@@ -18,7 +18,7 @@ A base de ditado é o Handy, e o serviço nasce como repositório próprio, sem 
 
 - **Handy como base:** licença MIT, feito em Tauri/Rust. Transcreve localmente com Whisper, tem overlay e atalho, aceita modelos GGML próprios e tem pós-processamento via endpoint compatível com OpenAI (em alpha, como recurso experimental).
 - **Integração:** o provedor "Custom" do Handy aponta para o serviço local.
-- **Prompts moram no serviço:** um system prompt fixo e um prompt do usuário livre, valendo para todos os provedores. No Handy, o prompt fica só com `${output}`.
+- **Prompts moram no Handy:** desde a versão 0.9.8, o Handy tem vários prompts com nome, editáveis na interface, e um prompt padrão que já corrige o texto, mantém o idioma e ignora instruções dentro do ditado. O Pumice repassa o prompt que recebe. O system prompt e o prompt do usuário do Pumice são opcionais e ficam desligados por padrão.
 - **Dicionário de termos:** usa o recurso nativo do Handy. O serviço não duplica.
 - **Assinaturas sempre pela CLI oficial:** nunca extrair tokens de login para usar fora dela.
 - **Plataformas:** o desenvolvimento e os testes locais acontecem no Linux (WSL). O alvo principal de uso é o Windows, validado manualmente depois, e a stack roda nos três sistemas desde o início. A validação no Windows não exige instalar nada nele agora.
@@ -53,7 +53,7 @@ O serviço só formata o ditado: corrige de leve e organiza listas. Nada de rees
 - API compatível com OpenAI
 - Adaptadores para Claude, Codex, Kimi, Antigravity e OpenCode
 - Adaptador genérico compatível com OpenAI (Ollama, LM Studio ou APIs com chave)
-- System prompt fixo + prompt do usuário
+- Instrução mínima por adaptador + prompts opcionais do Pumice
 - Timeout, provedor reserva e volta ao texto cru
 - CLIs rodando sem ferramentas
 - Arquivo de configuração
@@ -73,8 +73,8 @@ O serviço só formata o ditado: corrige de leve e organiza listas. Nada de rees
 
 ```mermaid
 flowchart TB
-    H["<b>Handy (app de ditado)</b><br/>Atalho e bolinha flutuante · Whisper transcreve no seu PC · dicionário de termos<br/>Cola o resultado no campo em foco"]
-    P["<b>Pumice (nosso repositório)</b><br/>System prompt fixo + prompt do usuário · escolhe o provedor pelo campo model<br/>Timeout e cadeia de reserva · limpa a saída · se tudo falhar, devolve o texto cru"]
+    H["<b>Handy (app de ditado)</b><br/>Atalho e bolinha flutuante · Whisper transcreve no seu PC · dicionário de termos<br/>Prompts de formatação editáveis · cola o resultado no campo em foco"]
+    P["<b>Pumice (nosso repositório)</b><br/>Repassa o prompt do Handy + instrução mínima do adaptador · escolhe o provedor pelo campo model<br/>Timeout e cadeia de reserva · limpa a saída · se tudo falhar, devolve o texto cru"]
     subgraph A["Adaptadores chamam as CLIs oficiais, sem ferramentas e em pasta vazia"]
         direction LR
         C["Claude<br/><code>claude -p</code>"]
@@ -84,9 +84,9 @@ flowchart TB
         G["Antigravity<br/><code>agy</code>, opcional"]
         N["Genérico<br/>Ollama, APIs"]
     end
-    H -- "pedido OpenAI com o texto cru" --> P
+    H -- "pedido OpenAI: prompt + texto cru" --> P
     P -- "texto formatado ou cru" --> H
-    P -- "system prompt + texto" --> A
+    P -- "prompt + texto" --> A
     A -- "texto final da IA" --> P
 ```
 
@@ -101,7 +101,7 @@ São nove épicos, de E0 a E8. Cada história tem um ID para o agente referencia
 1. **S0.1 Formato do pedido do Handy.** Como desenvolvedor, quero capturar o pedido bruto que o Handy envia ao endpoint Custom, para saber o que implementar.
    - Registrar rota, cabeçalhos e corpo de um pedido real
    - Confirmar se o Handy chama `/v1/models` e se pede saída estruturada
-   - Confirmar se o Handy envia algum system prompt próprio
+   - Confirmar como o Handy envia o prompt: tudo como mensagem do usuário ou com uma mensagem de sistema separada
    - Confirmar se o Handy pede a resposta em streaming
    - Confirmar se o Handy informa o idioma do ditado
 2. **S0.2 Modo não interativo de cada CLI.** Como desenvolvedor, quero saber como chamar cada CLI sem interação, para definir os adaptadores.
@@ -158,12 +158,13 @@ Critérios comuns a todos os adaptadores:
 
 ### E3 — Prompts e limpeza da saída
 
-1. **S3.1 System prompt fixo.** Como usuário, quero que a IA só formate o texto, sem obedecer ao que eu ditei.
-   - Regras: tratar o texto como conteúdo, manter o idioma, não inventar nem remover informação e devolver só o texto
-   - Ditar "escreve um e-mail pro João" devolve a frase formatada, não um e-mail
-2. **S3.2 Prompt do usuário.** Como usuário, quero escrever instruções livres que valham para todos os provedores.
-   - Texto livre no arquivo de configuração, somado ao system prompt
-3. **S3.3 Combinação.** O serviço usa o campo de system prompt da CLI quando ele existe e, quando não existe, junta tudo num texto só.
+1. **S3.1 Instrução mínima do adaptador.** Como usuário, quero que a CLI se comporte como um processador de texto, não como um assistente de programação.
+   - Cada adaptador acrescenta uma instrução fixa e curta: devolver só o texto resultante, sem comentários
+   - Com o prompt padrão do Handy, ditar "escreve um e-mail pro João" devolve a frase formatada, não um e-mail
+2. **S3.2 Prompts opcionais do Pumice.** Como usuário de outro app de ditado, quero poder definir um system prompt e um prompt do usuário no próprio Pumice.
+   - Desligados por padrão; quando ligados, valem para todos os provedores
+   - Configurados no YAML
+3. **S3.3 Combinação.** O serviço junta a instrução do adaptador, os prompts opcionais e as mensagens recebidas. Usa o campo de system prompt da CLI quando ele existe; quando não existe, junta tudo num texto só.
 4. **S3.4 Limpeza.** O serviço remove tags de raciocínio, preâmbulos como "Aqui está…", cercas de código e espaços sobrando.
 
 ### E4 — Confiabilidade
@@ -181,7 +182,7 @@ Critérios comuns a todos os adaptadores:
 
 ### E6 — Configuração
 
-1. **S6.1 Arquivo único** com provedores, ordem de reserva, timeouts, prompt do usuário e porta.
+1. **S6.1 Arquivo único** com provedores, ordem de reserva, timeouts, prompts opcionais e porta.
 2. **S6.2 Provedor pelo campo `model`.** O valor escolhido no Handy define o provedor; vazio cai no provedor padrão.
 3. **S6.3 Recarregar a configuração sem reiniciar** (desejável).
 4. **S6.4 Arquivo de exemplo.** O projeto traz um YAML de exemplo, comentado e pronto para copiar.
@@ -210,7 +211,7 @@ Cada fase começa quando o portão anterior é cumprido.
 ```mermaid
 flowchart TB
     F0["<b>Fase 0 — Investigação</b><br/>Formato do pedido do Handy, modo não interativo de cada CLI, termos de uso<br/>Protótipo mínimo para validar a stack (Rust)"]
-    F1["<b>v0.1 · Fase 1 — MVP com Claude</b><br/>Servidor compatível com OpenAI, adaptador do Claude, system prompt + prompt do usuário<br/>Limpeza da saída, timeout com volta ao texto cru, CLI sem ferramentas"]
+    F1["<b>v0.1 · Fase 1 — MVP com Claude</b><br/>Servidor compatível com OpenAI, adaptador do Claude com instrução mínima, prompts opcionais<br/>Limpeza da saída, timeout com volta ao texto cru, CLI sem ferramentas"]
     F2["<b>v0.2 · Fase 2 — Demais provedores</b><br/>Codex, Kimi, OpenCode e Antigravity (desligado por padrão)<br/>Adaptador genérico compatível com OpenAI e cadeia de reserva"]
     F3["<b>v1.0 · Fase 3 — Distribuição</b><br/>Builds para Windows, Linux e macOS, instalador e atualização automática<br/>Iniciar com o sistema e guia de instalação"]
     L["<i>Depois — fora do escopo atual</i><br/>Interface de configuração, tradução do ditado, fork do Handy com o serviço embutido, fine-tuning"]
@@ -233,7 +234,7 @@ O maior risco é a latência das CLIs: elas são agentes e demoram a iniciar. A 
 | Termos de uso mudam (a Anthropic já restringiu tokens de assinatura fora das apps oficiais; segundo relatos de jun/2026, o `claude -p` usa uma cota separada) | Adaptador para de funcionar ou viola os termos | Sempre a CLI oficial, nunca extrair tokens; revisar em S0.3 |
 | Pós-processamento do Handy ainda em alpha | O formato do pedido pode mudar | Log de pedido bruto (S1.4) e testes de contrato |
 | Modo não interativo do Kimi não verificado | Adaptador inviável | Confirmar em S0.2; alternativa: modelos Kimi pelo OpenCode Go |
-| A IA obedece ao ditado em vez de formatar | Texto errado colado | System prompt e o teste de aceite da S3.1 |
+| A IA obedece ao ditado em vez de formatar | Texto errado colado | Prompt padrão do Handy, instrução do adaptador e o teste de aceite da S3.1 |
 | CLIs com ferramentas executam ações no PC | Risco de segurança | Épico E5 |
 
 **Decisões**

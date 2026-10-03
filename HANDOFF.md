@@ -21,7 +21,7 @@ Deliverable: `docs/research/S0.1-handy-request.md`
 
 - Build a throwaway HTTP listener that accepts any route and logs method, path, headers and body, then replies with a minimal valid OpenAI chat completion (echoing the input text). It can live in the S0.4 prototype.
 - The owner configures Handy on Windows (Settings > Advanced > Experimental Features > Post Processing, provider **Custom**, base URL pointing at the listener) and triggers a dictation with the post-processing hotkey. Write clear step-by-step instructions for the owner in the note; the agent cannot operate the Windows GUI.
-- Answer: route(s) called, whether `/v1/models` is called, whether a system message or structured output is requested, whether `stream: true` is used, whether the language is sent, and what Handy does with the response.
+- Answer: route(s) called, whether `/v1/models` is called, how the prompt is sent (all in a user message, or with a separate system message), whether structured output is requested, whether `stream: true` is used, whether the language is sent, and what Handy does with the response.
 - Redact any real dictated text in the note.
 
 ### S0.2 — Non-interactive mode of each CLI

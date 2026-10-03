@@ -18,7 +18,7 @@ Handy is the dictation front end, and Pumice is its own repository, with no fork
 
 - **Handy as the base:** MIT licensed, built with Tauri/Rust. It transcribes locally with Whisper, has an overlay and a hotkey, accepts custom GGML models, and offers post-processing through an OpenAI-compatible endpoint (alpha, behind an experimental toggle).
 - **Integration:** Handy's "Custom" provider points to the local service.
-- **Prompts live in the service:** a fixed system prompt plus a free-form user prompt, applied to every provider. In Handy, the prompt is just `${output}`.
+- **Prompts live in Handy:** since version 0.9.8, Handy has multiple named prompts, editable in its UI, and a default prompt that already fixes the text, keeps its language and ignores instructions inside the dictation. Pumice passes through the prompt it receives. Pumice's own system prompt and user prompt are optional and off by default.
 - **Term dictionary:** use Handy's built-in feature. The service does not duplicate it.
 - **Subscriptions only through the official CLI:** never extract login tokens to use them elsewhere.
 - **Platforms:** development and local tests happen on Linux (WSL). The main target for daily use is Windows, validated manually later, and the stack runs on all three systems from day one. Validating on Windows must not require installing anything there for now.
@@ -53,7 +53,7 @@ The service only formats dictation: light corrections and list formatting. It ne
 - OpenAI-compatible API
 - Adapters for Claude, Codex, Kimi, Antigravity and OpenCode
 - Generic OpenAI-compatible adapter (Ollama, LM Studio or keyed APIs)
-- Fixed system prompt + user prompt
+- Minimal per-adapter instruction + optional Pumice prompts
 - Timeout, fallback provider and falling back to raw text
 - CLIs running without tools
 - Configuration file
@@ -73,8 +73,8 @@ The service only formats dictation: light corrections and list formatting. It ne
 
 ```mermaid
 flowchart TB
-    H["<b>Handy (dictation app)</b><br/>Hotkey + floating overlay · Whisper transcribes locally · term dictionary<br/>Pastes the result into the focused field"]
-    P["<b>Pumice (this repo)</b><br/>Fixed system prompt + user prompt · picks the provider from the model field<br/>Timeout + fallback chain · cleans the output · returns raw text if everything fails"]
+    H["<b>Handy (dictation app)</b><br/>Hotkey + floating overlay · Whisper transcribes locally · term dictionary<br/>Editable formatting prompts · pastes the result into the focused field"]
+    P["<b>Pumice (this repo)</b><br/>Passes Handy's prompt through + minimal adapter instruction · picks the provider from the model field<br/>Timeout + fallback chain · cleans the output · returns raw text if everything fails"]
     subgraph A["Adapters call the official CLIs, with no tools and in an empty folder"]
         direction LR
         C["Claude<br/><code>claude -p</code>"]
@@ -84,9 +84,9 @@ flowchart TB
         G["Antigravity<br/><code>agy</code>, opt-in"]
         N["Generic<br/>Ollama, APIs"]
     end
-    H -- "OpenAI request with raw text" --> P
+    H -- "OpenAI request: prompt + raw text" --> P
     P -- "formatted (or raw) text" --> H
-    P -- "system prompt + text" --> A
+    P -- "prompt + text" --> A
     A -- "final AI text" --> P
 ```
 
@@ -101,7 +101,7 @@ There are nine epics, E0 to E8. Every story has an ID for agents to reference, w
 1. **S0.1 Handy request format.** As a developer, I want to capture the raw request Handy sends to the Custom endpoint, so I know what to implement.
    - Record the route, headers and body of a real request
    - Confirm whether Handy calls `/v1/models` and whether it asks for structured output
-   - Confirm whether Handy sends a system prompt of its own
+   - Confirm how Handy sends the prompt: everything as a user message, or with a separate system message
    - Confirm whether Handy asks for a streamed response
    - Confirm whether Handy reports the dictation language
 2. **S0.2 Non-interactive mode of each CLI.** As a developer, I want to know how to call each CLI without interaction, to define the adapters.
@@ -158,12 +158,13 @@ Criteria shared by every adapter:
 
 ### E3 — Prompts and output cleanup
 
-1. **S3.1 Fixed system prompt.** As a user, I want the AI to only format the text, never obey what I dictated.
-   - Rules: treat the text as content, keep its language, never add or remove information, return only the text
-   - Dictating "write an email to João" returns that sentence formatted, not an email
-2. **S3.2 User prompt.** As a user, I want to write free-form instructions that apply to every provider.
-   - Free text in the configuration file, appended to the system prompt
-3. **S3.3 Combination.** The service uses the CLI's system-prompt option when it exists and, when it doesn't, merges everything into a single text.
+1. **S3.1 Minimal adapter instruction.** As a user, I want the CLI to behave as a text processor, not as a coding assistant.
+   - Every adapter adds a short, fixed instruction: return only the resulting text, with no commentary
+   - With Handy's default prompt, dictating "write an email to João" returns that sentence formatted, not an email
+2. **S3.2 Optional Pumice prompts.** As a user of another dictation app, I want to be able to set a system prompt and a user prompt in Pumice itself.
+   - Off by default; when on, they apply to every provider
+   - Set in the YAML
+3. **S3.3 Combination.** The service combines the adapter instruction, the optional prompts and the incoming messages. It uses the CLI's system-prompt option when it exists; when it doesn't, it merges everything into a single text.
 4. **S3.4 Cleanup.** The service strips reasoning tags, preambles such as "Here is…", code fences and leftover whitespace.
 
 ### E4 — Reliability
@@ -181,7 +182,7 @@ Criteria shared by every adapter:
 
 ### E6 — Configuration
 
-1. **S6.1 Single file** with providers, fallback order, timeouts, user prompt and port.
+1. **S6.1 Single file** with providers, fallback order, timeouts, optional prompts and port.
 2. **S6.2 Provider from the `model` field.** The value chosen in Handy selects the provider; an empty value falls back to the default provider.
 3. **S6.3 Reload the configuration without restarting** (nice to have).
 4. **S6.4 Example file.** The project ships a commented example YAML, ready to copy.
@@ -210,7 +211,7 @@ Each phase starts only when the previous gate is met.
 ```mermaid
 flowchart TB
     F0["<b>Phase 0 — Investigation</b><br/>Handy request format, non-interactive mode of each CLI, terms of use<br/>Minimal prototype to validate the stack (Rust)"]
-    F1["<b>v0.1 · Phase 1 — MVP with Claude</b><br/>OpenAI-compatible server, Claude adapter, system prompt + user prompt<br/>Output cleanup, timeout with raw-text fallback, CLI without tools"]
+    F1["<b>v0.1 · Phase 1 — MVP with Claude</b><br/>OpenAI-compatible server, Claude adapter with minimal instruction, optional prompts<br/>Output cleanup, timeout with raw-text fallback, CLI without tools"]
     F2["<b>v0.2 · Phase 2 — Remaining providers</b><br/>Codex, Kimi, OpenCode and Antigravity (off by default)<br/>Generic OpenAI-compatible adapter and fallback chain"]
     F3["<b>v1.0 · Phase 3 — Distribution</b><br/>Builds for Windows, Linux and macOS, installer and auto-update<br/>Start with the system and installation guide"]
     L["<i>Later — out of current scope</i><br/>Configuration UI, dictation translation, Handy fork with Pumice embedded, fine-tuning"]
@@ -233,7 +234,7 @@ The biggest risk is CLI latency: they are agents and take time to start. Phase 0
 | Terms of use change (Anthropic already restricted subscription tokens outside its official apps; according to reports from June 2026, `claude -p` uses a separate quota) | Adapter stops working or breaks the terms | Always the official CLI, never extract tokens; review in S0.3 |
 | Handy post-processing still in alpha | The request format may change | Raw request log (S1.4) and contract tests |
 | Kimi's non-interactive mode not verified | Adapter not viable | Confirm in S0.2; alternative: Kimi models through OpenCode Go |
-| The AI obeys the dictation instead of formatting it | Wrong text pasted | System prompt and the S3.1 acceptance test |
+| The AI obeys the dictation instead of formatting it | Wrong text pasted | Handy's default prompt, the adapter instruction and the S3.1 acceptance test |
 | CLIs with tools take actions on the PC | Security risk | Epic E5 |
 
 **Decisions**
