@@ -1,0 +1,14 @@
+# Rust build output
+/target/
+**/*.rs.bk
+
+# Local configuration and debug logs (may contain dictated text)
+/pumice.yaml
+*.log
+
+# Editors and OS files
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
