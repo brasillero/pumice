@@ -31,7 +31,7 @@ Update this table in the PR that finishes each story. Order follows the plan in 
 | 4 | S2.6 OpenCode adapter | Done | #26 | Off by default, explicit provider/model, deny-all inline agent via `OPENCODE_CONFIG_CONTENT`; full contract suite passes |
 | 5 | S2.5 Antigravity adapter | Done | #25 | Dormant: documentation-derived invocation/parser tested against the fake CLI, `enabled: true` refused at the enabled line, build fails as defense in depth, `agy` never spawned |
 | 6 | S2.7 Generic loopback adapter | Not started | | PR to stay open until the owner approves the outbound exception |
-| 7 | S2.8 part 2: `pumice doctor` | Not started | | `--login-check` is the only quota-bearing path |
+| 7 | S2.8 part 2: `pumice doctor` | Done (pending review) | | `doctor` renders a fresh detection report (found/missing + install hints + warnings + Kimi standby note), exit 0/1/2; `--login-check --provider <id>` is the only quota-bearing path: one fixed call through the selected provider, no fallback, text-free result |
 | 8 | S6.4 follow-up: Phase 2 config examples | Not started | | |
 | 9 | S8.3 follow-up: Phase 2 gate | Not started | | |
 
