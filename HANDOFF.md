@@ -1,10 +1,43 @@
 # Handoff — start here
 
-**Current phase: Phase 1 — MVP (v0.1).** Phase 0 is complete (see [below](#phase-0-done)). Phase 1 replaces the throwaway prototype with the real service.
+**Current phase: Phase 2 — remaining providers (v0.2).** Phase 1 is complete and its gate passed (agent-verified; see [Phase 1](#phase-1-done)). Phase 0 is [below](#phase-0-done).
 
-Read [`AGENTS.md`](AGENTS.md) for the rules and [`docs/spec.md`](docs/spec.md) for the full spec. The Phase 1 architecture, crate choices, config schema and PR-by-PR plan are in [`docs/research/phase1-architecture.md`](docs/research/phase1-architecture.md). Read it before starting any Phase 1 story.
+Read [`AGENTS.md`](AGENTS.md) for the rules and [`docs/spec.md`](docs/spec.md) for the full spec. The Phase 2 design, the orchestrator's decisions and the PR-by-PR plan are in [`docs/research/phase2-architecture.md`](docs/research/phase2-architecture.md). The Phase 1 architecture they build on is in [`docs/research/phase1-architecture.md`](docs/research/phase1-architecture.md). Read both before starting a Phase 2 story.
 
-## Owner decisions for Phase 1 (2026-10-04)
+## Phase 2 decisions (2026-10-04)
+
+The owner was away and authorized the orchestrator to set specifications and proceed, reporting afterwards. These are the decisions taken (full list in the architecture doc). The spec is unchanged.
+
+- **Scope:** OpenCode (S2.6), Antigravity (S2.5, dormant), the loopback-only generic adapter (S2.7), auto-detection and `pumice doctor` (S2.8), and a shared adapter contract suite. **Kimi (S2.4) stays on standby.**
+- **New providers are off by default.** Only `enabled: true` turns one on; detection never does.
+- **OpenCode:** an explicit `provider/model` is required when enabled; there is no hosted default.
+- **Antigravity:** the protocol is built against the fake CLI only, and turning it on is refused until a safe per-launch tool policy exists. `agy` is never run.
+- **Generic adapter:** conflicts with the AGENTS.md outbound-call rule, so its PR is opened but **not merged** until the owner approves a loopback-only exception.
+- **Gate:** the contract suite passes on 3 OSes for every implemented adapter. Antigravity is reported as protocol coverage plus safe refusal.
+
+## Phase 2 gate
+
+All adapters pass the same criteria: the shared contract suite (no tools, empty workspace, transport, system-prompt separation, error classification, timeout, invalid output, cleanup, fallback participation, privacy, disabled behavior), on Windows, Linux and macOS. Unresolved conditions (Antigravity execution, the generic adapter's policy exception) are recorded, not relabeled as passes.
+
+## Status
+
+Update this table in the PR that finishes each story. Order follows the plan in `docs/research/phase2-architecture.md` §7 (its rows 1–6 were finished in Phase 1).
+
+| # | Story | Status | PR | Notes |
+| --- | --- | --- | --- | --- |
+| 1 | S8.2 follow-up: shared adapter contract suite | Not started | | Claude and Codex migrated first |
+| 2 | S2.1 follow-up: provider capabilities | Not started | | Default-off flag, risk warnings, probe metadata, full-settings validation |
+| 3 | S2.8 part 1: provider detection | Not started | | Cached version probes (2 s), `/v1/models` lists available providers |
+| 4 | S2.6 OpenCode adapter | Not started | | Off by default, explicit `provider/model`, deny-all inline agent |
+| 5 | S2.5 Antigravity adapter | Not started | | Dormant: fake-only protocol, enabling refused, never runs `agy` |
+| 6 | S2.7 Generic loopback adapter | Not started | | PR to stay open until the owner approves the outbound exception |
+| 7 | S2.8 part 2: `pumice doctor` | Not started | | `--login-check` is the only quota-bearing path |
+| 8 | S6.4 follow-up: Phase 2 config examples | Not started | | |
+| 9 | S8.3 follow-up: Phase 2 gate | Not started | | |
+
+## Phase 1 (done)
+
+### Owner decisions for Phase 1 (2026-10-04)
 
 These change the spec's phasing. The spec itself is unchanged; product-doc updates are up to the owner.
 
@@ -20,7 +53,7 @@ These change the spec's phasing. The spec itself is unchanged; product-doc updat
 - **Default models confirmed:** Claude `haiku`, Codex `gpt-6.1-sol`.
 - **Unattended gate (2026-10-04):** the owner was away and asked to skip manual steps, so the gate below was verified by the orchestrator over HTTP with the real CLIs. The Handy GUI check is deferred to the owner.
 
-## Phase 1 gate
+### Phase 1 gate
 
 A dictation formatted end to end, **with both Claude and Codex**, plus a working fallback: another provider, or raw text when all fail.
 
@@ -40,9 +73,7 @@ A dictation formatted end to end, **with both Claude and Codex**, plus a working
 - the Windows npm-shim layout on a real install;
 - the Handy version (S0.1).
 
-## Status
-
-Update this table in the PR that finishes each story. Merge order follows the table; see the architecture doc for dependencies and what can run in parallel.
+### Phase 1 status
 
 | # | Story | Status | PR | Notes |
 | --- | --- | --- | --- | --- |
@@ -62,7 +93,7 @@ Update this table in the PR that finishes each story. Merge order follows the ta
 | 13 | S1.4 Debug log | Done | #20 | `src/logging.rs` JSONL sink behind `debug_log.enabled`; records body+headers (only user-agent/content-type), raw_text, outcome, response; mode 0600 on Unix; `tests/privacy.rs` covers redaction and the disabled default |
 | 14 | S5.1 + S5.2 CLI isolation and Windows shims | Done | #16 | npm `.cmd` shim translation to direct node launch + all-adapter isolation contract tests; Codex residual risk accepted by the owner (2026-10-04) |
 | 15 | S6.4 Example config | Done | #18 | Commented `pumice.example.yaml` (all defaults, load-tested both as shipped and with documented overrides uncommented); README "run from source" section |
-| 16 | S8.3 Phase 1 CI and gate | Done | (this PR) | CI builds and tests with `--locked` on 3 OSes, reports the binary size, keeps the static-CRT check; gate evidence below |
+| 16 | S8.3 Phase 1 CI and gate | Done | #21 | CI builds and tests with `--locked` on 3 OSes, reports the binary size, keeps the static-CRT check; gate evidence below |
 
 ## Phase 0 (done)
 
