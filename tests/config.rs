@@ -886,6 +886,82 @@ fn configured_openai_base_url_reaches_the_codex_invocation() {
     assert_eq!(args[position - 1], "-c");
 }
 
+/// Path to the shipped `pumice.example.yaml` at the repository root.
+fn example_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("pumice.example.yaml")
+}
+
+#[test]
+fn example_config_loads_with_all_defaults() {
+    let example = example_path();
+    let loaded = config::load_with_env(Some(&example), no_env).expect("example loads");
+
+    let defaults = config::load_with_env(None, no_env)
+        .expect("built-in defaults load")
+        .config;
+    let mut expected = defaults.clone();
+    // Relative paths anchor at the configuration file's directory, so the
+    // example's default debug log path resolves beside the example file
+    // instead of staying relative.
+    expected.debug_log.path = example
+        .parent()
+        .expect("example lives in a directory")
+        .join("pumice-debug.jsonl");
+
+    assert_eq!(loaded.source, ConfigSource::File(example));
+    assert_eq!(loaded.config, expected);
+}
+
+/// Replaces the last occurrence of `from` with `to`.
+fn replace_last(text: &str, from: &str, to: &str) -> String {
+    let start = text
+        .rfind(from)
+        .unwrap_or_else(|| panic!("{from:?} is present"));
+    format!("{}{}{}", &text[..start], to, &text[start + from.len()..])
+}
+
+#[test]
+fn example_documented_overrides_load() {
+    let text = fs::read_to_string(example_path()).expect("read example");
+
+    // Apply the documented examples: try Codex after Claude, route Codex
+    // through a gateway, and set both formatting prompts.
+    let uncommented = text.replace("fallback_order: []", "fallback_order: [codex]");
+    // Codex's `options: {}` is the last one in the file.
+    let uncommented = replace_last(
+        &uncommented,
+        "    options: {}",
+        "    options:\n      openai_base_url: \"https://your-existing-gateway.example/v1\"",
+    );
+    let uncommented = uncommented
+        .replace(
+            "  system: null",
+            "  system: |\n    Preserve technical terms and product names.",
+        )
+        .replace(
+            "  user: null",
+            "  user: |\n    Format spoken enumerations as Markdown lists.",
+        );
+
+    let config = load_text(&uncommented).expect("documented overrides load");
+    assert_eq!(config.fallback_order, vec!["codex".to_owned()]);
+    assert_eq!(
+        codex(&config)
+            .options
+            .get("openai_base_url")
+            .map(String::as_str),
+        Some("https://your-existing-gateway.example/v1")
+    );
+    assert_eq!(
+        config.prompts.system.as_deref(),
+        Some("Preserve technical terms and product names.\n")
+    );
+    assert_eq!(
+        config.prompts.user.as_deref(),
+        Some("Format spoken enumerations as Markdown lists.\n")
+    );
+}
+
 #[test]
 fn relative_config_path_still_anchors_relative_settings() {
     // A relative --config path still anchors relative settings: the config

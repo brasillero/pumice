@@ -17,7 +17,19 @@ Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude
 
 ## Status
 
-Pumice is in **Phase 1 (MVP)**; there is nothing to install yet. The Phase 0 prototype commands were removed, and the real service is being built in small steps.
+Pumice is in **Phase 1 (MVP)**: the service can already format dictation through Claude and Codex, but there is no release or installer yet.
+
+### Run from source (preview)
+
+With [Rust](https://rustup.rs/) installed:
+
+```sh
+cargo build --release
+./target/release/pumice check-config   # validates pumice.yaml or the built-in defaults
+./target/release/pumice serve
+```
+
+In Handy: **Settings → Advanced → Experimental Features → Post Processing**, set the provider to **Custom**, base URL `http://127.0.0.1:7567/v1`, API key empty, model `claude` or `codex`. See [`pumice.example.yaml`](pumice.example.yaml) for every configuration setting. On WSL, use `127.0.0.1`, not `localhost` (see [`docs/research/S0.5-wsl-localhost.md`](docs/research/S0.5-wsl-localhost.md)).
 
 - Product spec: [`docs/spec.md`](docs/spec.md)
 - Current plan and status: [`HANDOFF.md`](HANDOFF.md)
@@ -27,8 +39,8 @@ Pumice is in **Phase 1 (MVP)**; there is nothing to install yet. The Phase 0 pro
 
 | Version | Goal |
 | --- | --- |
-| v0.1 | MVP: formatted dictation end to end through Handy, with Claude |
-| v0.2 | Codex, Kimi, OpenCode, Antigravity and generic adapters, fallback chain, CLI auto-detection |
+| v0.1 | Claude and Codex, fallback chain |
+| v0.2 | OpenCode, Antigravity (opt-in), generic adapter, auto-detection |
 | v1.0 | Installers, auto-update and start with the system on Windows, Linux and macOS |
 
 ## License
