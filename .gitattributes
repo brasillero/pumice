@@ -1,0 +1,2 @@
+# Test fixtures are byte-exact CLI outputs: never convert line endings.
+tests/fixtures/** -text

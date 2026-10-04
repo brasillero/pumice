@@ -17,7 +17,7 @@ Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude
 
 ## Status
 
-Early planning. Pumice is in **Phase 0 (investigation)**; there is nothing to install yet.
+Pumice is in **Phase 1 (MVP)**; there is nothing to install yet. The Phase 0 prototype commands were removed, and the real service is being built in small steps.
 
 - Product spec: [`docs/spec.md`](docs/spec.md)
 - Current plan and status: [`HANDOFF.md`](HANDOFF.md)

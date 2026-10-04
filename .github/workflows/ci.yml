@@ -36,8 +36,9 @@ jobs:
       - name: cargo test
         run: cargo test
 
-      - name: cargo build --release
-        run: cargo build --release
+      # Only the product executable; the fake CLI is a test-only binary.
+      - name: cargo build --release --bin pumice
+        run: cargo build --release --bin pumice
 
       - name: Set up MSVC environment
         if: matrix.os == 'windows-latest'
