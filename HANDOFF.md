@@ -62,7 +62,7 @@ Update this table in the PR that finishes each story.
 
 | Story | Status | PR | Notes |
 | --- | --- | --- | --- |
-| S0.1 Handy request format | Not started | | Needs the owner to configure Handy on Windows |
+| S0.1 Handy request format | Done (pending review) | | `GET /v1/models` plus `POST /v1/chat/completions`. One user message with the prompt and a `<transcript>`, no system message. `stream: false`, `reasoning_effort: none`, no language field, no auth. Response pasted verbatim. |
 | S0.2 CLI matrix | Not started | | Start with Claude |
 | S0.3 Terms of use | Not started | | |
 | S0.4 Validate the stack | Not started | | |
