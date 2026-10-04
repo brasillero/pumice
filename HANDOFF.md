@@ -16,10 +16,29 @@ These change the spec's phasing. The spec itself is unchanged; product-doc updat
 - **Claude thinking off by default** (`MAX_THINKING_TOKENS=0`). Effort tuning and Handy's `reasoning_effort` field come later.
 - **Plan quota is intended:** Pumice runs on the user's subscription through the official CLIs.
 - **Later (Phase 3):** installer, auto-update and running as a Windows service.
+- **Codex residual tool risk accepted** (S5.1): "make it work first, refine its behavior later". Codex runs in its most restricted documented mode, and any run that shows tool activity is rejected.
+- **Default models confirmed:** Claude `haiku`, Codex `gpt-6.1-sol`.
+- **Unattended gate (2026-10-04):** the owner was away and asked to skip manual steps, so the gate below was verified by the orchestrator over HTTP with the real CLIs. The Handy GUI check is deferred to the owner.
 
 ## Phase 1 gate
 
-A dictation formatted end to end through Handy, **with both Claude and Codex**, plus a working fallback (another provider, or raw text when all fail). Owner steps: section 7 of the architecture doc.
+A dictation formatted end to end, **with both Claude and Codex**, plus a working fallback: another provider, or raw text when all fail.
+
+**Status: passed (agent-verified, 2026-10-04).** The owner asked for manual steps to be skipped, so the orchestrator ran `pumice serve` (release build of `main`) in WSL and sent the exact request shape Handy sends (`tests/fixtures/handy-request.json`, from S0.1) with a synthetic Portuguese dictation containing a spoken list:
+
+| Check | Result |
+| --- | --- |
+| `claude` | Formatted in 2.2–2.4 s; language kept, spoken list punctuated, "escreva um email pro João" kept as text (not acted on) |
+| `codex` | Formatted in 4.7 s (07:07 UTC). Later runs hit a real upstream `429 Too Many Requests`, which Pumice classified as `RateLimited` |
+| Fallback chain | Claude binary missing → Codex (rate-limited at the time) → exact raw text, within the budget. Missing-then-success is covered by fake-CLI tests |
+| Raw fallback | All providers missing → exact raw dictation in 19 ms |
+| `/health`, `/v1/models` | `ok` + version; `claude`, `codex` listed |
+| Logs | Metadata only, no dictated text |
+
+**Owner checks still open** (not blocking Phase 2):
+- the same dictation through the Handy GUI on Windows (`http://127.0.0.1:7567/v1`, model `claude`, then `codex`);
+- the Windows npm-shim layout on a real install;
+- the Handy version (S0.1).
 
 ## Status
 
@@ -37,13 +56,13 @@ Update this table in the PR that finishes each story. Merge order follows the ta
 | 8 | S4.1 Timeouts | Done | #13 | `pipeline.rs`: total budget with response reserve, provider cap + hard stop, fake-CLI deadline tests |
 | 9 | S4.3 Raw-text fallback | Done | #13 | `pipeline.rs` outcomes: exact raw text for unknown/disabled/busy/budget/provider/cleanup failures |
 | 9b | S4.2 Fallback chain | Done | #15 | `pipeline.rs` walks `fallback_order` within the total budget; skips duplicates/disabled/unbuilt; `FormatOutcome.attempts`; raw fallback carries the last failure |
-| 10 | S1.1 + S5.3 Chat completions on loopback | Done (pending review) | | axum + tokio; exact routes, 10 MiB/5 s body bounds, SSE, loopback bind, port-taken exit 1 |
-| 11 | S1.2 + S6.2 Model list and provider selection | Done (pending review) | | `Pipeline::model_ids` (default first) and `Pipeline::select` (trimmed, case-insensitive) are the single source of truth for listing, selection and the response `model`; covered end to end over HTTP with two fakes |
-| 12 | S1.3 Health route | Done (pending review) | | `GET /health` returns ok+version without touching the pipeline; a slow-fake test proves it answers in <300 ms during a dictation |
-| 13 | S1.4 Debug log | Done (pending review) | | `src/logging.rs` JSONL sink behind `debug_log.enabled`; records body+headers (only user-agent/content-type), raw_text, outcome, response; mode 0600 on Unix; `tests/privacy.rs` covers redaction and the disabled default |
-| 14 | S5.1 + S5.2 CLI isolation and Windows shims | Done | #16 | npm `.cmd` shim translation to direct node launch + all-adapter isolation contract tests; Codex residual-risk acceptance left to owner |
-| 15 | S6.4 Example config | Done (pending review) | | Commented `pumice.example.yaml` (all defaults, load-tested both as shipped and with documented overrides uncommented); README "run from source" section |
-| 16 | S8.3 Phase 1 CI and gate | Not started | | |
+| 10 | S1.1 + S5.3 Chat completions on loopback | Done | #17 | axum + tokio; exact routes, 10 MiB/5 s body bounds, SSE, loopback bind, port-taken exit 1 |
+| 11 | S1.2 + S6.2 Model list and provider selection | Done | #19 | `Pipeline::model_ids` (default first) and `Pipeline::select` (trimmed, case-insensitive) are the single source of truth for listing, selection and the response `model`; covered end to end over HTTP with two fakes |
+| 12 | S1.3 Health route | Done | #20 | `GET /health` returns ok+version without touching the pipeline; a slow-fake test proves it answers in <300 ms during a dictation |
+| 13 | S1.4 Debug log | Done | #20 | `src/logging.rs` JSONL sink behind `debug_log.enabled`; records body+headers (only user-agent/content-type), raw_text, outcome, response; mode 0600 on Unix; `tests/privacy.rs` covers redaction and the disabled default |
+| 14 | S5.1 + S5.2 CLI isolation and Windows shims | Done | #16 | npm `.cmd` shim translation to direct node launch + all-adapter isolation contract tests; Codex residual risk accepted by the owner (2026-10-04) |
+| 15 | S6.4 Example config | Done | #18 | Commented `pumice.example.yaml` (all defaults, load-tested both as shipped and with documented overrides uncommented); README "run from source" section |
+| 16 | S8.3 Phase 1 CI and gate | Done | (this PR) | CI builds and tests with `--locked` on 3 OSes, reports the binary size, keeps the static-CRT check; gate evidence below |
 
 ## Phase 0 (done)
 
