@@ -199,6 +199,7 @@ impl OutcomeSummary {
     fn of(outcome: &FormatOutcome) -> OutcomeSummary {
         let (kind, reason) = match &outcome.kind {
             OutcomeKind::Formatted => ("formatted", None),
+            OutcomeKind::Passthrough => ("passthrough", None),
             OutcomeKind::Empty => ("empty", None),
             OutcomeKind::Raw(reason) => ("raw", Some(format!("{reason:?}"))),
         };

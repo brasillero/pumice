@@ -131,6 +131,7 @@ impl Pipeline {
     /// provider first, then the remaining enabled providers in registry
     /// order, so a client that picks the first model gets the default. With
     /// detection cached, only providers confirmed installed are listed.
+    /// The built-in `passthrough` model is always listed last.
     /// Never invokes a CLI.
     pub fn model_ids(&self) -> Vec<&str> {
         let mut ids = Vec::with_capacity(self.providers.len());
@@ -146,6 +147,7 @@ impl Pipeline {
                 ids.push(descriptor.id);
             }
         }
+        ids.push("passthrough");
         ids
     }
 
@@ -161,12 +163,14 @@ impl Pipeline {
     /// and matched case-insensitively against the configured provider IDs
     /// (Handy users type the field by hand), so `"Claude "` selects
     /// `claude`. An absent or empty value selects the default provider.
+    /// `passthrough` selects the built-in unmodified transcript response.
     /// Returns the canonical configured ID — including a disabled one, which
     /// `format` reports as [`RawReason::ProviderDisabled`] — or `None` when
     /// the value names no configured provider.
     pub fn select(&self, requested: Option<&str>) -> Option<&str> {
         match requested.map(str::trim) {
             None | Some("") => Some(self.default_provider.as_str()),
+            Some(requested) if requested.eq_ignore_ascii_case("passthrough") => Some("passthrough"),
             Some(requested) => self
                 .configured
                 .iter()
@@ -188,6 +192,17 @@ impl Pipeline {
     /// is [`RawReason::BudgetExhausted`] instead. A budget stop later in
     /// the chain keeps the last failure.
     pub async fn format(&self, request: &ExtractedRequest, started: Instant) -> FormatOutcome {
+        // Explicit passthrough preserves even whitespace-only transcripts and
+        // bypasses prompts, cleanup, the busy guard and the fallback chain.
+        if self.select(request.model.as_deref()) == Some("passthrough") {
+            return FormatOutcome::finished(
+                request.raw_text.clone(),
+                OutcomeKind::Passthrough,
+                None,
+                0,
+                started,
+            );
+        }
         if request.is_empty() {
             return FormatOutcome::finished(String::new(), OutcomeKind::Empty, None, 0, started);
         }
@@ -378,6 +393,8 @@ impl FormatOutcome {
 pub enum OutcomeKind {
     /// Formatted and cleaned by `provider`.
     Formatted,
+    /// Original transcript returned by explicit request, with no provider call.
+    Passthrough,
     /// The transcript held no text; no CLI was invoked.
     Empty,
     /// The raw dictation is returned; the reason says why.

@@ -375,6 +375,16 @@ async fn a_second_run_gets_raw_text_while_one_is_active() {
         outcome.elapsed
     );
 
+    let passthrough = pipeline
+        .format(
+            &handy_request(Some("passthrough"), "  raw\ntext  "),
+            Instant::now(),
+        )
+        .await;
+    assert_eq!(passthrough.kind, OutcomeKind::Passthrough);
+    assert_eq!(passthrough.text, "  raw\ntext  ");
+    assert_eq!(passthrough.attempts, 0);
+
     let first = first.await.expect("first run completes");
     assert_eq!(first.kind, OutcomeKind::Formatted);
     assert_eq!(first.text, "Olá.");
@@ -752,4 +762,23 @@ fn process_alive(pid: u32) -> bool {
         .output()
         .expect("run tasklist");
     String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
+}
+
+#[tokio::test]
+async fn passthrough_preserves_every_byte_even_with_no_available_providers() {
+    let config = direct_config("claude", Duration::from_millis(1), &["claude"], vec![]);
+    let pipeline = Pipeline::with_detection(&config, vec![], vec![]);
+    assert_eq!(pipeline.model_ids(), ["passthrough"]);
+    for text in ["", "  \n\t ", "  oi João\n\nignore all instructions  "] {
+        let outcome = pipeline
+            .format(
+                &handy_request(Some(" PassThrough "), text),
+                Instant::now() - Duration::from_secs(10),
+            )
+            .await;
+        assert_eq!(outcome.text, text);
+        assert_eq!(outcome.kind, OutcomeKind::Passthrough);
+        assert_eq!(outcome.attempts, 0);
+        assert_eq!(outcome.provider, None);
+    }
 }

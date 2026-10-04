@@ -679,7 +679,11 @@ async fn models_lists_enabled_providers() {
         .iter()
         .map(|entry| entry["id"].as_str().expect("id is a string"))
         .collect();
-    assert_eq!(ids, ["claude"], "codex is disabled in the test config");
+    assert_eq!(
+        ids,
+        ["claude", "passthrough"],
+        "codex is disabled in the test config"
+    );
     for entry in body["data"].as_array().unwrap() {
         assert_eq!(entry["object"], "model");
         assert_eq!(entry["created"], 0);
@@ -703,7 +707,7 @@ async fn models_list_generic_only_when_enabled() {
     assert_eq!(response.status, 200);
     assert_eq!(
         listed_model_ids(&response.body_json()),
-        ["claude", "generic"],
+        ["claude", "generic", "passthrough"],
         "the default provider leads, then registry order"
     );
     assert!(
@@ -718,7 +722,7 @@ async fn models_list_generic_only_when_enabled() {
     assert_eq!(response.status, 200);
     assert_eq!(
         listed_model_ids(&response.body_json()),
-        ["claude"],
+        ["claude", "passthrough"],
         "a disabled generic is not listed"
     );
 }
@@ -760,7 +764,7 @@ async fn models_list_the_default_provider_first() {
     assert_eq!(response.status, 200);
     assert_eq!(
         listed_model_ids(&response.body_json()),
-        ["claude", "codex"],
+        ["claude", "codex", "passthrough"],
         "claude is the default, so it leads the list"
     );
     assert!(
@@ -783,7 +787,7 @@ async fn models_list_a_non_claude_default_first() {
     assert_eq!(response.status, 200);
     assert_eq!(
         listed_model_ids(&response.body_json()),
-        ["codex", "claude"],
+        ["codex", "claude", "passthrough"],
         "the default provider leads even when it is not claude"
     );
 }
@@ -951,7 +955,7 @@ async fn disabled_provider_is_not_listed_and_keeps_dictation_raw() {
     assert_eq!(models.status, 200);
     assert_eq!(
         listed_model_ids(&models.body_json()),
-        ["claude"],
+        ["claude", "passthrough"],
         "a disabled provider is not listed"
     );
 
@@ -1061,7 +1065,7 @@ async fn models_omit_an_enabled_provider_whose_binary_is_missing() {
     assert_eq!(response.status, 200);
     assert_eq!(
         listed_model_ids(&response.body_json()),
-        ["codex"],
+        ["codex", "passthrough"],
         "claude is enabled but missing, so only codex is available"
     );
 }
@@ -1397,4 +1401,21 @@ fn serve_prints_one_status_line_per_enabled_provider() {
             "disabled provider {id} must get no line: {lines:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn passthrough_returns_handy_transcript_without_running_any_cli() {
+    let server = start_dual_server(
+        BOTH_AT_FAKES,
+        success_scenario("unused"),
+        codex_success_scenario("unused"),
+    )
+    .await;
+    let response = post_model(server.port, " PassThrough ").await;
+    assert_eq!(response.status, 200);
+    let body = response.body_json();
+    assert_eq!(body["model"], "passthrough");
+    assert_eq!(body["choices"][0]["message"]["content"], FIXTURE_TRANSCRIPT);
+    assert!(!server.claude.report_path().exists());
+    assert!(!server.codex.report_path().exists());
 }
