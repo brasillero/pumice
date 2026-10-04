@@ -221,6 +221,7 @@ async fn read_body_bounded(body: Body) -> Result<Vec<u8>, ReadBodyError> {
 fn completion_line(outcome: &FormatOutcome) -> String {
     let (kind, reason) = match &outcome.kind {
         OutcomeKind::Formatted => ("formatted", "-".to_owned()),
+        OutcomeKind::Passthrough => ("passthrough", "-".to_owned()),
         OutcomeKind::Empty => ("empty", "-".to_owned()),
         OutcomeKind::Raw(reason) => ("raw", format!("{reason:?}")),
     };

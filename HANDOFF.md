@@ -110,6 +110,7 @@ The owner skipped the manual fallback steps; the agent-verified runs above cover
 | 8 | S4.1 Timeouts | Done | #13 | `pipeline.rs`: total budget with response reserve, provider cap + hard stop, fake-CLI deadline tests |
 | 9 | S4.3 Raw-text fallback | Done | #13 | `pipeline.rs` outcomes: exact raw text for unknown/disabled/busy/budget/provider/cleanup failures |
 | 9b | S4.2 Fallback chain | Done | #15 | `pipeline.rs` walks `fallback_order` within the total budget; skips duplicates/disabled/unbuilt; `FormatOutcome.attempts`; raw fallback carries the last failure |
+| 9c | S4.3 follow-up: explicit passthrough | Done | #32 | Built-in `passthrough` model returns the exact extracted transcript without AI calls, cleanup or fallback; always listed after the available providers |
 | 10 | S1.1 + S5.3 Chat completions on loopback | Done | #17 | axum + tokio; exact routes, 10 MiB/5 s body bounds, SSE, loopback bind, port-taken exit 1 |
 | 11 | S1.2 + S6.2 Model list and provider selection | Done | #19 | `Pipeline::model_ids` (default first) and `Pipeline::select` (trimmed, case-insensitive) are the single source of truth for listing, selection and the response `model`; covered end to end over HTTP with two fakes |
 | 12 | S1.3 Health route | Done | #20 | `GET /health` returns ok+version without touching the pipeline; a slow-fake test proves it answers in <300 ms during a dictation |

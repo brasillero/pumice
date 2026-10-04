@@ -345,7 +345,7 @@ fn models_listing_never_includes_antigravity() {
     let pipeline = Pipeline::new(&loaded.config, providers);
     let ids = pipeline.model_ids();
     assert!(!ids.contains(&"antigravity"), "{ids:?}");
-    assert_eq!(ids, ["claude", "codex"]);
+    assert_eq!(ids, ["claude", "codex", "passthrough"]);
 }
 
 #[tokio::test]
