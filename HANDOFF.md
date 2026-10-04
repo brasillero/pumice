@@ -42,7 +42,7 @@ Update this table in the PR that finishes each story. Merge order follows the ta
 | 12 | S1.3 Health route | Not started | | |
 | 13 | S1.4 Debug log | Not started | | |
 | 14 | S5.1 + S5.2 CLI isolation and Windows shims | Done | #16 | npm `.cmd` shim translation to direct node launch + all-adapter isolation contract tests; Codex residual-risk acceptance left to owner |
-| 15 | S6.4 Example config | Not started | | |
+| 15 | S6.4 Example config | Done (pending review) | | Commented `pumice.example.yaml` (all defaults, load-tested both as shipped and with documented overrides uncommented); README "run from source" section |
 | 16 | S8.3 Phase 1 CI and gate | Not started | | |
 
 ## Phase 0 (done)

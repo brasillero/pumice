@@ -1,0 +1,83 @@
+# Pumice configuration example.
+#
+# Every setting below is the built-in default, so the service works without
+# any file. Copy this to your own pumice.yaml and keep only what you change.
+#
+# Pumice reads exactly one configuration file:
+#   1. the path passed with --config (pumice serve --config my.yaml), else
+#   2. the per-user file: ~/.config/pumice/pumice.yaml on Linux and macOS
+#      ($XDG_CONFIG_HOME/pumice/pumice.yaml when XDG_CONFIG_HOME is set), and
+#      %APPDATA%\pumice\pumice.yaml on Windows,
+#   otherwise the defaults below apply.
+#
+# Validate a file with: pumice check-config --config <path>
+#
+# Never put credentials in this file: Pumice runs on the logins of the
+# official CLIs and rejects credential-looking settings.
+#
+# Point Handy's Custom provider at: http://127.0.0.1:7567/v1
+
+# TCP port the service binds to on 127.0.0.1.
+port: 7567
+
+# Provider used when a request does not select one.
+default_provider: claude
+
+# Total seconds budget for one dictation, fallback chain included.
+total_timeout_secs: 30
+
+# Providers to try, in order, after the selected one fails or times out,
+# all within total_timeout_secs. The raw dictation comes back when every
+# fallback fails too. Uncomment to try Codex after Claude:
+fallback_order: []
+# fallback_order: [codex]
+
+providers:
+  claude:
+    enabled: true
+    # null looks up "claude" on PATH; a relative path resolves against this
+    # file's directory, an absolute path is used as-is.
+    binary: null
+    # Measured default from Phase 0.
+    model: haiku
+    # Per-call cap, also limited by the remaining total budget.
+    timeout_secs: 30
+    # Only non-secret routing variables may be set here, and Claude allows
+    # just the one below. Uncomment to use, replacing the empty map:
+    # env:
+    #   ANTHROPIC_BASE_URL: "http://127.0.0.1:9999"
+    env: {}
+    # Claude accepts no adapter options.
+    options: {}
+
+  codex:
+    enabled: true
+    binary: null
+    model: gpt-6.1-sol
+    timeout_secs: 30
+    # Codex accepts no environment overrides; routing goes through `options`.
+    env: {}
+    # The only supported option routes Codex through an existing gateway (an
+    # http:// or https:// URL, never with credentials in it). Uncomment to
+    # use, replacing the empty map:
+    # options:
+    #   openai_base_url: "https://your-existing-gateway.example/v1"
+    options: {}
+
+# Optional formatting instructions, added after Pumice's fixed instruction.
+# Both are off by default (null); a block scalar (|) keeps line breaks.
+prompts:
+  # Example: replace `system: null` with a block scalar:
+  # system: |
+  #   Preserve technical terms and product names.
+  system: null
+  # Example: replace `user: null` with a block scalar:
+  # user: |
+  #   Format spoken enumerations as Markdown lists.
+  user: null
+
+# Dictated text is written to a log only when debug logging is enabled.
+debug_log:
+  enabled: false
+  # Relative paths resolve against this file's directory.
+  path: pumice-debug.jsonl
