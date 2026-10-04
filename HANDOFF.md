@@ -64,7 +64,7 @@ Update this table in the PR that finishes each story.
 | --- | --- | --- | --- |
 | S0.1 Handy request format | Not started | | Needs the owner to configure Handy on Windows |
 | S0.2 CLI matrix | Not started | | Start with Claude |
-| S0.3 Terms of use | Done (pending review) | | Claude: unclear; Codex: OK; Kimi: risky (subscription is interactive-only); OpenCode: unclear; Antigravity: risky. June 2026 headless quota split is paused. |
+| S0.3 Terms of use | Done (pending review) | #1 | Claude: unclear; Codex: OK; Kimi: risky (subscription is interactive-only); OpenCode: unclear; Antigravity: risky. June 2026 headless quota split is paused. |
 | S0.4 Validate the stack | Not started | | |
 | S0.5 WSL localhost | Not started | | Can run together with S0.1 |
 
