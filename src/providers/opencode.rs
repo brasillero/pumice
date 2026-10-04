@@ -31,8 +31,8 @@ use serde_json::Value;
 
 use super::cli::{CliAdapter, CliProvider};
 use super::{
-    FormatInput, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode, ProviderLocations,
-    ProviderSettings, RawOption,
+    FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode,
+    ProviderLocations, ProviderSettings, RawOption,
 };
 use crate::config::ConfigError;
 use crate::process::{
@@ -83,6 +83,10 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     disabled_by_default: true,
     risk_warning: Some(RISK_WARNING),
     validate_settings,
+    probe: ProbeSpec::Version(&["--version"]),
+    default_binary: DEFAULT_BINARY,
+    npm_entrypoint: None,
+    install_hint: "npm install -g opencode-ai",
 };
 
 fn defaults() -> ProviderSettings {

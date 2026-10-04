@@ -21,8 +21,8 @@ use serde_json::Value;
 
 use super::cli::{CliAdapter, CliProvider};
 use super::{
-    FormatInput, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode, ProviderSettings,
-    RawOption, validate_settings_noop,
+    FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode,
+    ProviderSettings, RawOption, validate_settings_noop,
 };
 use crate::config::ConfigError;
 use crate::process::{
@@ -55,6 +55,10 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     disabled_by_default: false,
     risk_warning: None,
     validate_settings: validate_settings_noop,
+    probe: ProbeSpec::Version(&["--version"]),
+    default_binary: DEFAULT_BINARY,
+    npm_entrypoint: Some(NPM_ENTRYPOINT),
+    install_hint: "npm install -g @openai/codex",
 };
 
 fn defaults() -> ProviderSettings {

@@ -24,7 +24,7 @@ use serde_saphyr::Location;
 
 use super::cli::CliAdapter;
 use super::{
-    FormatInput, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode,
+    FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode,
     ProviderLocations, ProviderSettings, RawOption,
 };
 use crate::config::ConfigError;
@@ -54,6 +54,12 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     disabled_by_default: true,
     risk_warning: Some(RISK_WARNING),
     validate_settings,
+    // PATH-only: `agy` is never spawned, not even for `--version`
+    // (orchestrator decision 4).
+    probe: ProbeSpec::PathOnly,
+    default_binary: DEFAULT_BINARY,
+    npm_entrypoint: None,
+    install_hint: "bundled with the Antigravity IDE (https://antigravity.google)",
 };
 
 fn defaults() -> ProviderSettings {

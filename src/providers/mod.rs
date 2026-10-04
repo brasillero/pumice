@@ -5,6 +5,7 @@
 //! `register_providers!` below.
 
 pub mod cli;
+pub mod discovery;
 mod interface;
 
 use std::collections::BTreeMap;
@@ -113,6 +114,28 @@ pub struct ProviderDescriptor {
     /// enabled provider without a `model`). Errors should point at the most
     /// specific [`ProviderLocations`] entry available.
     pub validate_settings: ValidateSettingsFn,
+    /// How startup detection checks this provider's presence (S2.8).
+    /// Detection never spends quota and never changes `enabled`.
+    pub probe: ProbeSpec,
+    /// Command name looked up on PATH when the configuration sets no
+    /// `binary`; the same default the adapter builds with.
+    pub default_binary: &'static str,
+    /// npm package entrypoint for Windows `.cmd` shim translation during
+    /// detection. Must equal the adapter's value so detection resolves the
+    /// program exactly like a formatting call; `None` refuses shims.
+    pub npm_entrypoint: Option<&'static str>,
+    /// Short official installation hint for a missing provider, printed by
+    /// startup and (later) `pumice doctor`.
+    pub install_hint: &'static str,
+}
+
+/// How [`discovery`] checks a provider's presence at startup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProbeSpec {
+    /// Resolve and run the given version arguments.
+    Version(&'static [&'static str]),
+    /// Resolve on PATH only; never spawn.
+    PathOnly,
 }
 
 /// Validates one provider's fully defaulted settings; see

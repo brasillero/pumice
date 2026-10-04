@@ -22,7 +22,7 @@ use pumice::config;
 use pumice::logging::DebugLog;
 use pumice::pipeline::Pipeline;
 use pumice::process::ProcessRunner;
-use pumice::providers;
+use pumice::providers::{self, discovery};
 use serde_json::{Value, json};
 use support::FakeCli;
 use tempfile::TempDir;
@@ -112,7 +112,8 @@ async fn start_dual_server(
         .expect("config loads")
         .config;
     let runner = Arc::new(ProcessRunner::new());
-    let built = providers::build_from_config(&config, runner).expect("providers build");
+    let built =
+        providers::build_from_config(&config, Arc::clone(&runner)).expect("providers build");
     let pipeline = Arc::new(Pipeline::new(&config, built));
 
     let listener = tokio::net::TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
@@ -942,6 +943,128 @@ async fn disabled_provider_is_not_listed_and_keeps_dictation_raw() {
     );
 }
 
+/// A running in-process server with detection cached in the pipeline, where
+/// the selected provider (`claude`) has a missing binary and every other
+/// registered provider has its own fake.
+struct MissingSelectedServer {
+    port: u16,
+    log: Arc<LogCapture>,
+    codex: FakeCli,
+    _config_dir: TempDir,
+    _missing_dir: TempDir,
+}
+
+impl MissingSelectedServer {
+    fn log_lines(&self) -> Vec<String> {
+        self.log.lines()
+    }
+}
+
+/// Starts a detected pipeline where `claude`'s binary does not exist (inside
+/// a real temporary directory, so the path is absolute) and the other
+/// providers run at their own fakes. `yaml_tail` is appended after the
+/// `providers:` section; `{codex}` is replaced by the codex fake's path.
+async fn start_missing_selected_server(
+    yaml_tail: &str,
+    codex_scenario: Value,
+) -> MissingSelectedServer {
+    let codex = FakeCli::new(codex_scenario);
+    let opencode = FakeCli::new(json!({}));
+    let antigravity = FakeCli::new(json!({}));
+    let missing_dir = TempDir::new().expect("temp dir");
+    let missing_binary = missing_dir.path().join("claude");
+    let yaml = format!(
+        "providers:\n  claude:\n    binary: '{}'\n  opencode:\n    binary: '{}'\n  antigravity:\n    binary: '{}'\n{yaml_tail}",
+        missing_binary.display(),
+        opencode.path().display(),
+        antigravity.path().display(),
+    )
+    .replace("{codex}", &codex.path().display().to_string());
+    let config_dir = TempDir::new().expect("temp dir");
+    let config_path = config_dir.path().join("pumice.yaml");
+    fs::write(&config_path, yaml).expect("write config");
+    let config = config::load_with_env(Some(&config_path), |_| None)
+        .expect("config loads")
+        .config;
+    let runner = Arc::new(ProcessRunner::new());
+    let built =
+        providers::build_from_config(&config, Arc::clone(&runner)).expect("providers build");
+    let detection = discovery::detect(&config, providers::PROVIDERS, &runner).await;
+    let pipeline = Arc::new(Pipeline::with_detection(&config, built, detection));
+
+    let listener = tokio::net::TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind ephemeral loopback port");
+    let port = listener.local_addr().unwrap().port();
+    let log = Arc::new(LogCapture::default());
+    let serve_log = Arc::clone(&log);
+    tokio::spawn(async move {
+        let _ = api::serve(
+            listener,
+            pipeline,
+            serve_log,
+            Arc::new(DebugLog::disabled()),
+        )
+        .await;
+    });
+    MissingSelectedServer {
+        port,
+        log,
+        codex,
+        _config_dir: config_dir,
+        _missing_dir: missing_dir,
+    }
+}
+
+#[tokio::test]
+async fn models_omit_an_enabled_provider_whose_binary_is_missing() {
+    let server = start_missing_selected_server(
+        "  codex:\n    binary: '{codex}'\n",
+        codex_success_scenario("unused"),
+    )
+    .await;
+
+    let response = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
+
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        listed_model_ids(&response.body_json()),
+        ["codex"],
+        "claude is enabled but missing, so only codex is available"
+    );
+}
+
+#[tokio::test]
+async fn selecting_a_missing_provider_still_falls_back_through_the_chain() {
+    let server = start_missing_selected_server(
+        "  codex:\n    binary: '{codex}'\nfallback_order: [codex]\n",
+        codex_success_scenario("Texto do Codex."),
+    )
+    .await;
+
+    let response = post_model(server.port, "claude").await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    let body = response.body_json();
+    assert_eq!(body["model"], "codex", "the fallback provider answers");
+    assert_eq!(
+        body["choices"][0]["message"]["content"], "Texto do Codex.",
+        "the dictation is formatted by the next provider's fake"
+    );
+    assert!(
+        server.codex.report_path().exists(),
+        "codex ran after claude failed as NotInstalled"
+    );
+    assert!(
+        server
+            .log_lines()
+            .iter()
+            .any(|line| line.contains("kind=formatted") && line.contains("provider=codex")),
+        "a formatted outcome through the fallback: {:?}",
+        server.log_lines()
+    );
+}
+
 #[tokio::test]
 async fn authorization_header_is_ignored_and_never_logged() {
     let result = "Autorizado.";
@@ -980,6 +1103,28 @@ async fn authorization_header_is_ignored_and_never_logged() {
     }
 }
 
+/// Builds `pumice serve` YAML whose every registered provider binary points
+/// at its own disposable fake, so startup detection never looks a real CLI
+/// up on PATH. Returns the fakes — they must outlive the served process —
+/// and the YAML.
+fn hermetic_serve_yaml(port: u16, claude_scenario: Value) -> (FakeCli, Vec<FakeCli>, String) {
+    let claude = FakeCli::new(claude_scenario);
+    let mut fakes: Vec<FakeCli> = Vec::new();
+    let mut yaml = format!(
+        "port: {port}\nproviders:\n  claude:\n    binary: '{}'\n",
+        claude.path().display()
+    );
+    for id in ["codex", "opencode", "antigravity"] {
+        let fake = FakeCli::new(json!({}));
+        yaml.push_str(&format!(
+            "  {id}:\n    binary: '{}'\n",
+            fake.path().display()
+        ));
+        fakes.push(fake);
+    }
+    (claude, fakes, yaml)
+}
+
 /// Writes `yaml` to a fresh config file and returns its directory (kept
 /// alive by the caller) and path.
 fn write_config(yaml: &str) -> (TempDir, std::path::PathBuf) {
@@ -994,7 +1139,8 @@ fn occupied_port_exits_1_naming_port() {
     let blocker = std::net::TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
         .expect("bind a port to occupy");
     let port = blocker.local_addr().unwrap().port();
-    let (_dir, config_path) = write_config(&format!("port: {port}\n"));
+    let (_claude, _fakes, yaml) = hermetic_serve_yaml(port, json!({}));
+    let (_dir, config_path) = write_config(&yaml);
 
     let output = Command::new(env!("CARGO_BIN_EXE_pumice"))
         .arg("serve")
@@ -1070,7 +1216,8 @@ fn spawn_serve(config_path: &std::path::Path) -> (Child, mpsc::Receiver<Option<S
 fn serve_prints_the_loopback_address() {
     for attempt in 1..=3 {
         let port = grab_free_port();
-        let (_dir, config_path) = write_config(&format!("port: {port}\n"));
+        let (_claude, _fakes, yaml) = hermetic_serve_yaml(port, json!({}));
+        let (_dir, config_path) = write_config(&yaml);
         let (mut child, line_rx) = spawn_serve(&config_path);
 
         let line = line_rx
@@ -1114,4 +1261,108 @@ fn serve_prints_the_loopback_address() {
         return;
     }
     panic!("could not start pumice on a free port after 3 attempts");
+}
+
+/// Spawns `pumice serve` like [`spawn_serve`] and additionally forwards every
+/// stderr line, so a test can watch the startup provider status lines.
+fn spawn_serve_with_stderr(
+    config_path: &std::path::Path,
+) -> (
+    Child,
+    mpsc::Receiver<Option<String>>,
+    mpsc::Receiver<String>,
+) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pumice"))
+        .arg("serve")
+        .arg("--config")
+        .arg(config_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn pumice serve");
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let (stdout_tx, stdout_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut line = String::new();
+        let mut byte = [0u8; 1];
+        loop {
+            match stdout.read(&mut byte) {
+                Ok(0) => break,
+                Ok(_) => {
+                    line.push(byte[0] as char);
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = stdout_tx.send(if line.is_empty() { None } else { Some(line) });
+    });
+    let stderr = child.stderr.take().expect("piped stderr");
+    let (stderr_tx, stderr_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stderr);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match std::io::BufRead::read_line(&mut reader, &mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
+                    if stderr_tx.send(trimmed).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    (child, stdout_rx, stderr_rx)
+}
+
+#[test]
+fn serve_prints_one_status_line_per_enabled_provider() {
+    let port = grab_free_port();
+    let (_claude, _fakes, yaml) = hermetic_serve_yaml(
+        port,
+        json!({"stdout": "2.1.288 (Claude Code)", "exit_code": 0}),
+    );
+    let (_dir, config_path) = write_config(&yaml);
+    let (mut child, _stdout_rx, stderr_rx) = spawn_serve_with_stderr(&config_path);
+
+    // First line: allow generous startup time (process spawn plus probes on
+    // a loaded CI box). Then drain the rest with a short idle timeout as the
+    // end-of-output signal: after the status lines, serve prints nothing more
+    // to stderr.
+    let mut lines: Vec<String> = Vec::new();
+    match stderr_rx.recv_timeout(Duration::from_secs(15)) {
+        Ok(line) => lines.push(line),
+        Err(error) => panic!("pumice printed no startup status lines: {error}"),
+    }
+    while let Ok(line) = stderr_rx.recv_timeout(Duration::from_millis(500)) {
+        lines.push(line);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+
+    for wanted in [
+        "provider claude: found 2.1.288",
+        "provider codex: found (version unavailable)",
+    ] {
+        assert!(
+            lines.iter().any(|line| line.contains(wanted)),
+            "startup must print {wanted:?}; stderr: {lines:?}"
+        );
+    }
+    // Disabled providers were detected but get no line.
+    for id in ["opencode", "antigravity"] {
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.starts_with(&format!("provider {id}:"))),
+            "disabled provider {id} must get no line: {lines:?}"
+        );
+    }
 }
