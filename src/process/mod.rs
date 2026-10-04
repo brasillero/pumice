@@ -15,7 +15,7 @@ mod tree;
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{ExitStatus, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -118,14 +118,27 @@ async fn run_in(
     }
     command.envs(&invocation.env);
 
+    // Setup above can take a while (temporary files, PATH lookup): never
+    // start a CLI once the deadline has passed.
+    if Instant::now() >= deadline {
+        return Err(ProviderError::Timeout);
+    }
     let mut tree = ProcessTree::spawn(command).map_err(|e| match e.kind() {
         io::ErrorKind::NotFound => ProviderError::NotInstalled,
         _ => ProviderError::other(ProviderErrorCode::Spawn),
     })?;
-    let result = drive(&mut tree, invocation.stdin, deadline).await;
+    let captured = drive(&mut tree, invocation.stdin, deadline).await;
     // Kill whatever is left (descendants included) on every path, then reap.
-    tree.kill_and_reap(REAP_LIMIT).await;
-    result
+    // If this future is dropped before here, `ProcessTree`'s drop kills the
+    // tree instead.
+    let status = tree.finish(REAP_LIMIT).await;
+    let (stdout, stderr_tail) = captured?;
+    let status = status.ok_or(ProviderError::other(ProviderErrorCode::Io))?;
+    Ok(ProcessOutput {
+        status,
+        stdout,
+        stderr_tail,
+    })
 }
 
 /// Removes the temporary root, retrying briefly: on Windows a killed
@@ -172,20 +185,21 @@ enum Abort {
     Io,
 }
 
-/// Feeds stdin, drains stdout/stderr and waits for the direct child, all
-/// concurrently and bounded by `deadline`.
+/// Feeds stdin, drains stdout/stderr and waits for the direct child to
+/// exit, all concurrently and bounded by `deadline`. Returns the captured
+/// stdout and stderr tail; the caller kills the tree and reaps the child.
 async fn drive(
     tree: &mut ProcessTree,
     stdin: Vec<u8>,
     deadline: Instant,
-) -> Result<ProcessOutput, ProviderError> {
+) -> Result<(Vec<u8>, Vec<u8>), ProviderError> {
     let stdin_pipe = tree.take_stdin();
     let stdout_pipe = tree.take_stdout();
     let stderr_pipe = tree.take_stderr();
 
     let mut stdout = Vec::new();
     let mut stderr_tail = Vec::new();
-    let mut status: Option<ExitStatus> = None;
+    let mut exited = false;
     let mut stdout_done = stdout_pipe.is_none();
     let mut stderr_done = stderr_pipe.is_none();
     let mut stdin_done = stdin_pipe.is_none();
@@ -200,11 +214,29 @@ async fn drive(
 
         let mut limit = deadline;
         loop {
-            if status.is_some() && stdout_done && stderr_done {
+            if exited && stdout_done && stderr_done {
                 break Ok(());
             }
+            // Biased with the timer first: once the limit has passed, no
+            // other ready branch can win.
             tokio::select! {
-                () = &mut stdin_fut, if !stdin_done => stdin_done = true,
+                biased;
+                () = tokio::time::sleep_until(limit) => {
+                    // Past the grace period (and still before the deadline) the
+                    // parent has finished: keep what it wrote and let the caller
+                    // kill the descendants still holding the pipes.
+                    if exited && limit < deadline {
+                        break Ok(());
+                    }
+                    break Err(Abort::Timeout);
+                }
+                r = tree.exited(), if !exited => match r {
+                    Ok(()) => {
+                        exited = true;
+                        limit = deadline.min(Instant::now() + EXIT_GRACE);
+                    }
+                    Err(_) => break Err(Abort::Io),
+                },
                 r = &mut stdout_fut, if !stdout_done => match r {
                     Ok(()) => stdout_done = true,
                     Err(abort) => break Err(abort),
@@ -213,32 +245,14 @@ async fn drive(
                     Ok(()) => stderr_done = true,
                     Err(abort) => break Err(abort),
                 },
-                r = tree.wait_direct(), if status.is_none() => match r {
-                    Ok(exit) => {
-                        status = Some(exit);
-                        limit = deadline.min(Instant::now() + EXIT_GRACE);
-                    }
-                    Err(_) => break Err(Abort::Io),
-                },
-                () = tokio::time::sleep_until(limit) => {
-                    // Past the grace period (and still before the deadline) the
-                    // parent has finished: keep what it wrote and let the caller
-                    // kill the descendants still holding the pipes.
-                    if status.is_some() && limit < deadline {
-                        break Ok(());
-                    }
-                    break Err(Abort::Timeout);
-                }
+                () = &mut stdin_fut, if !stdin_done => stdin_done = true,
             }
         }
     };
 
     match outcome {
-        Ok(()) => Ok(ProcessOutput {
-            status: status.expect("loop ends successfully only after exit"),
-            stdout,
-            stderr_tail,
-        }),
+        Ok(()) if Instant::now() >= deadline => Err(ProviderError::Timeout),
+        Ok(()) => Ok((stdout, stderr_tail)),
         Err(Abort::Timeout) => Err(ProviderError::Timeout),
         Err(Abort::TooLarge) => Err(ProviderError::other(ProviderErrorCode::OutputTooLarge)),
         Err(Abort::Io) => Err(ProviderError::other(ProviderErrorCode::Io)),

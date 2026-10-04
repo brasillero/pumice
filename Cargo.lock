@@ -248,6 +248,7 @@ dependencies = [
 name = "pumice"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "process-wrap",
  "serde",
  "serde_json",

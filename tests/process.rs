@@ -202,7 +202,10 @@ async fn stderr_keeps_only_the_tail() {
 }
 
 #[tokio::test]
-async fn deadline_exceeded_is_timeout_and_cleans_up() {
+async fn deadline_exceeded_is_timeout() {
+    // Does not read the report: on a slow runner the deadline can kill the
+    // fake before it writes one. Cleanup after a started CLI is checked by
+    // the grandchild and cancellation tests, which wait for the report.
     let fake = FakeCli::new(json!({"sleep_ms": 30_000, "stdout": "too late"}));
     let budget = Duration::from_millis(500);
 
@@ -214,7 +217,40 @@ async fn deadline_exceeded_is_timeout_and_cleans_up() {
 
     assert_eq!(result.unwrap_err(), ProviderError::Timeout);
     assert!(elapsed < budget + TOLERANCE, "took {elapsed:?}");
-    assert!(!temp_root(&fake.report()).exists());
+}
+
+#[tokio::test]
+async fn cancelled_run_kills_the_whole_tree() {
+    const SLEEP_MS: u64 = 30_000;
+    let fake = FakeCli::new(json!({
+        "sleep_ms": SLEEP_MS,
+        "spawn_grandchild_sleep_ms": SLEEP_MS,
+    }));
+    let inv = invocation(fake.path());
+    let task = tokio::spawn(async move {
+        ProcessRunner::new()
+            .run(inv, Instant::now() + Duration::from_millis(SLEEP_MS))
+            .await
+    });
+
+    // The fake writes its report (with the grandchild PID) before sleeping.
+    let started_by = std::time::Instant::now() + RELAXED;
+    while !fake.report_path().exists() {
+        assert!(std::time::Instant::now() < started_by, "fake never started");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let report = fake.report();
+    let parent = report["pid"].as_u64().expect("pid") as u32;
+    let grandchild = report["grandchild_pid"].as_u64().expect("grandchild pid") as u32;
+
+    // Cancel the run, as the pipeline does on its total deadline or when the
+    // client disconnects.
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+
+    assert!(process_alive(std::process::id()));
+    wait_until_gone(parent);
+    wait_until_gone(grandchild);
 }
 
 #[tokio::test]
@@ -238,14 +274,7 @@ async fn returns_promptly_and_kills_grandchild_holding_pipes() {
         .expect("grandchild pid") as u32;
     // Guard against a liveness check that always says "gone".
     assert!(process_alive(std::process::id()));
-    let gone_by = std::time::Instant::now() + Duration::from_secs(5);
-    while process_alive(pid) {
-        assert!(
-            std::time::Instant::now() < gone_by,
-            "grandchild {pid} still running"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until_gone(pid);
 }
 
 #[tokio::test]
@@ -276,6 +305,18 @@ async fn control_file_names_must_be_plain() {
         }
     );
     assert!(!fake.report_path().exists(), "the CLI must not start");
+}
+
+/// Waits (with a CI tolerance) until process `pid` is no longer running.
+fn wait_until_gone(pid: u32) {
+    let gone_by = std::time::Instant::now() + Duration::from_secs(5);
+    while process_alive(pid) {
+        assert!(
+            std::time::Instant::now() < gone_by,
+            "process {pid} still running"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Whether a process with this PID is still running (zombies count as gone).

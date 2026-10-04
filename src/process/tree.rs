@@ -8,6 +8,12 @@
 //!
 //! A process group does not contain a Unix descendant that deliberately
 //! leaves it. This is lifecycle management, not a security boundary.
+//!
+//! PGID reuse on Unix: the direct child leads the group, so the group ID
+//! cannot be reused while that child exists, even as a zombie. Its exit is
+//! therefore observed without reaping it (`waitid` with `WNOWAIT`), the group
+//! is signalled while the zombie still pins the ID, and only then is the
+//! child reaped. After reaping, the group is never signalled again.
 
 use std::io;
 use std::process::ExitStatus;
@@ -16,13 +22,21 @@ use std::time::Duration;
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 
+/// How often the direct child is polled for exit.
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
+
 /// A spawned CLI together with its process group or Job Object.
 ///
-/// Dropping it kills the direct child (`kill_on_drop`) and, on Windows, every
-/// process in the job. Call [`kill`](ProcessTree::kill) for the whole tree
-/// on Unix.
+/// Dropping it before [`finish`](ProcessTree::finish) has reaped the child
+/// (for example when the caller's future is cancelled) kills the whole tree.
 pub struct ProcessTree {
     child: Box<dyn ChildWrapper>,
+    #[cfg(unix)]
+    pid: libc::id_t,
+    #[cfg(windows)]
+    status: Option<ExitStatus>,
+    /// The tree was killed and the direct child reaped: never signal again.
+    reaped: bool,
 }
 
 impl ProcessTree {
@@ -34,8 +48,22 @@ impl ProcessTree {
         wrap.wrap(process_wrap::tokio::ProcessGroup::leader());
         #[cfg(windows)]
         wrap.wrap(process_wrap::tokio::JobObject);
+        let mut child = wrap.spawn()?;
+        #[cfg(unix)]
+        let pid = match child.id() {
+            Some(pid) => pid as libc::id_t,
+            None => {
+                let _ = child.start_kill();
+                return Err(io::Error::other("spawned child has no PID"));
+            }
+        };
         Ok(ProcessTree {
-            child: wrap.spawn()?,
+            child,
+            #[cfg(unix)]
+            pid,
+            #[cfg(windows)]
+            status: None,
+            reaped: false,
         })
     }
 
@@ -51,47 +79,94 @@ impl ProcessTree {
         self.child.stderr().take()
     }
 
-    /// Waits until the direct child exits. Descendants may still be running.
-    ///
-    /// Unix: the process-group wrapper's `wait` lets Tokio reap the child,
-    /// then reaps any other children of ours in the group (there are none:
-    /// descendants belong to the CLI), so a descendant holding the pipes does
-    /// not block it. Its `try_wait` is avoided because it reaps behind Tokio's
-    /// back, after which `kill_on_drop` would signal a stale PID.
-    #[cfg(unix)]
-    pub async fn wait_direct(&mut self) -> io::Result<ExitStatus> {
-        self.child.wait().await
+    /// Waits until the direct child exits, without reaping it on Unix.
+    /// Descendants may still be running. Cancellation-safe.
+    pub async fn exited(&mut self) -> io::Result<()> {
+        while !self.poll_exited()? {
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+        Ok(())
     }
 
-    /// Waits until the direct child exits. Descendants may still be running.
-    ///
-    /// Windows: the Job Object wrapper's `wait` also waits for every process
-    /// in the job, which would block on a descendant holding the pipes, so
-    /// the direct child is polled with `try_wait` instead.
-    #[cfg(windows)]
-    pub async fn wait_direct(&mut self) -> io::Result<ExitStatus> {
+    #[cfg(unix)]
+    fn poll_exited(&mut self) -> io::Result<bool> {
         loop {
-            if let Some(status) = self.child.try_wait()? {
-                return Ok(status);
+            // SAFETY: an all-zero `siginfo_t` is a valid value; `waitid` only
+            // writes into it.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            // SAFETY: `info` is a valid, writable `siginfo_t`. `WNOWAIT`
+            // leaves the child waitable, so Tokio still reaps it later.
+            let rc = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    self.pid,
+                    &mut info,
+                    libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+                )
+            };
+            if rc == 0 {
+                // With WNOHANG and no state change, the zeroed `info` stays
+                // zero (Linux clears it; elsewhere it is left untouched).
+                return Ok(info.si_signo == libc::SIGCHLD);
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            let err = io::Error::last_os_error();
+            match err.raw_os_error() {
+                Some(libc::EINTR) => continue,
+                // Already reaped: it has certainly exited.
+                Some(libc::ECHILD) => return Ok(true),
+                _ => return Err(err),
+            }
         }
     }
 
-    /// Kills every process in the tree without waiting. Best effort: the
-    /// tree may already be gone.
-    pub fn kill(&mut self) {
-        let _ = self.child.start_kill();
+    #[cfg(windows)]
+    fn poll_exited(&mut self) -> io::Result<bool> {
+        // The Job Object wrapper's `wait` also waits for every process in the
+        // job, which would block on a descendant holding the pipes; polling
+        // the direct child observes it alone.
+        if self.status.is_none() {
+            self.status = self.child.try_wait()?;
+        }
+        Ok(self.status.is_some())
     }
 
-    /// Kills the tree and reaps the direct child, waiting at most `limit`.
-    ///
-    /// Uses [`wait_direct`](ProcessTree::wait_direct) rather than the
-    /// Windows wrapper's `wait`, which waits for job notifications that the
-    /// `try_wait` polling has already consumed and could block until `limit`
-    /// on every call.
-    pub async fn kill_and_reap(&mut self, limit: Duration) {
-        self.kill();
-        let _ = tokio::time::timeout(limit, self.wait_direct()).await;
+    /// Kills every process in the tree, then reaps the direct child, waiting
+    /// at most `limit`. Returns the direct child's exit status, or `None`
+    /// when it could not be reaped in time (dropping the tree retries the
+    /// kill).
+    pub async fn finish(&mut self, limit: Duration) -> Option<ExitStatus> {
+        if !self.reaped {
+            // Unix: the unreaped leader still pins the group ID here.
+            let _ = self.child.start_kill();
+        }
+        let status = tokio::time::timeout(limit, self.reap()).await.ok()?.ok()?;
+        self.reaped = true;
+        Some(status)
+    }
+
+    #[cfg(unix)]
+    async fn reap(&mut self) -> io::Result<ExitStatus> {
+        // Reap through the native Tokio child (the layer under the process
+        // group wrapper) so Tokio records the exit and `kill_on_drop` never
+        // signals a stale PID. Its `wait` is cancellation-safe.
+        self.child.inner_mut().wait().await
+    }
+
+    #[cfg(windows)]
+    async fn reap(&mut self) -> io::Result<ExitStatus> {
+        self.exited().await?;
+        Ok(self.status.expect("exited() sets the status"))
+    }
+}
+
+impl Drop for ProcessTree {
+    /// Cancellation safety: if the run was abandoned before `finish` reaped
+    /// the child, kill the whole tree now. On Unix the unreaped leader still
+    /// pins the group ID, so the signal cannot reach an unrelated group. On
+    /// Windows closing the job handle afterwards also kills the job.
+    fn drop(&mut self) {
+        if !self.reaped {
+            let _ = self.child.start_kill();
+        }
     }
 }

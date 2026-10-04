@@ -28,6 +28,10 @@ serde_json = "1"
 tempfile = "3"
 tokio = { version = "1.53.2", features = ["rt", "time", "io-util", "process"] }
 
+[target.'cfg(unix)'.dependencies]
+# `waitid(WNOWAIT)`: observe the CLI's exit without reaping it (src/process/tree.rs).
+libc = "0.2.190"
+
 [dev-dependencies]
 tokio = { version = "1.53.2", features = ["macros", "rt"] }
 
