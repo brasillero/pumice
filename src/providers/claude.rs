@@ -16,7 +16,7 @@ use serde_json::Value;
 use super::cli::{CliAdapter, CliProvider};
 use super::{
     FormatInput, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode, ProviderSettings,
-    RawOption,
+    RawOption, validate_settings_noop,
 };
 use crate::config::ConfigError;
 use crate::process::{Argument, CliInvocation, ControlFile, ProcessOutput, ProcessRunner, ProgramSpec};
@@ -44,6 +44,9 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     allowed_env: ALLOWED_ENV,
     validate_options,
     build,
+    disabled_by_default: false,
+    risk_warning: None,
+    validate_settings: validate_settings_noop,
 };
 
 fn defaults() -> ProviderSettings {

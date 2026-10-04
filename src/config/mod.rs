@@ -129,7 +129,7 @@ pub fn load_with_env(
     };
     let config = match &source {
         ConfigSource::File(path) => load_file(path)?,
-        ConfigSource::BuiltInDefaults => validate(None, None)?,
+        ConfigSource::BuiltInDefaults => validate(None, None, providers::PROVIDERS)?,
     };
     Ok(LoadedConfig { config, source })
 }
@@ -142,7 +142,23 @@ fn load_file(path: &Path) -> Result<Config, ConfigError> {
     let raw =
         serde_saphyr::from_str_with_options::<Option<raw::RawConfig>>(&text, saphyr_options())
             .map_err(|error| parse_error(path, &error))?;
-    validate(raw, Some(&config_dir)).map_err(|error| error.with_file(path))
+    validate(raw, Some(&config_dir), providers::PROVIDERS).map_err(|error| error.with_file(path))
+}
+
+/// Validates YAML `text` against an explicit provider descriptor list
+/// instead of the built-in registry, attaching `path` to errors the way a
+/// configuration file would. Relative settings have no anchor directory.
+/// Exists so tests can exercise registry-driven behavior (default-off
+/// providers, risk warnings, full-settings validation) with synthetic
+/// descriptors.
+pub fn validate_text_with_descriptors(
+    text: &str,
+    path: &Path,
+    descriptors: &[providers::ProviderDescriptor],
+) -> Result<Config, ConfigError> {
+    let raw = serde_saphyr::from_str_with_options::<Option<raw::RawConfig>>(text, saphyr_options())
+        .map_err(|error| parse_error(path, &error))?;
+    validate(raw, None, descriptors).map_err(|error| error.with_file(path))
 }
 
 fn saphyr_options() -> serde_saphyr::Options {
@@ -165,12 +181,16 @@ fn config_dir_of(path: &Path) -> PathBuf {
     }
 }
 
-fn validate(raw: Option<raw::RawConfig>, config_dir: Option<&Path>) -> Result<Config, ConfigError> {
+fn validate(
+    raw: Option<raw::RawConfig>,
+    config_dir: Option<&Path>,
+    descriptors: &[providers::ProviderDescriptor],
+) -> Result<Config, ConfigError> {
     let raw = raw.unwrap_or_default();
 
     // Unknown provider ids first, at the key's own position.
     for (key, _) in &raw.providers {
-        if providers::descriptor(&key.value).is_none() {
+        if !descriptors.iter().any(|d| d.id == key.value) {
             return Err(ConfigError::at(
                 key.referenced,
                 format!("providers.{} is not a known provider", key.value),
@@ -179,7 +199,7 @@ fn validate(raw: Option<raw::RawConfig>, config_dir: Option<&Path>) -> Result<Co
     }
 
     let mut configured = BTreeMap::new();
-    for descriptor in providers::PROVIDERS {
+    for descriptor in descriptors {
         let entry = raw
             .providers
             .iter()
@@ -252,7 +272,7 @@ fn validate(raw: Option<raw::RawConfig>, config_dir: Option<&Path>) -> Result<Co
     let mut fallback_order = Vec::new();
     if let Some(entries) = &raw.fallback_order {
         for entry in entries {
-            if providers::descriptor(&entry.value).is_none() {
+            if !descriptors.iter().any(|d| d.id == entry.value) {
                 return Err(ConfigError::at(
                     entry.referenced,
                     format!("unknown provider \"{}\" in fallback_order", entry.value),
@@ -306,50 +326,62 @@ fn validate(raw: Option<raw::RawConfig>, config_dir: Option<&Path>) -> Result<Co
     })
 }
 
-/// Applies one provider's overrides on top of its descriptor defaults.
+/// Applies one provider's defaults and overrides, then runs its
+/// full-settings validator (even without a `providers:` entry, so a
+/// descriptor can reject its own defaults).
 fn provider_settings(
     descriptor: &providers::ProviderDescriptor,
     entry: Option<&(Spanned<String>, raw::RawProviderSettings)>,
     config_dir: Option<&Path>,
 ) -> Result<ProviderSettings, ConfigError> {
     let mut settings = (descriptor.defaults)();
-    let Some((key, raw)) = entry else {
-        return Ok(settings);
-    };
-    let base = format!("providers.{}", key.value);
-
-    if let Some(enabled) = &raw.enabled {
-        settings.enabled = enabled.value;
-    }
-    if let Some(binary) = &raw.binary {
-        settings.binary = Some(resolve_binary(&binary.value, config_dir));
-    }
-    if let Some(model) = &raw.model {
-        if model.value.trim().is_empty() {
-            return Err(ConfigError::at(
-                model.referenced,
-                format!("{base}.model must not be empty"),
-            ));
+    // `defaults` leaves every provider on; `disabled_by_default` is the
+    // registry's switch for providers that need explicit opt-in.
+    settings.enabled = !descriptor.disabled_by_default;
+    let mut locations = providers::ProviderLocations::default();
+    if let Some((key, raw)) = entry {
+        let base = format!("providers.{}", key.value);
+        locations.provider = Some(key.referenced);
+        if let Some(enabled) = &raw.enabled {
+            locations.enabled = Some(enabled.referenced);
+            settings.enabled = enabled.value;
         }
-        settings.model = model.value.clone();
-    }
-    if let Some(timeout) = &raw.timeout_secs {
-        if timeout.value == 0 {
-            return Err(ConfigError::at(
-                timeout.referenced,
-                format!("{base}.timeout_secs must be greater than zero"),
-            ));
+        if let Some(binary) = &raw.binary {
+            locations.binary = Some(binary.referenced);
+            settings.binary = Some(resolve_binary(&binary.value, config_dir));
         }
-        settings.timeout = Duration::from_secs(timeout.value);
-    }
+        if let Some(model) = &raw.model {
+            locations.model = Some(model.referenced);
+            if model.value.trim().is_empty() {
+                return Err(ConfigError::at(
+                    model.referenced,
+                    format!("{base}.model must not be empty"),
+                ));
+            }
+            settings.model = model.value.clone();
+        }
+        if let Some(timeout) = &raw.timeout_secs {
+            if timeout.value == 0 {
+                return Err(ConfigError::at(
+                    timeout.referenced,
+                    format!("{base}.timeout_secs must be greater than zero"),
+                ));
+            }
+            settings.timeout = Duration::from_secs(timeout.value);
+        }
 
-    settings.env = validate_env(descriptor, &base, &raw.env)?;
-    validate_options(descriptor, &raw.options)?;
-    for (key, value) in &raw.options {
-        settings
-            .options
-            .insert(key.value.clone(), value.value.clone());
+        settings.env = validate_env(descriptor, &base, &raw.env)?;
+        validate_options(descriptor, &raw.options)?;
+        for (key, value) in &raw.options {
+            locations
+                .options
+                .insert(key.value.clone(), value.referenced);
+            settings
+                .options
+                .insert(key.value.clone(), value.value.clone());
+        }
     }
+    (descriptor.validate_settings)(&settings, &locations)?;
     Ok(settings)
 }
 
