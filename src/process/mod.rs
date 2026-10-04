@@ -26,7 +26,7 @@ pub use invocation::{
     Argument, CliInvocation, ControlFile, OutputParser, ProcessOutput, ProgramSpec,
     toml_basic_string,
 };
-pub use resolve::resolve_program;
+pub use resolve::{ResolvedProgram, resolve_program};
 
 use crate::providers::{ProviderError, ProviderErrorCode};
 use tree::ProcessTree;
@@ -84,7 +84,7 @@ impl ProcessRunner {
 
 async fn run_in(
     root: &Path,
-    program: &Path,
+    program: &ResolvedProgram,
     invocation: CliInvocation,
     deadline: Instant,
 ) -> Result<ProcessOutput, ProviderError> {
@@ -116,8 +116,10 @@ async fn run_in(
         })
         .collect::<Result<Vec<OsString>, _>>()?;
 
-    let mut command = Command::new(program);
+    let mut command = Command::new(&program.path);
     command
+        // Entrypoint of a translated Windows shim, before the adapter's args.
+        .args(&program.prefix_args)
         .args(&args)
         .current_dir(&workspace)
         .stdin(Stdio::piped())

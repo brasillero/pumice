@@ -156,8 +156,9 @@ impl fmt::Debug for ControlFile {
 pub struct ProgramSpec {
     /// A bare command name (looked up on PATH) or a path.
     pub binary: PathBuf,
-    /// Package entrypoint used to launch a supported npm shim directly.
-    /// Not used until Windows shim support lands (S5.1).
+    /// Package entrypoint inside the npm global `node_modules`, declared by
+    /// the adapter so a standard Windows `.cmd` shim can be translated into
+    /// a direct launch of its runtime. `None` refuses such shims.
     pub npm_entrypoint: Option<&'static str>,
 }
 

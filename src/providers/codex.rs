@@ -42,6 +42,10 @@ const ALLOWED_ENV: &[&str] = &[];
 
 const OPENAI_BASE_URL_KEY: &str = "openai_base_url";
 
+/// npm package entrypoint the Windows `.cmd` shim translates to (layout from
+/// npm; verify on a real Windows install (owner check)).
+const NPM_ENTRYPOINT: &str = "@openai/codex/bin/codex.js";
+
 pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: ID,
     defaults,
@@ -242,8 +246,7 @@ impl CliAdapter for CodexAdapter {
         Ok(CliInvocation {
             program: ProgramSpec {
                 binary: self.binary.clone(),
-                // The npm package layout on Windows is unverified (S5.1).
-                npm_entrypoint: None,
+                npm_entrypoint: Some(NPM_ENTRYPOINT),
             },
             args,
             stdin: stdin.into_bytes(),
