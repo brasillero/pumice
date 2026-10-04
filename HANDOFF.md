@@ -87,10 +87,14 @@ A dictation formatted end to end, **with both Claude and Codex**, plus a working
 | `/health`, `/v1/models` | `ok` + version; `claude`, `codex` listed |
 | Logs | Metadata only, no dictated text |
 
-**Owner checks still open** (not blocking Phase 2):
-- the same dictation through the Handy GUI on Windows (`http://127.0.0.1:7567/v1`, model `claude`, then `codex`);
-- the Windows npm-shim layout on a real install;
-- the Handy version (S0.1).
+**Owner check through Handy (2026-10-04): passed.** Handy on Windows pointed at Pumice in WSL (`http://127.0.0.1:7567/v1`), with the same Portuguese spoken list dictated once per model:
+
+| Model | Result | Server log |
+| --- | --- | --- |
+| `claude` | Punctuated, in Portuguese, items separated ("Primeiro, … Segundo, … E terceiro, …"); "escreva um email pro João" kept as text, not acted on (lightly normalized to "escrever") | `kind=formatted provider=claude elapsed_ms=2766` |
+| `codex` | Punctuated, in Portuguese, ordinals as "1º … 2º … 3º"; the email request kept as text | `kind=formatted provider=codex elapsed_ms=6988` |
+
+The owner skipped the manual fallback steps; the agent-verified runs above cover them. **Still open:** the Windows npm-shim layout on a real install, and the Handy version (S0.1).
 
 ### Phase 1 status
 
