@@ -201,7 +201,7 @@ fn empty_file_gives_all_defaults() {
     assert_eq!(config.prompts.system, None);
     assert_eq!(config.prompts.user, None);
     assert!(!config.debug_log.enabled);
-    assert_eq!(config.providers.len(), 2);
+    assert_eq!(config.providers.len(), 3);
 
     let claude = claude(&config);
     assert!(claude.enabled);
@@ -218,6 +218,17 @@ fn empty_file_gives_all_defaults() {
     assert_eq!(codex.timeout, Duration::from_secs(30));
     assert!(codex.env.is_empty());
     assert!(codex.options.is_empty());
+
+    // Antigravity is registered but dormant: off by default, with no model.
+    let antigravity = config
+        .providers
+        .get("antigravity")
+        .expect("antigravity is configured");
+    assert!(!antigravity.enabled);
+    assert!(antigravity.model.is_empty());
+    assert_eq!(antigravity.timeout, Duration::from_secs(30));
+    assert!(antigravity.env.is_empty());
+    assert!(antigravity.options.is_empty());
 }
 
 #[test]

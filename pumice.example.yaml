@@ -64,6 +64,13 @@ providers:
     #   openai_base_url: "https://your-existing-gateway.example/v1"
     options: {}
 
+  # Antigravity (agy) is registered but cannot be enabled yet: no supported
+  # per-launch tool policy exists, and third-party integration may risk
+  # account access (docs/research/phase2-architecture.md §3.2). Writing
+  # `enabled: true` below is refused by `pumice check-config`.
+  # antigravity:
+  #   enabled: false
+
 # Optional formatting instructions, added after Pumice's fixed instruction.
 # Both are off by default (null); a block scalar (|) keeps line breaks.
 prompts:
