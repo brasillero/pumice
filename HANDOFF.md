@@ -1,6 +1,6 @@
 # Handoff — start here
 
-**Current phase: Phase 2 — remaining providers (v0.2).** Phase 1 is complete and its gate passed (agent-verified; see [Phase 1](#phase-1-done)). Phase 0 is [below](#phase-0-done).
+**Current phase: Phase 2 — remaining providers (v0.2): gate passed with recorded conditions.** Phase 3 (distribution) has **not** started: the owner postponed the installer, auto-update and Windows-service topic. Phase 1 is [below](#phase-1-done), Phase 0 [further below](#phase-0-done).
 
 Read [`AGENTS.md`](AGENTS.md) for the rules and [`docs/spec.md`](docs/spec.md) for the full spec. The Phase 2 design, the orchestrator's decisions and the PR-by-PR plan are in [`docs/research/phase2-architecture.md`](docs/research/phase2-architecture.md). The Phase 1 architecture they build on is in [`docs/research/phase1-architecture.md`](docs/research/phase1-architecture.md). Read both before starting a Phase 2 story.
 
@@ -19,6 +19,25 @@ The owner was away and authorized the orchestrator to set specifications and pro
 
 All adapters pass the same criteria: the shared contract suite (no tools, empty workspace, transport, system-prompt separation, error classification, timeout, invalid output, cleanup, fallback participation, privacy, disabled behavior), on Windows, Linux and macOS. Unresolved conditions (Antigravity execution, the generic adapter's policy exception) are recorded, not relabeled as passes.
 
+**Status: passed with recorded conditions (agent-verified, 2026-10-04).**
+
+| Check | Result |
+| --- | --- |
+| Contract suite | 12 cases × 4 CLI adapters (Claude, Codex, OpenCode, Antigravity), green on Windows, Linux and macOS in CI. The generic adapter covers the same cases in `tests/generic.rs` (#27, green on 3 OSes) |
+| Claude, real | `pumice doctor --login-check --provider claude`: ok, 2.6 s |
+| Codex, real | `pumice doctor --login-check --provider codex`: ok, 4.5 s |
+| Fallback chain, real | Claude binary missing, Codex formatted the Handy-shaped Portuguese dictation in 5.2 s (`provider=codex`) |
+| Detection, real | `pumice doctor`: claude 2.1.288, codex 0.160.0, opencode 1.18.34 found; antigravity missing; Kimi standby note; no quota spent |
+| OpenCode | Contract suite only. **No real call:** its only configured upstream here is Kimi (standby) |
+| Antigravity | **Protocol coverage plus safe refusal**, not executable conformance: `enabled: true` is refused, `agy` was never run |
+| Generic | Implemented in #27, **not merged** pending the owner's AGENTS.md exception |
+
+**Conditions for the owner:**
+1. Approve, or reject, the loopback-only exception for the generic adapter (#27). If approved, add it to AGENTS.md and merge #27.
+2. Antigravity stays dormant until a supported per-launch tool policy exists.
+3. Pick an authorized OpenCode upstream (Zen free model or another provider) if you want OpenCode used for real.
+4. Still open from Phase 1: the Handy GUI check on Windows, a real Windows npm install, and the Handy version.
+
 ## Status
 
 Update this table in the PR that finishes each story. Order follows the plan in `docs/research/phase2-architecture.md` §7 (its rows 1–6 were finished in Phase 1).
@@ -27,13 +46,13 @@ Update this table in the PR that finishes each story. Order follows the plan in 
 | --- | --- | --- | --- | --- |
 | 1 | S8.2 follow-up: shared adapter contract suite | Done | #23 | Suite in `tests/support/adapter_contract.rs` + `tests/adapter_contract.rs`; claude and codex run every applicable case; isolation.rs keeps exact argv and Windows shim tests |
 | 2 | S2.1 follow-up: provider capabilities | Done | #24 | Descriptors carry `disabled_by_default`, `risk_warning` and full-settings validation (`ProviderLocations`); `check-config` and startup print warnings; probe descriptors in tests/config.rs |
-| 3 | S2.8 part 1: provider detection | Done (pending review) | | `ProbeSpec` + `discovery.rs`: bounded concurrent version probes (2 s) cached at startup, `agy` never spawned; `/v1/models` lists enabled∩found; a missing selected provider still fails at runtime and falls back |
+| 3 | S2.8 part 1: provider detection | Done | #28 | `ProbeSpec` + `discovery.rs`: bounded concurrent version probes (2 s) cached at startup, `agy` never spawned; `/v1/models` lists enabled∩found; a missing selected provider still fails at runtime and falls back |
 | 4 | S2.6 OpenCode adapter | Done | #26 | Off by default, explicit provider/model, deny-all inline agent via `OPENCODE_CONFIG_CONTENT`; full contract suite passes |
 | 5 | S2.5 Antigravity adapter | Done | #25 | Dormant: documentation-derived invocation/parser tested against the fake CLI, `enabled: true` refused at the enabled line, build fails as defense in depth, `agy` never spawned |
-| 6 | S2.7 Generic loopback adapter | Not started | | PR to stay open until the owner approves the outbound exception |
-| 7 | S2.8 part 2: `pumice doctor` | Done (pending review) | | `doctor` renders a fresh detection report (found/missing + install hints + warnings + Kimi standby note), exit 0/1/2; `--login-check --provider <id>` is the only quota-bearing path: one fixed call through the selected provider, no fallback, text-free result |
-| 8 | S6.4 follow-up: Phase 2 config examples | Not started | | |
-| 9 | S8.3 follow-up: Phase 2 gate | Not started | | |
+| 6 | S2.7 Generic loopback adapter | Done (awaiting owner approval) | #27 (open) | Implemented, CI green on 3 OSes; not merged until the owner approves a loopback-only exception to the AGENTS.md outbound-call rule |
+| 7 | S2.8 part 2: `pumice doctor` | Done | #29 | `doctor` renders a fresh detection report (found/missing + install hints + warnings + Kimi standby note), exit 0/1/2; `--login-check --provider <id>` is the only quota-bearing path: one fixed call through the selected provider, no fallback, text-free result |
+| 8 | S6.4 follow-up: Phase 2 config examples | Done | #25, #26 (#27) | Delivered with the adapters: commented `opencode` block, Antigravity note; the `generic` block ships with #27. Example-config tests cover them |
+| 9 | S8.3 follow-up: Phase 2 gate | Done | (this PR) | Gate evidence below |
 
 ## Phase 1 (done)
 
