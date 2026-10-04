@@ -65,7 +65,7 @@ Update this table in the PR that finishes each story.
 | S0.1 Handy request format | Not started | | Needs the owner to configure Handy on Windows |
 | S0.2 CLI matrix | Not started | | Start with Claude |
 | S0.3 Terms of use | Not started | | |
-| S0.4 Validate the stack | Not started | | |
+| S0.4 Validate the stack | Done (pending review) | | Rust prototype: `pumice listen` (for S0.1) and `pumice claude-probe` (real call 2.8 s). CI on 3 OSes with a Windows CRT DLL check. |
 | S0.5 WSL localhost | Not started | | Can run together with S0.1 |
 
 ## After Phase 0
