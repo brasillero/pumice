@@ -66,7 +66,7 @@ Update this table in the PR that finishes each story.
 | S0.2 CLI matrix | Not started | | Start with Claude |
 | S0.3 Terms of use | Not started | | |
 | S0.4 Validate the stack | Not started | | |
-| S0.5 WSL localhost | Not started | | Can run together with S0.1 |
+| S0.5 WSL localhost | Done (pending review) | | Works in NAT mode with no changes. Use `127.0.0.1` in Handy: `localhost` first tries IPv6 `::1`, which is not forwarded (~2 s delay). |
 
 ## After Phase 0
 
