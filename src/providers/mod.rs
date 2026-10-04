@@ -133,7 +133,7 @@ macro_rules! register_providers {
     };
 }
 
-register_providers!(claude, codex, antigravity);
+register_providers!(claude, codex, opencode, antigravity);
 
 /// Looks up a provider by ID.
 pub fn descriptor(id: &str) -> Option<&'static ProviderDescriptor> {

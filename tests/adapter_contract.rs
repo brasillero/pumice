@@ -17,6 +17,7 @@ use pumice::providers::antigravity::AntigravityAdapter;
 use pumice::providers::claude::ClaudeAdapter;
 use pumice::providers::cli::CliProvider;
 use pumice::providers::codex::CodexAdapter;
+use pumice::providers::opencode::OpenCodeAdapter;
 use serde_json::{Value, json};
 use support::adapter_contract::{
     AFTER, BEFORE, ContractAdapter, HOSTILE_TEXT, SYSTEM_PROMPT, has_pair, report_argv,
@@ -25,6 +26,7 @@ use support::fixture;
 
 adapter_contract!(claude, ClaudeContract);
 adapter_contract!(codex, CodexContract);
+adapter_contract!(opencode, OpenCodeContract);
 adapter_contract!(antigravity, AntigravityContract);
 
 /// Claude's protocol fixtures and adapter-specific assertions.
@@ -252,6 +254,168 @@ impl ContractAdapter for CodexContract {
             );
         }
     }
+}
+
+/// OpenCode's protocol fixtures and adapter-specific assertions. The event
+/// shapes are documentation-derived from the installed 1.18.34 bundled
+/// source (see `tests/fixtures/opencode/README.md`): every event is
+/// `{type, timestamp, sessionID, part|error}`; completed text parts carry
+/// `time.end`; a failed run prints one structured `error` event and exits
+/// nonzero.
+struct OpenCodeContract;
+
+impl ContractAdapter for OpenCodeContract {
+    const ID: &'static str = "opencode";
+
+    fn provider(fake: &Path, timeout: Duration) -> Arc<dyn Provider> {
+        Arc::new(CliProvider::new(
+            OpenCodeAdapter::new(fake.to_path_buf(), "opencode/big-pickle".to_owned(), None),
+            Arc::new(ProcessRunner::new()),
+            timeout,
+        ))
+    }
+
+    fn success(text: &str) -> (String, i32) {
+        // step_start, an ignored reasoning part, one completed text part,
+        // step_finish: only the text part may reach the result.
+        let events = [
+            json!({"type":"step_start","timestamp":1000,"sessionID":"ses_contract","part":{"id":"prt_1","messageID":"msg_1","sessionID":"ses_contract","type":"step-start"}}),
+            json!({"type":"reasoning","timestamp":1200,"sessionID":"ses_contract","part":{"id":"prt_r","messageID":"msg_1","sessionID":"ses_contract","type":"reasoning","text":"thinking about formatting","time":{"start":1050,"end":1200}}}),
+            json!({"type":"text","timestamp":1500,"sessionID":"ses_contract","part":{"id":"prt_2","messageID":"msg_1","sessionID":"ses_contract","type":"text","text":text,"time":{"start":1100,"end":1500}}}),
+            json!({"type":"step_finish","timestamp":1600,"sessionID":"ses_contract","part":{"id":"prt_3","messageID":"msg_1","sessionID":"ses_contract","type":"step-finish","reason":"stop","cost":0,"tokens":{"input":1,"output":1,"reasoning":0,"cache":{"read":0,"write":0}}}}),
+        ];
+        let stream = events
+            .into_iter()
+            .map(|event| event.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        (format!("{stream}\n"), 0)
+    }
+
+    fn not_logged_in(marker: &str) -> (String, i32) {
+        // The structured missing-authentication error; the marker rides in
+        // the diagnostic and must never leak into the classified error.
+        let event = json!({"type":"error","timestamp":1200,"sessionID":"ses_contract","error":{"name":"ProviderAuthError","data":{"providerID":"opencode","message":format!("missing authentication ({marker})")}}});
+        (format!("{event}\n"), 1)
+    }
+
+    fn invalid_outputs() -> Vec<(String, i32)> {
+        vec![
+            ("not json\n".to_owned(), 0),
+            ("{}\n".to_owned(), 0),
+            ("[1,2]\n".to_owned(), 0),
+            (String::new(), 0),
+            // A text part without the final step_finish is incomplete.
+            (
+                concat!(
+                    r#"{"type":"text","timestamp":1,"sessionID":"ses_contract","part":{"id":"prt_1","messageID":"m","sessionID":"ses_contract","type":"text","text":"Partial.","time":{"start":1,"end":2}}}"#,
+                    "\n",
+                )
+                .to_owned(),
+                0,
+            ),
+            // A step_finish without any text part produced no answer.
+            (
+                concat!(
+                    r#"{"type":"step_finish","timestamp":1,"sessionID":"ses_contract","part":{"id":"prt_1","messageID":"m","sessionID":"ses_contract","type":"step-finish","reason":"stop","cost":0,"tokens":{"input":1,"output":1,"reasoning":0,"cache":{"read":0,"write":0}}}}"#,
+                    "\n",
+                )
+                .to_owned(),
+                0,
+            ),
+            // Two events from different sessions are not one run.
+            (
+                concat!(
+                    r#"{"type":"step_start","timestamp":1,"sessionID":"ses_one","part":{"id":"prt_1","messageID":"m","sessionID":"ses_one","type":"step-start"}}"#,
+                    "\n",
+                    r#"{"type":"text","timestamp":2,"sessionID":"ses_two","part":{"id":"prt_2","messageID":"m","sessionID":"ses_two","type":"text","text":"Mixed.","time":{"start":1,"end":2}}}"#,
+                    "\n",
+                    r#"{"type":"step_finish","timestamp":3,"sessionID":"ses_one","part":{"id":"prt_3","messageID":"m","sessionID":"ses_one","type":"step-finish","reason":"stop","cost":0,"tokens":{"input":1,"output":1,"reasoning":0,"cache":{"read":0,"write":0}}}}"#,
+                    "\n",
+                )
+                .to_owned(),
+                0,
+            ),
+            // A truncated (length) finish reason means no complete text.
+            (
+                concat!(
+                    r#"{"type":"text","timestamp":1,"sessionID":"ses_contract","part":{"id":"prt_1","messageID":"m","sessionID":"ses_contract","type":"text","text":"Partial","time":{"start":1,"end":2}}}"#,
+                    "\n",
+                    r#"{"type":"step_finish","timestamp":2,"sessionID":"ses_contract","part":{"id":"prt_2","messageID":"m","sessionID":"ses_contract","type":"step-finish","reason":"length","cost":0,"tokens":{"input":1,"output":1,"reasoning":0,"cache":{"read":0,"write":0}}}}"#,
+                    "\n",
+                )
+                .to_owned(),
+                0,
+            ),
+        ]
+    }
+
+    fn tool_activity() -> Option<(String, i32)> {
+        // A completed tool call prints a tool_use event even before the
+        // step_finish; a clean exit must not rescue the run.
+        Some((
+            concat!(
+                r#"{"type":"step_start","timestamp":1,"sessionID":"ses_contract","part":{"id":"prt_1","messageID":"m","sessionID":"ses_contract","type":"step-start"}}"#,
+                "\n",
+                r#"{"type":"tool_use","timestamp":2,"sessionID":"ses_contract","part":{"id":"prt_2","messageID":"m","sessionID":"ses_contract","type":"tool","callID":"call_1","tool":"read","state":{"status":"completed"}}}"#,
+                "\n",
+                r#"{"type":"text","timestamp":3,"sessionID":"ses_contract","part":{"id":"prt_3","messageID":"m","sessionID":"ses_contract","type":"text","text":"Tool output.","time":{"start":2,"end":3}}}"#,
+                "\n",
+                r#"{"type":"step_finish","timestamp":4,"sessionID":"ses_contract","part":{"id":"prt_4","messageID":"m","sessionID":"ses_contract","type":"step-finish","reason":"tool-calls","cost":0,"tokens":{"input":1,"output":1,"reasoning":0,"cache":{"read":0,"write":0}}}}"#,
+                "\n",
+            )
+            .to_owned(),
+            0,
+        ))
+    }
+
+    fn capture_system_prompt(scenario: &mut Value) {
+        scenario["report_env"] = json!(["OPENCODE_CONFIG_CONTENT"]);
+    }
+
+    fn assert_system_separation(report: &Value) {
+        // The system prompt travels in OPENCODE_CONFIG_CONTENT, never in
+        // stdin: the user message alone reaches stdin and the decoded inline
+        // config carries the prompt exactly.
+        let stdin = report["stdin"].as_str().unwrap();
+        assert_eq!(stdin, format!("{BEFORE}{HOSTILE_TEXT}{AFTER}"));
+        assert!(
+            !stdin.contains(SYSTEM_PROMPT),
+            "the system prompt must not reach stdin"
+        );
+        assert_eq!(inline_agent_prompt(report), SYSTEM_PROMPT);
+    }
+
+    fn assert_system_prompt_placement(report: &Value) {
+        // No control file exists: the inline config env var is the system
+        // prompt's only channel, and it holds the prompt exactly.
+        assert_eq!(inline_agent_prompt(report), SYSTEM_PROMPT);
+    }
+
+    fn assert_restricted_argv(argv: &[String]) {
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        assert_eq!(argv.first(), Some(&"run"));
+        assert!(argv.contains(&"--pure"), "missing --pure");
+        assert!(has_pair(&argv, "--agent", "pumice"));
+        assert!(has_pair(&argv, "--format", "json"));
+        assert!(has_pair(&argv, "--title", "Pumice"));
+        assert!(has_pair(&argv, "--model", "opencode/big-pickle"));
+        // Dictated text and the system prompt never travel in argv.
+        assert!(!argv.contains(&"--variant"));
+    }
+}
+
+/// Decodes the inline configuration carried in `OPENCODE_CONFIG_CONTENT`,
+/// returning the `pumice` agent's prompt from it.
+fn inline_agent_prompt(report: &Value) -> String {
+    let raw = report["env"]["OPENCODE_CONFIG_CONTENT"]
+        .as_str()
+        .expect("inline configuration env var reported");
+    let config: Value = serde_json::from_str(raw).expect("inline configuration is JSON");
+    config["agent"]["pumice"]["prompt"]
+        .as_str()
+        .expect("pumice agent prompt in inline configuration")
+        .to_owned()
 }
 
 /// Joins records into one newline-terminated NDJSON stream.
