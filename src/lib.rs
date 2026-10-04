@@ -3,6 +3,7 @@
 
 pub mod cleanup;
 pub mod config;
+pub mod pipeline;
 pub mod process;
 pub mod prompts;
 pub mod providers;
