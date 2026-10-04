@@ -104,12 +104,12 @@ async fn run_in(
                 .ok_or(ProviderError::other(
                     ProviderErrorCode::InvalidConfiguration,
                 )),
+            // A lossy conversion would name a different file, so a path that
+            // is not valid Unicode is refused.
             Argument::ConfigControlPath { key, file } => control_paths
                 .get(*file)
-                .map(|path| {
-                    let value = toml_basic_string(&path.to_string_lossy());
-                    OsString::from(format!("{key}={value}"))
-                })
+                .and_then(|path| path.to_str())
+                .map(|path| OsString::from(format!("{key}={}", toml_basic_string(path))))
                 .ok_or(ProviderError::other(
                     ProviderErrorCode::InvalidConfiguration,
                 )),

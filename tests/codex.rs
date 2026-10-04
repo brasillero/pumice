@@ -35,7 +35,7 @@ const FIXED_ARGS: [&str; 11] = [
 ];
 
 /// The `-c` argument pairs after `-m <model>`, up to the control file.
-const CONFIG_ARGS: [&str; 10] = [
+const CONFIG_ARGS: [&str; 14] = [
     "-c",
     r#"web_search="disabled""#,
     "-c",
@@ -46,6 +46,10 @@ const CONFIG_ARGS: [&str; 10] = [
     "features.multi_agent=false",
     "-c",
     "features.hooks=false",
+    "-c",
+    "features.view_image=false",
+    "-c",
+    "features.remote_plugin=false",
 ];
 
 /// A fake Codex CLI that records argv, stdin and the instructions file named
@@ -466,6 +470,24 @@ async fn transient_reconnect_errors_before_a_completed_turn_are_ignored() {
         r#"{"type":"error","message":"Reconnecting... 1/5 (stream disconnected before completion)"}"#,
         "\n",
         r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Formatted text."}}"#,
+        "\n",
+        r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        "\n",
+    );
+    let fake = fake_codex(stdout, 0);
+    assert_eq!(format(&fake, "text").await.unwrap(), "Formatted text.");
+}
+
+#[tokio::test]
+async fn warning_items_do_not_reject_a_successful_turn() {
+    let stdout = concat!(
+        r#"{"type":"thread.started","thread_id":"t"}"#,
+        "\n",
+        r#"{"type":"turn.started"}"#,
+        "\n",
+        r#"{"type":"item.completed","item":{"id":"item_0","type":"error","message":"model rerouted to a fallback"}}"#,
+        "\n",
+        r#"{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"Formatted text."}}"#,
         "\n",
         r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#,
         "\n",

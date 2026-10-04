@@ -72,21 +72,62 @@ fn validate_options(options: &[RawOption<'_>]) -> Result<(), ConfigError> {
                 format!("providers.{ID}.options.{} is not supported", option.key),
             ));
         }
-        let has_host = option
-            .value
-            .strip_prefix("http://")
-            .or_else(|| option.value.strip_prefix("https://"))
-            .is_some_and(|rest| !rest.is_empty());
-        if !has_host || option.value.chars().any(char::is_whitespace) {
+        if !is_valid_base_url(option.value) {
             return Err(ConfigError::at(
                 option.value_at,
                 format!(
-                    "providers.{ID}.options.{OPENAI_BASE_URL_KEY} must be an http:// or https:// URL without whitespace"
+                    "providers.{ID}.options.{OPENAI_BASE_URL_KEY} must be an http:// or https:// URL with a valid host"
                 ),
             ));
         }
     }
     Ok(())
+}
+
+/// An `http://` or `https://` URL with a real host: `scheme://host[:port][/path]`.
+/// No whitespace, userinfo, query or fragment; the host is a DNS name, an IPv4
+/// address or a bracketed IPv6 address, and the port (if any) is numeric.
+fn is_valid_base_url(url: &str) -> bool {
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    let Some(rest) = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    if rest.contains(['?', '#', '@']) {
+        return false;
+    }
+    let authority = rest.split('/').next().unwrap_or_default();
+    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let Some((inside, after)) = bracketed.split_once(']') else {
+            return false;
+        };
+        if inside.is_empty() || !inside.chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.') {
+            return false;
+        }
+        match after {
+            "" => (inside, None),
+            _ => match after.strip_prefix(':') {
+                Some(port) => (inside, Some(port)),
+                None => return false,
+            },
+        }
+    } else {
+        match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        }
+    };
+    let host_ok = !host.is_empty()
+        && (authority.starts_with('[')
+            || host
+                .split('.')
+                .all(|label| !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')));
+    let port_ok = port.is_none_or(|p| !p.is_empty() && p.len() <= 5 && p.chars().all(|c| c.is_ascii_digit()) && p.parse::<u16>().is_ok_and(|n| n > 0));
+    host_ok && port_ok
 }
 
 fn build(
@@ -173,6 +214,10 @@ impl CliAdapter for CodexAdapter {
             "features.unified_exec=false",
             "features.multi_agent=false",
             "features.hooks=false",
+            // `view_image` can read files and its activity never appears in
+            // the JSONL stream, so it must be off.
+            "features.view_image=false",
+            "features.remote_plugin=false",
         ] {
             args.push(Argument::literal("-c"));
             args.push(Argument::literal(value));
@@ -250,7 +295,10 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
                             })?;
                         last_agent_message = Some(text.to_owned());
                     }
-                    Some("agent_message" | "reasoning") => {}
+                    // Codex reports non-fatal warnings (config, deprecation,
+                    // model rerouting) as `error` items; they carry no tool
+                    // activity and no output text.
+                    Some("agent_message" | "reasoning" | "error") => {}
                     Some(_) => tool_activity = true,
                     None => return Err(ProviderError::other(ProviderErrorCode::InvalidOutput)),
                 }

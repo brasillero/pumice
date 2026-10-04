@@ -442,14 +442,55 @@ fn codex_rejects_invalid_openai_base_url_at_the_value() {
         "providers:\n  codex:\n    options:\n      openai_base_url: \"ftp://gw.example/v1\"\n",
         4,
         24,
-        "providers.codex.options.openai_base_url must be an http:// or https:// URL without whitespace",
+        "providers.codex.options.openai_base_url must be an http:// or https:// URL with a valid host",
     );
     assert_error(
         "providers:\n  codex:\n    options:\n      openai_base_url: \"http://exa mple\"\n",
         4,
         24,
-        "providers.codex.options.openai_base_url must be an http:// or https:// URL without whitespace",
+        "providers.codex.options.openai_base_url must be an http:// or https:// URL with a valid host",
     );
+}
+
+#[test]
+fn codex_rejects_hostless_or_malformed_base_urls() {
+    for bad in [
+        "https://?",
+        "http:///",
+        "https://[invalid",
+        "http://host:99999",
+        "https://user@host",
+        "https://a..b",
+    ] {
+        assert_error(
+            &format!("providers:\n  codex:\n    options:\n      openai_base_url: \"{bad}\"\n"),
+            4,
+            24,
+            "providers.codex.options.openai_base_url must be an http:// or https:// URL with a valid host",
+        );
+    }
+}
+
+#[test]
+fn codex_accepts_realistic_base_urls() {
+    for good in [
+        "http://localhost:8317/v1",
+        "https://gw.example.ts.net/v1",
+        "http://[::1]:8080",
+        "https://10.0.0.2",
+    ] {
+        let config = load_text(&format!(
+            "providers:\n  codex:\n    options:\n      openai_base_url: \"{good}\"\n"
+        ))
+        .unwrap_or_else(|e| panic!("{good} should load: {e}"));
+        assert_eq!(
+            codex(&config)
+                .options
+                .get("openai_base_url")
+                .map(String::as_str),
+            Some(good)
+        );
+    }
 }
 
 #[test]
