@@ -34,8 +34,8 @@ Update this table in the PR that finishes each story. Merge order follows the ta
 | 5 | S3.1 + S3.3 Adapter instruction and prompt composition | Done | #10 | Fixed instruction, transcript extraction, lossless Handy reconstruction, plain-text envelope escaping; pure functions + tests |
 | 6 | S3.2 Optional Pumice prompts | Done (pending review) | | `compose_with_settings` wires `PromptSettings` into composition; block-scalar, whitespace-only and fake-CLI order tests |
 | 7 | S3.4 Output cleanup | Done | #9 | `cleanup` pure function + tests; preservation guard on every rule, idempotence over positive fixtures |
-| 8 | S4.1 Timeouts | Not started | | |
-| 9 | S4.3 Raw-text fallback | Not started | | |
+| 8 | S4.1 Timeouts | Done (pending review) | | `pipeline.rs`: total budget with response reserve, provider cap + hard stop, fake-CLI deadline tests |
+| 9 | S4.3 Raw-text fallback | Done (pending review) | | `pipeline.rs` outcomes: exact raw text for unknown/disabled/busy/budget/provider/cleanup failures |
 | 9b | S4.2 Fallback chain | Not started | | |
 | 10 | S1.1 + S5.3 Chat completions on loopback | Not started | | `axum` + `tokio` |
 | 11 | S1.2 + S6.2 Model list and provider selection | Not started | | |
