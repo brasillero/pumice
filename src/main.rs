@@ -1,7 +1,9 @@
 //! Pumice command-line entry point.
 //!
 //! `serve` runs the local OpenAI-compatible dictation-formatting service on
-//! IPv4 loopback; `check-config` validates and summarizes the configuration.
+//! IPv4 loopback; `check-config` validates and summarizes the configuration;
+//! `doctor` reports which provider CLIs are installed and can run one real
+//! formatting call to check a provider's login.
 
 use std::io;
 use std::path::Path;
@@ -10,6 +12,7 @@ use std::sync::Arc;
 
 use pumice::api;
 use pumice::config::{self, ConfigSource, LoadedConfig};
+use pumice::doctor;
 use pumice::logging::DebugLog;
 use pumice::pipeline::Pipeline;
 use pumice::process::ProcessRunner;
@@ -22,8 +25,13 @@ usage:
   pumice --help                          print this help
   pumice --version                       print the version
   pumice check-config [--config <path>]  validate and summarize the configuration
+  pumice doctor [--config <path>]        show which provider CLIs are installed
+  pumice doctor --login-check --provider <id>
+                                         run one real formatting call to check login
   pumice serve [--config <path>]         run the local service on 127.0.0.1
 ";
+
+const DOCTOR_USAGE: &str = "usage: pumice doctor [--config <path>] [--login-check --provider <id>]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -38,6 +46,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         ["check-config", rest @ ..] => check_config(rest),
+        ["doctor", rest @ ..] => doctor(rest),
         ["serve", rest @ ..] => serve(rest),
         [] => {
             eprint!("{USAGE}");
@@ -51,25 +60,43 @@ fn main() -> ExitCode {
     }
 }
 
-/// `--config` handling is shared with `check-config`: same errors, same
-/// exit code 2.
-fn load_config(args: &[&str], command: &str) -> Result<LoadedConfig, ExitCode> {
-    let explicit = match args {
-        [] => None,
-        ["--config", path] => Some(Path::new(path)),
+/// Parses a trailing `[--config <path>]`; shared by `check-config` and
+/// `serve`.
+fn config_flag<'a>(args: &'a [&'a str], command: &str) -> Result<Option<&'a Path>, ExitCode> {
+    match args {
+        [] => Ok(None),
+        ["--config", path] => Ok(Some(Path::new(path))),
         _ => {
             eprintln!("error: usage: pumice {command} [--config <path>]\n");
-            return Err(ExitCode::from(2));
+            Err(ExitCode::from(2))
         }
-    };
+    }
+}
+
+/// Config loading is shared between commands: same errors, same exit code 2.
+fn load_config(explicit: Option<&Path>) -> Result<LoadedConfig, ExitCode> {
     config::load(explicit).map_err(|error| {
         eprintln!("{error}");
         ExitCode::from(2)
     })
 }
 
+fn build_runtime() -> Result<tokio::runtime::Runtime, ExitCode> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| {
+            eprintln!("error: cannot start the async runtime: {error}");
+            ExitCode::from(1)
+        })
+}
+
 fn check_config(args: &[&str]) -> ExitCode {
-    match load_config(args, "check-config") {
+    let explicit = match config_flag(args, "check-config") {
+        Ok(explicit) => explicit,
+        Err(code) => return code,
+    };
+    match load_config(explicit) {
         Ok(loaded) => {
             print_summary(&loaded);
             ExitCode::SUCCESS
@@ -79,21 +106,124 @@ fn check_config(args: &[&str]) -> ExitCode {
 }
 
 fn serve(args: &[&str]) -> ExitCode {
-    let loaded = match load_config(args, "serve") {
+    let explicit = match config_flag(args, "serve") {
+        Ok(explicit) => explicit,
+        Err(code) => return code,
+    };
+    let loaded = match load_config(explicit) {
         Ok(loaded) => loaded,
         Err(code) => return code,
     };
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
+    let runtime = match build_runtime() {
         Ok(runtime) => runtime,
-        Err(error) => {
-            eprintln!("error: cannot start the async runtime: {error}");
-            return ExitCode::from(1);
-        }
+        Err(code) => return code,
     };
     runtime.block_on(run_service(loaded))
+}
+
+/// `pumice doctor [--config <path>] [--login-check --provider <id>]`.
+fn doctor(args: &[&str]) -> ExitCode {
+    let mut explicit: Option<&Path> = None;
+    let mut login_check = false;
+    let mut provider: Option<&str> = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match *arg {
+            "--config" => match rest.next() {
+                Some(path) => explicit = Some(Path::new(path)),
+                None => {
+                    eprintln!("error: --config requires a path\n{DOCTOR_USAGE}");
+                    return ExitCode::from(2);
+                }
+            },
+            "--login-check" => login_check = true,
+            "--provider" => match rest.next() {
+                Some(id) => provider = Some(id),
+                None => {
+                    eprintln!("error: --provider requires an id\n{DOCTOR_USAGE}");
+                    return ExitCode::from(2);
+                }
+            },
+            other => {
+                eprintln!("error: unexpected argument '{other}'\n{DOCTOR_USAGE}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    if provider.is_some() && !login_check {
+        eprintln!("error: --provider requires --login-check\n{DOCTOR_USAGE}");
+        return ExitCode::from(2);
+    }
+    if login_check && provider.is_none() {
+        eprintln!("error: --login-check requires --provider <id>\n{DOCTOR_USAGE}");
+        return ExitCode::from(2);
+    }
+    match provider {
+        Some(id) => doctor_login_check(explicit, id),
+        None => doctor_report(explicit),
+    }
+}
+
+/// The default, quota-free report: fresh detection over the whole registry.
+fn doctor_report(explicit: Option<&Path>) -> ExitCode {
+    let loaded = match load_config(explicit) {
+        Ok(loaded) => loaded,
+        Err(code) => return code,
+    };
+    let runtime = match build_runtime() {
+        Ok(runtime) => runtime,
+        Err(code) => return code,
+    };
+    runtime.block_on(async {
+        let runner = ProcessRunner::new();
+        let detection =
+            providers::discovery::detect(&loaded.config, providers::PROVIDERS, &runner).await;
+        print!(
+            "{}",
+            doctor::render(&loaded.config, &loaded.source, &detection)
+        );
+        let (ready, total) = doctor::enabled_ready(&detection);
+        if ready == total {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        }
+    })
+}
+
+/// The quota-bearing path: one real formatting call through the selected
+/// provider's normal adapter, never the fallback chain.
+fn doctor_login_check(explicit: Option<&Path>, id: &str) -> ExitCode {
+    let loaded = match load_config(explicit) {
+        Ok(loaded) => loaded,
+        Err(code) => return code,
+    };
+    let runtime = match build_runtime() {
+        Ok(runtime) => runtime,
+        Err(code) => return code,
+    };
+    runtime.block_on(async {
+        let runner = ProcessRunner::new();
+        let provider = match doctor::prepare_login_check(&loaded.config, id, &runner).await {
+            Ok(provider) => provider,
+            Err(error) => {
+                let (line, code) = error.line_and_code(id);
+                eprintln!("{line}");
+                return ExitCode::from(code);
+            }
+        };
+        eprintln!("{}", doctor::quota_notice(id));
+        match doctor::run_login_call(&loaded.config, &provider).await {
+            doctor::LoginCheck::Ok(elapsed) => {
+                println!("login check: ok ({} ms)", elapsed.as_millis());
+                ExitCode::SUCCESS
+            }
+            doctor::LoginCheck::Failed(error) => {
+                eprintln!("login check: {}", doctor::error_category(error));
+                ExitCode::from(1)
+            }
+        }
+    })
 }
 
 async fn run_service(loaded: LoadedConfig) -> ExitCode {

@@ -26,6 +26,7 @@ With [Rust](https://rustup.rs/) installed:
 ```sh
 cargo build --release
 ./target/release/pumice check-config   # validates pumice.yaml or the built-in defaults
+./target/release/pumice doctor         # checks which CLIs are installed
 ./target/release/pumice serve
 ```
 
