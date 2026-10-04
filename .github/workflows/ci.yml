@@ -18,7 +18,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -31,14 +31,25 @@ jobs:
         run: cargo fmt --check
 
       - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
+      # Tests only ever run the fake CLI (`pumice-test-cli`); no real AI CLI
+      # is installed on the runners, so a test that reached one would fail.
       - name: cargo test
-        run: cargo test
+        run: cargo test --locked
 
       # Only the product executable; the fake CLI is a test-only binary.
       - name: cargo build --release --bin pumice
-        run: cargo build --release --bin pumice
+        run: cargo build --release --locked --bin pumice
+
+      - name: Report release binary size
+        shell: bash
+        run: |
+          bin=target/release/pumice
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          size=$(wc -c < "$bin")
+          echo "pumice release binary: $size bytes"
+          echo "pumice release binary (${{ matrix.os }}): $size bytes" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up MSVC environment
         if: matrix.os == 'windows-latest'
@@ -61,7 +72,7 @@ jobs:
           Write-Host "OK: pumice.exe has no CRT DLL dependencies"
 
       - name: Upload release binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: pumice-release-${{ matrix.os }}
           path: |
