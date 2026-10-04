@@ -28,7 +28,7 @@ Update this table in the PR that finishes each story. Order follows the plan in 
 | 1 | S8.2 follow-up: shared adapter contract suite | Done | #23 | Suite in `tests/support/adapter_contract.rs` + `tests/adapter_contract.rs`; claude and codex run every applicable case; isolation.rs keeps exact argv and Windows shim tests |
 | 2 | S2.1 follow-up: provider capabilities | Done | #24 | Descriptors carry `disabled_by_default`, `risk_warning` and full-settings validation (`ProviderLocations`); `check-config` and startup print warnings; probe descriptors in tests/config.rs |
 | 3 | S2.8 part 1: provider detection | Done (pending review) | | `ProbeSpec` + `discovery.rs`: bounded concurrent version probes (2 s) cached at startup, `agy` never spawned; `/v1/models` lists enabled∩found; a missing selected provider still fails at runtime and falls back |
-| 4 | S2.6 OpenCode adapter | Done (pending review) | | Off by default, explicit provider/model, deny-all inline agent via `OPENCODE_CONFIG_CONTENT`; full contract suite passes |
+| 4 | S2.6 OpenCode adapter | Done | #26 | Off by default, explicit provider/model, deny-all inline agent via `OPENCODE_CONFIG_CONTENT`; full contract suite passes |
 | 5 | S2.5 Antigravity adapter | Done | #25 | Dormant: documentation-derived invocation/parser tested against the fake CLI, `enabled: true` refused at the enabled line, build fails as defense in depth, `agy` never spawned |
 | 6 | S2.7 Generic loopback adapter | Not started | | PR to stay open until the owner approves the outbound exception |
 | 7 | S2.8 part 2: `pumice doctor` | Not started | | `--login-check` is the only quota-bearing path |
@@ -77,11 +77,11 @@ A dictation formatted end to end, **with both Claude and Codex**, plus a working
 
 | # | Story | Status | PR | Notes |
 | --- | --- | --- | --- | --- |
-| 1 | S8.2 Fake CLI; remove the prototype | Done | #23 | Portable Rust fake CLI (`pumice-test-cli`) driven by `<exe>.scenario.json`; prototype removed |
-| 2 | S2.1 + S2.2 Provider interface and Claude adapter | Done | #24 | `Provider` trait and registry, shared `ProcessRunner` (process group / Job Object, bounded pipes, 250 ms exit grace), restricted Claude adapter |
+| 1 | S8.2 Fake CLI; remove the prototype | Done | #7 | Portable Rust fake CLI (`pumice-test-cli`) driven by `<exe>.scenario.json`; prototype removed |
+| 2 | S2.1 + S2.2 Provider interface and Claude adapter | Done | #8 | `Provider` trait and registry, shared `ProcessRunner` (process group / Job Object, bounded pipes, 250 ms exit grace), restricted Claude adapter |
 | 3 | S6.1 + S1.5 YAML config and default port | Done | #11 | `serde-saphyr` with `file:line:column` errors, per-user lookup, `pumice check-config`; port 7567 |
 | 4 | S2.3 Codex adapter | Done | #14 | Restricted `exec` invocation with TOML-quoted control file; only `openai_base_url` option, no env overrides |
-| 5 | S3.1 + S3.3 Adapter instruction and prompt composition | Done | #25 | Fixed instruction, transcript extraction, lossless Handy reconstruction, plain-text envelope escaping; pure functions + tests |
+| 5 | S3.1 + S3.3 Adapter instruction and prompt composition | Done | #10 | Fixed instruction, transcript extraction, lossless Handy reconstruction, plain-text envelope escaping; pure functions + tests |
 | 6 | S3.2 Optional Pumice prompts | Done | #12 | `compose_with_settings` wires `PromptSettings` into composition; block-scalar, whitespace-only and fake-CLI order tests |
 | 7 | S3.4 Output cleanup | Done | #9 | `cleanup` pure function + tests; preservation guard on every rule, idempotence over positive fixtures |
 | 8 | S4.1 Timeouts | Done | #13 | `pipeline.rs`: total budget with response reserve, provider cap + hard stop, fake-CLI deadline tests |
