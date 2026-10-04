@@ -3,5 +3,7 @@
 
 pub mod cleanup;
 pub mod process;
+pub mod prompts;
 pub mod providers;
+pub mod request;
 pub mod time;
