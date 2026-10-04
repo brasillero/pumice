@@ -76,7 +76,7 @@ mod capability_probe {
     use pumice::config::ConfigError;
     use pumice::process::ProcessRunner;
     use pumice::providers::{
-        Provider, ProviderDescriptor, ProviderLocations, ProviderSettings, RawOption,
+        ProbeSpec, Provider, ProviderDescriptor, ProviderLocations, ProviderSettings, RawOption,
     };
     use serde_saphyr::Location;
 
@@ -95,6 +95,10 @@ mod capability_probe {
         disabled_by_default: true,
         risk_warning: Some("the probe formats nothing and is not real"),
         validate_settings: probe_validate_settings,
+        probe: ProbeSpec::PathOnly,
+        default_binary: "probe-cli",
+        npm_entrypoint: None,
+        install_hint: "the probe is not installable",
     };
 
     /// The same model requirement without the opt-in: even an absent entry
@@ -108,6 +112,10 @@ mod capability_probe {
         disabled_by_default: false,
         risk_warning: None,
         validate_settings: bare_validate_settings,
+        probe: ProbeSpec::PathOnly,
+        default_binary: "probe-cli",
+        npm_entrypoint: None,
+        install_hint: "the probe is not installable",
     };
 
     /// Validates quietly when left disabled; exists only to be counted.
@@ -120,6 +128,10 @@ mod capability_probe {
         disabled_by_default: true,
         risk_warning: None,
         validate_settings: counting_validate_settings,
+        probe: ProbeSpec::PathOnly,
+        default_binary: "probe-cli",
+        npm_entrypoint: None,
+        install_hint: "the probe is not installable",
     };
 
     fn probe_defaults() -> ProviderSettings {

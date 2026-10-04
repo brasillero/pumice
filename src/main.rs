@@ -99,14 +99,29 @@ fn serve(args: &[&str]) -> ExitCode {
 async fn run_service(loaded: LoadedConfig) -> ExitCode {
     let config = loaded.config.clone();
     let runner = Arc::new(ProcessRunner::new());
-    let providers = match providers::build_from_config(&config, runner) {
-        Ok(providers) => providers,
+    let built = match providers::build_from_config(&config, Arc::clone(&runner)) {
+        Ok(built) => built,
         Err(error) => {
             eprintln!("{error}");
             return ExitCode::from(2);
         }
     };
-    let pipeline = Arc::new(Pipeline::new(&config, providers));
+
+    // Startup detection (S2.8 part 1): probe every registered provider once —
+    // enabled or not, so a later `doctor` can show the whole registry — and
+    // cache the result in the pipeline. Status lines name enabled providers
+    // only and never carry probe output.
+    let detection = providers::discovery::detect(&config, providers::PROVIDERS, &runner).await;
+    for (descriptor, status) in providers::PROVIDERS.iter().zip(&detection) {
+        debug_assert_eq!(descriptor.id, status.id);
+        if status.enabled {
+            eprintln!(
+                "{}",
+                providers::discovery::status_line(status, descriptor.install_hint)
+            );
+        }
+    }
+    let pipeline = Arc::new(Pipeline::with_detection(&config, built, detection));
 
     for warning in providers::risk_warnings(&config, providers::PROVIDERS) {
         eprintln!("{warning}");

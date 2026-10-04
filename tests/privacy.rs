@@ -7,7 +7,6 @@
 mod support;
 
 use std::fs;
-use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -337,6 +336,25 @@ fn write_config(yaml: &str) -> (TempDir, PathBuf) {
     (dir, path)
 }
 
+/// YAML with every registered provider's binary at its own disposable fake,
+/// so spawned-`pumice` tests never look a real CLI up on PATH during startup
+/// detection. `debug_log` is appended verbatim. Returns the fakes — they
+/// must outlive the served process — and the YAML.
+fn hermetic_serve_yaml(port: u16, debug_log: &str) -> (Vec<FakeCli>, String) {
+    let mut fakes: Vec<FakeCli> = Vec::new();
+    let mut yaml = format!("port: {port}\nproviders:\n");
+    for id in ["claude", "codex", "opencode", "antigravity"] {
+        let fake = FakeCli::new(json!({}));
+        yaml.push_str(&format!(
+            "  {id}:\n    binary: '{}'\n",
+            fake.path().display()
+        ));
+        fakes.push(fake);
+    }
+    yaml.push_str(debug_log);
+    (fakes, yaml)
+}
+
 #[test]
 fn serve_exits_1_when_the_debug_log_path_is_unopenable() {
     let (dir, config_path) = write_config("");
@@ -345,14 +363,14 @@ fn serve_exits_1_when_the_debug_log_path_is_unopenable() {
     let blocker = dir.path().join("blocker");
     fs::write(&blocker, "not a directory").expect("write blocker file");
     let debug_path = blocker.join("nested.jsonl");
-    fs::write(
-        &config_path,
-        format!(
-            "debug_log:\n  enabled: true\n  path: '{}'\n",
-            debug_path.display()
-        ),
-    )
-    .expect("write config");
+    // The port never binds: the debug log open fails first. Any valid port
+    // keeps the config loadable.
+    let (_fakes, mut yaml) = hermetic_serve_yaml(grab_free_port(), "");
+    yaml.push_str(&format!(
+        "debug_log:\n  enabled: true\n  path: '{}'\n",
+        debug_path.display()
+    ));
+    fs::write(&config_path, yaml).expect("write config");
 
     let output = Command::new(env!("CARGO_BIN_EXE_pumice"))
         .arg("serve")
@@ -386,8 +404,8 @@ fn grab_free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-/// Spawns `pumice serve` and returns the child plus a receiver holding the
-/// first stderr line, read on a helper thread.
+/// Spawns `pumice serve` and returns the child plus a receiver forwarding
+/// every stderr line (`None` marks end of output), read on a helper thread.
 fn spawn_serve_stderr(config_path: &Path) -> (Child, mpsc::Receiver<Option<String>>) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_pumice"))
         .arg("serve")
@@ -398,24 +416,27 @@ fn spawn_serve_stderr(config_path: &Path) -> (Child, mpsc::Receiver<Option<Strin
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn pumice serve");
-    let mut stderr = child.stderr.take().expect("piped stderr");
+    let stderr = child.stderr.take().expect("piped stderr");
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stderr);
         let mut line = String::new();
-        let mut byte = [0u8; 1];
         loop {
-            match stderr.read(&mut byte) {
+            line.clear();
+            match std::io::BufRead::read_line(&mut reader, &mut line) {
                 Ok(0) => break,
                 Ok(_) => {
-                    line.push(byte[0] as char);
-                    if byte[0] == b'\n' {
-                        break;
+                    if tx
+                        .send(Some(line.trim_end_matches(['\r', '\n']).to_owned()))
+                        .is_err()
+                    {
+                        return;
                     }
                 }
                 Err(_) => break,
             }
         }
-        let _ = tx.send(if line.is_empty() { None } else { Some(line) });
+        let _ = tx.send(None);
     });
     (child, rx)
 }
@@ -424,35 +445,50 @@ fn spawn_serve_stderr(config_path: &Path) -> (Child, mpsc::Receiver<Option<Strin
 fn serve_warns_when_the_debug_log_is_enabled() {
     for attempt in 1..=3 {
         let port = grab_free_port();
-        let (_dir, config_path) =
-            write_config(&format!("port: {port}\ndebug_log:\n  enabled: true\n"));
-        let (mut child, line_rx) = spawn_serve_stderr(&config_path);
+        let (_fakes, yaml) = hermetic_serve_yaml(port, "debug_log:\n  enabled: true\n");
+        let (_dir, config_path) = write_config(&yaml);
+        let (mut child, lines_rx) = spawn_serve_stderr(&config_path);
 
-        let line = line_rx
-            .recv_timeout(Duration::from_secs(15))
-            .unwrap_or_else(|_| {
-                let _ = child.kill();
-                panic!("pumice did not print its warning line (attempt {attempt})")
-            });
+        // Startup detection prints provider status lines first; scan until
+        // the debug-log warning appears.
+        let mut seen: Vec<String> = Vec::new();
+        let mut warning: Option<String> = None;
+        let mut exited_early = false;
+        loop {
+            match lines_rx.recv_timeout(Duration::from_secs(15)) {
+                Ok(Some(line)) => {
+                    if line.contains("warning: debug log enabled: dictated text is written to ") {
+                        warning = Some(line);
+                        break;
+                    }
+                    seen.push(line);
+                }
+                // EOF (child gone) or timeout: no warning is coming.
+                Ok(None) | Err(_) => {
+                    exited_early = true;
+                    break;
+                }
+            }
+        }
 
-        let Some(line) = line else {
-            // The child exited before printing: only a lost port race is
+        let Some(warning) = warning else {
+            // The child exited before the warning: only a lost port race is
             // tolerable, and only a few times.
+            assert!(
+                exited_early,
+                "the warning never printed; stderr so far: {seen:?}"
+            );
             let status = child.wait().expect("child exits");
             assert!(
                 status.code() == Some(1),
-                "pumice exited unexpectedly (attempt {attempt})"
+                "pumice exited unexpectedly (attempt {attempt}); stderr: {seen:?}"
             );
             continue;
         };
 
         assert!(
-            line.contains("warning: debug log enabled: dictated text is written to "),
-            "line: {line}"
-        );
-        assert!(
-            line.contains("pumice-debug.jsonl"),
-            "the warning must name the path: {line}"
+            warning.contains("pumice-debug.jsonl"),
+            "the warning must name the path: {warning}"
         );
 
         child.kill().expect("stop pumice");

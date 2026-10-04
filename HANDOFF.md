@@ -27,7 +27,7 @@ Update this table in the PR that finishes each story. Order follows the plan in 
 | --- | --- | --- | --- | --- |
 | 1 | S8.2 follow-up: shared adapter contract suite | Done | #23 | Suite in `tests/support/adapter_contract.rs` + `tests/adapter_contract.rs`; claude and codex run every applicable case; isolation.rs keeps exact argv and Windows shim tests |
 | 2 | S2.1 follow-up: provider capabilities | Done | #24 | Descriptors carry `disabled_by_default`, `risk_warning` and full-settings validation (`ProviderLocations`); `check-config` and startup print warnings; probe descriptors in tests/config.rs |
-| 3 | S2.8 part 1: provider detection | Not started | | Cached version probes (2 s), `/v1/models` lists available providers |
+| 3 | S2.8 part 1: provider detection | Done (pending review) | | `ProbeSpec` + `discovery.rs`: bounded concurrent version probes (2 s) cached at startup, `agy` never spawned; `/v1/models` lists enabled∩found; a missing selected provider still fails at runtime and falls back |
 | 4 | S2.6 OpenCode adapter | Done (pending review) | | Off by default, explicit provider/model, deny-all inline agent via `OPENCODE_CONFIG_CONTENT`; full contract suite passes |
 | 5 | S2.5 Antigravity adapter | Done | #25 | Dormant: documentation-derived invocation/parser tested against the fake CLI, `enabled: true` refused at the enabled line, build fails as defense in depth, `agy` never spawned |
 | 6 | S2.7 Generic loopback adapter | Not started | | PR to stay open until the owner approves the outbound exception |

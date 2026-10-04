@@ -50,7 +50,7 @@ const WORKSPACE_DIR: &str = "workspace";
 const CONTROL_DIR: &str = "control";
 
 /// Runs CLI invocations. Stateless; share one instance.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct ProcessRunner;
 
 impl ProcessRunner {

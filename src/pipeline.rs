@@ -18,6 +18,7 @@ use tokio::time::Instant;
 use crate::cleanup::cleanup;
 use crate::config::{Config, PromptSettings};
 use crate::prompts::compose_with_settings;
+use crate::providers::discovery::{Found, ProviderStatus};
 use crate::providers::{self, FormatInput, Provider, ProviderError};
 use crate::request::ExtractedRequest;
 
@@ -63,11 +64,42 @@ pub struct Pipeline {
     fallback_order: Vec<String>,
     total_timeout: Duration,
     prompt_settings: PromptSettings,
+    /// Provider IDs startup detection confirmed installed. `None` when the
+    /// pipeline was built without detection (the Phase 1 behavior): then
+    /// every built provider counts as available. Selection and fallback
+    /// ignore this; only model listing filters by it.
+    available: Option<BTreeSet<String>>,
     busy: Semaphore,
 }
 
 impl Pipeline {
     pub fn new(config: &Config, providers: Vec<Arc<dyn Provider>>) -> Pipeline {
+        Pipeline::build(config, providers, None)
+    }
+
+    /// [`new`](Self::new) with startup detection cached in the pipeline:
+    /// [`model_ids`](Self::model_ids) lists only built providers detection
+    /// found. An enabled provider detection missed stays built and
+    /// selectable — it fails at runtime with `NotInstalled` and the fallback
+    /// chain runs, exactly as before detection existed.
+    pub fn with_detection(
+        config: &Config,
+        providers: Vec<Arc<dyn Provider>>,
+        detection: Vec<ProviderStatus>,
+    ) -> Pipeline {
+        let available = detection
+            .iter()
+            .filter(|status| matches!(status.found, Found::Found(_)))
+            .map(|status| status.id.to_owned())
+            .collect();
+        Pipeline::build(config, providers, Some(available))
+    }
+
+    fn build(
+        config: &Config,
+        providers: Vec<Arc<dyn Provider>>,
+        available: Option<BTreeSet<String>>,
+    ) -> Pipeline {
         let mut entries = BTreeMap::new();
         for provider in providers {
             // A built provider with no configured entry (not possible through
@@ -88,26 +120,39 @@ impl Pipeline {
             fallback_order: config.fallback_order.clone(),
             total_timeout: config.total_timeout,
             prompt_settings: config.prompts.clone(),
+            available,
             busy: Semaphore::new(1),
         }
     }
 
     /// The provider IDs offered as models on `GET /v1/models`: the default
     /// provider first, then the remaining enabled providers in registry
-    /// order, so a client that picks the first model gets the default.
+    /// order, so a client that picks the first model gets the default. With
+    /// detection cached, only providers confirmed installed are listed.
     /// Never invokes a CLI.
     pub fn model_ids(&self) -> Vec<&str> {
         let mut ids = Vec::with_capacity(self.providers.len());
         let default = self.default_provider.as_str();
-        if self.providers.contains_key(default) {
+        if self.providers.contains_key(default) && self.is_available(default) {
             ids.push(default);
         }
         for descriptor in providers::PROVIDERS {
-            if descriptor.id != default && self.providers.contains_key(descriptor.id) {
+            if descriptor.id != default
+                && self.providers.contains_key(descriptor.id)
+                && self.is_available(descriptor.id)
+            {
                 ids.push(descriptor.id);
             }
         }
         ids
+    }
+
+    /// Whether detection confirmed `id` installed; without detection every
+    /// built provider counts.
+    fn is_available(&self, id: &str) -> bool {
+        self.available
+            .as_ref()
+            .is_none_or(|available| available.contains(id))
     }
 
     /// Selection rule for the request's `model` field: the value is trimmed
