@@ -1197,7 +1197,10 @@ fn replace_last(text: &str, from: &str, to: &str) -> String {
 
 #[test]
 fn example_documented_overrides_load() {
-    let text = fs::read_to_string(example_path()).expect("read example");
+    // Windows checkouts may use CRLF; the edits below match `\n`.
+    let text = fs::read_to_string(example_path())
+        .expect("read example")
+        .replace("\r\n", "\n");
 
     // Apply the documented examples: try Codex after Claude, route Codex
     // through a gateway, and set both formatting prompts.
