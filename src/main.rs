@@ -108,6 +108,10 @@ async fn run_service(loaded: LoadedConfig) -> ExitCode {
     };
     let pipeline = Arc::new(Pipeline::new(&config, providers));
 
+    for warning in providers::risk_warnings(&config, providers::PROVIDERS) {
+        eprintln!("{warning}");
+    }
+
     // The debug log holds dictated text, so it opens before serving and a
     // misconfigured path fails startup (exit 1) instead of silently losing
     // records.
@@ -217,5 +221,8 @@ fn print_summary(loaded: &LoadedConfig) {
                 settings.timeout.as_secs()
             ),
         }
+    }
+    for warning in providers::risk_warnings(config, providers::PROVIDERS) {
+        println!("{warning}");
     }
 }

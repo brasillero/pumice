@@ -25,7 +25,8 @@ impl ConfigError {
     /// A semantic problem at a source position. Spans can be lost (for
     /// example through anchors or serde buffering), in which case
     /// `Location::UNKNOWN` degrades this to a message without a position.
-    pub(crate) fn at(location: Location, message: impl Into<String>) -> ConfigError {
+    /// Provider descriptors use this to compose their own located errors.
+    pub fn at(location: Location, message: impl Into<String>) -> ConfigError {
         let known = location.line() != 0;
         ConfigError {
             file: None,
