@@ -33,7 +33,7 @@ Update this table in the PR that finishes each story. Merge order follows the ta
 | 4 | S2.3 Codex adapter | Not started | | Keeps `--ignore-user-config`; allows only `openai_base_url` |
 | 5 | S3.1 + S3.3 Adapter instruction and prompt composition | Not started | | |
 | 6 | S3.2 Optional Pumice prompts | Not started | | |
-| 7 | S3.4 Output cleanup | Not started | | |
+| 7 | S3.4 Output cleanup | Done (pending review) | | `cleanup` pure function + tests; preservation guard on every rule, idempotence over positive fixtures |
 | 8 | S4.1 Timeouts | Not started | | |
 | 9 | S4.3 Raw-text fallback | Not started | | |
 | 9b | S4.2 Fallback chain | Not started | | |
