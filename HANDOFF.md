@@ -25,8 +25,8 @@ Update this table in the PR that finishes each story. Order follows the plan in 
 
 | # | Story | Status | PR | Notes |
 | --- | --- | --- | --- | --- |
-| 1 | S8.2 follow-up: shared adapter contract suite | Done (pending review) | | Suite in `tests/support/adapter_contract.rs` + `tests/adapter_contract.rs`; claude and codex run every applicable case; isolation.rs keeps exact argv and Windows shim tests |
-| 2 | S2.1 follow-up: provider capabilities | Not started | | Default-off flag, risk warnings, probe metadata, full-settings validation |
+| 1 | S8.2 follow-up: shared adapter contract suite | Done | #23 | Suite in `tests/support/adapter_contract.rs` + `tests/adapter_contract.rs`; claude and codex run every applicable case; isolation.rs keeps exact argv and Windows shim tests |
+| 2 | S2.1 follow-up: provider capabilities | Done (pending review) | | Descriptors carry `disabled_by_default`, `risk_warning` and full-settings validation (`ProviderLocations`); `check-config` and startup print warnings; probe descriptors in tests/config.rs |
 | 3 | S2.8 part 1: provider detection | Not started | | Cached version probes (2 s), `/v1/models` lists available providers |
 | 4 | S2.6 OpenCode adapter | Not started | | Off by default, explicit `provider/model`, deny-all inline agent |
 | 5 | S2.5 Antigravity adapter | Not started | | Dormant: fake-only protocol, enabling refused, never runs `agy` |
@@ -77,7 +77,7 @@ A dictation formatted end to end, **with both Claude and Codex**, plus a working
 
 | # | Story | Status | PR | Notes |
 | --- | --- | --- | --- | --- |
-| 1 | S8.2 Fake CLI; remove the prototype | Done | #7 | Portable Rust fake CLI (`pumice-test-cli`) driven by `<exe>.scenario.json`; prototype removed |
+| 1 | S8.2 Fake CLI; remove the prototype | Done | #23 | Portable Rust fake CLI (`pumice-test-cli`) driven by `<exe>.scenario.json`; prototype removed |
 | 2 | S2.1 + S2.2 Provider interface and Claude adapter | Done | #8 | `Provider` trait and registry, shared `ProcessRunner` (process group / Job Object, bounded pipes, 250 ms exit grace), restricted Claude adapter |
 | 3 | S6.1 + S1.5 YAML config and default port | Done | #11 | `serde-saphyr` with `file:line:column` errors, per-user lookup, `pumice check-config`; port 7567 |
 | 4 | S2.3 Codex adapter | Done | #14 | Restricted `exec` invocation with TOML-quoted control file; only `openai_base_url` option, no env overrides |
