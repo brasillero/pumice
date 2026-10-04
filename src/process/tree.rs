@@ -48,6 +48,7 @@ impl ProcessTree {
         wrap.wrap(process_wrap::tokio::ProcessGroup::leader());
         #[cfg(windows)]
         wrap.wrap(process_wrap::tokio::JobObject);
+        #[cfg_attr(windows, allow(unused_mut))]
         let mut child = wrap.spawn()?;
         #[cfg(unix)]
         let pid = match child.id() {
