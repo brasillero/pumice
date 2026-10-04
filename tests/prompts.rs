@@ -7,8 +7,23 @@
 //! Dictated text must stay inside the transcript span and never leak into the
 //! system prompt.
 
-use pumice::prompts::{ADAPTER_INSTRUCTION, ComposedPrompts, compose_prompts};
+mod support;
+
+use std::fs;
+use std::sync::Arc;
+use std::time::Duration;
+
+use pumice::config::{self, PromptSettings};
+use pumice::process::ProcessRunner;
+use pumice::prompts::{
+    ADAPTER_INSTRUCTION, ComposedPrompts, compose_prompts, compose_with_settings,
+};
+use pumice::providers;
 use pumice::request::{ChatCompletionRequest, ExtractedRequest, extract_request};
+use serde_json::json;
+use support::{FakeCli, fixture};
+use tempfile::TempDir;
+use tokio::time::Instant;
 
 const HANDY_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -39,6 +54,18 @@ fn handy_request() -> ExtractedRequest {
     let request: ChatCompletionRequest =
         serde_json::from_str(&body).expect("fixture must deserialize");
     extract_request(request).expect("fixture must extract")
+}
+
+/// Writes `text` to a temporary `pumice.yaml` and loads it. The directory is
+/// removed once loading finishes: the loaded `Config` no longer needs the
+/// file (embedded paths were resolved during loading).
+fn load_config(text: &str) -> config::Config {
+    let dir = TempDir::new().expect("create config directory");
+    let path = dir.path().join("pumice.yaml");
+    fs::write(&path, text).expect("write config");
+    config::load_with_env(Some(&path), |_| None)
+        .expect("config loads")
+        .config
 }
 
 /// Asserts the transcript appears exactly once in the message sent on stdin.
@@ -197,4 +224,118 @@ fn format_input_borrows_the_composed_prompts() {
     ]
     .concat();
     assert_eq!(stdin, composed.user.as_message());
+}
+
+#[test]
+fn defaults_add_no_optional_preferences() {
+    let config = load_config("");
+    assert_eq!(config.prompts, PromptSettings::default());
+
+    let request = handy_request();
+    let composed = compose_with_settings(&request, &config.prompts);
+
+    // Handy sends no system message: the system part is just the instruction
+    // and the user message is Handy's original, unchanged.
+    assert_eq!(composed.system, ADAPTER_INSTRUCTION);
+    let original = request.before_text.clone() + &request.text + &request.after_text;
+    assert_eq!(composed.user.as_message(), original);
+    assert_transcript_not_duplicated(&composed, FIXTURE_TRANSCRIPT);
+}
+
+#[test]
+fn block_scalar_prompts_reach_the_composed_prompts_in_order() {
+    let config = load_config(
+        "prompts:\n  system: |\n    Preserve technical terms.\n    Keep product names in English.\n  user: |\n    Format spoken enumerations as lists.\n",
+    );
+    let system = config.prompts.system.as_deref().expect("system prompt set");
+    // `|` keeps the internal newlines; its single trailing newline is fine.
+    assert_eq!(
+        system,
+        "Preserve technical terms.\nKeep product names in English.\n"
+    );
+    let user = config.prompts.user.as_deref().expect("user prompt set");
+    assert_eq!(user, "Format spoken enumerations as lists.\n");
+
+    let request = handy_request();
+    let composed = compose_with_settings(&request, &config.prompts);
+
+    // Documented order: the fixed instruction, then the Pumice system prompt.
+    assert_eq!(
+        composed.system,
+        format!("{ADAPTER_INSTRUCTION}\n\n{system}")
+    );
+    // The Pumice user prompt is prepended to Handy's complete message, which
+    // keeps its transcript span exactly once.
+    let original = request.before_text.clone() + &request.text + &request.after_text;
+    assert_eq!(composed.user.as_message(), format!("{user}\n\n{original}"));
+    assert_transcript_not_duplicated(&composed, FIXTURE_TRANSCRIPT);
+}
+
+#[test]
+fn whitespace_only_configured_prompts_are_ignored() {
+    let config = load_config("prompts:\n  system: \"   \"\n  user: \"\t \"\n");
+    assert_eq!(
+        config.prompts.system.as_deref(),
+        Some("   "),
+        "the loader keeps the value; composition filters it"
+    );
+
+    let request = handy_request();
+    let composed = compose_with_settings(&request, &config.prompts);
+
+    assert_eq!(composed.system, ADAPTER_INSTRUCTION);
+    let original = request.before_text.clone() + &request.text + &request.after_text;
+    assert_eq!(composed.user.as_message(), original);
+}
+
+#[tokio::test]
+async fn configured_prompts_reach_the_cli_in_documented_order() {
+    let fake = FakeCli::new(json!({
+        "stdout": fixture("claude/success.json"),
+        "exit_code": 0,
+        "report_arg_files": ["--system-prompt-file"],
+    }));
+    // A JSON string is a valid YAML double-quoted scalar, so the fake's path
+    // survives Windows backslashes unchanged.
+    let config = load_config(&format!(
+        "providers:\n  claude:\n    binary: {path}\nprompts:\n  system: |\n    Preserve technical terms.\n    Keep product names in English.\n  user: |\n    Format spoken enumerations as lists.\n",
+        path = serde_json::to_string(fake.path().to_str().expect("UTF-8 fake path"))
+            .expect("serialize fake path"),
+    ));
+    let system = config.prompts.system.as_deref().expect("system prompt set");
+    let user = config.prompts.user.as_deref().expect("user prompt set");
+
+    let descriptor = providers::descriptor("claude").expect("claude is registered");
+    let settings = config
+        .providers
+        .get("claude")
+        .expect("claude is configured");
+    let provider = (descriptor.build)(settings, Arc::new(ProcessRunner::new()))
+        .expect("provider builds from the config");
+
+    let request = handy_request();
+    let composed = compose_with_settings(&request, &config.prompts);
+    let outcome = provider
+        .format(
+            composed.format_input(),
+            Instant::now() + Duration::from_secs(30),
+        )
+        .await
+        .expect("format succeeds");
+    assert_eq!(outcome, "Formatted text.");
+
+    // The control file holds the instruction, then the Pumice system prompt,
+    // exactly as composed; the provider adds nothing of its own.
+    let report = fake.report();
+    let file = &report["arg_files"]["--system-prompt-file"];
+    assert_eq!(file["contents"], json!(composed.system));
+    assert_eq!(
+        file["contents"],
+        json!(format!("{ADAPTER_INSTRUCTION}\n\n{system}"))
+    );
+
+    // stdin starts with the Pumice user prompt, followed by Handy's complete
+    // original message.
+    let original = request.before_text.clone() + &request.text + &request.after_text;
+    assert_eq!(report["stdin"], json!(format!("{user}\n\n{original}")));
 }

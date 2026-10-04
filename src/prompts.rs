@@ -9,6 +9,7 @@
 
 use std::fmt;
 
+use crate::config::PromptSettings;
 use crate::providers::{FormatInput, UserPrompt};
 use crate::request::ExtractedRequest;
 
@@ -123,4 +124,21 @@ pub fn compose_prompts(
             after_text: request.after_text.clone(),
         },
     }
+}
+
+/// Builds the composed prompts from the validated configuration's
+/// [`PromptSettings`].
+///
+/// The optional Pumice prompts are off by default and, when configured, apply
+/// to every provider: the composed result never depends on which provider
+/// will run the call.
+pub fn compose_with_settings(
+    request: &ExtractedRequest,
+    settings: &PromptSettings,
+) -> ComposedPrompts {
+    compose_prompts(
+        request,
+        settings.system.as_deref(),
+        settings.user.as_deref(),
+    )
 }
