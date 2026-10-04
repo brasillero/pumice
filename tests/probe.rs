@@ -6,7 +6,9 @@
 //! the JSON shape the real `claude -p --output-format json` prints.
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use pumice::probe::{ProbeError, ProbeOptions, run_probe};
 
