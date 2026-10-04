@@ -34,6 +34,10 @@ const NOT_LOGGED_IN_PREFIX: &str = "Not logged in";
 /// Non-secret routing variables the configuration may set for this provider.
 const ALLOWED_ENV: &[&str] = &["ANTHROPIC_BASE_URL"];
 
+/// npm package entrypoint the Windows `.cmd` shim translates to (layout from
+/// npm; verify on a real Windows install (owner check)).
+const NPM_ENTRYPOINT: &str = "@anthropic-ai/claude-code/cli.js";
+
 pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: ID,
     defaults,
@@ -144,8 +148,7 @@ impl CliAdapter for ClaudeAdapter {
         Ok(CliInvocation {
             program: ProgramSpec {
                 binary: self.binary.clone(),
-                // The npm package layout on Windows is unverified (S5.1).
-                npm_entrypoint: None,
+                npm_entrypoint: Some(NPM_ENTRYPOINT),
             },
             args,
             stdin: stdin.into_bytes(),
