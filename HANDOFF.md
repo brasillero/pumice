@@ -1,10 +1,18 @@
 # Handoff — start here
 
-**Current phase: Phase 3 — distribution: started with the owner's authorization (2026-10-04).** Phase 2 passed its gate with recorded conditions. S7.1 release archives are in progress; installer framework, startup account and update-network exception remain owner decisions. Phase 1 is [below](#phase-1-done), Phase 0 [further below](#phase-0-done).
+**Current phase: Phase 3 — distribution: started with the owner's authorization (2026-10-04).** Phase 2 passed its gate with recorded conditions. S7.1 release archives are implemented in #33, pending review/merge; installer framework, startup account and update-network exception remain owner decisions. Phase 1 is [below](#phase-1-done), Phase 0 [further below](#phase-0-done).
 
 Read [`AGENTS.md`](AGENTS.md) for the rules and [`docs/spec.md`](docs/spec.md) for the full spec. The Phase 2 design, the orchestrator's decisions and the PR-by-PR plan are in [`docs/research/phase2-architecture.md`](docs/research/phase2-architecture.md). The Phase 1 architecture they build on is in [`docs/research/phase1-architecture.md`](docs/research/phase1-architecture.md). Read both before starting a Phase 2 story.
 
-**Phase 3 status:** S7.1 release archive workflow prepared in #33, pending review/CI. Next: S7.5 generated changelog/release preparation, S7.2 startup, S7.4 installer/updates, then completion of S7.3 installation guide. No public release or version tag has been created; the Phase 3 gate has not passed.
+**Phase 3 status:** S7.1 release archives passed all nine checks at `ad6a448` in #33; owner review/merge remains pending. Next: S7.5 generated changelog/release preparation, S7.2 startup, S7.4 installer/updates, then completion of S7.3 installation guide. No public release or version tag has been created; the Phase 3 gate has not passed.
+
+| Phase 3 story | Status | PR | Notes |
+| --- | --- | --- | --- |
+| S7.1 Release archives | Done | #33 (open) | Four native targets passed at `ad6a448`: Windows x64 MSVC, static Linux x64 MUSL, macOS arm64/x64; extracted-binary smoke checks, archive contents and SHA256SUMS verified. Unsigned Actions artifacts only |
+| S7.5 Generated changelog | Next | — | Conventional Commits to Keep a Changelog; release preparation, no public version/tag chosen yet |
+| S7.2 Automatic startup | Pending | — | Startup account/session decision is open; Unix SIGTERM shutdown and explicit executable/config paths required |
+| S7.4 Installer and updates | Pending | — | Installer framework/WebView2 and updater-network exception await owner decisions |
+| S7.3 Installation guide | Pending | — | Preview archive instructions shipped in #33; complete after startup/installer/update behavior is settled |
 
 ## Phase 2 decisions (2026-10-04)
 
