@@ -691,6 +691,38 @@ async fn models_lists_enabled_providers() {
     );
 }
 
+#[tokio::test]
+async fn models_list_generic_only_when_enabled() {
+    // Enabled: listed even though nothing listens at the endpoint. Detection
+    // deliberately does no reachability probe for the generic adapter; the
+    // call-time check (`EndpointUnavailable`) is what triggers fallback.
+    let yaml = "providers:\n  claude:\n    binary: '{binary}'\n  codex:\n    enabled: false\n  generic:\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n";
+    let server = start_server(yaml, success_scenario("unused")).await;
+    let response = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
+
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        listed_model_ids(&response.body_json()),
+        ["claude", "generic"],
+        "the default provider leads, then registry order"
+    );
+    assert!(
+        !server.fake.report_path().exists(),
+        "listing never invokes a CLI"
+    );
+
+    // Disabled (the default config): absent from the list.
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let response = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
+
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        listed_model_ids(&response.body_json()),
+        ["claude"],
+        "a disabled generic is not listed"
+    );
+}
+
 /// The model IDs of a `/v1/models` body, in order.
 fn listed_model_ids(body: &Value) -> Vec<String> {
     body["data"]

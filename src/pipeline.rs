@@ -66,8 +66,10 @@ pub struct Pipeline {
     prompt_settings: PromptSettings,
     /// Provider IDs startup detection confirmed installed. `None` when the
     /// pipeline was built without detection (the Phase 1 behavior): then
-    /// every built provider counts as available. Selection and fallback
-    /// ignore this; only model listing filters by it.
+    /// every built provider counts as available. The generic loopback
+    /// adapter has no executable to find and counts as available whenever it
+    /// is built. Selection and fallback ignore this; only model listing
+    /// filters by it.
     available: Option<BTreeSet<String>>,
     busy: Semaphore,
 }
@@ -89,7 +91,7 @@ impl Pipeline {
     ) -> Pipeline {
         let available = detection
             .iter()
-            .filter(|status| matches!(status.found, Found::Found(_)))
+            .filter(|status| matches!(status.found, Found::Found(_) | Found::NotApplicable))
             .map(|status| status.id.to_owned())
             .collect();
         Pipeline::build(config, providers, Some(available))

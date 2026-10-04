@@ -142,6 +142,12 @@ pub enum ProbeSpec {
     Version(&'static [&'static str]),
     /// Resolve on PATH only; never spawn.
     PathOnly,
+    /// No CLI exists to detect (the generic loopback adapter): detection
+    /// neither resolves nor spawns anything. The provider is reported
+    /// available for listing purposes when enabled; its endpoint is a
+    /// network target whose availability is only checked at call time
+    /// (`EndpointUnavailable` then triggers the fallback chain).
+    NotApplicable,
 }
 
 /// Validates one provider's fully defaulted settings; see
@@ -220,6 +226,7 @@ mod tests {
 
     #[test]
     fn registry_ids_are_unique_and_found() {
+        assert_eq!(PROVIDERS.len(), 5, "five providers are registered");
         for (i, d) in PROVIDERS.iter().enumerate() {
             assert!(PROVIDERS[..i].iter().all(|other| other.id != d.id));
             assert!(std::ptr::eq(descriptor(d.id).unwrap(), d));

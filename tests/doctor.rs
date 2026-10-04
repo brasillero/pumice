@@ -14,6 +14,7 @@ use std::process::{Command, Output};
 
 use serde_json::json;
 use support::FakeCli;
+use support::fake_http::{Behavior, FakeHttp, Reply};
 use tempfile::TempDir;
 
 /// The fixture's result text: the login check must never print it.
@@ -104,6 +105,10 @@ fn all_enabled_found_lists_every_provider_and_the_kimi_note() {
         "stdout: {stdout}"
     );
     assert!(
+        stdout.contains("generic: disabled, local endpoint (checked at call time)\n"),
+        "stdout: {stdout}"
+    );
+    assert!(
         stdout.contains("kimi: on standby (not supported in this version)\n"),
         "stdout: {stdout}"
     );
@@ -161,6 +166,36 @@ fn antigravity_is_detected_but_never_spawned() {
     assert!(
         !antigravity.report_path().exists(),
         "antigravity must never be spawned, not even for --version"
+    );
+}
+
+#[test]
+fn generic_enabled_reports_the_endpoint_line_and_counts_ready() {
+    // The other providers are disabled and the default moves to generic, so
+    // the report is exactly one enabled provider and it is ready: there is
+    // no executable to miss, only the endpoint checked at call time.
+    let (_dir, config_path) = write_config(
+        "default_provider: generic\nproviders:\n  claude:\n    enabled: false\n  codex:\n    enabled: false\n  generic:\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
+    );
+
+    let output = run_doctor(&config_path, &[]);
+    let text = combined(&output);
+
+    assert_eq!(output.status.code(), Some(0), "output: {text}");
+    assert!(
+        text.contains("generic: enabled, local endpoint (checked at call time)\n"),
+        "output: {text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "  warning: generic: {}\n",
+            pumice::providers::generic::RISK_WARNING
+        )),
+        "output: {text}"
+    );
+    assert!(
+        text.contains("1 of 1 enabled providers ready\n"),
+        "output: {text}"
     );
 }
 
@@ -328,5 +363,56 @@ fn login_check_never_uses_the_fallback_chain() {
     assert!(
         !codex.report_path().exists(),
         "the fallback chain must never run during a login check"
+    );
+}
+
+// Multi-threaded: `run_doctor` blocks its thread on the child process while
+// the in-process fake server must keep answering on another one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn login_check_generic_ok_against_the_fake_http_server() {
+    let server = FakeHttp::spawn(Behavior::Reply(Reply::json(
+        200,
+        json!({"choices": [{"message": {"content": FIXTURE_RESULT, "role": "assistant"}, "finish_reason": "stop"}]}),
+    )))
+    .await;
+    let (_dir, config_path) = write_config(&format!(
+        "providers:\n  generic:\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"{}\"\n",
+        server.base_url()
+    ));
+
+    let output = run_doctor(&config_path, &["--login-check", "--provider", "generic"]);
+    let text = combined(&output);
+
+    assert_eq!(output.status.code(), Some(0), "output: {text}");
+    assert!(
+        text.contains("this runs one real formatting call and spends generic quota\n"),
+        "output: {text}"
+    );
+    assert!(text.contains("login check: ok ("), "output: {text}");
+    assert!(
+        !text.contains(FIXTURE_RESULT),
+        "the response text must never be printed: {text}"
+    );
+    // Exactly one call reached the endpoint: no fallback, no retry.
+    assert_eq!(server.hit_count(), 1, "one call reaches the endpoint");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn login_check_generic_without_a_server_reports_endpoint_unavailable_and_exits_1() {
+    // Grab a loopback port nothing listens on: bind, read the port, drop.
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a probe socket");
+    let port = probe.local_addr().expect("probe address").port();
+    drop(probe);
+    let (_dir, config_path) = write_config(&format!(
+        "providers:\n  generic:\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"http://127.0.0.1:{port}/v1\"\n",
+    ));
+
+    let output = run_doctor(&config_path, &["--login-check", "--provider", "generic"]);
+    let text = combined(&output);
+
+    assert_eq!(output.status.code(), Some(1), "output: {text}");
+    assert!(
+        text.contains("login check: endpoint unavailable\n"),
+        "output: {text}"
     );
 }

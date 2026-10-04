@@ -71,7 +71,9 @@ pub fn render(config: &Config, source: &ConfigSource, statuses: &[ProviderStatus
 
 /// One doctor line for `status`: id, enabled state, found state (with the
 /// install hint when the provider is missing) and, for the dormant
-/// Antigravity adapter, the plain note that it cannot be enabled yet.
+/// Antigravity adapter, the plain note that it cannot be enabled yet. The
+/// generic loopback adapter has no executable: its state names the local
+/// endpoint and defers availability to call time.
 fn provider_line(status: &ProviderStatus) -> String {
     let install_hint = providers::descriptor(status.id).map_or("", |d| d.install_hint);
     let state = match (&status.found, &status.version) {
@@ -80,6 +82,7 @@ fn provider_line(status: &ProviderStatus) -> String {
         (Found::Found(_), Version::Skipped) => "found".to_owned(),
         (Found::Missing, _) => format!("missing (install: {install_hint})"),
         (Found::UnsupportedShim, _) => format!("unsupported launcher (install: {install_hint})"),
+        (Found::NotApplicable, _) => "local endpoint (checked at call time)".to_owned(),
     };
     let enabled = if status.enabled {
         "enabled"
@@ -94,8 +97,10 @@ fn provider_line(status: &ProviderStatus) -> String {
     line
 }
 
-/// Counts `(ready, total)` over the enabled providers: an enabled provider is
-/// ready when detection found its executable.
+/// Counts `(ready, total)` over the enabled providers: an enabled provider
+/// is ready when detection found its executable; the generic loopback
+/// adapter has no executable and is ready by definition, since its endpoint
+/// is checked at call time.
 pub fn enabled_ready(statuses: &[ProviderStatus]) -> (usize, usize) {
     let mut ready = 0;
     let mut total = 0;
@@ -104,7 +109,7 @@ pub fn enabled_ready(statuses: &[ProviderStatus]) -> (usize, usize) {
             continue;
         }
         total += 1;
-        if matches!(status.found, Found::Found(_)) {
+        if matches!(status.found, Found::Found(_) | Found::NotApplicable) {
             ready += 1;
         }
     }
@@ -186,8 +191,10 @@ pub async fn prepare_login_check(
     }
     // Fresh detection for exactly this provider, through the same resolution
     // path a formatting call uses; the bounded version probe spends no quota.
+    // NotApplicable providers (generic) have no executable to find: their
+    // endpoint availability is what the login-check call itself establishes.
     let statuses = discovery::detect(config, &[*descriptor], runner).await;
-    if !matches!(statuses[0].found, Found::Found(_)) {
+    if !matches!(statuses[0].found, Found::Found(_) | Found::NotApplicable) {
         return Err(LoginCheckError::NotInstalled);
     }
     (descriptor.build)(settings, Arc::new(*runner)).map_err(LoginCheckError::BuildFailed)
@@ -223,24 +230,30 @@ pub async fn run_login_call(config: &Config, provider: &Arc<dyn Provider>) -> Lo
 }
 
 /// Text-free category for a failed login check; never carries captured
-/// output, diagnostics or dictated text.
-pub fn error_category(error: ProviderError) -> &'static str {
+/// output, diagnostics or dictated text. Returns an owned string because the
+/// `HTTP status n` category embeds the status code.
+pub fn error_category(error: ProviderError) -> String {
     match error {
-        ProviderError::NotInstalled => "not installed",
-        ProviderError::NotLoggedIn => "not logged in",
-        ProviderError::Timeout => "timeout",
-        ProviderError::QuotaExceeded { .. } => "quota exhausted",
-        ProviderError::RateLimited { .. } => "rate limited",
+        ProviderError::NotInstalled => "not installed".to_owned(),
+        ProviderError::NotLoggedIn => "not logged in".to_owned(),
+        ProviderError::Timeout => "timeout".to_owned(),
+        ProviderError::QuotaExceeded { .. } => "quota exhausted".to_owned(),
+        ProviderError::RateLimited { .. } => "rate limited".to_owned(),
         ProviderError::Other { code } => match code {
-            ProviderErrorCode::Spawn => "could not start the CLI",
-            ProviderErrorCode::Io => "I/O error while running the CLI",
-            ProviderErrorCode::InvalidConfiguration => "invalid provider configuration",
-            ProviderErrorCode::AuthenticationRejected => "the CLI rejected its credentials",
-            ProviderErrorCode::UnsupportedShim => "the CLI is an unsupported wrapper",
-            ProviderErrorCode::InvalidOutput => "the CLI returned unparseable output",
-            ProviderErrorCode::OutputTooLarge => "the CLI returned too much output",
-            ProviderErrorCode::UnexpectedToolActivity => "the CLI tried to use a tool",
-            ProviderErrorCode::NonzeroExit => "the CLI reported a failure",
+            ProviderErrorCode::Spawn => "could not start the CLI".to_owned(),
+            ProviderErrorCode::Io => "I/O error while running the CLI".to_owned(),
+            ProviderErrorCode::InvalidConfiguration => "invalid provider configuration".to_owned(),
+            ProviderErrorCode::AuthenticationRejected => {
+                "the CLI rejected its credentials".to_owned()
+            }
+            ProviderErrorCode::UnsupportedShim => "the CLI is an unsupported wrapper".to_owned(),
+            ProviderErrorCode::InvalidOutput => "the CLI returned unparseable output".to_owned(),
+            ProviderErrorCode::OutputTooLarge => "the CLI returned too much output".to_owned(),
+            ProviderErrorCode::InputTooLarge => "input too large".to_owned(),
+            ProviderErrorCode::UnexpectedToolActivity => "the CLI tried to use a tool".to_owned(),
+            ProviderErrorCode::NonzeroExit => "the CLI reported a failure".to_owned(),
+            ProviderErrorCode::EndpointUnavailable => "endpoint unavailable".to_owned(),
+            ProviderErrorCode::HttpStatus(status) => format!("HTTP status {status}"),
         },
     }
 }
@@ -290,6 +303,7 @@ mod tests {
             ),
             status("opencode", false, Found::Missing, Version::Unavailable),
             status("antigravity", false, found(), Version::Skipped),
+            status("generic", false, Found::NotApplicable, Version::Skipped),
         ]
     }
 
@@ -316,6 +330,10 @@ mod tests {
         );
         assert!(
             report.contains("antigravity: disabled, found, cannot be enabled yet (see docs)\n"),
+            "{report}"
+        );
+        assert!(
+            report.contains("generic: disabled, local endpoint (checked at call time)\n"),
             "{report}"
         );
         assert!(report.contains(KIMI_NOTE), "{report}");
@@ -400,6 +418,33 @@ mod tests {
     }
 
     #[test]
+    fn render_reports_an_enabled_generic_as_a_local_endpoint() {
+        let config = crate::config::validate_text_with_descriptors(
+            "providers:\n  generic:\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
+            Path::new("pumice.yaml"),
+            providers::PROVIDERS,
+        )
+        .expect("config validates");
+        let mut statuses = full_scan();
+        statuses[4] = status("generic", true, Found::NotApplicable, Version::Skipped);
+        let report = render(&config, &ConfigSource::BuiltInDefaults, &statuses);
+
+        assert!(
+            report.contains("generic: enabled, local endpoint (checked at call time)\n"),
+            "{report}"
+        );
+        assert!(
+            report.contains(&format!(
+                "  warning: generic: {}\n",
+                providers::generic::RISK_WARNING
+            )),
+            "{report}"
+        );
+        // An enabled generic has no executable to miss, so it is ready.
+        assert_eq!(enabled_ready(&statuses), (3, 3));
+    }
+
+    #[test]
     fn enabled_ready_counts_enabled_providers_only() {
         assert_eq!(enabled_ready(&full_scan()), (2, 2));
         assert_eq!(enabled_ready(&[]), (0, 0));
@@ -416,6 +461,22 @@ mod tests {
         assert_eq!(
             error_category(ProviderError::other(ProviderErrorCode::NonzeroExit)),
             "the CLI reported a failure"
+        );
+        assert_eq!(
+            error_category(ProviderError::other(ProviderErrorCode::InputTooLarge)),
+            "input too large"
+        );
+        assert_eq!(
+            error_category(ProviderError::other(ProviderErrorCode::EndpointUnavailable)),
+            "endpoint unavailable"
+        );
+        assert_eq!(
+            error_category(ProviderError::other(ProviderErrorCode::HttpStatus(500))),
+            "HTTP status 500"
+        );
+        assert_eq!(
+            error_category(ProviderError::other(ProviderErrorCode::HttpStatus(404))),
+            "HTTP status 404"
         );
     }
 

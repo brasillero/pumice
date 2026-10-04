@@ -32,8 +32,8 @@ use tokio::net::TcpStream;
 use tokio::time::Instant;
 
 use super::{
-    FormatInput, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode, ProviderFuture,
-    ProviderLocations, ProviderSettings, RawOption,
+    FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode,
+    ProviderFuture, ProviderLocations, ProviderSettings, RawOption,
 };
 use crate::config::ConfigError;
 use crate::process::ProcessRunner;
@@ -72,6 +72,19 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     disabled_by_default: true,
     risk_warning: Some(RISK_WARNING),
     validate_settings,
+    // This adapter has no CLI: detection neither resolves nor spawns
+    // anything for it (no PATH lookup, no probe). Its endpoint is a network
+    // target whose availability is checked at call time, when
+    // `EndpointUnavailable` triggers the fallback chain.
+    probe: ProbeSpec::NotApplicable,
+    // No binary exists. The value stays empty on purpose and is never
+    // resolved: `NotApplicable` detection skips resolution entirely.
+    default_binary: "",
+    // No npm entrypoint: nothing to translate a `.cmd` shim for.
+    npm_entrypoint: None,
+    // There is nothing to install: readiness means a local server answering
+    // at the configured `base_url`.
+    install_hint: "start a local OpenAI-compatible server such as Ollama or LM Studio",
 };
 
 fn defaults() -> ProviderSettings {

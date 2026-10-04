@@ -4,7 +4,9 @@
 //! [`detect`] resolves every registered provider through the same
 //! [`resolve_program`] path a formatting call uses, then — except for
 //! [`ProbeSpec::PathOnly`] providers such as Antigravity, which is never
-//! spawned — runs a bounded `--version`-style probe through the shared
+//! spawned, and [`ProbeSpec::NotApplicable`] providers such as the generic
+//! loopback adapter, which have no CLI and are never even resolved — runs a
+//! bounded `--version`-style probe through the shared
 //! [`ProcessRunner`], so a probe gets a fresh empty workspace, no shell,
 //! closed stdin and process-tree kill on timeout. The service runs detection
 //! once at startup and caches the result in the pipeline; `/v1/models` then
@@ -53,6 +55,10 @@ pub enum Found {
     /// Found, but it is a script wrapper Pumice refuses to translate
     /// (on Windows, anything but a supported npm `.cmd` shim).
     UnsupportedShim,
+    /// No executable exists to find ([`ProbeSpec::NotApplicable`], the
+    /// generic loopback adapter): detection neither resolves nor spawns
+    /// anything, and availability is checked at call time instead.
+    NotApplicable,
 }
 
 /// What a version probe established.
@@ -63,7 +69,8 @@ pub enum Version {
     /// The probe failed, timed out or printed nothing version-shaped. This
     /// never changes [`Found`]: the provider is still installed.
     Unavailable,
-    /// Deliberately not probed ([`ProbeSpec::PathOnly`]).
+    /// Deliberately not probed ([`ProbeSpec::PathOnly`] or
+    /// [`ProbeSpec::NotApplicable`]).
     Skipped,
 }
 
@@ -92,6 +99,12 @@ pub async fn detect_with_timeout(
     let mut found: Vec<Found> = Vec::with_capacity(descriptors.len());
     let mut probes: Vec<(usize, CliInvocation)> = Vec::new();
     for (index, descriptor) in descriptors.iter().enumerate() {
+        // NotApplicable providers have no CLI: never resolve, never probe.
+        // Their endpoint is a network target checked at call time.
+        if descriptor.probe == ProbeSpec::NotApplicable {
+            found.push(Found::NotApplicable);
+            continue;
+        }
         let program = probe_program(descriptor, config.providers.get(descriptor.id));
         let resolved = match resolve_program(&program) {
             Ok(resolved) => Found::Found(resolved.path),
@@ -136,7 +149,12 @@ pub async fn detect_with_timeout(
                 (Found::Found(_), ProbeSpec::Version(_)) => {
                     probed.get(&index).cloned().unwrap_or(Version::Unavailable)
                 }
-                (Found::Found(_), ProbeSpec::PathOnly) => Version::Skipped,
+                // Unreachable in practice: NotApplicable descriptors never
+                // resolve, so they never report Found. Nothing was probed.
+                (Found::Found(_), ProbeSpec::PathOnly | ProbeSpec::NotApplicable) => {
+                    Version::Skipped
+                }
+                (Found::NotApplicable, _) => Version::Skipped,
                 (Found::Missing, _) | (Found::UnsupportedShim, _) => Version::Unavailable,
             };
             ProviderStatus {
@@ -250,6 +268,7 @@ pub fn status_line(status: &ProviderStatus, install_hint: &str) -> String {
         },
         Found::Missing => format!("missing (install: {install_hint})"),
         Found::UnsupportedShim => format!("unsupported wrapper (install: {install_hint})"),
+        Found::NotApplicable => "local endpoint (checked at call time)".to_owned(),
     };
     format!("provider {}: {state}", status.id)
 }
