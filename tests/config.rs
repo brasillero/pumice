@@ -416,9 +416,14 @@ fn bare_and_absolute_binary_paths_are_not_resolved() {
         load_text("providers:\n  claude:\n    binary: myclaude\n").expect("bare name loads");
     assert_eq!(claude(&config).binary, Some(PathBuf::from("myclaude")));
 
-    let config =
-        load_text("providers:\n  claude:\n    binary: /opt/claude\n").expect("absolute loads");
-    assert_eq!(claude(&config).binary, Some(PathBuf::from("/opt/claude")));
+    // An absolute path on every OS (`/opt/claude` is relative on Windows).
+    let absolute = std::env::temp_dir().join("claude");
+    let yaml = format!(
+        "providers:\n  claude:\n    binary: '{}'\n",
+        absolute.display()
+    );
+    let config = load_text(&yaml).expect("absolute loads");
+    assert_eq!(claude(&config).binary, Some(absolute));
 
     let config = load_text("providers:\n  claude:\n    binary: null\n").expect("null loads");
     assert_eq!(claude(&config).binary, None);
@@ -474,6 +479,7 @@ fn explicit_unreadable_file_reports_the_os_error() {
     assert!(text.contains("cannot read configuration file"), "{text}");
 }
 
+#[cfg(not(windows))]
 #[test]
 fn per_user_config_is_used_when_present() {
     let dir = TempDir::new().expect("temp dir");
@@ -494,6 +500,7 @@ fn per_user_config_is_used_when_present() {
     assert_eq!(loaded.source, ConfigSource::BuiltInDefaults);
 }
 
+#[cfg(not(windows))]
 #[test]
 fn per_user_config_falls_back_to_home_config() {
     let dir = TempDir::new().expect("temp dir");
@@ -509,6 +516,22 @@ fn per_user_config_falls_back_to_home_config() {
         ConfigSource::File(pumice_dir.join(CONFIG_NAME))
     );
     assert_eq!(loaded.config.port, 9124);
+}
+
+#[cfg(windows)]
+#[test]
+fn per_user_config_uses_appdata_on_windows() {
+    let dir = TempDir::new().expect("temp dir");
+    let appdata = dir.path().join("appdata");
+    let pumice_dir = appdata.join("pumice");
+    fs::create_dir_all(&pumice_dir).expect("create config dir");
+    let file = pumice_dir.join(CONFIG_NAME);
+    fs::write(&file, "port: 9125\n").expect("write config");
+
+    let env = |key: &str| (key == "APPDATA").then(|| appdata.clone().into_os_string());
+    let loaded = config::load_with_env(None, env).expect("per-user config loads");
+    assert_eq!(loaded.source, ConfigSource::File(file));
+    assert_eq!(loaded.config.port, 9125);
 }
 
 #[test]
