@@ -4,8 +4,8 @@
 //!
 //! Every outcome returns either formatted-and-cleaned text or the dictation
 //! exactly as extracted — never partially cleaned, never trimmed. Only
-//! metadata leaves this module: dictated text is never logged here (event
-//! logging arrives in S1.4 on top of these outcomes).
+//! metadata leaves this module: dictated text is never logged here; the S1.4
+//! debug log consumes these outcomes in the API layer.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

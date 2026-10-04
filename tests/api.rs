@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use pumice::api::{self, RequestLog};
 use pumice::config;
+use pumice::logging::DebugLog;
 use pumice::pipeline::Pipeline;
 use pumice::process::ProcessRunner;
 use pumice::providers;
@@ -121,7 +122,13 @@ async fn start_dual_server(
     let log = Arc::new(LogCapture::default());
     let serve_log = Arc::clone(&log);
     tokio::spawn(async move {
-        let _ = api::serve(listener, pipeline, serve_log).await;
+        let _ = api::serve(
+            listener,
+            pipeline,
+            serve_log,
+            Arc::new(DebugLog::disabled()),
+        )
+        .await;
     });
     DualServer {
         port,
@@ -156,7 +163,13 @@ async fn start_server(yaml: &str, scenario: Value) -> TestServer {
     let log = Arc::new(LogCapture::default());
     let serve_log = Arc::clone(&log);
     tokio::spawn(async move {
-        let _ = api::serve(listener, pipeline, serve_log).await;
+        let _ = api::serve(
+            listener,
+            pipeline,
+            serve_log,
+            Arc::new(DebugLog::disabled()),
+        )
+        .await;
     });
     TestServer {
         port,

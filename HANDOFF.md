@@ -39,8 +39,8 @@ Update this table in the PR that finishes each story. Merge order follows the ta
 | 9b | S4.2 Fallback chain | Done | #15 | `pipeline.rs` walks `fallback_order` within the total budget; skips duplicates/disabled/unbuilt; `FormatOutcome.attempts`; raw fallback carries the last failure |
 | 10 | S1.1 + S5.3 Chat completions on loopback | Done (pending review) | | axum + tokio; exact routes, 10 MiB/5 s body bounds, SSE, loopback bind, port-taken exit 1 |
 | 11 | S1.2 + S6.2 Model list and provider selection | Done (pending review) | | `Pipeline::model_ids` (default first) and `Pipeline::select` (trimmed, case-insensitive) are the single source of truth for listing, selection and the response `model`; covered end to end over HTTP with two fakes |
-| 12 | S1.3 Health route | Not started | | |
-| 13 | S1.4 Debug log | Not started | | |
+| 12 | S1.3 Health route | Done (pending review) | | `GET /health` returns ok+version without touching the pipeline; a slow-fake test proves it answers in <300 ms during a dictation |
+| 13 | S1.4 Debug log | Done (pending review) | | `src/logging.rs` JSONL sink behind `debug_log.enabled`; records body+headers (only user-agent/content-type), raw_text, outcome, response; mode 0600 on Unix; `tests/privacy.rs` covers redaction and the disabled default |
 | 14 | S5.1 + S5.2 CLI isolation and Windows shims | Done | #16 | npm `.cmd` shim translation to direct node launch + all-adapter isolation contract tests; Codex residual-risk acceptance left to owner |
 | 15 | S6.4 Example config | Done (pending review) | | Commented `pumice.example.yaml` (all defaults, load-tested both as shipped and with documented overrides uncommented); README "run from source" section |
 | 16 | S8.3 Phase 1 CI and gate | Not started | | |

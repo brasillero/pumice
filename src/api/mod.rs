@@ -2,9 +2,10 @@
 //! (S5.3).
 //!
 //! [`bind`] listens on `127.0.0.1` and nothing else; [`serve`] runs the
-//! router until Ctrl-C. Dictated text never reaches the log sink — only one
-//! metadata line per completion request does (the S1.4 debug log plugs into
-//! the handler at the marked spot).
+//! router until Ctrl-C. Dictated text never reaches the ordinary log sink —
+//! only one metadata line per completion request does. When `debug_log` is
+//! enabled (S1.4), the opt-in debug sink additionally records full request
+//! and response payloads, including the dictation, for investigation.
 
 mod handlers;
 mod types;
@@ -18,6 +19,7 @@ use axum::Router;
 use axum::routing::{get, post};
 use tokio::net::TcpListener;
 
+use crate::logging::DebugLog;
 use crate::pipeline::Pipeline;
 
 /// State shared by every handler.
@@ -26,14 +28,20 @@ pub(crate) struct ApiState {
     pipeline: Arc<Pipeline>,
     counter: Arc<AtomicU64>,
     log: Arc<dyn RequestLog>,
+    debug_log: Arc<DebugLog>,
 }
 
 impl ApiState {
-    fn new(pipeline: Arc<Pipeline>, log: Arc<dyn RequestLog>) -> ApiState {
+    fn new(
+        pipeline: Arc<Pipeline>,
+        log: Arc<dyn RequestLog>,
+        debug_log: Arc<DebugLog>,
+    ) -> ApiState {
         ApiState {
             pipeline,
             counter: Arc::new(AtomicU64::new(1)),
             log,
+            debug_log,
         }
     }
 
@@ -69,8 +77,9 @@ pub async fn serve(
     listener: TcpListener,
     pipeline: Arc<Pipeline>,
     log: Arc<dyn RequestLog>,
+    debug_log: Arc<DebugLog>,
 ) -> io::Result<()> {
-    let state = ApiState::new(pipeline, log);
+    let state = ApiState::new(pipeline, log, debug_log);
     axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await

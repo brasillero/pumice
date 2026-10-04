@@ -1,8 +1,10 @@
 //! Handlers for the chat-completions, model-list and health routes, plus the
 //! OpenAI-style fallback for everything else.
 //!
-//! Dictated text flows through [`chat_completions`] but never into logs:
-//! only the outcome metadata line is written. Errors use OpenAI's
+//! Dictated text flows through [`chat_completions`] but never into the
+//! ordinary log: only the outcome metadata line is written. The opt-in debug
+//! log ([`crate::logging`]) is the one exception, and only when the
+//! configuration enables it. Errors use OpenAI's
 //! `{"error":{"message","type"}}` envelope with fixed, text-free messages.
 
 use std::future::poll_fn;
@@ -15,6 +17,7 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use tokio::time::Instant;
 
+use crate::logging::DebugRecord;
 use crate::pipeline::{FormatOutcome, OutcomeKind};
 use crate::request::{ChatCompletionRequest, extract_request};
 use crate::time::{format_rfc3339, now_unix_secs};
@@ -33,6 +36,13 @@ const BODY_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// return the raw dictation as a normal completion.
 pub async fn chat_completions(State(state): State<ApiState>, request: Request) -> Response {
     let started = Instant::now();
+    // The debug log (when enabled) is the only reader of request headers, and
+    // only through `DebugRecord::new`; the map must be captured before the
+    // request is consumed. Disabled (the default): nothing is captured.
+    let debug_headers = state
+        .debug_log
+        .is_enabled()
+        .then(|| request.headers().clone());
 
     let bytes = match read_body_bounded(request.into_body()).await {
         Ok(bytes) => bytes,
@@ -74,13 +84,28 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
         Err(error) => return openai_error(StatusCode::BAD_REQUEST, &error.to_string()),
     };
 
+    // The response id is minted before the run so the opt-in debug log can
+    // name the exact completion it records.
+    let id = format!("chatcmpl-pumice-{}", state.next_id());
     let outcome = state.pipeline.format(&extracted, started).await;
 
-    // S1.4: the opt-in debug log records request/response payloads here,
-    // gated by `debug_log.enabled`; the metadata line below stays text-free.
+    // The opt-in debug log (S1.4) records the full exchange — dictation
+    // included — only when `debug_log.enabled` turns it on; the metadata
+    // line below stays text-free either way.
+    if let Some(headers) = &debug_headers {
+        // The body already parsed as a request, so it parses as JSON too;
+        // unknown client fields are preserved by the `Value` round trip.
+        let body = serde_json::from_slice(&bytes).expect("request body already parsed once");
+        state.debug_log.record(&DebugRecord::new(
+            &id,
+            body,
+            headers,
+            &extracted.raw_text,
+            &outcome,
+        ));
+    }
     state.log.write_line(&completion_line(&outcome));
 
-    let id = format!("chatcmpl-pumice-{}", state.next_id());
     let created = now_unix_secs();
     // The producing provider when formatting succeeded; otherwise the
     // provider selection resolved to (on a raw fallback this names the
