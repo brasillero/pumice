@@ -4,7 +4,7 @@
 
 Read [`AGENTS.md`](AGENTS.md) for the rules and [`docs/spec.md`](docs/spec.md) for the full spec. The Phase 2 design, the orchestrator's decisions and the PR-by-PR plan are in [`docs/research/phase2-architecture.md`](docs/research/phase2-architecture.md). The Phase 1 architecture they build on is in [`docs/research/phase1-architecture.md`](docs/research/phase1-architecture.md). Read both before starting a Phase 2 story.
 
-**Phase 3 status:** S7.1 release archive workflow prepared in PR pending review/CI. Next: S7.5 generated changelog/release preparation, S7.2 startup, S7.4 installer/updates, then completion of S7.3 installation guide. No public release or version tag has been created; the Phase 3 gate has not passed.
+**Phase 3 status:** S7.1 release archive workflow prepared in #33, pending review/CI. Next: S7.5 generated changelog/release preparation, S7.2 startup, S7.4 installer/updates, then completion of S7.3 installation guide. No public release or version tag has been created; the Phase 3 gate has not passed.
 
 ## Phase 2 decisions (2026-10-04)
 
