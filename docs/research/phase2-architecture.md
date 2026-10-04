@@ -671,6 +671,8 @@ Add focused HTTP tests for redirects with a second listener receiving zero reque
 
 Reuse synthetic dictations for language, lists, corrections and command-as-data cases. They seed S8.1; they do not complete its owner-provided real-sample requirement.
 
+**Implemented location (S8.2 follow-up).** The suite lives in `tests/support/adapter_contract.rs` — the `ContractAdapter` trait (one small struct per adapter supplying protocol fixtures, system-prompt capture keys and restriction assertions), one generic async function per contract case, and the `adapter_contract!` macro that expands to one named `#[tokio::test]` per case inside an adapter-named module, so failures stay individually named (`claude::timeout`, `codex::privacy`, …). It runs from `tests/adapter_contract.rs`, which today holds `adapter_contract!(claude, ClaudeContract);` and `adapter_contract!(codex, CodexContract);`. The trait is named `ContractAdapter` rather than the `ContractFactory` sketch above, and its fixture builders return the fake CLI's `(stdout, exit_code)` pair because CLI adapters are driven through the existing `FakeCli`; later HTTP adapters can implement the same trait against fake listeners. A new adapter plugs in by implementing `ContractAdapter` and adding one macro line. `tests/isolation.rs` keeps only what is adapter-specific: the exact argv lists and the Windows shim tests.
+
 ## 7. Ordered PR plan
 
 Each PR covers one story, uses Conventional Commits and updates permitted `HANDOFF.md` status/notes. Do not edit AGENTS.md or either product/spec document. Record contradictions in research **Questions for the owner** and the relevant PR description.
