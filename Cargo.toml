@@ -1,0 +1,15 @@
+[package]
+name = "pumice"
+version = "0.1.0"
+edition = "2024"
+description = "Local dictation formatting service (Phase 0 stack-validation prototype)"
+license = "MIT"
+
+[dependencies]
+serde_json = "1.0"
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
