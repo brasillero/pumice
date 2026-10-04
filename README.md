@@ -17,7 +17,7 @@ Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude
 
 ## Status
 
-Pumice is in **Phase 1 (MVP)**: the service can already format dictation through Claude and Codex, but there is no release or installer yet.
+Pumice works end to end through Claude and Codex (with a fallback chain), and optionally OpenCode, but there is no release or installer yet. Run `pumice doctor` to see which CLIs it found.
 
 ### Run from source (preview)
 
