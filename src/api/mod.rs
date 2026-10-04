@@ -80,6 +80,7 @@ fn router(state: ApiState) -> Router {
     Router::new()
         .route("/v1/chat/completions", post(handlers::chat_completions))
         .route("/v1/models", get(handlers::list_models))
+        .route("/health", get(handlers::health))
         .fallback(handlers::not_found)
         .with_state(state)
 }

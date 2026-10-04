@@ -1,4 +1,4 @@
-//! Handlers for the chat-completions and model-list routes, plus the
+//! Handlers for the chat-completions, model-list and health routes, plus the
 //! OpenAI-style fallback for everything else.
 //!
 //! Dictated text flows through [`chat_completions`] but never into logs:
@@ -139,7 +139,16 @@ pub async fn list_models(State(state): State<ApiState>) -> Json<ModelList> {
     })
 }
 
-/// OpenAI-style JSON 404 for anything outside the two routes, so generic
+/// GET /health: liveness for monitors and Handy setups. Never touches the
+/// pipeline, so it stays responsive while a dictation is being formatted.
+pub async fn health() -> Json<HealthBody> {
+    Json(HealthBody {
+        status: "ok",
+        version: env!("CARGO_PKG_VERSION"),
+    })
+}
+
+/// OpenAI-style JSON 404 for anything outside the three routes, so generic
 /// clients receive an envelope they already know how to read.
 pub async fn not_found() -> Response {
     openai_error(
