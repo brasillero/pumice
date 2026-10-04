@@ -342,3 +342,21 @@ fn idempotent_over_positive_fixtures() {
         assert_eq!(once, twice, "cleanup is not idempotent for {output:?}");
     }
 }
+
+#[test]
+fn quote_rule_keeps_text_that_opens_and_closes_with_separate_quotes() {
+    let out = "\"Hi,\" she said, \"bye.\"";
+    assert_eq!(cleanup(out, "hi she said bye").unwrap(), out);
+}
+
+#[test]
+fn quote_rule_keeps_wrapped_text_with_inner_apostrophe() {
+    let out = "'it's done'";
+    assert_eq!(cleanup(out, "its done").unwrap(), out);
+}
+
+#[test]
+fn fence_with_crlf_line_endings_is_unwrapped() {
+    let out = "```\r\nFormatted text.\r\n```";
+    assert_eq!(cleanup(out, "formatted text").unwrap(), "Formatted text.");
+}

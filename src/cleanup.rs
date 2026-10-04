@@ -112,7 +112,13 @@ pub fn cleanup(output: &str, raw_text: &str) -> Result<String, CleanupError> {
             continue;
         }
         if trimmed.starts_with(open) && trimmed.ends_with(close) {
-            work = &trimmed[open.len()..trimmed.len() - close.len()];
+            let inner = &trimmed[open.len()..trimmed.len() - close.len()];
+            // `"Hi," she said, "bye."` starts and ends with a quote but is not
+            // one wrapping pair: an inner quote mark means it is quoted speech.
+            if inner.contains(open) || inner.contains(close) {
+                break;
+            }
+            work = inner;
             break;
         }
     }
@@ -165,7 +171,7 @@ fn is_preamble(line: &str) -> bool {
 /// block. Internal fences stay untouched.
 fn unwrap_enclosing_fence(t: &str) -> Option<&str> {
     let opener_end = t.find('\n')?;
-    let language = t[..opener_end].strip_prefix("```")?;
+    let language = t[..opener_end].trim_end_matches('\r').strip_prefix("```")?;
     if language.chars().any(char::is_whitespace) {
         return None;
     }
