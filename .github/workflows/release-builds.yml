@@ -1,0 +1,120 @@
+name: Release builds
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Install Linux static linker
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+      - name: Read package version
+        id: version
+        shell: bash
+        run: |
+          cargo metadata --locked --no-deps --format-version 1 > metadata.json
+          python3 - <<'PYTHON'
+          import json, os
+          with open('metadata.json', encoding='utf-8') as file:
+              metadata = json.load(file)
+          package = next(p for p in metadata['packages'] if p['name'] == 'pumice')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as file:
+              file.write(f"version={package['version']}\n")
+          PYTHON
+      # Native tests invoke only the portable fake CLI, never an AI service.
+      - name: Test native platform
+        run: cargo test --locked
+      - name: Build product executable
+        run: cargo build --release --locked --bin pumice --target ${{ matrix.target }}
+      - name: Set up MSVC dependency inspection
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Verify static Windows CRT
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $output = dumpbin /dependents target/${{ matrix.target }}/release/pumice.exe
+          if ($LASTEXITCODE -ne 0) { throw 'dumpbin failed' }
+          $text = ($output | Out-String).ToLowerInvariant()
+          foreach ($name in @('vcruntime', 'msvcp', 'ucrtbase', 'api-ms-win-crt')) {
+            if ($text.Contains($name)) { throw "CRT DLL dependency: $name" }
+          }
+      - name: Verify static Linux executable
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          binary=target/${{ matrix.target }}/release/pumice
+          readelf --program-headers "$binary" > elf-program.txt
+          readelf --dynamic "$binary" > elf-dynamic.txt
+          if grep -q INTERP elf-program.txt || grep -q NEEDED elf-dynamic.txt; then
+            echo 'Linux executable must have no dynamic interpreter or dependencies' >&2
+            exit 1
+          fi
+      - name: Package, extract and verify archive
+        shell: bash
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+          PACKAGE_TARGET: ${{ matrix.target }}
+        run: python3 .github/scripts/package-release.py
+      - name: Upload target archive and checksum
+        uses: actions/upload-artifact@v5
+        with:
+          name: package-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  collect:
+    name: Collect release archives
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      - name: Verify checksums and assemble manifest
+        env:
+          PACKAGE_VERSION: ${{ needs.package.outputs.version }}
+        run: python3 .github/scripts/package-release.py --collect
+      - uses: actions/upload-artifact@v5
+        with:
+          name: pumice-${{ needs.package.outputs.version }}-release
+          path: dist/*
+          if-no-files-found: error

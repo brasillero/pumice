@@ -1,8 +1,10 @@
 # Handoff — start here
 
-**Current phase: Phase 2 — remaining providers (v0.2): gate passed with recorded conditions.** Phase 3 (distribution) has **not** started: the owner postponed the installer, auto-update and Windows-service topic. Phase 1 is [below](#phase-1-done), Phase 0 [further below](#phase-0-done).
+**Current phase: Phase 3 — distribution: started with the owner's authorization (2026-10-04).** Phase 2 passed its gate with recorded conditions. S7.1 release archives are in progress; installer framework, startup account and update-network exception remain owner decisions. Phase 1 is [below](#phase-1-done), Phase 0 [further below](#phase-0-done).
 
 Read [`AGENTS.md`](AGENTS.md) for the rules and [`docs/spec.md`](docs/spec.md) for the full spec. The Phase 2 design, the orchestrator's decisions and the PR-by-PR plan are in [`docs/research/phase2-architecture.md`](docs/research/phase2-architecture.md). The Phase 1 architecture they build on is in [`docs/research/phase1-architecture.md`](docs/research/phase1-architecture.md). Read both before starting a Phase 2 story.
+
+**Phase 3 status:** S7.1 release archive workflow prepared in PR pending review/CI. Next: S7.5 generated changelog/release preparation, S7.2 startup, S7.4 installer/updates, then completion of S7.3 installation guide. No public release or version tag has been created; the Phase 3 gate has not passed.
 
 ## Phase 2 decisions (2026-10-04)
 
@@ -30,13 +32,13 @@ All adapters pass the same criteria: the shared contract suite (no tools, empty 
 | Detection, real | `pumice doctor`: claude 2.1.288, codex 0.160.0, opencode 1.18.34 found; antigravity missing; Kimi standby note; no quota spent |
 | OpenCode | Contract suite only. **No real call:** its only configured upstream here is Kimi (standby) |
 | Antigravity | **Protocol coverage plus safe refusal**, not executable conformance: `enabled: true` is refused, `agy` was never run |
-| Generic | Implemented in #27, **not merged** pending the owner's AGENTS.md exception |
+| Generic | Merged in #27 with the owner's approval; the matching AGENTS.md exception remains the owner's to add |
 
 **Conditions for the owner:**
-1. Approve, or reject, the loopback-only exception for the generic adapter (#27). If approved, add it to AGENTS.md and merge #27.
+1. Add the approved loopback-only exception for the generic adapter (#27) to AGENTS.md; #27 is already merged.
 2. Antigravity stays dormant until a supported per-launch tool policy exists.
 3. Pick an authorized OpenCode upstream (Zen free model or another provider) if you want OpenCode used for real.
-4. Still open from Phase 1: the Handy GUI check on Windows, a real Windows npm install, and the Handy version.
+4. Still open from Phase 1: a real Windows npm install and the Handy version. The owner's Handy GUI check passed.
 
 ## Status
 

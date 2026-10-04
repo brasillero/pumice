@@ -19,6 +19,10 @@ Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude
 
 Pumice works end to end through Claude and Codex (with a fallback chain), and optionally OpenCode, but there is no release or installer yet. Run `pumice doctor` to see which CLIs it found.
 
+### Download a preview archive
+
+The release-build workflow produces Windows x64, Linux x64, and macOS Intel/Apple Silicon archives as GitHub Actions artifacts. See [release archives](docs/releasing.md) for download, checksum and run instructions. These are unsigned preview packages; there is no installer or published release yet.
+
 ### Run from source (preview)
 
 With [Rust](https://rustup.rs/) installed:
