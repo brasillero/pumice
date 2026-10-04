@@ -63,7 +63,7 @@ Update this table in the PR that finishes each story.
 | Story | Status | PR | Notes |
 | --- | --- | --- | --- |
 | S0.1 Handy request format | Not started | | Needs the owner to configure Handy on Windows |
-| S0.2 CLI matrix | Done (pending review) | | Claude viable: median 6.5 s, ~1.9 s with thinking off. Codex 5.2 s, OpenCode 6.0 s, Kimi 5.7 s. Gateway caveat. Warm modes not measured. |
+| S0.2 CLI matrix | Done (pending review) | #2 | Claude viable: median 6.5 s, ~1.9 s with thinking off. Codex 5.2 s, OpenCode 6.0 s, Kimi 5.7 s. Gateway caveat. Warm modes not measured. |
 | S0.3 Terms of use | Not started | | |
 | S0.4 Validate the stack | Not started | | |
 | S0.5 WSL localhost | Not started | | Can run together with S0.1 |
