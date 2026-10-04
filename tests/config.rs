@@ -213,7 +213,7 @@ fn empty_file_gives_all_defaults() {
     assert_eq!(config.prompts.system, None);
     assert_eq!(config.prompts.user, None);
     assert!(!config.debug_log.enabled);
-    assert_eq!(config.providers.len(), 4);
+    assert_eq!(config.providers.len(), 5);
 
     let claude = claude(&config);
     assert!(claude.enabled);
@@ -252,6 +252,19 @@ fn empty_file_gives_all_defaults() {
     assert_eq!(opencode.timeout, Duration::from_secs(30));
     assert!(opencode.env.is_empty());
     assert!(opencode.options.is_empty());
+
+    // The generic loopback adapter is registered but off by default, with no
+    // model and no base URL.
+    let generic = config
+        .providers
+        .get("generic")
+        .expect("generic is configured");
+    assert!(!generic.enabled);
+    assert!(generic.model.is_empty());
+    assert_eq!(generic.timeout, Duration::from_secs(30));
+    assert!(generic.binary.is_none());
+    assert!(generic.env.is_empty());
+    assert!(generic.options.is_empty());
 }
 
 #[test]
@@ -1203,6 +1216,15 @@ fn example_documented_overrides_load() {
         .replace(
             "  user: null",
             "  user: |\n    Format spoken enumerations as Markdown lists.",
+        )
+        // The generic adapter's documented block: uncomment it wholesale.
+        .replace("  # generic:\n", "  generic:\n")
+        .replace("  #   enabled: true\n", "    enabled: true\n")
+        .replace("  #   model: qwen2.5-7b\n", "    model: qwen2.5-7b\n")
+        .replace("  #   options:\n", "    options:\n")
+        .replace(
+            "  #     base_url: \"http://127.0.0.1:11434/v1\"\n",
+            "      base_url: \"http://127.0.0.1:11434/v1\"\n",
         );
 
     let config = load_text(&uncommented).expect("documented overrides load");
@@ -1213,6 +1235,13 @@ fn example_documented_overrides_load() {
             .get("openai_base_url")
             .map(String::as_str),
         Some("https://your-existing-gateway.example/v1")
+    );
+    let generic = config.providers.get("generic").expect("generic loads");
+    assert!(generic.enabled);
+    assert_eq!(generic.model, "qwen2.5-7b");
+    assert_eq!(
+        generic.options.get("base_url").map(String::as_str),
+        Some("http://127.0.0.1:11434/v1")
     );
     assert_eq!(
         config.prompts.system.as_deref(),

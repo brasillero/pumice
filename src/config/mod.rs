@@ -198,18 +198,6 @@ fn validate(
         }
     }
 
-    let mut configured = BTreeMap::new();
-    for descriptor in descriptors {
-        let entry = raw
-            .providers
-            .iter()
-            .find(|(key, _)| key.value == descriptor.id);
-        configured.insert(
-            descriptor.id.to_owned(),
-            provider_settings(descriptor, entry, config_dir)?,
-        );
-    }
-
     let port = match &raw.port {
         Some(span) if span.value == 0 => {
             return Err(ConfigError::at(
@@ -220,6 +208,18 @@ fn validate(
         Some(span) => span.value,
         None => DEFAULT_PORT,
     };
+
+    let mut configured = BTreeMap::new();
+    for descriptor in descriptors {
+        let entry = raw
+            .providers
+            .iter()
+            .find(|(key, _)| key.value == descriptor.id);
+        configured.insert(
+            descriptor.id.to_owned(),
+            provider_settings(descriptor, entry, config_dir, port)?,
+        );
+    }
 
     let total_timeout = match &raw.total_timeout_secs {
         Some(span) if span.value == 0 => {
@@ -333,12 +333,16 @@ fn provider_settings(
     descriptor: &providers::ProviderDescriptor,
     entry: Option<&(Spanned<String>, raw::RawProviderSettings)>,
     config_dir: Option<&Path>,
+    port: u16,
 ) -> Result<ProviderSettings, ConfigError> {
     let mut settings = (descriptor.defaults)();
     // `defaults` leaves every provider on; `disabled_by_default` is the
     // registry's switch for providers that need explicit opt-in.
     settings.enabled = !descriptor.disabled_by_default;
-    let mut locations = providers::ProviderLocations::default();
+    let mut locations = providers::ProviderLocations {
+        port,
+        ..providers::ProviderLocations::default()
+    };
     if let Some((key, raw)) = entry {
         let base = format!("providers.{}", key.value);
         locations.provider = Some(key.referenced);

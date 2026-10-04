@@ -11,6 +11,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 pub mod adapter_contract;
+pub mod fake_http;
 pub mod test_provider;
 
 /// Path of the fake CLI built by Cargo for this test run.

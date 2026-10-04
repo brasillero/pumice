@@ -80,6 +80,12 @@ pub struct ProviderLocations {
     pub binary: Option<Location>,
     /// Each option value's location, keyed by option name.
     pub options: BTreeMap<String, Location>,
+    /// The port Pumice itself listens on. Adapters that call out (the generic
+    /// loopback adapter) must reject endpoints pointing back at it, to prevent
+    /// recursive requests. `Default` is 0, which no validated endpoint port
+    /// (1–65535) can equal, so direct construction without the loader stays
+    /// safe.
+    pub port: u16,
 }
 
 /// What the registry knows about one provider.
@@ -156,7 +162,7 @@ macro_rules! register_providers {
     };
 }
 
-register_providers!(claude, codex, opencode, antigravity);
+register_providers!(claude, codex, opencode, antigravity, generic);
 
 /// Looks up a provider by ID.
 pub fn descriptor(id: &str) -> Option<&'static ProviderDescriptor> {

@@ -52,7 +52,7 @@ Update this table in the PR that finishes each story. Order follows the plan in 
 | 6 | S2.7 Generic loopback adapter | Done (awaiting owner approval) | #27 (open) | Implemented, CI green on 3 OSes; not merged until the owner approves a loopback-only exception to the AGENTS.md outbound-call rule |
 | 7 | S2.8 part 2: `pumice doctor` | Done | #29 | `doctor` renders a fresh detection report (found/missing + install hints + warnings + Kimi standby note), exit 0/1/2; `--login-check --provider <id>` is the only quota-bearing path: one fixed call through the selected provider, no fallback, text-free result |
 | 8 | S6.4 follow-up: Phase 2 config examples | Done | #25, #26 (#27) | Delivered with the adapters: commented `opencode` block, Antigravity note; the `generic` block ships with #27. Example-config tests cover them |
-| 9 | S8.3 follow-up: Phase 2 gate | Done | (this PR) | Gate evidence below |
+| 9 | S8.3 follow-up: Phase 2 gate | Done | #30 | Gate evidence below |
 
 ## Phase 1 (done)
 

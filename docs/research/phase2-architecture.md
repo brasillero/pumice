@@ -462,6 +462,10 @@ Accept HTTP 200 with one assistant choice, string content and successful final c
 
 `NotInstalled` and `NotLoggedIn` are CLI-specific and do not describe this transport.
 
+> **S2.7 status (2026-10-04):** implemented per this section (`src/providers/generic.rs`,
+> fake-HTTP tests in `tests/generic.rs`); the PR stays open, unmerged, pending the
+> owner's AGENTS.md exception for unauthenticated loopback HTTP.
+
 ## 4. Registry and configuration
 
 ### Descriptor additions
