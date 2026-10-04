@@ -3,14 +3,15 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use pumice::config::{self, Config, ConfigSource, DEFAULT_PORT};
 use pumice::process::ProcessRunner;
-use pumice::providers::{self, ProviderSettings};
+use pumice::providers::{self, ProviderDescriptor, ProviderSettings};
 use tempfile::TempDir;
 
 const CONFIG_NAME: &str = "pumice.yaml";
@@ -60,6 +61,133 @@ fn codex(config: &Config) -> &ProviderSettings {
 
 fn no_env(_: &str) -> Option<OsString> {
     None
+}
+
+/// Synthetic provider descriptors exercising registry capabilities
+/// (default-off behavior, risk warnings, full-settings validation) against
+/// `config::validate_text_with_descriptors`, leaving the built-in registry
+/// untouched.
+mod capability_probe {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use pumice::config::ConfigError;
+    use pumice::process::ProcessRunner;
+    use pumice::providers::{
+        Provider, ProviderDescriptor, ProviderLocations, ProviderSettings, RawOption,
+    };
+    use serde_saphyr::Location;
+
+    /// How often `COUNTING.validate_settings` ran. Dedicated to one test so
+    /// parallel tests never observe each other's counts.
+    pub static COUNT_VALIDATIONS: AtomicUsize = AtomicUsize::new(0);
+
+    /// The OpenCode shape: off by default, and `enabled` without an explicit
+    /// `model` is rejected at the `enabled` line.
+    pub const PROBE: ProviderDescriptor = ProviderDescriptor {
+        id: "probe",
+        defaults: probe_defaults,
+        allowed_env: &[],
+        validate_options: probe_validate_options,
+        build: probe_build,
+        disabled_by_default: true,
+        risk_warning: Some("the probe formats nothing and is not real"),
+        validate_settings: probe_validate_settings,
+    };
+
+    /// The same model requirement without the opt-in: even an absent entry
+    /// is validated, and with no `enabled` line the error has no position.
+    pub const BARE: ProviderDescriptor = ProviderDescriptor {
+        id: "bare",
+        defaults: probe_defaults,
+        allowed_env: &[],
+        validate_options: probe_validate_options,
+        build: probe_build,
+        disabled_by_default: false,
+        risk_warning: None,
+        validate_settings: bare_validate_settings,
+    };
+
+    /// Validates quietly when left disabled; exists only to be counted.
+    pub const COUNTING: ProviderDescriptor = ProviderDescriptor {
+        id: "counting",
+        defaults: probe_defaults,
+        allowed_env: &[],
+        validate_options: probe_validate_options,
+        build: probe_build,
+        disabled_by_default: true,
+        risk_warning: None,
+        validate_settings: counting_validate_settings,
+    };
+
+    fn probe_defaults() -> ProviderSettings {
+        ProviderSettings {
+            enabled: true, // the loader replaces this per `disabled_by_default`
+            binary: None,
+            model: String::new(),
+            timeout: Duration::from_secs(30),
+            env: BTreeMap::new(),
+            options: BTreeMap::new(),
+        }
+    }
+
+    fn probe_validate_options(options: &[RawOption<'_>]) -> Result<(), ConfigError> {
+        if let Some(option) = options.first() {
+            return Err(ConfigError::at(
+                option.key_at,
+                format!(
+                    "option {} is not supported by the test provider",
+                    option.key
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn probe_build(
+        _settings: &ProviderSettings,
+        _runner: Arc<ProcessRunner>,
+    ) -> Result<Arc<dyn Provider>, ConfigError> {
+        panic!("the probe descriptors are never built")
+    }
+
+    fn probe_validate_settings(
+        settings: &ProviderSettings,
+        locations: &ProviderLocations,
+    ) -> Result<(), ConfigError> {
+        model_required_when_enabled("probe", settings, locations)
+    }
+
+    fn bare_validate_settings(
+        settings: &ProviderSettings,
+        locations: &ProviderLocations,
+    ) -> Result<(), ConfigError> {
+        model_required_when_enabled("bare", settings, locations)
+    }
+
+    fn counting_validate_settings(
+        settings: &ProviderSettings,
+        locations: &ProviderLocations,
+    ) -> Result<(), ConfigError> {
+        COUNT_VALIDATIONS.fetch_add(1, Ordering::SeqCst);
+        model_required_when_enabled("counting", settings, locations)
+    }
+
+    fn model_required_when_enabled(
+        id: &str,
+        settings: &ProviderSettings,
+        locations: &ProviderLocations,
+    ) -> Result<(), ConfigError> {
+        if settings.enabled && settings.model.is_empty() {
+            return Err(ConfigError::at(
+                locations.enabled.unwrap_or(Location::UNKNOWN),
+                format!("providers.{id}.model is required when the provider is enabled"),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[test]
@@ -657,6 +785,106 @@ fn registry_builds_enabled_providers_from_config() {
         .expect("providers build");
     let ids: Vec<&str> = built.iter().map(|provider| provider.id()).collect();
     assert_eq!(ids, ["claude", "codex"]);
+}
+
+/// Registry slice for the capability tests: a synthetic probe plus the real
+/// Claude descriptor, which stays enabled and remains the implicit default
+/// provider.
+fn probe_registry() -> [ProviderDescriptor; 2] {
+    [
+        capability_probe::PROBE,
+        *providers::descriptor("claude").expect("claude is registered"),
+    ]
+}
+
+fn load_with_descriptors(text: &str, descriptors: &[ProviderDescriptor]) -> Result<Config, String> {
+    config::validate_text_with_descriptors(text, Path::new(CONFIG_NAME), descriptors)
+        .map_err(|error| error.to_string())
+}
+
+#[test]
+fn disabled_by_default_provider_is_off_until_enabled() {
+    let descriptors = probe_registry();
+    let config = load_with_descriptors("", &descriptors).expect("defaults load");
+    let probe = config.providers.get("probe").expect("probe is configured");
+    assert!(!probe.enabled);
+    assert!(
+        claude(&config).enabled,
+        "claude is unaffected by the probe descriptor"
+    );
+
+    let config = load_with_descriptors(
+        "providers:\n  probe:\n    enabled: true\n    model: test/model\n",
+        &descriptors,
+    )
+    .expect("explicit enablement loads");
+    let probe = config.providers.get("probe").expect("probe is configured");
+    assert!(probe.enabled);
+    assert_eq!(probe.model, "test/model");
+}
+
+#[test]
+fn full_settings_validation_runs_without_a_yaml_entry() {
+    let descriptors = [
+        capability_probe::COUNTING,
+        *providers::descriptor("claude").expect("claude is registered"),
+    ];
+    capability_probe::COUNT_VALIDATIONS.store(0, Ordering::SeqCst);
+    let config = load_with_descriptors("", &descriptors).expect("defaults load");
+    assert!(!config.providers["counting"].enabled);
+    assert_eq!(
+        capability_probe::COUNT_VALIDATIONS.load(Ordering::SeqCst),
+        1,
+        "the validator ran for a provider with no YAML entry"
+    );
+}
+
+#[test]
+fn enabled_without_a_model_is_rejected_at_the_enabled_line() {
+    let descriptors = probe_registry();
+    let error = load_with_descriptors("providers:\n  probe:\n    enabled: true\n", &descriptors)
+        .expect_err("enabled without a model fails");
+    assert!(
+        error.contains(":3:14: providers.probe.model is required when the provider is enabled"),
+        "{error}"
+    );
+    assert!(
+        error.contains(CONFIG_NAME),
+        "error names the file:\n{error}"
+    );
+}
+
+#[test]
+fn missing_field_without_an_entry_reports_file_and_path_without_a_line() {
+    let descriptors = [
+        capability_probe::BARE,
+        *providers::descriptor("claude").expect("claude is registered"),
+    ];
+    let error = load_with_descriptors("", &descriptors).expect_err("no model fails");
+    assert_eq!(
+        error,
+        format!("{CONFIG_NAME}: providers.bare.model is required when the provider is enabled")
+    );
+}
+
+#[test]
+fn risk_warnings_render_only_for_enabled_providers() {
+    let descriptors = probe_registry();
+    let config = load_with_descriptors(
+        "providers:\n  probe:\n    enabled: true\n    model: test/model\n",
+        &descriptors,
+    )
+    .expect("config loads");
+    assert_eq!(
+        providers::risk_warnings(&config, &descriptors),
+        ["warning: probe: the probe formats nothing and is not real"]
+    );
+
+    let config = load_with_descriptors("", &descriptors).expect("defaults load");
+    assert!(
+        providers::risk_warnings(&config, &descriptors).is_empty(),
+        "a disabled provider prints no warning"
+    );
 }
 
 #[test]
