@@ -1,64 +1,53 @@
 # Handoff — start here
 
-**Current phase: Phase 0 — Investigation.** No product code yet. The goal of this phase is to answer the open technical questions before building the MVP.
+**Current phase: Phase 1 — MVP (v0.1).** Phase 0 is complete (see [below](#phase-0-done)). Phase 1 replaces the throwaway prototype with the real service.
 
-Read [`AGENTS.md`](AGENTS.md) for the rules and [`docs/spec.md`](docs/spec.md) for the full spec (stories S0.1 to S0.5 are the ones in scope now).
+Read [`AGENTS.md`](AGENTS.md) for the rules and [`docs/spec.md`](docs/spec.md) for the full spec. The Phase 1 architecture, crate choices, config schema and PR-by-PR plan are in [`docs/research/phase1-architecture.md`](docs/research/phase1-architecture.md). Read it before starting any Phase 1 story.
 
-## Phase 0 gate
+## Owner decisions for Phase 1 (2026-10-04)
 
-Phase 1 (the v0.1 MVP) starts only when both are true:
+These change the spec's phasing. The spec itself is unchanged; product-doc updates are up to the owner.
 
-1. The request format Handy sends to a Custom endpoint is documented (S0.1).
-2. At least one CLI, Claude, is confirmed viable: it can be called non-interactively, without tools, within the 30 s target (S0.2 and S0.4).
+- **Modular adapters:** a new CLI is a new module behind a common interface (S2.1), plus one registry entry.
+- **Two adapters in Phase 1:** Claude (S2.2) and **Codex (S2.3)**. Codex moved up from Phase 2. OpenCode, Antigravity, the generic adapter and auto-detection come later.
+- **Fallback chain (S4.2) is in Phase 1:** after the selected provider fails, try the next in `fallback_order`, then return raw text, all within the total timeout.
+- **Kimi is on standby:** its subscription terms allow interactive use only (S0.3). No Kimi adapter.
+- **Default port: 7567** (S1.5). Handy points at `http://127.0.0.1:7567/v1`.
+- **Claude thinking off by default** (`MAX_THINKING_TOKENS=0`). Effort tuning and Handy's `reasoning_effort` field come later.
+- **Plan quota is intended:** Pumice runs on the user's subscription through the official CLIs.
+- **Later (Phase 3):** installer, auto-update and running as a Windows service.
 
-## Stories in this phase
+## Phase 1 gate
 
-Each story produces a research note in `docs/research/`. Every note ends with two sections: **Findings** (what was confirmed, with evidence) and **Questions for the owner** (anything that needs a human decision).
-
-### S0.1 — Handy request format
-
-Deliverable: `docs/research/S0.1-handy-request.md`
-
-- Build a throwaway HTTP listener that accepts any route and logs method, path, headers and body, then replies with a minimal valid OpenAI chat completion (echoing the input text). It can live in the S0.4 prototype.
-- The owner configures Handy on Windows (Settings > Advanced > Experimental Features > Post Processing, provider **Custom**, base URL pointing at the listener) and triggers a dictation with the post-processing hotkey. Write clear step-by-step instructions for the owner in the note; the agent cannot operate the Windows GUI.
-- Answer: route(s) called, whether `/v1/models` is called, how the prompt is sent (all in a user message, or with a separate system message), whether structured output is requested, whether `stream: true` is used, whether the language is sent, and what Handy does with the response.
-- Redact any real dictated text in the note.
-
-### S0.2 — Non-interactive mode of each CLI
-
-Deliverable: `docs/research/S0.2-cli-matrix.md`
-
-- Ask the owner which CLIs are installed and logged in inside WSL. Start with Claude.
-- For each available CLI, fill a table with: version, non-interactive command, how to pass a system prompt, how to disable tools, output format (plain text or JSON), how to tell "not installed" from "not logged in", and whether a server or warm mode exists.
-- Measure latency with one fixed sample text: median of 5 cold runs, plus warm runs if a server mode exists.
-- CLIs to cover: Claude (`claude -p`), Codex (`codex exec`), OpenCode (`opencode run`), Kimi (command to be confirmed) and Antigravity (`agy -p`). **Antigravity is high risk** (reports of Google accounts banned for automation): only document it from public docs, do not run it unless the owner explicitly says so.
-
-### S0.3 — Terms of use
-
-Deliverable: `docs/research/S0.3-terms.md`
-
-- For each provider, link the official terms or docs that cover non-interactive or scripted personal use of its CLI, summarize the rule, and note any quota limits.
-- Mark each provider as OK, unclear or risky. This is a summary for the owner, not legal advice.
-
-### S0.4 — Validate the stack
-
-Deliverables: a minimal Rust prototype and `docs/research/S0.4-stack.md`
-
-- Create the Cargo project for Pumice with a prototype binary that spawns `claude -p` in an empty temp directory, passes a sample text and reads the response.
-- Add a GitHub Actions workflow that builds on Windows, Linux and macOS. On Windows, use the MSVC target with a statically linked C runtime.
-- Confirm the Windows executable has no runtime dependencies beyond what ships with Windows (for example, check its imported DLLs).
-- In the note, record the path to an installer and auto-update with Tauri for Phase 3. Research only, no implementation.
-
-### S0.5 — Handy on Windows, Pumice in WSL
-
-Deliverable: `docs/research/S0.5-wsl-localhost.md`
-
-- Check that a listener bound to `127.0.0.1` inside WSL is reachable from Windows at `http://localhost:<port>`. This can be done together with S0.1, since Handy on Windows will be calling the listener in WSL.
-- Document the WSL networking mode in use and any setting the owner needs to change.
+A dictation formatted end to end through Handy, **with both Claude and Codex**, plus a working fallback (another provider, or raw text when all fail). Owner steps: section 7 of the architecture doc.
 
 ## Status
 
-Update this table in the PR that finishes each story.
+Update this table in the PR that finishes each story. Merge order follows the table; see the architecture doc for dependencies and what can run in parallel.
+
+| # | Story | Status | PR | Notes |
+| --- | --- | --- | --- | --- |
+| 1 | S8.2 Fake CLI; remove the prototype | Not started | | Portable Rust fake CLI (`pumice-test-cli`) |
+| 2 | S2.1 + S2.2 Provider interface and Claude adapter | Not started | | Shared process runner, process-tree kill |
+| 3 | S6.1 + S1.5 YAML config and default port | Not started | | `serde-saphyr`, exact line numbers, port 7567 |
+| 4 | S2.3 Codex adapter | Not started | | Keeps `--ignore-user-config`; allows only `openai_base_url` |
+| 5 | S3.1 + S3.3 Adapter instruction and prompt composition | Not started | | |
+| 6 | S3.2 Optional Pumice prompts | Not started | | |
+| 7 | S3.4 Output cleanup | Not started | | |
+| 8 | S4.1 Timeouts | Not started | | |
+| 9 | S4.3 Raw-text fallback | Not started | | |
+| 9b | S4.2 Fallback chain | Not started | | |
+| 10 | S1.1 + S5.3 Chat completions on loopback | Not started | | `axum` + `tokio` |
+| 11 | S1.2 + S6.2 Model list and provider selection | Not started | | |
+| 12 | S1.3 Health route | Not started | | |
+| 13 | S1.4 Debug log | Not started | | |
+| 14 | S5.1 + S5.2 CLI isolation and Windows shims | Not started | | |
+| 15 | S6.4 Example config | Not started | | |
+| 16 | S8.3 Phase 1 CI and gate | Not started | | |
+
+## Phase 0 (done)
+
+Phase 0 answered the open technical questions. Each story has a research note in `docs/research/` with **Findings** and **Questions for the owner**.
 
 | Story | Status | PR | Notes |
 | --- | --- | --- | --- |
@@ -67,7 +56,3 @@ Update this table in the PR that finishes each story.
 | S0.3 Terms of use | Done | #1 | Claude: unclear; Codex: OK; Kimi: risky (subscription is interactive-only); OpenCode: unclear; Antigravity: risky. June 2026 headless quota split is paused. |
 | S0.4 Validate the stack | Done | #3 | Rust prototype: `pumice listen` (for S0.1) and `pumice claude-probe` (real call 2.8 s). CI on 3 OSes with a Windows CRT DLL check. |
 | S0.5 WSL localhost | Done | #5 | Works in NAT mode with no changes. Use `127.0.0.1` in Handy: `localhost` first tries IPv6 `::1`, which is not forwarded (~2 s delay). |
-
-## After Phase 0
-
-Phase 1 (v0.1) covers the OpenAI-compatible server (E1), the Claude adapter (S2.1, S2.2), prompts and cleanup (E3), timeout with raw-text fallback (S4.1, S4.3), security (E5), the config file (S6.1, S6.2, S6.4) and the fake CLI with tests (S8.2, S8.3). Its gate: a dictation formatted end to end through Handy. This file will be updated with the Phase 1 plan once the Phase 0 gate is met.
