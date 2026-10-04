@@ -2,6 +2,7 @@
 
 mod support;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,7 +32,11 @@ fn fake_claude(stdout: &str, exit_code: i32) -> FakeCli {
 
 fn provider(fake: &FakeCli) -> CliProvider<ClaudeAdapter> {
     CliProvider::new(
-        ClaudeAdapter::new(fake.path().to_path_buf(), "haiku".to_owned()),
+        ClaudeAdapter::new(
+            fake.path().to_path_buf(),
+            "haiku".to_owned(),
+            BTreeMap::new(),
+        ),
         Arc::new(ProcessRunner::new()),
         Duration::from_secs(30),
     )

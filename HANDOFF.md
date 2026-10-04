@@ -29,7 +29,7 @@ Update this table in the PR that finishes each story. Merge order follows the ta
 | --- | --- | --- | --- | --- |
 | 1 | S8.2 Fake CLI; remove the prototype | Done | #7 | Portable Rust fake CLI (`pumice-test-cli`) driven by `<exe>.scenario.json`; prototype removed |
 | 2 | S2.1 + S2.2 Provider interface and Claude adapter | Done (pending review) | | `Provider` trait and registry, shared `ProcessRunner` (process group / Job Object, bounded pipes, 250 ms exit grace), restricted Claude adapter |
-| 3 | S6.1 + S1.5 YAML config and default port | Not started | | `serde-saphyr`, exact line numbers, port 7567 |
+| 3 | S6.1 + S1.5 YAML config and default port | Done (pending review) | | `serde-saphyr` with `file:line:column` errors, per-user lookup, `pumice check-config`; port 7567 |
 | 4 | S2.3 Codex adapter | Not started | | Keeps `--ignore-user-config`; allows only `openai_base_url` |
 | 5 | S3.1 + S3.3 Adapter instruction and prompt composition | Done (pending review) | | Fixed instruction, transcript extraction, lossless Handy reconstruction, plain-text envelope escaping; pure functions + tests |
 | 6 | S3.2 Optional Pumice prompts | Not started | | |

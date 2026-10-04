@@ -2,6 +2,7 @@
 //! these modules so the logic can be tested directly.
 
 pub mod cleanup;
+pub mod config;
 pub mod process;
 pub mod prompts;
 pub mod providers;

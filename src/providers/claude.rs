@@ -6,6 +6,7 @@
 //! envelope whose `result` holds the text.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,7 +16,9 @@ use serde_json::Value;
 use super::cli::{CliAdapter, CliProvider};
 use super::{
     FormatInput, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode, ProviderSettings,
+    RawOption,
 };
+use crate::config::ConfigError;
 use crate::process::{Argument, CliInvocation, ControlFile, ProcessOutput, ProcessRunner, ProgramSpec};
 
 pub const ID: &str = "claude";
@@ -28,26 +31,52 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// `Not logged in · Please run /login`; only its stable start is matched.
 const NOT_LOGGED_IN_PREFIX: &str = "Not logged in";
 
+/// Non-secret routing variables the configuration may set for this provider.
+const ALLOWED_ENV: &[&str] = &["ANTHROPIC_BASE_URL"];
+
 pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: ID,
     defaults,
+    allowed_env: ALLOWED_ENV,
+    validate_options,
     build,
 };
 
 fn defaults() -> ProviderSettings {
     ProviderSettings {
-        binary: PathBuf::from(DEFAULT_BINARY),
+        enabled: true,
+        binary: None,
         model: DEFAULT_MODEL.to_owned(),
         timeout: DEFAULT_TIMEOUT,
+        env: BTreeMap::new(),
+        options: BTreeMap::new(),
     }
 }
 
-fn build(settings: &ProviderSettings, runner: Arc<ProcessRunner>) -> Arc<dyn Provider> {
-    Arc::new(CliProvider::new(
-        ClaudeAdapter::new(settings.binary.clone(), settings.model.clone()),
+/// Claude accepts no adapter options in Phase 1.
+fn validate_options(options: &[RawOption<'_>]) -> Result<(), ConfigError> {
+    if let Some(option) = options.first() {
+        return Err(ConfigError::at(
+            option.key_at,
+            format!("providers.{ID}.options.{} is not supported", option.key),
+        ));
+    }
+    Ok(())
+}
+
+fn build(
+    settings: &ProviderSettings,
+    runner: Arc<ProcessRunner>,
+) -> Result<Arc<dyn Provider>, ConfigError> {
+    let binary = settings
+        .binary
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_BINARY));
+    Ok(Arc::new(CliProvider::new(
+        ClaudeAdapter::new(binary, settings.model.clone(), settings.env.clone()),
         runner,
         settings.timeout,
-    ))
+    )))
 }
 
 /// Builds restricted `claude -p` calls.
@@ -55,13 +84,15 @@ fn build(settings: &ProviderSettings, runner: Arc<ProcessRunner>) -> Arc<dyn Pro
 pub struct ClaudeAdapter {
     binary: PathBuf,
     model: String,
+    /// Non-secret routing overrides forwarded to the CLI.
+    env: BTreeMap<String, String>,
 }
 
 impl ClaudeAdapter {
     /// `binary` is a command name looked up on PATH (normally `claude`) or a
     /// path to the official CLI.
-    pub fn new(binary: PathBuf, model: String) -> ClaudeAdapter {
-        ClaudeAdapter { binary, model }
+    pub fn new(binary: PathBuf, model: String, env: BTreeMap<String, String>) -> ClaudeAdapter {
+        ClaudeAdapter { binary, model, env }
     }
 }
 
@@ -100,6 +131,16 @@ impl CliAdapter for ClaudeAdapter {
         let user = input.user_prompt;
         let stdin = [user.before_text, input.text, user.after_text].concat();
 
+        // Configured routing overrides first; adapter-owned variables (such
+        // as thinking-off) always win.
+        let mut env: BTreeMap<OsString, OsString> = self
+            .env
+            .iter()
+            .map(|(key, value)| (OsString::from(key.as_str()), OsString::from(value.as_str())))
+            .collect();
+        // Thinking off: it dominated latency in S0.2 (owner decision).
+        env.insert(OsString::from("MAX_THINKING_TOKENS"), OsString::from("0"));
+
         Ok(CliInvocation {
             program: ProgramSpec {
                 binary: self.binary.clone(),
@@ -108,8 +149,7 @@ impl CliAdapter for ClaudeAdapter {
             },
             args,
             stdin: stdin.into_bytes(),
-            // Thinking off: it dominated latency in S0.2 (owner decision).
-            env: BTreeMap::from([("MAX_THINKING_TOKENS".into(), "0".into())]),
+            env,
             remove_env: Vec::new(),
             control_files: vec![ControlFile {
                 name: "system.txt",
