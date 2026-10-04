@@ -29,19 +29,19 @@ Update this table in the PR that finishes each story. Merge order follows the ta
 | --- | --- | --- | --- | --- |
 | 1 | S8.2 Fake CLI; remove the prototype | Done | #7 | Portable Rust fake CLI (`pumice-test-cli`) driven by `<exe>.scenario.json`; prototype removed |
 | 2 | S2.1 + S2.2 Provider interface and Claude adapter | Done | #8 | `Provider` trait and registry, shared `ProcessRunner` (process group / Job Object, bounded pipes, 250 ms exit grace), restricted Claude adapter |
-| 3 | S6.1 + S1.5 YAML config and default port | Done (pending review) | | `serde-saphyr` with `file:line:column` errors, per-user lookup, `pumice check-config`; port 7567 |
-| 4 | S2.3 Codex adapter | Done (pending review) | | Restricted `exec` invocation with TOML-quoted control file; only `openai_base_url` option, no env overrides |
+| 3 | S6.1 + S1.5 YAML config and default port | Done | #11 | `serde-saphyr` with `file:line:column` errors, per-user lookup, `pumice check-config`; port 7567 |
+| 4 | S2.3 Codex adapter | Done | #14 | Restricted `exec` invocation with TOML-quoted control file; only `openai_base_url` option, no env overrides |
 | 5 | S3.1 + S3.3 Adapter instruction and prompt composition | Done | #10 | Fixed instruction, transcript extraction, lossless Handy reconstruction, plain-text envelope escaping; pure functions + tests |
-| 6 | S3.2 Optional Pumice prompts | Done (pending review) | | `compose_with_settings` wires `PromptSettings` into composition; block-scalar, whitespace-only and fake-CLI order tests |
+| 6 | S3.2 Optional Pumice prompts | Done | #12 | `compose_with_settings` wires `PromptSettings` into composition; block-scalar, whitespace-only and fake-CLI order tests |
 | 7 | S3.4 Output cleanup | Done | #9 | `cleanup` pure function + tests; preservation guard on every rule, idempotence over positive fixtures |
-| 8 | S4.1 Timeouts | Done (pending review) | | `pipeline.rs`: total budget with response reserve, provider cap + hard stop, fake-CLI deadline tests |
-| 9 | S4.3 Raw-text fallback | Done (pending review) | | `pipeline.rs` outcomes: exact raw text for unknown/disabled/busy/budget/provider/cleanup failures |
-| 9b | S4.2 Fallback chain | Done (pending review) | | `pipeline.rs` walks `fallback_order` within the total budget; skips duplicates/disabled/unbuilt; `FormatOutcome.attempts`; raw fallback carries the last failure |
-| 10 | S1.1 + S5.3 Chat completions on loopback | Not started | | `axum` + `tokio` |
+| 8 | S4.1 Timeouts | Done | #13 | `pipeline.rs`: total budget with response reserve, provider cap + hard stop, fake-CLI deadline tests |
+| 9 | S4.3 Raw-text fallback | Done | #13 | `pipeline.rs` outcomes: exact raw text for unknown/disabled/busy/budget/provider/cleanup failures |
+| 9b | S4.2 Fallback chain | Done | #15 | `pipeline.rs` walks `fallback_order` within the total budget; skips duplicates/disabled/unbuilt; `FormatOutcome.attempts`; raw fallback carries the last failure |
+| 10 | S1.1 + S5.3 Chat completions on loopback | Done (pending review) | | axum + tokio; exact routes, 10 MiB/5 s body bounds, SSE, loopback bind, port-taken exit 1 |
 | 11 | S1.2 + S6.2 Model list and provider selection | Not started | | |
 | 12 | S1.3 Health route | Not started | | |
 | 13 | S1.4 Debug log | Not started | | |
-| 14 | S5.1 + S5.2 CLI isolation and Windows shims | Done (pending review) | | npm `.cmd` shim translation to direct node launch + all-adapter isolation contract tests; Codex residual-risk acceptance left to owner |
+| 14 | S5.1 + S5.2 CLI isolation and Windows shims | Done | #16 | npm `.cmd` shim translation to direct node launch + all-adapter isolation contract tests; Codex residual-risk acceptance left to owner |
 | 15 | S6.4 Example config | Not started | | |
 | 16 | S8.3 Phase 1 CI and gate | Not started | | |
 

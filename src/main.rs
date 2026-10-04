@@ -1,13 +1,18 @@
 //! Pumice command-line entry point.
 //!
-//! Phase 1 is in progress: `check-config` validates and summarizes the
-//! configuration. The `serve` command (the local OpenAI-compatible service)
-//! is not implemented yet.
+//! `serve` runs the local OpenAI-compatible dictation-formatting service on
+//! IPv4 loopback; `check-config` validates and summarizes the configuration.
 
+use std::io;
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::Arc;
 
+use pumice::api;
 use pumice::config::{self, ConfigSource, LoadedConfig};
+use pumice::pipeline::Pipeline;
+use pumice::process::ProcessRunner;
+use pumice::providers;
 
 const USAGE: &str = "\
 pumice - local dictation formatting service
@@ -16,7 +21,7 @@ usage:
   pumice --help                          print this help
   pumice --version                       print the version
   pumice check-config [--config <path>]  validate and summarize the configuration
-  pumice serve [--config <path>]         run the local service (not implemented yet)
+  pumice serve [--config <path>]         run the local service on 127.0.0.1
 ";
 
 fn main() -> ExitCode {
@@ -32,11 +37,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         ["check-config", rest @ ..] => check_config(rest),
-        ["serve", ..] => {
-            eprintln!("error: `serve` is not implemented yet\n");
-            eprint!("{USAGE}");
-            ExitCode::from(2)
-        }
+        ["serve", rest @ ..] => serve(rest),
         [] => {
             eprint!("{USAGE}");
             ExitCode::from(2)
@@ -49,24 +50,101 @@ fn main() -> ExitCode {
     }
 }
 
-fn check_config(args: &[&str]) -> ExitCode {
+/// `--config` handling is shared with `check-config`: same errors, same
+/// exit code 2.
+fn load_config(args: &[&str], command: &str) -> Result<LoadedConfig, ExitCode> {
     let explicit = match args {
         [] => None,
         ["--config", path] => Some(Path::new(path)),
         _ => {
-            eprintln!("error: usage: pumice check-config [--config <path>]\n");
-            return ExitCode::from(2);
+            eprintln!("error: usage: pumice {command} [--config <path>]\n");
+            return Err(ExitCode::from(2));
         }
     };
-    match config::load(explicit) {
+    config::load(explicit).map_err(|error| {
+        eprintln!("{error}");
+        ExitCode::from(2)
+    })
+}
+
+fn check_config(args: &[&str]) -> ExitCode {
+    match load_config(args, "check-config") {
         Ok(loaded) => {
             print_summary(&loaded);
             ExitCode::SUCCESS
         }
+        Err(code) => code,
+    }
+}
+
+fn serve(args: &[&str]) -> ExitCode {
+    let loaded = match load_config(args, "serve") {
+        Ok(loaded) => loaded,
+        Err(code) => return code,
+    };
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("error: cannot start the async runtime: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    runtime.block_on(run_service(loaded))
+}
+
+async fn run_service(loaded: LoadedConfig) -> ExitCode {
+    let config = loaded.config.clone();
+    let runner = Arc::new(ProcessRunner::new());
+    let providers = match providers::build_from_config(&config, runner) {
+        Ok(providers) => providers,
         Err(error) => {
             eprintln!("{error}");
-            ExitCode::from(2)
+            return ExitCode::from(2);
         }
+    };
+    let pipeline = Arc::new(Pipeline::new(&config, providers));
+    let enabled_models: Vec<String> = config
+        .providers
+        .iter()
+        .filter(|(_, settings)| settings.enabled)
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    // Bind before serving so an occupied port fails at startup with an
+    // actionable message instead of after the event loop starts.
+    let listener = match api::bind(config.port).await {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+            eprintln!(
+                "error: port {} on 127.0.0.1 is already in use. Change \"port\" in {}.",
+                config.port,
+                config_location(&loaded.source)
+            );
+            return ExitCode::from(1);
+        }
+        Err(error) => {
+            eprintln!("error: cannot listen on 127.0.0.1:{}: {error}", config.port);
+            return ExitCode::from(1);
+        }
+    };
+
+    println!("pumice listening on http://127.0.0.1:{}/v1", config.port);
+    match api::serve(listener, pipeline, enabled_models, Arc::new(api::StderrLog)).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: the service stopped unexpectedly: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn config_location(source: &ConfigSource) -> String {
+    match source {
+        ConfigSource::File(path) => path.display().to_string(),
+        ConfigSource::BuiltInDefaults => "the configuration file".to_owned(),
     }
 }
 

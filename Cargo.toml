@@ -19,6 +19,10 @@ test = false
 bench = false
 
 [dependencies]
+# HTTP API (S1.1): HTTP/1 only, no tower-http, no tracing.
+axum = { version = "0.8.9", default-features = false, features = [
+    "http1", "json", "tokio",
+] }
 process-wrap = { version = "10.0.1", default-features = false, features = [
     "tokio1", "kill-on-drop", "process-group", "job-object", "creation-flags",
 ] }
@@ -30,15 +34,13 @@ serde-saphyr = { version = "1.3.0", default-features = false, features = [
 serde_json = "1"
 tempfile = "3"
 tokio = { version = "1.53.2", features = [
-    "rt", "time", "io-util", "process", "sync",
+    "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync",
+    "time",
 ] }
 
 [target.'cfg(unix)'.dependencies]
 # `waitid(WNOWAIT)`: observe the CLI's exit without reaping it (src/process/tree.rs).
 libc = "0.2.190"
-
-[dev-dependencies]
-tokio = { version = "1.53.2", features = ["macros", "rt"] }
 
 [profile.release]
 lto = true

@@ -761,13 +761,31 @@ fn check_config_rejects_bad_arguments() {
 }
 
 #[test]
-fn serve_is_still_not_implemented() {
-    let output = run_pumice(&["serve"]);
+fn serve_rejects_bad_arguments() {
+    let output = run_pumice(&["serve", "--bogus"]);
     assert_eq!(output.status.code(), Some(2));
     assert!(
-        stderr(&output).contains("not implemented"),
+        stderr(&output).contains("usage: pumice serve"),
         "{}",
         stderr(&output)
+    );
+
+    let output = run_pumice(&["serve", "extra"]);
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn serve_reports_config_errors_like_check_config() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join(CONFIG_NAME);
+    fs::write(&path, "providers:\n  claude:\n    timeout_secs: 0\n").expect("write config");
+
+    let output = run_pumice(&["serve", "--config", path.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = stderr(&output);
+    assert!(
+        stderr.contains("providers.claude.timeout_secs must be greater than zero"),
+        "{stderr}"
     );
 }
 
