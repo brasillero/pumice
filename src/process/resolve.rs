@@ -111,7 +111,10 @@ fn translate_npm_shim(
         return Err(unsupported_shim());
     };
     // `entrypoint` is the package path inside `node_modules`.
-    let entrypoint_path = shim_dir.join("node_modules").join(&entrypoint);
+    // Join component by component so the path uses native separators.
+    let entrypoint_path = entrypoint
+        .split('/')
+        .fold(shim_dir.join("node_modules"), |path, part| path.join(part));
     if !entrypoint_path.is_file() {
         return Err(unsupported_shim());
     }
@@ -358,7 +361,11 @@ mod tests {
     /// shim's directory, and returns the shim path next to it.
     fn shim_with_entrypoint(shim_name: &str, entrypoint: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let entry = dir.path().join("node_modules").join(entrypoint);
+        let entry = entrypoint
+            .split('/')
+            .fold(dir.path().join("node_modules"), |path, part| {
+                path.join(part)
+            });
         std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
         std::fs::write(&entry, b"// entrypoint").unwrap();
         let shim = dir.path().join(shim_name);
@@ -378,11 +385,11 @@ mod tests {
             assert_eq!(resolved.path, node);
             assert_eq!(
                 resolved.prefix_args,
-                [shim
-                    .parent()
-                    .unwrap()
-                    .join("node_modules")
-                    .join(entrypoint)
+                [entrypoint
+                    .split('/')
+                    .fold(shim.parent().unwrap().join("node_modules"), |path, part| {
+                        path.join(part)
+                    })
                     .into_os_string()]
             );
         }
