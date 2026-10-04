@@ -455,3 +455,21 @@ fn provider_reports_its_id_without_running() {
     assert_eq!(provider(&fake, None).id(), "codex");
     assert!(!fake.report_path().exists());
 }
+
+#[tokio::test]
+async fn transient_reconnect_errors_before_a_completed_turn_are_ignored() {
+    let stdout = concat!(
+        r#"{"type":"thread.started","thread_id":"t"}"#,
+        "\n",
+        r#"{"type":"turn.started"}"#,
+        "\n",
+        r#"{"type":"error","message":"Reconnecting... 1/5 (stream disconnected before completion)"}"#,
+        "\n",
+        r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Formatted text."}}"#,
+        "\n",
+        r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        "\n",
+    );
+    let fake = fake_codex(stdout, 0);
+    assert_eq!(format(&fake, "text").await.unwrap(), "Formatted text.");
+}

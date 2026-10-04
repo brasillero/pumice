@@ -225,6 +225,7 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
 
     let mut last_agent_message: Option<String> = None;
     let mut saw_turn_completed = false;
+    let mut saw_turn_failed = false;
     let mut tool_activity = false;
     let mut failure_messages: Vec<String> = Vec::new();
 
@@ -256,6 +257,7 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
             }
             "turn.completed" => saw_turn_completed = true,
             "turn.failed" => {
+                saw_turn_failed = true;
                 if let Some(message) = event.pointer("/error/message").and_then(Value::as_str) {
                     failure_messages.push(message.to_owned());
                 }
@@ -275,13 +277,16 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
             ProviderErrorCode::UnexpectedToolActivity,
         ));
     }
-    if !failure_messages.is_empty() {
-        return Err(classify_failure(&failure_messages));
-    }
-    if !output.status.success() {
-        return Err(ProviderError::other(ProviderErrorCode::NonzeroExit));
-    }
-    if !saw_turn_completed {
+    // Transient `error` events ("Reconnecting... 1/5") can precede a turn that
+    // still completes, so they only matter when the turn did not succeed.
+    let succeeded = saw_turn_completed && !saw_turn_failed && output.status.success();
+    if !succeeded {
+        if !failure_messages.is_empty() {
+            return Err(classify_failure(&failure_messages));
+        }
+        if !output.status.success() {
+            return Err(ProviderError::other(ProviderErrorCode::NonzeroExit));
+        }
         return Err(ProviderError::other(ProviderErrorCode::InvalidOutput));
     }
     last_agent_message.ok_or_else(|| ProviderError::other(ProviderErrorCode::InvalidOutput))
