@@ -399,6 +399,13 @@ impl GenericProvider {
         {
             Ok(Ok(stream)) => stream,
             Ok(Err(error)) => return Err(connect_error(&error)),
+            // The connect cap, not the request deadline, ran out: the local
+            // endpoint did not accept the connection. Windows retries a closed
+            // loopback port for about 2 s before reporting a refusal, so this
+            // is how "nothing is listening" usually surfaces there.
+            Err(_) if connect_cap == CONNECT_TIMEOUT => {
+                return Err(ProviderError::other(ProviderErrorCode::EndpointUnavailable));
+            }
             Err(_) => return Err(ProviderError::Timeout),
         };
         if Instant::now() >= deadline {
