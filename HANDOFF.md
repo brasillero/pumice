@@ -29,7 +29,7 @@ Update this table in the PR that finishes each story. Order follows the plan in 
 | 2 | S2.1 follow-up: provider capabilities | Done (pending review) | | Descriptors carry `disabled_by_default`, `risk_warning` and full-settings validation (`ProviderLocations`); `check-config` and startup print warnings; probe descriptors in tests/config.rs |
 | 3 | S2.8 part 1: provider detection | Not started | | Cached version probes (2 s), `/v1/models` lists available providers |
 | 4 | S2.6 OpenCode adapter | Not started | | Off by default, explicit `provider/model`, deny-all inline agent |
-| 5 | S2.5 Antigravity adapter | Not started | | Dormant: fake-only protocol, enabling refused, never runs `agy` |
+| 5 | S2.5 Antigravity adapter | Done (pending review) | | Dormant: documentation-derived invocation/parser tested against the fake CLI, `enabled: true` refused at the enabled line, build fails as defense in depth, `agy` never spawned |
 | 6 | S2.7 Generic loopback adapter | Not started | | PR to stay open until the owner approves the outbound exception |
 | 7 | S2.8 part 2: `pumice doctor` | Not started | | `--login-check` is the only quota-bearing path |
 | 8 | S6.4 follow-up: Phase 2 config examples | Not started | | |

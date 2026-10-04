@@ -74,12 +74,61 @@ pub trait ContractAdapter {
     fn tool_activity() -> Option<(String, i32)>;
 
     /// Adds the scenario keys that make the fake CLI capture the system
-    /// prompt control file (for example `report_arg_files`).
-    fn capture_system_prompt(scenario: &mut Value);
+    /// prompt control file (for example `report_arg_files`). Adapters whose
+    /// transport has no control file (Antigravity's merged stdin event) keep
+    /// the default no-op.
+    fn capture_system_prompt(_scenario: &mut Value) {}
 
     /// The captured system prompt control file: its absolute path (which
-    /// must stay outside the call's workspace) and its contents.
-    fn captured_system_prompt(report: &Value) -> (PathBuf, String);
+    /// must stay outside the call's workspace) and its contents. Only called
+    /// for adapters with a control-file channel; the default panics because
+    /// an adapter without one must override the assertions that use it.
+    fn captured_system_prompt(_report: &Value) -> (PathBuf, String) {
+        panic!("this adapter has no system-prompt control file");
+    }
+
+    /// Asserts the dictated text travelled as data: byte-exact through the
+    /// transport's input channel and in no argv element. The default expects
+    /// the plain user message on stdin; merged-input transports (Antigravity)
+    /// override [`ContractAdapter::assert_stdin_payload`] instead.
+    fn assert_dictation_is_data(report: &Value, text: &str) {
+        Self::assert_stdin_payload(report, text);
+        assert_no_argv_carries_text(report, text);
+    }
+
+    /// The transport-specific half of [`ContractAdapter::assert_dictation_is_data`]:
+    /// where the text must appear byte-exact. Merged-input overrides decode
+    /// their stdin event.
+    fn assert_stdin_payload(report: &Value, text: &str) {
+        assert_eq!(report["stdin"], json!(format!("{BEFORE}{text}{AFTER}")));
+    }
+
+    /// Asserts the system prompt stayed separate from the user message. The
+    /// default: never in stdin, only in the control file. Antigravity's
+    /// merged-input transport overrides this with its documented fallback:
+    /// the system prompt is inside the single stdin event and no
+    /// system-prompt flag or file exists.
+    fn assert_system_separation(report: &Value) {
+        let stdin = report["stdin"].as_str().unwrap();
+        assert_eq!(stdin, format!("{BEFORE}{HOSTILE_TEXT}{AFTER}"));
+        assert!(
+            !stdin.contains(SYSTEM_PROMPT),
+            "the system prompt must not reach stdin"
+        );
+        let (_, contents) = Self::captured_system_prompt(report);
+        assert_eq!(contents, SYSTEM_PROMPT);
+    }
+
+    /// Asserts where the system prompt lives relative to the workspace. The
+    /// default: a control file outside the call's cwd. Antigravity overrides:
+    /// no file exists at all, so no argv element may name one.
+    fn assert_system_prompt_placement(report: &Value) {
+        let cwd = Path::new(report["cwd"].as_str().unwrap());
+        let (path, contents) = Self::captured_system_prompt(report);
+        assert_eq!(contents, SYSTEM_PROMPT);
+        assert!(path.is_absolute(), "{}", path.display());
+        assert!(!path.starts_with(cwd));
+    }
 
     /// Asserts the complete restriction recipe (tools off, or the most
     /// restricted documented mode) on a reported argv.
@@ -211,10 +260,9 @@ fn success_fake<A: ContractAdapter>(text: &str) -> FakeCli {
     FakeCli::new(scenario)
 }
 
-/// Asserts the dictated text arrived on stdin byte for byte and in no argv
-/// element.
-fn dictation_is_stdin_data_only(report: &Value, text: &str) {
-    assert_eq!(report["stdin"], json!(format!("{BEFORE}{text}{AFTER}")));
+/// Asserts no argv element carries `text` (dictated text is data, never
+/// argv).
+fn assert_no_argv_carries_text(report: &Value, text: &str) {
     for arg in report_argv(report) {
         let shown: String = arg.chars().take(80).collect();
         assert!(
@@ -310,10 +358,7 @@ pub async fn empty_workspace<A: ContractAdapter>() {
     assert_eq!(cwd.file_name().unwrap(), "workspace");
     assert_eq!(first["cwd_entries"], json!([]));
 
-    let (path, contents) = A::captured_system_prompt(&first);
-    assert_eq!(contents, SYSTEM_PROMPT);
-    assert!(path.is_absolute(), "{}", path.display());
-    assert!(!path.starts_with(first["cwd"].as_str().unwrap()));
+    A::assert_system_prompt_placement(&first);
     let first_root = temp_root(&first);
 
     format_with(&provider, "second call").await.unwrap();
@@ -336,27 +381,19 @@ pub async fn transport<A: ContractAdapter>() {
         let provider = A::provider(fake.path(), CALL_TIMEOUT);
 
         format_with(&provider, text).await.unwrap();
-        dictation_is_stdin_data_only(&fake.report(), text);
+        A::assert_dictation_is_data(&fake.report(), text);
     }
 }
 
-/// System separation: the system prompt arrives only in its control file,
-/// never in the stdin message.
+/// System separation: the system prompt never mixes into the user message;
+/// how it reaches the CLI is transport-specific (a control file by default,
+/// the merged stdin event for Antigravity).
 pub async fn system_separation<A: ContractAdapter>() {
     let fake = success_fake::<A>("Texto formatado.");
     let provider = A::provider(fake.path(), CALL_TIMEOUT);
 
     format_with(&provider, HOSTILE_TEXT).await.unwrap();
-    let report = fake.report();
-
-    let stdin = report["stdin"].as_str().unwrap();
-    assert_eq!(stdin, format!("{BEFORE}{HOSTILE_TEXT}{AFTER}"));
-    assert!(
-        !stdin.contains(SYSTEM_PROMPT),
-        "the system prompt must not reach stdin"
-    );
-    let (_, contents) = A::captured_system_prompt(&report);
-    assert_eq!(contents, SYSTEM_PROMPT);
+    A::assert_system_separation(&fake.report());
 }
 
 /// Not installed: a nonexistent binary path is `NotInstalled`.

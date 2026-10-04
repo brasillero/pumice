@@ -1,0 +1,2 @@
+{"event":"init","model":"gemini-test"}
+{"event":"result","status":"FAILURE","result":{"error":"authentication required: no cached login"}}

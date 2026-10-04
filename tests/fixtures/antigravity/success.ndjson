@@ -1,0 +1,6 @@
+{"event":"init","model":"gemini-test"}
+{"event":"message","type":"model","content":"Olá "}
+{"event":"message","type":"model","content":"mundo."}
+{"event":"reasoning","content":"considering punctuation"}
+{"event":"checkpoint","id":"checkpoint-1"}
+{"event":"result","status":"SUCCESS","result":{"response":"Olá mundo.","usage":{"input_tokens":31,"output_tokens":4},"turns":1}}
