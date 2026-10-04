@@ -4,22 +4,20 @@
 
 mod support;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use pumice::config::{self, Config, DebugLogSettings, PromptSettings};
 use pumice::pipeline::{FormatOutcome, OutcomeKind, Pipeline, ProviderErrorKind, RawReason};
 use pumice::process::ProcessRunner;
-use pumice::providers::{
-    self, FormatInput, Provider, ProviderError, ProviderErrorCode, ProviderFuture, ProviderSettings,
-};
+use pumice::providers::{self, Provider, ProviderError, ProviderErrorCode, ProviderSettings};
 use pumice::request::{ChatCompletionRequest, Content, ExtractedRequest, Message, extract_request};
 use serde_json::{Value, json};
 use support::FakeCli;
+use support::test_provider::{Step, TestProvider};
 use tempfile::TempDir;
 use tokio::time::Instant;
 
@@ -74,72 +72,11 @@ fn success_scenario(result: &str) -> Value {
     json!({"stdout": success_envelope(result), "exit_code": 0})
 }
 
+/// Asserts a raw outcome carries the exact dictation and no provider.
 fn assert_raw(outcome: &FormatOutcome, reason: RawReason, text: &str) {
     assert_eq!(outcome.kind, OutcomeKind::Raw(reason), "kind mismatch");
     assert_eq!(outcome.text, text, "raw text mismatch");
     assert_eq!(outcome.provider, None, "raw outcomes name no provider");
-}
-
-/// One scripted reaction of a [`TestProvider`].
-enum Step {
-    /// Succeed with this final text.
-    Ready(String),
-    /// Fail immediately with this error.
-    Fail(ProviderError),
-    /// Sleep this long before succeeding; the test expects the pipeline's
-    /// deadline to fire first.
-    Sleep(Duration),
-}
-
-/// A scripted [`Provider`] for fallback-chain tests: every `format` call
-/// pops the next [`Step`] and counts as one call. Real fake-CLI providers
-/// cannot build two chain entries (every adapter reports one fixed id), so
-/// chain logic runs against this double, with one real adapter mixed in
-/// where the protocol matters.
-struct TestProvider {
-    id: &'static str,
-    calls: AtomicUsize,
-    steps: Mutex<VecDeque<Step>>,
-}
-
-impl TestProvider {
-    fn new(id: &'static str, steps: Vec<Step>) -> Arc<TestProvider> {
-        Arc::new(TestProvider {
-            id,
-            calls: AtomicUsize::new(0),
-            steps: Mutex::new(steps.into()),
-        })
-    }
-
-    fn calls(&self) -> usize {
-        self.calls.load(Ordering::SeqCst)
-    }
-}
-
-impl Provider for TestProvider {
-    fn id(&self) -> &'static str {
-        self.id
-    }
-
-    fn format<'a>(&'a self, _input: FormatInput<'a>, _deadline: Instant) -> ProviderFuture<'a> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        let step = self
-            .steps
-            .lock()
-            .expect("test provider steps")
-            .pop_front()
-            .expect("test provider has a scripted step");
-        Box::pin(async move {
-            match step {
-                Step::Ready(text) => Ok(text),
-                Step::Fail(error) => Err(error),
-                Step::Sleep(duration) => {
-                    tokio::time::sleep(duration).await;
-                    Ok("woke up after the deadline".to_owned())
-                }
-            }
-        })
-    }
 }
 
 /// Claude defaults under a test-only id, for directly built configs (YAML

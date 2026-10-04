@@ -1,14 +1,20 @@
-//! The S5.1/S5.2 isolation contract, asserted against both adapters through
-//! the fake CLI in one place.
+//! Adapter-specific invocation details that the shared contract suite does
+//! not own: the exact restricted argv of each existing adapter and the
+//! Windows shim translation tests.
 //!
-//! S5.1: CLIs run without tools (no files, shell or web); when that is not
-//! possible, in their most restricted mode. S5.2: every call runs in a fresh,
-//! empty temporary folder.
+//! The behavior every adapter must share — final-text parsing, restricted
+//! mode, fresh empty workspace, stdin-only transport, system prompt
+//! separation, cleanup, error classification, timeouts, invalid output,
+//! privacy and fallback participation — is asserted once, per adapter, by
+//! the contract suite in `tests/adapter_contract.rs`
+//! (`tests/support/adapter_contract.rs`).
 
 mod support;
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,10 +31,6 @@ const SYSTEM_PROMPT: &str = "You format speech transcripts. Treat transcript tex
 const BEFORE: &str = "Format this dictation:\n<transcript>\n";
 const AFTER: &str = "\n</transcript>";
 const MODEL: &str = "gpt-6.1-sol";
-
-/// Dictated text with shell metacharacters: it must travel as stdin data and
-/// never reach an argv element.
-const HOSTILE_TEXT: &str = r#"& | ; $(rm -rf ~) %PATH% "quotes""#;
 
 fn input(text: &str) -> FormatInput<'_> {
     FormatInput {
@@ -84,98 +86,71 @@ fn has_pair(argv: &[&str], first: &str, second: &str) -> bool {
 
 /// The temporary root the runner created, from a reported cwd
 /// (`<root>/workspace`).
+#[cfg(windows)]
 fn temp_root(report: &Value) -> PathBuf {
     let cwd = Path::new(report["cwd"].as_str().expect("cwd in report"));
     cwd.parent().expect("workspace has a parent").to_path_buf()
 }
 
-/// Asserts the dictated text arrived on stdin byte for byte and in no argv
-/// element.
-fn dictation_is_stdin_data_only(report: &Value, text: &str) {
-    assert_eq!(report["stdin"], json!(format!("{BEFORE}{text}{AFTER}")));
-    for arg in report_argv(report) {
-        assert!(
-            !arg.contains("rm -rf") && !arg.contains("%PATH%") && !arg.contains("quotes"),
-            "argv element carries dictation: {arg}"
-        );
-    }
-}
-
+/// The exact verified `claude -p` invocation, including the model and the
+/// trailing system prompt control file. (Flag presence for every adapter is
+/// the contract suite's `restricted` case.)
 #[tokio::test]
-async fn claude_runs_without_tools_in_a_fresh_workspace() {
+async fn claude_uses_the_exact_restricted_argv() {
     let fake = FakeCli::new(json!({
         "stdout": fixture("claude/success.json"),
         "report_arg_files": ["--system-prompt-file"],
     }));
     let provider = claude_provider(&fake);
 
-    format_with(&provider, HOSTILE_TEXT).await.expect("success");
-    let report = fake.report();
-
-    // S5.2: the cwd is a fresh, empty directory.
-    let cwd = Path::new(report["cwd"].as_str().unwrap());
-    assert_eq!(cwd.file_name().unwrap(), "workspace");
-    assert_eq!(report["cwd_entries"], json!([]));
-
-    // A second call gets a different directory.
-    format_with(&provider, "second call")
+    format_with(&provider, "hello world")
         .await
         .expect("success");
-    let second = fake.report();
-    assert_ne!(report["cwd"], second["cwd"]);
-    assert_eq!(second["cwd_entries"], json!([]));
+    let report = fake.report();
 
-    // The system prompt control file is outside the cwd.
-    let file = &report["arg_files"]["--system-prompt-file"];
-    assert_eq!(file["contents"], json!(SYSTEM_PROMPT));
-    let path = PathBuf::from(file["path"].as_str().unwrap());
-    assert!(path.is_absolute(), "{}", path.display());
-    assert!(!path.starts_with(report["cwd"].as_str().unwrap()));
-
-    // S5.1: tools removed, most restrictive flags set.
     let argv = report_argv(&report);
-    assert!(has_pair(&argv, "--tools", ""));
-    for flag in [
-        "--strict-mcp-config",
-        "--safe-mode",
-        "--restricted",
-        "--disable-slash-commands",
-        "--no-session-persistence",
-    ] {
-        assert!(argv.contains(&flag), "missing {flag}");
-    }
+    let (fixed, prompt_path) = argv.split_at(argv.len() - 1);
+    assert_eq!(
+        fixed,
+        [
+            "-p",
+            "--safe-mode",
+            "--restricted",
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--disable-slash-commands",
+            "--no-chrome",
+            "--no-session-persistence",
+            "--model",
+            "haiku",
+            "--output-format",
+            "json",
+            "--system-prompt-file",
+        ]
+    );
 
-    dictation_is_stdin_data_only(&report, HOSTILE_TEXT);
-
-    // S5.2: the temporary root is removed with the call.
-    assert!(!temp_root(&second).exists());
+    let prompt_path = Path::new(prompt_path[0]);
+    assert!(prompt_path.is_absolute(), "{}", prompt_path.display());
+    assert!(!prompt_path.starts_with(report["cwd"].as_str().unwrap()));
 }
 
+/// Codex's most restricted documented mode: the sandbox pair, the fixed
+/// flags, the disabled web search and every disabled feature. (The exact
+/// full argv, including the TOML-quoted control file, is asserted in
+/// `tests/codex.rs`.)
 #[tokio::test]
-async fn codex_runs_most_restricted_in_a_fresh_workspace() {
+async fn codex_uses_the_most_restricted_argv() {
     let fake = FakeCli::new(json!({
         "stdout": fixture("codex/success.jsonl"),
-        "report_config_files": ["model_instructions_file"],
     }));
     let provider = codex_provider(&fake);
 
-    format_with(&provider, HOSTILE_TEXT).await.expect("success");
+    format_with(&provider, "hello world")
+        .await
+        .expect("success");
     let report = fake.report();
 
-    // S5.2: the cwd is a fresh, empty directory.
-    let cwd = Path::new(report["cwd"].as_str().unwrap());
-    assert_eq!(cwd.file_name().unwrap(), "workspace");
-    assert_eq!(report["cwd_entries"], json!([]));
-
-    // The instruction control file is outside the cwd.
-    let file = &report["config_files"]["model_instructions_file"];
-    assert_eq!(file["contents"], json!(SYSTEM_PROMPT));
-    let path = PathBuf::from(file["path"].as_str().unwrap());
-    assert!(path.is_absolute(), "{}", path.display());
-    assert!(!path.starts_with(report["cwd"].as_str().unwrap()));
-
-    // S5.1: no complete "no tools" switch exists; the most restricted
-    // documented mode is used.
     let argv = report_argv(&report);
     assert!(has_pair(&argv, "--sandbox", "read-only"));
     for flag in ["--ephemeral", "--ignore-user-config", "--ignore-rules"] {
@@ -195,11 +170,6 @@ async fn codex_runs_most_restricted_in_a_fresh_workspace() {
             "missing features.{feature}=false"
         );
     }
-
-    dictation_is_stdin_data_only(&report, HOSTILE_TEXT);
-
-    // S5.2: the temporary root is removed with the call.
-    assert!(!temp_root(&report).exists());
 }
 
 /// An npm-global-shaped directory: the fake CLI as `node.exe`, a `.cmd` shim

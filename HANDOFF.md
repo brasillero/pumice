@@ -25,7 +25,7 @@ Update this table in the PR that finishes each story. Order follows the plan in 
 
 | # | Story | Status | PR | Notes |
 | --- | --- | --- | --- | --- |
-| 1 | S8.2 follow-up: shared adapter contract suite | Not started | | Claude and Codex migrated first |
+| 1 | S8.2 follow-up: shared adapter contract suite | Done (pending review) | | Suite in `tests/support/adapter_contract.rs` + `tests/adapter_contract.rs`; claude and codex run every applicable case; isolation.rs keeps exact argv and Windows shim tests |
 | 2 | S2.1 follow-up: provider capabilities | Not started | | Default-off flag, risk warnings, probe metadata, full-settings validation |
 | 3 | S2.8 part 1: provider detection | Not started | | Cached version probes (2 s), `/v1/models` lists available providers |
 | 4 | S2.6 OpenCode adapter | Not started | | Off by default, explicit `provider/model`, deny-all inline agent |
