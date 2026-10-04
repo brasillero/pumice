@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use tempfile::TempDir;
 
+pub mod adapter_contract;
+pub mod test_provider;
+
 /// Path of the fake CLI built by Cargo for this test run.
 pub const FAKE_CLI_BIN: &str = env!("CARGO_BIN_EXE_pumice-test-cli");
 
