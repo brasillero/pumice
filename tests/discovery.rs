@@ -1,8 +1,9 @@
 //! Tests for startup provider detection (S2.8 part 1): version parsing over
 //! realistic outputs, missing binaries, probe deadlines, the never-spawn
-//! guarantee for Antigravity, and full-registry detection. Every CLI below is
-//! the portable fake; no test looks a real CLI up on PATH (each test passes
-//! descriptors whose binaries it controls).
+//! guarantees for Antigravity and the CLI-less generic adapter, and
+//! full-registry detection. Every CLI below is the portable fake; no test
+//! looks a real CLI up on PATH (each test passes descriptors whose binaries
+//! it controls).
 
 mod support;
 
@@ -148,6 +149,35 @@ async fn antigravity_is_resolved_but_never_spawned() {
 }
 
 #[tokio::test]
+async fn generic_is_never_resolved_or_spawned() {
+    // The generic adapter has no CLI. Even with a `binary` configured
+    // (allowed while the provider is disabled), detection neither resolves
+    // it — a resolution would report the path, or Missing for a absent one —
+    // nor spawns it. The `binary` here exists on disk, so only the
+    // NotApplicable skip keeps the status free of any resolved path.
+    let fake = FakeCli::new(json!({}));
+    let config = load(&format!(
+        "providers:\n  generic:\n    binary: '{}'\n",
+        fake.path().display()
+    ));
+    let statuses =
+        discovery::detect(&config, &[descriptor("generic")], &ProcessRunner::new()).await;
+
+    assert_eq!(statuses.len(), 1);
+    assert!(!statuses[0].enabled);
+    assert_eq!(
+        statuses[0].found,
+        Found::NotApplicable,
+        "no executable exists, so detection must not resolve one"
+    );
+    assert_eq!(statuses[0].version, Version::Skipped);
+    assert!(
+        !fake.report_path().exists(),
+        "the generic adapter has no CLI: nothing may ever be spawned for it"
+    );
+}
+
+#[tokio::test]
 async fn detection_covers_every_registered_provider_enabled_or_not() {
     let claude = FakeCli::new(json!({"stdout": "2.1.288 (Claude Code)"}));
     let codex = FakeCli::new(json!({"stdout": "codex-cli 0.160.0"}));
@@ -185,6 +215,9 @@ async fn detection_covers_every_registered_provider_enabled_or_not() {
         !antigravity.report_path().exists(),
         "the PathOnly provider was never spawned"
     );
+    // NotApplicable: no CLI to resolve or probe, whatever the config says.
+    assert_eq!(status("generic").found, Found::NotApplicable);
+    assert_eq!(status("generic").version, Version::Skipped);
 }
 
 #[test]
@@ -192,14 +225,28 @@ fn registry_probe_metadata_is_consistent() {
     for descriptor in providers::PROVIDERS {
         match descriptor.probe {
             ProbeSpec::Version(args) => assert_eq!(args, ["--version"], "{}", descriptor.id),
-            ProbeSpec::PathOnly => {}
+            ProbeSpec::PathOnly | ProbeSpec::NotApplicable => {}
         }
-        assert!(!descriptor.default_binary.is_empty(), "{}", descriptor.id);
+        if descriptor.probe == ProbeSpec::NotApplicable {
+            // No CLI exists: the empty default binary is never resolved.
+            assert!(descriptor.default_binary.is_empty(), "{}", descriptor.id);
+        } else {
+            assert!(!descriptor.default_binary.is_empty(), "{}", descriptor.id);
+        }
         assert!(!descriptor.install_hint.is_empty(), "{}", descriptor.id);
     }
     assert_eq!(
         descriptor("antigravity").probe,
         ProbeSpec::PathOnly,
         "agy is never spawned, so its probe must stay PATH-only"
+    );
+    assert_eq!(
+        descriptor("generic").probe,
+        ProbeSpec::NotApplicable,
+        "generic spawns no CLI, so detection must not touch PATH or the runner"
+    );
+    assert_eq!(
+        descriptor("generic").install_hint,
+        "start a local OpenAI-compatible server such as Ollama or LM Studio"
     );
 }

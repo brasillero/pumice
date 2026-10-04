@@ -86,8 +86,15 @@ pub enum ProviderErrorCode {
     UnsupportedShim,
     InvalidOutput,
     OutputTooLarge,
+    InputTooLarge,
     UnexpectedToolActivity,
     NonzeroExit,
+    /// An HTTP endpoint refused the connection or is unreachable (the generic
+    /// loopback adapter).
+    EndpointUnavailable,
+    /// The endpoint answered with an unexpected HTTP status (never a captured
+    /// body; the status code is safe to show).
+    HttpStatus(u16),
 }
 
 impl ProviderError {
@@ -100,11 +107,13 @@ impl ProviderError {
 impl fmt::Display for ProviderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ProviderError::NotInstalled => f.write_str("the CLI is not installed"),
-            ProviderError::NotLoggedIn => f.write_str("the CLI is not logged in"),
-            ProviderError::Timeout => f.write_str("the CLI timed out"),
-            ProviderError::QuotaExceeded { .. } => f.write_str("the CLI usage quota is exhausted"),
-            ProviderError::RateLimited { .. } => f.write_str("the CLI is rate limited"),
+            ProviderError::NotInstalled => f.write_str("the provider is not installed"),
+            ProviderError::NotLoggedIn => f.write_str("the provider is not logged in"),
+            ProviderError::Timeout => f.write_str("the provider timed out"),
+            ProviderError::QuotaExceeded { .. } => {
+                f.write_str("the provider usage quota is exhausted")
+            }
+            ProviderError::RateLimited { .. } => f.write_str("the provider is rate limited"),
             ProviderError::Other { code } => code.fmt(f),
         }
     }
@@ -113,17 +122,27 @@ impl fmt::Display for ProviderError {
 impl fmt::Display for ProviderErrorCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            ProviderErrorCode::Spawn => "the CLI could not be started",
-            ProviderErrorCode::Io => "I/O error while running the CLI",
+            ProviderErrorCode::Spawn => "the provider could not be started",
+            ProviderErrorCode::Io => "I/O error while running the provider",
             ProviderErrorCode::InvalidConfiguration => "invalid provider configuration",
-            ProviderErrorCode::AuthenticationRejected => "the CLI rejected its credentials",
+            ProviderErrorCode::AuthenticationRejected => "the provider rejected its credentials",
             ProviderErrorCode::UnsupportedShim => {
                 "the CLI is a script wrapper that is not supported"
             }
-            ProviderErrorCode::InvalidOutput => "the CLI returned output that could not be parsed",
-            ProviderErrorCode::OutputTooLarge => "the CLI returned too much output",
-            ProviderErrorCode::UnexpectedToolActivity => "the CLI tried to use a tool",
-            ProviderErrorCode::NonzeroExit => "the CLI reported a failure",
+            ProviderErrorCode::InvalidOutput => {
+                "the provider returned output that could not be parsed"
+            }
+            ProviderErrorCode::OutputTooLarge => "the provider returned too much output",
+            ProviderErrorCode::InputTooLarge => "the dictation is too large for the provider",
+            ProviderErrorCode::UnexpectedToolActivity => "the provider tried to use a tool",
+            ProviderErrorCode::NonzeroExit => "the provider reported a failure",
+            ProviderErrorCode::EndpointUnavailable => "the endpoint is unavailable",
+            ProviderErrorCode::HttpStatus(status) => {
+                return write!(
+                    f,
+                    "the endpoint returned an unexpected HTTP status ({status})"
+                );
+            }
         })
     }
 }

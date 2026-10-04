@@ -88,6 +88,22 @@ providers:
   # antigravity:
   #   enabled: false
 
+  # Generic OpenAI-compatible endpoint on this machine (Ollama, LM Studio).
+  # Disabled by default: it talks HTTP to an unauthenticated loopback server,
+  # which needs the owner's explicit approval (the AGENTS.md outbound-call
+  # exception is still pending; see docs/research/phase2-architecture.md §3.3).
+  # When enabled, `model` and `options.base_url` are both required, and the
+  # base URL must be exactly http://127.0.0.1:<port>/v1,
+  # http://localhost:<port>/v1 or http://[::1]:<port>/v1 (an explicit port,
+  # the /v1 path, nothing else). Pumice's own port is refused, so a dictation
+  # can never route back into this service. The endpoint needs no key; the
+  # local server controls inference routing and retention.
+  # generic:
+  #   enabled: true
+  #   model: qwen2.5-7b
+  #   options:
+  #     base_url: "http://127.0.0.1:11434/v1"
+
 # Optional formatting instructions, added after Pumice's fixed instruction.
 # Both are off by default (null); a block scalar (|) keeps line breaks.
 prompts:

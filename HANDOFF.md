@@ -12,7 +12,7 @@ The owner was away and authorized the orchestrator to set specifications and pro
 - **New providers are off by default.** Only `enabled: true` turns one on; detection never does.
 - **OpenCode:** an explicit `provider/model` is required when enabled; there is no hosted default.
 - **Antigravity:** the protocol is built against the fake CLI only, and turning it on is refused until a safe per-launch tool policy exists. `agy` is never run.
-- **Generic adapter:** conflicts with the AGENTS.md outbound-call rule, so its PR is opened but **not merged** until the owner approves a loopback-only exception.
+- **Generic adapter:** loopback-only and off by default. The owner approved merging it (2026-10-04), despite the AGENTS.md outbound-call rule; the owner adds the matching exception to AGENTS.md.
 - **Gate:** the contract suite passes on 3 OSes for every implemented adapter. Antigravity is reported as protocol coverage plus safe refusal.
 
 ## Phase 2 gate
@@ -49,10 +49,10 @@ Update this table in the PR that finishes each story. Order follows the plan in 
 | 3 | S2.8 part 1: provider detection | Done | #28 | `ProbeSpec` + `discovery.rs`: bounded concurrent version probes (2 s) cached at startup, `agy` never spawned; `/v1/models` lists enabled∩found; a missing selected provider still fails at runtime and falls back |
 | 4 | S2.6 OpenCode adapter | Done | #26 | Off by default, explicit provider/model, deny-all inline agent via `OPENCODE_CONFIG_CONTENT`; full contract suite passes |
 | 5 | S2.5 Antigravity adapter | Done | #25 | Dormant: documentation-derived invocation/parser tested against the fake CLI, `enabled: true` refused at the enabled line, build fails as defense in depth, `agy` never spawned |
-| 6 | S2.7 Generic loopback adapter | Done (awaiting owner approval) | #27 (open) | Implemented, CI green on 3 OSes; not merged until the owner approves a loopback-only exception to the AGENTS.md outbound-call rule |
+| 6 | S2.7 Generic loopback adapter | Done | #27 | Loopback-only (Ollama/LM Studio on this machine), off by default; merged with the owner's approval (2026-10-04). The matching AGENTS.md exception is the owner's to add |
 | 7 | S2.8 part 2: `pumice doctor` | Done | #29 | `doctor` renders a fresh detection report (found/missing + install hints + warnings + Kimi standby note), exit 0/1/2; `--login-check --provider <id>` is the only quota-bearing path: one fixed call through the selected provider, no fallback, text-free result |
 | 8 | S6.4 follow-up: Phase 2 config examples | Done | #25, #26 (#27) | Delivered with the adapters: commented `opencode` block, Antigravity note; the `generic` block ships with #27. Example-config tests cover them |
-| 9 | S8.3 follow-up: Phase 2 gate | Done | (this PR) | Gate evidence below |
+| 9 | S8.3 follow-up: Phase 2 gate | Done | #30 | Gate evidence below |
 
 ## Phase 1 (done)
 

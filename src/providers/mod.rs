@@ -80,6 +80,12 @@ pub struct ProviderLocations {
     pub binary: Option<Location>,
     /// Each option value's location, keyed by option name.
     pub options: BTreeMap<String, Location>,
+    /// The port Pumice itself listens on. Adapters that call out (the generic
+    /// loopback adapter) must reject endpoints pointing back at it, to prevent
+    /// recursive requests. `Default` is 0, which no validated endpoint port
+    /// (1–65535) can equal, so direct construction without the loader stays
+    /// safe.
+    pub port: u16,
 }
 
 /// What the registry knows about one provider.
@@ -136,6 +142,12 @@ pub enum ProbeSpec {
     Version(&'static [&'static str]),
     /// Resolve on PATH only; never spawn.
     PathOnly,
+    /// No CLI exists to detect (the generic loopback adapter): detection
+    /// neither resolves nor spawns anything. The provider is reported
+    /// available for listing purposes when enabled; its endpoint is a
+    /// network target whose availability is only checked at call time
+    /// (`EndpointUnavailable` then triggers the fallback chain).
+    NotApplicable,
 }
 
 /// Validates one provider's fully defaulted settings; see
@@ -156,7 +168,7 @@ macro_rules! register_providers {
     };
 }
 
-register_providers!(claude, codex, opencode, antigravity);
+register_providers!(claude, codex, opencode, antigravity, generic);
 
 /// Looks up a provider by ID.
 pub fn descriptor(id: &str) -> Option<&'static ProviderDescriptor> {
@@ -214,6 +226,7 @@ mod tests {
 
     #[test]
     fn registry_ids_are_unique_and_found() {
+        assert_eq!(PROVIDERS.len(), 5, "five providers are registered");
         for (i, d) in PROVIDERS.iter().enumerate() {
             assert!(PROVIDERS[..i].iter().all(|other| other.id != d.id));
             assert!(std::ptr::eq(descriptor(d.id).unwrap(), d));

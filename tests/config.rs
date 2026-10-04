@@ -213,7 +213,7 @@ fn empty_file_gives_all_defaults() {
     assert_eq!(config.prompts.system, None);
     assert_eq!(config.prompts.user, None);
     assert!(!config.debug_log.enabled);
-    assert_eq!(config.providers.len(), 4);
+    assert_eq!(config.providers.len(), 5);
 
     let claude = claude(&config);
     assert!(claude.enabled);
@@ -252,6 +252,19 @@ fn empty_file_gives_all_defaults() {
     assert_eq!(opencode.timeout, Duration::from_secs(30));
     assert!(opencode.env.is_empty());
     assert!(opencode.options.is_empty());
+
+    // The generic loopback adapter is registered but off by default, with no
+    // model and no base URL.
+    let generic = config
+        .providers
+        .get("generic")
+        .expect("generic is configured");
+    assert!(!generic.enabled);
+    assert!(generic.model.is_empty());
+    assert_eq!(generic.timeout, Duration::from_secs(30));
+    assert!(generic.binary.is_none());
+    assert!(generic.env.is_empty());
+    assert!(generic.options.is_empty());
 }
 
 #[test]
@@ -1184,7 +1197,10 @@ fn replace_last(text: &str, from: &str, to: &str) -> String {
 
 #[test]
 fn example_documented_overrides_load() {
-    let text = fs::read_to_string(example_path()).expect("read example");
+    // Windows checkouts may use CRLF; the edits below match `\n`.
+    let text = fs::read_to_string(example_path())
+        .expect("read example")
+        .replace("\r\n", "\n");
 
     // Apply the documented examples: try Codex after Claude, route Codex
     // through a gateway, and set both formatting prompts.
@@ -1204,6 +1220,24 @@ fn example_documented_overrides_load() {
             "  user: null",
             "  user: |\n    Format spoken enumerations as Markdown lists.",
         );
+    // The generic adapter's documented block: uncomment only that block
+    // (OpenCode's commented block has identical lines).
+    let start = uncommented
+        .find("  # generic:\n")
+        .expect("the example documents the generic adapter");
+    let end = uncommented[start..]
+        .find("\n\n")
+        .map_or(uncommented.len(), |i| start + i);
+    let block = uncommented[start..end]
+        .replace("  # generic:", "  generic:")
+        .replace("  #   enabled: true", "    enabled: true")
+        .replace("  #   model: qwen2.5-7b", "    model: qwen2.5-7b")
+        .replace("  #   options:", "    options:")
+        .replace(
+            "  #     base_url: \"http://127.0.0.1:11434/v1\"",
+            "      base_url: \"http://127.0.0.1:11434/v1\"",
+        );
+    let uncommented = format!("{}{}{}", &uncommented[..start], block, &uncommented[end..]);
 
     let config = load_text(&uncommented).expect("documented overrides load");
     assert_eq!(config.fallback_order, vec!["codex".to_owned()]);
@@ -1213,6 +1247,13 @@ fn example_documented_overrides_load() {
             .get("openai_base_url")
             .map(String::as_str),
         Some("https://your-existing-gateway.example/v1")
+    );
+    let generic = config.providers.get("generic").expect("generic loads");
+    assert!(generic.enabled);
+    assert_eq!(generic.model, "qwen2.5-7b");
+    assert_eq!(
+        generic.options.get("base_url").map(String::as_str),
+        Some("http://127.0.0.1:11434/v1")
     );
     assert_eq!(
         config.prompts.system.as_deref(),
