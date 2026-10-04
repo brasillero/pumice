@@ -38,7 +38,7 @@ Update this table in the PR that finishes each story. Merge order follows the ta
 | 9 | S4.3 Raw-text fallback | Done | #13 | `pipeline.rs` outcomes: exact raw text for unknown/disabled/busy/budget/provider/cleanup failures |
 | 9b | S4.2 Fallback chain | Done | #15 | `pipeline.rs` walks `fallback_order` within the total budget; skips duplicates/disabled/unbuilt; `FormatOutcome.attempts`; raw fallback carries the last failure |
 | 10 | S1.1 + S5.3 Chat completions on loopback | Done (pending review) | | axum + tokio; exact routes, 10 MiB/5 s body bounds, SSE, loopback bind, port-taken exit 1 |
-| 11 | S1.2 + S6.2 Model list and provider selection | Not started | | |
+| 11 | S1.2 + S6.2 Model list and provider selection | Done (pending review) | | `Pipeline::model_ids` (default first) and `Pipeline::select` (trimmed, case-insensitive) are the single source of truth for listing, selection and the response `model`; covered end to end over HTTP with two fakes |
 | 12 | S1.3 Health route | Not started | | |
 | 13 | S1.4 Debug log | Not started | | |
 | 14 | S5.1 + S5.2 CLI isolation and Windows shims | Done | #16 | npm `.cmd` shim translation to direct node launch + all-adapter isolation contract tests; Codex residual-risk acceptance left to owner |

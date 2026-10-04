@@ -82,11 +82,19 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
 
     let id = format!("chatcmpl-pumice-{}", state.next_id());
     let created = now_unix_secs();
-    // The producing provider when formatting succeeded, else the requested
-    // model, else a neutral fallback.
+    // The producing provider when formatting succeeded; otherwise the
+    // provider selection resolved to (on a raw fallback this names the
+    // selected provider), else the requested string, else a neutral
+    // fallback.
     let model = outcome
         .provider
         .map(str::to_owned)
+        .or_else(|| {
+            state
+                .pipeline
+                .select(extracted.model.as_deref())
+                .map(str::to_owned)
+        })
         .or_else(|| extracted.model.clone())
         .unwrap_or_else(|| "pumice".to_owned());
 
@@ -111,15 +119,18 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
     }
 }
 
-/// Lists the enabled provider IDs; selection semantics arrive with S1.2.
+/// Lists the enabled provider IDs as models, default first — the same IDs
+/// [`Pipeline::select`](crate::pipeline::Pipeline::select) resolves, so
+/// listing and selection cannot drift.
 pub async fn list_models(State(state): State<ApiState>) -> Json<ModelList> {
     Json(ModelList {
         object: "list",
         data: state
-            .models
-            .iter()
+            .pipeline
+            .model_ids()
+            .into_iter()
             .map(|id| ModelEntry {
-                id: id.clone(),
+                id: id.to_owned(),
                 object: "model",
                 created: 0,
                 owned_by: "pumice",

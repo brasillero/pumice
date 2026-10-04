@@ -70,6 +70,68 @@ impl TestServer {
     }
 }
 
+/// A running in-process server with a separate fake CLI per provider, so a
+/// test can prove which provider ran.
+struct DualServer {
+    port: u16,
+    log: Arc<LogCapture>,
+    claude: FakeCli,
+    codex: FakeCli,
+    _config_dir: TempDir,
+}
+
+impl DualServer {
+    fn log_lines(&self) -> Vec<String> {
+        self.log.lines()
+    }
+}
+
+/// YAML configuring `claude` and `codex`, each at its own fake CLI.
+/// `{claude}` and `{codex}` are replaced by the fakes' paths.
+const BOTH_AT_FAKES: &str =
+    "providers:\n  claude:\n    binary: '{claude}'\n  codex:\n    binary: '{codex}'\n";
+
+/// Builds a pipeline from `yaml` with one fake per provider (`{claude}` and
+/// `{codex}` replaced by the fakes' paths), serves it on an ephemeral
+/// loopback port and returns the running server.
+async fn start_dual_server(
+    yaml: &str,
+    claude_scenario: Value,
+    codex_scenario: Value,
+) -> DualServer {
+    let claude = FakeCli::new(claude_scenario);
+    let codex = FakeCli::new(codex_scenario);
+    let yaml = yaml
+        .replace("{claude}", &claude.path().display().to_string())
+        .replace("{codex}", &codex.path().display().to_string());
+    let config_dir = TempDir::new().expect("temp dir");
+    let config_path = config_dir.path().join("pumice.yaml");
+    fs::write(&config_path, yaml).expect("write config");
+    let config = config::load_with_env(Some(&config_path), |_| None)
+        .expect("config loads")
+        .config;
+    let runner = Arc::new(ProcessRunner::new());
+    let built = providers::build_from_config(&config, runner).expect("providers build");
+    let pipeline = Arc::new(Pipeline::new(&config, built));
+
+    let listener = tokio::net::TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind ephemeral loopback port");
+    let port = listener.local_addr().unwrap().port();
+    let log = Arc::new(LogCapture::default());
+    let serve_log = Arc::clone(&log);
+    tokio::spawn(async move {
+        let _ = api::serve(listener, pipeline, serve_log).await;
+    });
+    DualServer {
+        port,
+        log,
+        claude,
+        codex,
+        _config_dir: config_dir,
+    }
+}
+
 /// Builds a pipeline from `yaml` (`{binary}` replaced by the fake's path),
 /// serves it on an ephemeral loopback port and returns the running server.
 async fn start_server(yaml: &str, scenario: Value) -> TestServer {
@@ -84,12 +146,6 @@ async fn start_server(yaml: &str, scenario: Value) -> TestServer {
     let runner = Arc::new(ProcessRunner::new());
     let built = providers::build_from_config(&config, runner).expect("provider builds");
     let pipeline = Arc::new(Pipeline::new(&config, built));
-    let enabled: Vec<String> = config
-        .providers
-        .iter()
-        .filter(|(_, settings)| settings.enabled)
-        .map(|(id, _)| id.clone())
-        .collect();
 
     // Bind before spawning so a taken ephemeral port fails here, not in the
     // background task.
@@ -100,7 +156,7 @@ async fn start_server(yaml: &str, scenario: Value) -> TestServer {
     let log = Arc::new(LogCapture::default());
     let serve_log = Arc::clone(&log);
     tokio::spawn(async move {
-        let _ = api::serve(listener, pipeline, enabled, serve_log).await;
+        let _ = api::serve(listener, pipeline, serve_log).await;
     });
     TestServer {
         port,
@@ -214,6 +270,23 @@ fn success_envelope(result: &str) -> String {
 /// A fake CLI replying successfully with `result`.
 fn success_scenario(result: &str) -> Value {
     json!({"stdout": success_envelope(result), "exit_code": 0})
+}
+
+/// The stdout of a fake CLI replying with a Codex JSONL success stream whose
+/// agent message is `result`, mirroring `tests/fixtures/codex/success.jsonl`.
+fn codex_success_stdout(result: &str) -> String {
+    let text = serde_json::to_string(result).expect("result serializes");
+    format!(
+        "{{\"type\":\"thread.started\",\"thread_id\":\"00000000-0000-4000-8000-000000000003\"}}\n\
+         {{\"type\":\"turn.started\"}}\n\
+         {{\"type\":\"item.completed\",\"item\":{{\"id\":\"item_0\",\"type\":\"agent_message\",\"text\":{text}}}}}\n\
+         {{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":5310,\"cached_input_tokens\":0,\"output_tokens\":6}}}}\n"
+    )
+}
+
+/// A fake Codex CLI replying successfully with `result`.
+fn codex_success_scenario(result: &str) -> Value {
+    json!({"stdout": codex_success_stdout(result), "exit_code": 0})
 }
 
 /// The recorded Handy request with `model` set to `claude`, since the
@@ -535,6 +608,258 @@ async fn models_lists_enabled_providers() {
     assert!(
         !server.fake.report_path().exists(),
         "listing never invokes a CLI"
+    );
+}
+
+/// The model IDs of a `/v1/models` body, in order.
+fn listed_model_ids(body: &Value) -> Vec<String> {
+    body["data"]
+        .as_array()
+        .expect("data is an array")
+        .iter()
+        .map(|entry| entry["id"].as_str().expect("id is a string").to_owned())
+        .collect()
+}
+
+/// Posts the recorded Handy request with `model` set, returning the response.
+async fn post_model(server_port: u16, model: &str) -> RawResponse {
+    raw_http(
+        server_port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &handy_fixture_with_model(model),
+        ),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn models_list_the_default_provider_first() {
+    let server = start_dual_server(
+        BOTH_AT_FAKES,
+        success_scenario("unused"),
+        codex_success_scenario("unused"),
+    )
+    .await;
+    let response = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
+
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        listed_model_ids(&response.body_json()),
+        ["claude", "codex"],
+        "claude is the default, so it leads the list"
+    );
+    assert!(
+        !server.claude.report_path().exists() && !server.codex.report_path().exists(),
+        "listing never invokes a CLI"
+    );
+}
+
+#[tokio::test]
+async fn models_list_a_non_claude_default_first() {
+    let yaml = "default_provider: codex\n".to_owned() + BOTH_AT_FAKES;
+    let server = start_dual_server(
+        &yaml,
+        success_scenario("unused"),
+        codex_success_scenario("unused"),
+    )
+    .await;
+    let response = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
+
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        listed_model_ids(&response.body_json()),
+        ["codex", "claude"],
+        "the default provider leads even when it is not claude"
+    );
+}
+
+#[tokio::test]
+async fn model_field_selects_the_named_provider() {
+    let server = start_dual_server(
+        BOTH_AT_FAKES,
+        success_scenario("Texto do Claude."),
+        codex_success_scenario("Texto do Codex."),
+    )
+    .await;
+
+    let codex = post_model(server.port, "codex").await;
+    assert_eq!(codex.status, 200, "body: {}", codex.body_text());
+    let codex_body = codex.body_json();
+    assert_eq!(codex_body["model"], "codex");
+    assert_eq!(
+        codex_body["choices"][0]["message"]["content"],
+        "Texto do Codex."
+    );
+    assert!(server.codex.report_path().exists(), "codex ran");
+    assert!(
+        !server.claude.report_path().exists(),
+        "selecting codex must not run claude"
+    );
+
+    let claude = post_model(server.port, "CLAUDE").await;
+    assert_eq!(claude.status, 200, "body: {}", claude.body_text());
+    let claude_body = claude.body_json();
+    assert_eq!(claude_body["model"], "claude");
+    assert_eq!(
+        claude_body["choices"][0]["message"]["content"],
+        "Texto do Claude."
+    );
+    assert!(server.claude.report_path().exists(), "claude ran");
+}
+
+#[tokio::test]
+async fn model_matching_is_case_insensitive_and_trims_whitespace() {
+    let server = start_dual_server(
+        BOTH_AT_FAKES,
+        success_scenario("Texto do Claude."),
+        codex_success_scenario("unused"),
+    )
+    .await;
+
+    // Handy users type the field by hand: "Claude " (trailing space,
+    // lowercase-rest mix) must still select claude.
+    let response = post_model(server.port, "Claude ").await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    assert_eq!(response.body_json()["model"], "claude");
+    assert!(server.claude.report_path().exists(), "claude ran");
+    assert!(
+        !server.codex.report_path().exists(),
+        "the codex fake must not run"
+    );
+}
+
+#[tokio::test]
+async fn empty_and_missing_model_select_the_default_provider() {
+    let server = start_dual_server(
+        BOTH_AT_FAKES,
+        success_scenario("Texto do Claude."),
+        codex_success_scenario("unused"),
+    )
+    .await;
+
+    let empty = post_model(server.port, "").await;
+    assert_eq!(empty.status, 200, "body: {}", empty.body_text());
+    assert_eq!(
+        empty.body_json()["choices"][0]["message"]["content"],
+        "Texto do Claude."
+    );
+
+    // The same fixture without a `model` key at all.
+    let mut body: Value =
+        serde_json::from_str(&support::fixture("handy-request.json")).expect("fixture parses");
+    body.as_object_mut().expect("object").remove("model");
+    let missing = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &serde_json::to_vec(&body).unwrap(),
+        ),
+    )
+    .await;
+
+    assert_eq!(missing.status, 200, "body: {}", missing.body_text());
+    assert_eq!(
+        missing.body_json()["choices"][0]["message"]["content"],
+        "Texto do Claude."
+    );
+    assert!(
+        server.claude.report_path().exists(),
+        "the default provider ran for both requests"
+    );
+    assert!(
+        !server.codex.report_path().exists(),
+        "the codex fake must not run"
+    );
+}
+
+#[tokio::test]
+async fn empty_model_selects_a_non_claude_default() {
+    let yaml = "default_provider: codex\n".to_owned() + BOTH_AT_FAKES;
+    let server = start_dual_server(
+        &yaml,
+        success_scenario("unused"),
+        codex_success_scenario("Texto do Codex."),
+    )
+    .await;
+
+    let response = post_model(server.port, "").await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    let body = response.body_json();
+    assert_eq!(body["model"], "codex");
+    assert_eq!(body["choices"][0]["message"]["content"], "Texto do Codex.");
+    assert!(server.codex.report_path().exists(), "codex ran");
+    assert!(
+        !server.claude.report_path().exists(),
+        "the claude fake must not run"
+    );
+}
+
+#[tokio::test]
+async fn unknown_model_returns_raw_text_and_runs_no_provider() {
+    let server = start_dual_server(
+        BOTH_AT_FAKES,
+        success_scenario("unused"),
+        codex_success_scenario("unused"),
+    )
+    .await;
+
+    let response = post_model(server.port, "gpt-4").await;
+
+    assert_eq!(response.status, 200, "raw fallback is a normal completion");
+    let body = response.body_json();
+    assert_eq!(
+        body["choices"][0]["message"]["content"], FIXTURE_TRANSCRIPT,
+        "unknown model: dictation comes back byte for byte"
+    );
+    assert_eq!(body["model"], "gpt-4", "the requested string is echoed");
+    assert!(
+        !server.claude.report_path().exists() && !server.codex.report_path().exists(),
+        "no provider may run for an unknown model"
+    );
+}
+
+#[tokio::test]
+async fn disabled_provider_is_not_listed_and_keeps_dictation_raw() {
+    let yaml = "providers:\n  claude:\n    binary: '{claude}'\n  codex:\n    enabled: false\n";
+    let server = start_dual_server(
+        yaml,
+        success_scenario("unused"),
+        codex_success_scenario("unused"),
+    )
+    .await;
+
+    let models = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
+    assert_eq!(models.status, 200);
+    assert_eq!(
+        listed_model_ids(&models.body_json()),
+        ["claude"],
+        "a disabled provider is not listed"
+    );
+
+    let response = post_model(server.port, "codex").await;
+    assert_eq!(response.status, 200, "raw fallback is a normal completion");
+    let body = response.body_json();
+    assert_eq!(
+        body["choices"][0]["message"]["content"], FIXTURE_TRANSCRIPT,
+        "disabled provider: dictation comes back byte for byte"
+    );
+    assert_eq!(body["model"], "codex", "the selected provider is named");
+    assert!(
+        !server.claude.report_path().exists() && !server.codex.report_path().exists(),
+        "no provider may run for a disabled selection"
+    );
+    let lines = server.log_lines();
+    assert!(
+        lines[0].contains("reason=ProviderDisabled"),
+        "line: {}",
+        lines[0]
     );
 }
 
