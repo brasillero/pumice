@@ -4,16 +4,19 @@
 
 mod support;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pumice::config::{self, Config, DebugLogSettings, PromptSettings};
 use pumice::pipeline::{FormatOutcome, OutcomeKind, Pipeline, ProviderErrorKind, RawReason};
 use pumice::process::ProcessRunner;
-use pumice::providers::{self, ProviderErrorCode};
+use pumice::providers::{
+    self, FormatInput, Provider, ProviderError, ProviderErrorCode, ProviderFuture, ProviderSettings,
+};
 use pumice::request::{ChatCompletionRequest, Content, ExtractedRequest, Message, extract_request};
 use serde_json::{Value, json};
 use support::FakeCli;
@@ -75,6 +78,116 @@ fn assert_raw(outcome: &FormatOutcome, reason: RawReason, text: &str) {
     assert_eq!(outcome.kind, OutcomeKind::Raw(reason), "kind mismatch");
     assert_eq!(outcome.text, text, "raw text mismatch");
     assert_eq!(outcome.provider, None, "raw outcomes name no provider");
+}
+
+/// One scripted reaction of a [`TestProvider`].
+enum Step {
+    /// Succeed with this final text.
+    Ready(String),
+    /// Fail immediately with this error.
+    Fail(ProviderError),
+    /// Sleep this long before succeeding; the test expects the pipeline's
+    /// deadline to fire first.
+    Sleep(Duration),
+}
+
+/// A scripted [`Provider`] for fallback-chain tests: every `format` call
+/// pops the next [`Step`] and counts as one call. Real fake-CLI providers
+/// cannot build two chain entries (every adapter reports one fixed id), so
+/// chain logic runs against this double, with one real adapter mixed in
+/// where the protocol matters.
+struct TestProvider {
+    id: &'static str,
+    calls: AtomicUsize,
+    steps: Mutex<VecDeque<Step>>,
+}
+
+impl TestProvider {
+    fn new(id: &'static str, steps: Vec<Step>) -> Arc<TestProvider> {
+        Arc::new(TestProvider {
+            id,
+            calls: AtomicUsize::new(0),
+            steps: Mutex::new(steps.into()),
+        })
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl Provider for TestProvider {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+
+    fn format<'a>(&'a self, _input: FormatInput<'a>, _deadline: Instant) -> ProviderFuture<'a> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let step = self
+            .steps
+            .lock()
+            .expect("test provider steps")
+            .pop_front()
+            .expect("test provider has a scripted step");
+        Box::pin(async move {
+            match step {
+                Step::Ready(text) => Ok(text),
+                Step::Fail(error) => Err(error),
+                Step::Sleep(duration) => {
+                    tokio::time::sleep(duration).await;
+                    Ok("woke up after the deadline".to_owned())
+                }
+            }
+        })
+    }
+}
+
+/// Claude defaults under a test-only id, for directly built configs (YAML
+/// only knows registered provider ids).
+fn test_settings(enabled: bool) -> ProviderSettings {
+    let descriptor = providers::descriptor("claude").expect("claude is registered");
+    let mut settings = (descriptor.defaults)();
+    settings.enabled = enabled;
+    settings
+}
+
+/// Settings pointing the real Claude adapter at a fake CLI.
+fn claude_settings_at(fake: &FakeCli) -> ProviderSettings {
+    let mut settings = test_settings(true);
+    settings.binary = Some(fake.path().to_path_buf());
+    settings
+}
+
+fn build_claude(settings: &ProviderSettings) -> Arc<dyn Provider> {
+    let descriptor = providers::descriptor("claude").expect("claude is registered");
+    (descriptor.build)(settings, Arc::new(ProcessRunner::new())).expect("claude builds")
+}
+
+/// Builds a [`Config`] directly, bypassing YAML validation. `entries` lists
+/// every configured provider; which of them are actually built is decided
+/// by the caller when constructing the pipeline, so tests can leave
+/// disabled providers unbuilt.
+fn direct_config(
+    default_provider: &str,
+    total_timeout: Duration,
+    fallback_order: &[&str],
+    entries: Vec<(&str, ProviderSettings)>,
+) -> Config {
+    Config {
+        port: 7567,
+        default_provider: default_provider.to_owned(),
+        total_timeout,
+        fallback_order: fallback_order.iter().map(|id| id.to_string()).collect(),
+        prompts: PromptSettings::default(),
+        debug_log: DebugLogSettings {
+            enabled: false,
+            path: PathBuf::from("pumice-debug.jsonl"),
+        },
+        providers: entries
+            .into_iter()
+            .map(|(id, settings)| (id.to_owned(), settings))
+            .collect(),
+    }
 }
 
 #[tokio::test]
@@ -368,6 +481,305 @@ async fn raw_fallback_preserves_the_dictation_exactly() {
     assert_eq!(
         outcome.text, raw,
         "leading/trailing spaces and accents stay"
+    );
+}
+
+#[tokio::test]
+async fn selected_failure_falls_back_to_the_next_provider() {
+    // Claude's fake answers with a not-logged-in envelope; the chain must
+    // move on to the next provider, which formats the dictation.
+    let fake = FakeCli::new(json!({
+        "stdout": support::fixture("claude/not-logged-in.json"),
+        "exit_code": 1,
+    }));
+    let backup = TestProvider::new("backup", vec![Step::Ready("Olá de novo.".to_owned())]);
+    let config = direct_config(
+        "claude",
+        Duration::from_secs(30),
+        &["backup"],
+        vec![
+            ("claude", claude_settings_at(&fake)),
+            ("backup", test_settings(true)),
+        ],
+    );
+    let providers: Vec<Arc<dyn Provider>> =
+        vec![build_claude(&config.providers["claude"]), backup.clone()];
+    let pipeline = Pipeline::new(&config, providers);
+
+    let outcome = pipeline
+        .format(&handy_request(None, "ola mundo"), Instant::now())
+        .await;
+    assert_eq!(outcome.kind, OutcomeKind::Formatted);
+    assert_eq!(outcome.provider, Some("backup"));
+    assert_eq!(outcome.attempts, 2);
+    assert_eq!(outcome.text, "Olá de novo.");
+    assert!(fake.report_path().exists(), "the fake ran once");
+    assert_eq!(backup.calls(), 1);
+}
+
+#[tokio::test]
+async fn fallback_provider_never_runs_when_the_selected_succeeds() {
+    let selected = TestProvider::new("alpha", vec![Step::Ready("Texto pronto.".to_owned())]);
+    let backup = TestProvider::new("backup", vec![Step::Ready("unused".to_owned())]);
+    let config = direct_config(
+        "alpha",
+        Duration::from_secs(30),
+        &["backup"],
+        vec![
+            ("alpha", test_settings(true)),
+            ("backup", test_settings(true)),
+        ],
+    );
+    let providers: Vec<Arc<dyn Provider>> = vec![selected.clone(), backup.clone()];
+    let pipeline = Pipeline::new(&config, providers);
+
+    let outcome = pipeline
+        .format(&handy_request(None, "dita"), Instant::now())
+        .await;
+    assert_eq!(outcome.kind, OutcomeKind::Formatted);
+    assert_eq!(outcome.provider, Some("alpha"));
+    assert_eq!(outcome.attempts, 1);
+    assert_eq!(selected.calls(), 1);
+    assert_eq!(backup.calls(), 0, "the fallback must not run");
+}
+
+#[tokio::test]
+async fn selected_reappearing_in_fallback_order_runs_once() {
+    // Through real YAML this time: the selected id may also appear in
+    // `fallback_order`; it must not be called twice.
+    let (pipeline, fake) = pipeline(
+        "fallback_order: [claude]\nproviders:\n  claude:\n    binary: '{binary}'\n",
+        success_scenario("Feito."),
+    );
+    let outcome = pipeline
+        .format(&handy_request(None, "dita"), Instant::now())
+        .await;
+    assert_eq!(outcome.kind, OutcomeKind::Formatted);
+    assert_eq!(outcome.provider, Some("claude"));
+    assert_eq!(outcome.attempts, 1);
+    assert!(fake.report_path().exists(), "the fake ran once");
+}
+
+#[tokio::test]
+async fn every_failing_candidate_returns_raw_with_the_last_failure() {
+    let alpha = TestProvider::new("alpha", vec![Step::Fail(ProviderError::NotLoggedIn)]);
+    let beta = TestProvider::new(
+        "beta",
+        vec![Step::Fail(ProviderError::QuotaExceeded {
+            retry_after: None,
+        })],
+    );
+    let config = direct_config(
+        "alpha",
+        Duration::from_secs(30),
+        &["beta"],
+        vec![
+            ("alpha", test_settings(true)),
+            ("beta", test_settings(true)),
+        ],
+    );
+    let providers: Vec<Arc<dyn Provider>> = vec![alpha.clone(), beta.clone()];
+    let pipeline = Pipeline::new(&config, providers);
+
+    let outcome = pipeline
+        .format(&handy_request(None, "texto ditado"), Instant::now())
+        .await;
+    assert_raw(
+        &outcome,
+        RawReason::ProviderFailed(ProviderErrorKind::QuotaExceeded { retry_after: None }),
+        "texto ditado",
+    );
+    assert_eq!(outcome.attempts, 2);
+    assert_eq!(alpha.calls(), 1);
+    assert_eq!(beta.calls(), 1);
+}
+
+#[tokio::test]
+async fn cleanup_failure_as_the_last_failure_is_reported() {
+    let alpha = TestProvider::new("alpha", vec![Step::Fail(ProviderError::NotLoggedIn)]);
+    // Preamble-only output cleans down to nothing: a cleanup failure.
+    let beta = TestProvider::new(
+        "beta",
+        vec![Step::Ready("Here is the formatted text:".to_owned())],
+    );
+    let config = direct_config(
+        "alpha",
+        Duration::from_secs(30),
+        &["beta"],
+        vec![
+            ("alpha", test_settings(true)),
+            ("beta", test_settings(true)),
+        ],
+    );
+    let providers: Vec<Arc<dyn Provider>> = vec![alpha.clone(), beta.clone()];
+    let pipeline = Pipeline::new(&config, providers);
+
+    let outcome = pipeline
+        .format(&handy_request(None, "texto ditado"), Instant::now())
+        .await;
+    assert_raw(&outcome, RawReason::CleanupFailed, "texto ditado");
+    assert_eq!(outcome.attempts, 2);
+    assert_eq!(alpha.calls(), 1);
+    assert_eq!(beta.calls(), 1);
+}
+
+#[tokio::test]
+async fn cleanup_failure_falls_back_to_the_next_provider() {
+    // The real adapter's preamble-only output fails cleanup; the next
+    // candidate formats the dictation instead.
+    let fake = FakeCli::new(success_scenario("Here is the formatted text:"));
+    let backup = TestProvider::new("backup", vec![Step::Ready("Texto limpo.".to_owned())]);
+    let config = direct_config(
+        "claude",
+        Duration::from_secs(30),
+        &["backup"],
+        vec![
+            ("claude", claude_settings_at(&fake)),
+            ("backup", test_settings(true)),
+        ],
+    );
+    let providers: Vec<Arc<dyn Provider>> =
+        vec![build_claude(&config.providers["claude"]), backup.clone()];
+    let pipeline = Pipeline::new(&config, providers);
+
+    let outcome = pipeline
+        .format(&handy_request(None, "ola mundo"), Instant::now())
+        .await;
+    assert_eq!(outcome.kind, OutcomeKind::Formatted);
+    assert_eq!(outcome.provider, Some("backup"));
+    assert_eq!(outcome.attempts, 2);
+    assert_eq!(outcome.text, "Texto limpo.");
+    assert!(fake.report_path().exists(), "the fake ran once");
+    assert_eq!(backup.calls(), 1);
+}
+
+#[tokio::test]
+async fn selected_timeout_falls_back_within_the_total_budget() {
+    // One-second provider timeout inside a five-second total budget: the
+    // timeout fires, the next provider formats, and the total holds.
+    let mut alpha_settings = test_settings(true);
+    alpha_settings.timeout = Duration::from_secs(1);
+    let alpha = TestProvider::new("alpha", vec![Step::Sleep(Duration::from_secs(10))]);
+    let beta = TestProvider::new("beta", vec![Step::Ready("Depois do timeout.".to_owned())]);
+    let config = direct_config(
+        "alpha",
+        Duration::from_secs(5),
+        &["beta"],
+        vec![("alpha", alpha_settings), ("beta", test_settings(true))],
+    );
+    let providers: Vec<Arc<dyn Provider>> = vec![alpha.clone(), beta.clone()];
+    let pipeline = Pipeline::new(&config, providers);
+
+    let outcome = pipeline
+        .format(&handy_request(None, "ola"), Instant::now())
+        .await;
+    assert_eq!(outcome.kind, OutcomeKind::Formatted);
+    assert_eq!(outcome.provider, Some("beta"));
+    assert_eq!(outcome.attempts, 2);
+    assert_eq!(alpha.calls(), 1);
+    assert_eq!(beta.calls(), 1);
+    assert!(
+        outcome.elapsed < Duration::from_secs(4),
+        "the total budget holds, took {:?}",
+        outcome.elapsed
+    );
+}
+
+#[tokio::test]
+async fn exhausted_budget_mid_chain_starts_no_further_cli() {
+    let alpha = TestProvider::new("alpha", vec![Step::Sleep(Duration::from_secs(10))]);
+    let beta = TestProvider::new("beta", vec![Step::Ready("unused".to_owned())]);
+    let config = direct_config(
+        "alpha",
+        Duration::from_millis(1500),
+        &["beta"],
+        vec![
+            ("alpha", test_settings(true)),
+            ("beta", test_settings(true)),
+        ],
+    );
+    let providers: Vec<Arc<dyn Provider>> = vec![alpha.clone(), beta.clone()];
+    let pipeline = Pipeline::new(&config, providers);
+
+    let outcome = pipeline
+        .format(&handy_request(None, "ditado"), Instant::now())
+        .await;
+    // A candidate was tried, so the last failure wins over BudgetExhausted.
+    assert_raw(
+        &outcome,
+        RawReason::ProviderFailed(ProviderErrorKind::Timeout),
+        "ditado",
+    );
+    assert_eq!(outcome.attempts, 1);
+    assert_eq!(beta.calls(), 0, "the second provider is never spawned");
+    assert!(
+        outcome.elapsed < Duration::from_millis(1500) + Duration::from_secs(1),
+        "took {:?}",
+        outcome.elapsed
+    );
+}
+
+#[tokio::test]
+async fn fallback_chain_skips_duplicates_and_unbuilt_providers() {
+    let alpha = TestProvider::new(
+        "alpha",
+        vec![Step::Fail(ProviderError::other(
+            ProviderErrorCode::NonzeroExit,
+        ))],
+    );
+    let gamma = TestProvider::new("gamma", vec![Step::Ready("Texto final.".to_owned())]);
+    // `beta` is configured but disabled, so it was never built; `alpha`
+    // repeats twice — once as the selected provider.
+    let config = direct_config(
+        "alpha",
+        Duration::from_secs(30),
+        &["alpha", "beta", "gamma", "alpha"],
+        vec![
+            ("alpha", test_settings(true)),
+            ("beta", test_settings(false)),
+            ("gamma", test_settings(true)),
+        ],
+    );
+    let providers: Vec<Arc<dyn Provider>> = vec![alpha.clone(), gamma.clone()];
+    let pipeline = Pipeline::new(&config, providers);
+
+    let outcome = pipeline
+        .format(&handy_request(None, "ola"), Instant::now())
+        .await;
+    assert_eq!(outcome.kind, OutcomeKind::Formatted);
+    assert_eq!(outcome.provider, Some("gamma"));
+    assert_eq!(outcome.attempts, 2, "alpha and gamma only");
+    assert_eq!(alpha.calls(), 1, "duplicates never call a provider twice");
+    assert_eq!(gamma.calls(), 1);
+}
+
+#[tokio::test]
+async fn unknown_selected_model_never_starts_the_chain() {
+    let backup = TestProvider::new("backup", vec![Step::Ready("unused".to_owned())]);
+    let config = direct_config(
+        "claude",
+        Duration::from_secs(30),
+        &["backup"],
+        vec![
+            ("claude", test_settings(true)),
+            ("backup", test_settings(true)),
+        ],
+    );
+    let providers: Vec<Arc<dyn Provider>> = vec![backup.clone()];
+    let pipeline = Pipeline::new(&config, providers);
+
+    let outcome = pipeline
+        .format(
+            &handy_request(Some("gpt-99"), "olá de novo"),
+            Instant::now(),
+        )
+        .await;
+    assert_raw(&outcome, RawReason::UnknownProvider, "olá de novo");
+    assert_eq!(outcome.attempts, 0);
+    assert_eq!(
+        backup.calls(),
+        0,
+        "a fallback never runs for a selection mistake"
     );
 }
 

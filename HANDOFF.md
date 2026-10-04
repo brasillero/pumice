@@ -36,7 +36,7 @@ Update this table in the PR that finishes each story. Merge order follows the ta
 | 7 | S3.4 Output cleanup | Done | #9 | `cleanup` pure function + tests; preservation guard on every rule, idempotence over positive fixtures |
 | 8 | S4.1 Timeouts | Done (pending review) | | `pipeline.rs`: total budget with response reserve, provider cap + hard stop, fake-CLI deadline tests |
 | 9 | S4.3 Raw-text fallback | Done (pending review) | | `pipeline.rs` outcomes: exact raw text for unknown/disabled/busy/budget/provider/cleanup failures |
-| 9b | S4.2 Fallback chain | Not started | | |
+| 9b | S4.2 Fallback chain | Done (pending review) | | `pipeline.rs` walks `fallback_order` within the total budget; skips duplicates/disabled/unbuilt; `FormatOutcome.attempts`; raw fallback carries the last failure |
 | 10 | S1.1 + S5.3 Chat completions on loopback | Not started | | `axum` + `tokio` |
 | 11 | S1.2 + S6.2 Model list and provider selection | Not started | | |
 | 12 | S1.3 Health route | Not started | | |

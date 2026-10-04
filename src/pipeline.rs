@@ -1,5 +1,6 @@
-//! The formatting pipeline: provider selection, deadline enforcement, one
-//! active run at a time, and the raw-text fallback guarantee.
+//! The formatting pipeline: provider selection and the fallback chain,
+//! deadline enforcement, one active run at a time, and the raw-text
+//! fallback guarantee.
 //!
 //! Every outcome returns either formatted-and-cleaned text or the dictation
 //! exactly as extracted — never partially cleaned, never trimmed. Only
@@ -57,6 +58,9 @@ pub struct Pipeline {
     /// missing from `providers` are [`RawReason::ProviderDisabled`].
     configured: BTreeSet<String>,
     default_provider: String,
+    /// Providers to try after the selected one fails, in configuration
+    /// order.
+    fallback_order: Vec<String>,
     total_timeout: Duration,
     prompt_settings: PromptSettings,
     busy: Semaphore,
@@ -81,6 +85,7 @@ impl Pipeline {
             providers: entries,
             configured: config.providers.keys().cloned().collect(),
             default_provider: config.default_provider.clone(),
+            fallback_order: config.fallback_order.clone(),
             total_timeout: config.total_timeout,
             prompt_settings: config.prompts.clone(),
             busy: Semaphore::new(1),
@@ -89,63 +94,109 @@ impl Pipeline {
 
     /// Formats one extracted request. `started` is when the HTTP request
     /// arrived; the total budget counts from it.
+    ///
+    /// Outcome rule: the first candidate whose output cleans successfully
+    /// wins ([`OutcomeKind::Formatted`]; `attempts` counts the providers
+    /// tried, starting at 1). A provider error — including a timeout — or
+    /// a cleanup failure moves to the next candidate in `fallback_order`.
+    /// When no candidate is left, the raw dictation returns with the last
+    /// failure ([`RawReason::ProviderFailed`] or [`RawReason::CleanupFailed`]);
+    /// when the budget dies before the first candidate starts, the reason
+    /// is [`RawReason::BudgetExhausted`] instead. A budget stop later in
+    /// the chain keeps the last failure.
     pub async fn format(&self, request: &ExtractedRequest, started: Instant) -> FormatOutcome {
         if request.is_empty() {
-            return FormatOutcome::finished(String::new(), OutcomeKind::Empty, None, started);
+            return FormatOutcome::finished(String::new(), OutcomeKind::Empty, None, 0, started);
         }
 
         let selected = request.model.as_deref().unwrap_or(&self.default_provider);
+        // An unknown or disabled selected provider is a configuration
+        // mistake, not a transient failure: return raw text at once so the
+        // user notices, never silently formatting through another provider.
         if !self.configured.contains(selected) {
-            return self.raw(request, RawReason::UnknownProvider, started);
+            return self.raw(request, RawReason::UnknownProvider, started, 0);
         }
-        let Some(entry) = self.providers.get(selected) else {
-            return self.raw(request, RawReason::ProviderDisabled, started);
-        };
+        if !self.providers.contains_key(selected) {
+            return self.raw(request, RawReason::ProviderDisabled, started, 0);
+        }
 
         // Held for the whole run; dropping it (including on cancellation)
         // releases the permit.
         let Ok(_permit) = self.busy.try_acquire() else {
-            return self.raw(request, RawReason::Busy, started);
+            return self.raw(request, RawReason::Busy, started, 0);
         };
 
         let Some(total_deadline) = started.checked_add(self.total_timeout) else {
-            return self.raw(request, RawReason::BudgetExhausted, started);
+            return self.raw(request, RawReason::BudgetExhausted, started, 0);
         };
         let total_deadline = total_deadline
             .checked_sub(RESPONSE_RESERVE)
             .unwrap_or(started);
         if total_deadline.duration_since(Instant::now()) < MIN_STARTUP {
-            return self.raw(request, RawReason::BudgetExhausted, started);
+            return self.raw(request, RawReason::BudgetExhausted, started, 0);
         }
 
         let prompts = compose_with_settings(request, &self.prompt_settings);
+        let candidates = self.candidates(selected);
 
-        // S4.2 fills in the fallback chain: walk `fallback_order` after a
-        // failure while the budget allows. The candidate list currently
-        // holds only the selected provider.
-        let candidates = std::slice::from_ref(entry);
+        let mut attempts: u8 = 0;
         let mut last_failure = None;
-        for candidate in candidates {
+        for candidate in candidates.iter().copied() {
+            // The whole chain shares one budget: never start a CLI when
+            // only the startup slice is left.
+            if total_deadline.duration_since(Instant::now()) < MIN_STARTUP {
+                break;
+            }
+            attempts = attempts.saturating_add(1);
             match run_within_budget(candidate, prompts.format_input(), total_deadline).await {
-                Ok(output) => {
-                    return match cleanup(&output, &request.raw_text) {
-                        Ok(text) => FormatOutcome::finished(
+                Ok(output) => match cleanup(&output, &request.raw_text) {
+                    Ok(text) => {
+                        return FormatOutcome::finished(
                             text,
                             OutcomeKind::Formatted,
                             Some(candidate.provider.id()),
+                            attempts,
                             started,
-                        ),
-                        Err(_) => self.raw(request, RawReason::CleanupFailed, started),
-                    };
-                }
-                Err(kind) => last_failure = Some(kind),
+                        );
+                    }
+                    Err(_) => last_failure = Some(ChainFailure::Cleanup),
+                },
+                Err(kind) => last_failure = Some(ChainFailure::Provider(kind)),
             }
         }
-        self.raw(
-            request,
-            RawReason::ProviderFailed(last_failure.expect("candidate list is never empty")),
-            started,
-        )
+
+        let reason = match last_failure {
+            Some(ChainFailure::Provider(kind)) => RawReason::ProviderFailed(kind),
+            Some(ChainFailure::Cleanup) => RawReason::CleanupFailed,
+            // The budget died before the first candidate started; the
+            // pre-loop check normally returns earlier, so `attempts` is 0.
+            None => RawReason::BudgetExhausted,
+        };
+        self.raw(request, reason, started, attempts)
+    }
+
+    /// Builds the fallback chain for `selected`: the selected provider
+    /// first, then every `fallback_order` entry in order. A reappearing
+    /// selected provider, duplicates, and providers that are disabled or
+    /// were never built are skipped, so no provider runs twice.
+    fn candidates(&self, selected: &str) -> Vec<&ProviderEntry> {
+        let mut chain = Vec::with_capacity(self.fallback_order.len() + 1);
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        if let Some(entry) = self.providers.get(selected) {
+            seen.insert(selected);
+            chain.push(entry);
+        }
+        for id in &self.fallback_order {
+            if !seen.insert(id) {
+                continue;
+            }
+            // A configured provider missing from `providers` is disabled;
+            // `fallback_order` validation already rejects unknown ids.
+            if let Some(entry) = self.providers.get(id) {
+                chain.push(entry);
+            }
+        }
+        chain
     }
 
     /// The raw fallback: the dictation exactly as extracted, never cleaned
@@ -155,14 +206,23 @@ impl Pipeline {
         request: &ExtractedRequest,
         reason: RawReason,
         started: Instant,
+        attempts: u8,
     ) -> FormatOutcome {
         FormatOutcome::finished(
             request.raw_text.clone(),
             OutcomeKind::Raw(reason),
             None,
+            attempts,
             started,
         )
     }
+}
+
+/// The last failure while walking the fallback chain; decides the raw
+/// outcome when no candidate formatted successfully.
+enum ChainFailure {
+    Provider(ProviderErrorKind),
+    Cleanup,
 }
 
 /// Runs one candidate: its own timeout capped by the total deadline, plus a
@@ -191,6 +251,10 @@ pub struct FormatOutcome {
     /// The provider that produced `text`; `None` for an empty transcript
     /// and every raw outcome.
     pub provider: Option<&'static str>,
+    /// Providers tried for this request: 1 when the first succeeds, more
+    /// after fallbacks, 0 when no CLI was started (selection errors, busy,
+    /// an exhausted budget).
+    pub attempts: u8,
     /// Time since the HTTP request arrived.
     pub elapsed: Duration,
 }
@@ -203,6 +267,7 @@ impl fmt::Debug for FormatOutcome {
             .field("text_len", &self.text.len())
             .field("kind", &self.kind)
             .field("provider", &self.provider)
+            .field("attempts", &self.attempts)
             .field("elapsed", &self.elapsed)
             .finish()
     }
@@ -213,12 +278,14 @@ impl FormatOutcome {
         text: String,
         kind: OutcomeKind,
         provider: Option<&'static str>,
+        attempts: u8,
         started: Instant,
     ) -> FormatOutcome {
         FormatOutcome {
             text,
             kind,
             provider,
+            attempts,
             elapsed: started.elapsed(),
         }
     }
@@ -246,7 +313,8 @@ pub enum RawReason {
     Busy,
     /// The request's total budget is (nearly) spent before starting.
     BudgetExhausted,
-    /// The provider failed, timed out or returned unusable output.
+    /// Every candidate failed, timed out or returned unusable output;
+    /// carries the last failure.
     ProviderFailed(ProviderErrorKind),
     /// Output cleanup refused the provider's text.
     CleanupFailed,
