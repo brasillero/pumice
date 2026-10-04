@@ -1216,16 +1216,25 @@ fn example_documented_overrides_load() {
         .replace(
             "  user: null",
             "  user: |\n    Format spoken enumerations as Markdown lists.",
-        )
-        // The generic adapter's documented block: uncomment it wholesale.
-        .replace("  # generic:\n", "  generic:\n")
-        .replace("  #   enabled: true\n", "    enabled: true\n")
-        .replace("  #   model: qwen2.5-7b\n", "    model: qwen2.5-7b\n")
-        .replace("  #   options:\n", "    options:\n")
-        .replace(
-            "  #     base_url: \"http://127.0.0.1:11434/v1\"\n",
-            "      base_url: \"http://127.0.0.1:11434/v1\"\n",
         );
+    // The generic adapter's documented block: uncomment only that block
+    // (OpenCode's commented block has identical lines).
+    let start = uncommented
+        .find("  # generic:\n")
+        .expect("the example documents the generic adapter");
+    let end = uncommented[start..]
+        .find("\n\n")
+        .map_or(uncommented.len(), |i| start + i);
+    let block = uncommented[start..end]
+        .replace("  # generic:", "  generic:")
+        .replace("  #   enabled: true", "    enabled: true")
+        .replace("  #   model: qwen2.5-7b", "    model: qwen2.5-7b")
+        .replace("  #   options:", "    options:")
+        .replace(
+            "  #     base_url: \"http://127.0.0.1:11434/v1\"",
+            "      base_url: \"http://127.0.0.1:11434/v1\"",
+        );
+    let uncommented = format!("{}{}{}", &uncommented[..start], block, &uncommented[end..]);
 
     let config = load_text(&uncommented).expect("documented overrides load");
     assert_eq!(config.fallback_order, vec!["codex".to_owned()]);
