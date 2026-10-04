@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test
+
+      - name: cargo build --release
+        run: cargo build --release
+
+      - name: Set up MSVC environment
+        if: matrix.os == 'windows-latest'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Verify release exe has no CRT DLL dependencies
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $output = dumpbin /dependents target\release\pumice.exe
+          $output | ForEach-Object { Write-Host $_ }
+          $text = ($output | Out-String).ToLowerInvariant()
+          $forbidden = @('vcruntime', 'msvcp', 'ucrtbase', 'api-ms-win-crt')
+          foreach ($name in $forbidden) {
+            if ($text.Contains($name)) {
+              Write-Error "FAIL: pumice.exe depends on '$name' (CRT must be statically linked)"
+              exit 1
+            }
+          }
+          Write-Host "OK: pumice.exe has no CRT DLL dependencies"
+
+      - name: Upload release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: pumice-release-${{ matrix.os }}
+          path: |
+            target/release/pumice
+            target/release/pumice.exe
+          if-no-files-found: ignore
