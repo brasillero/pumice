@@ -4,6 +4,7 @@
 pub mod api;
 pub mod cleanup;
 pub mod config;
+pub mod logging;
 pub mod pipeline;
 pub mod process;
 pub mod prompts;

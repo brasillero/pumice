@@ -54,6 +54,14 @@ pub struct Delta {
     pub content: Option<String>,
 }
 
+/// `GET /health` body: liveness, so monitors and Handy setups can check the
+/// service without touching the pipeline (no CLI call, no quota).
+#[derive(Serialize)]
+pub struct HealthBody {
+    pub status: &'static str,
+    pub version: &'static str,
+}
+
 /// `GET /v1/models` body: the enabled provider IDs as models.
 #[derive(Serialize)]
 pub struct ModelList {

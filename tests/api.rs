@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use pumice::api::{self, RequestLog};
 use pumice::config;
+use pumice::logging::DebugLog;
 use pumice::pipeline::Pipeline;
 use pumice::process::ProcessRunner;
 use pumice::providers;
@@ -121,7 +122,13 @@ async fn start_dual_server(
     let log = Arc::new(LogCapture::default());
     let serve_log = Arc::clone(&log);
     tokio::spawn(async move {
-        let _ = api::serve(listener, pipeline, serve_log).await;
+        let _ = api::serve(
+            listener,
+            pipeline,
+            serve_log,
+            Arc::new(DebugLog::disabled()),
+        )
+        .await;
     });
     DualServer {
         port,
@@ -156,7 +163,13 @@ async fn start_server(yaml: &str, scenario: Value) -> TestServer {
     let log = Arc::new(LogCapture::default());
     let serve_log = Arc::clone(&log);
     tokio::spawn(async move {
-        let _ = api::serve(listener, pipeline, serve_log).await;
+        let _ = api::serve(
+            listener,
+            pipeline,
+            serve_log,
+            Arc::new(DebugLog::disabled()),
+        )
+        .await;
     });
     TestServer {
         port,
@@ -583,6 +596,72 @@ async fn unknown_path_is_an_openai_404() {
     let body = response.body_json();
     assert_eq!(body["error"]["type"], "invalid_request_error");
     assert!(body["error"]["message"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn health_reports_ok_and_the_version() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let response = raw_http(server.port, http_request("GET", "/health", &[], b"")).await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    let body = response.body_json();
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+    assert!(
+        !server.fake.report_path().exists(),
+        "health never invokes a CLI"
+    );
+}
+
+#[tokio::test]
+async fn health_answers_quickly_while_a_dictation_runs() {
+    let result = "Reunião com a equipe às 9:00.";
+    // The fake sleeps two seconds, so the dictation below is still running
+    // (holding the pipeline's single permit) when /health is checked.
+    let server = start_server(
+        CLAUDE_AT_FAKE,
+        json!({"stdout": success_envelope(result), "exit_code": 0, "sleep_ms": 2000}),
+    )
+    .await;
+
+    let port = server.port;
+    let dictation = tokio::spawn(async move {
+        raw_http(
+            port,
+            http_request(
+                "POST",
+                "/v1/chat/completions",
+                &[("content-type", "application/json")],
+                &handy_fixture_with_model("claude"),
+            ),
+        )
+        .await
+    });
+    // Give the request time to reach the pipeline and start the fake.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let started = std::time::Instant::now();
+    let response = raw_http(server.port, http_request("GET", "/health", &[], b"")).await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    assert_eq!(response.body_json()["status"], "ok");
+    assert!(
+        elapsed < Duration::from_millis(300),
+        "health took {elapsed:?} while a dictation was running"
+    );
+    assert!(
+        !dictation.is_finished(),
+        "the dictation must still be running when health answers"
+    );
+
+    let dictation = dictation.await.expect("dictation task completes");
+    assert_eq!(dictation.status, 200);
+    assert_eq!(
+        dictation.body_json()["choices"][0]["message"]["content"],
+        result
+    );
+    assert!(server.fake.report_path().exists(), "the fake ran");
 }
 
 #[tokio::test]

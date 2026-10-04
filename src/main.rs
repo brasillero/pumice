@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use pumice::api;
 use pumice::config::{self, ConfigSource, LoadedConfig};
+use pumice::logging::DebugLog;
 use pumice::pipeline::Pipeline;
 use pumice::process::ProcessRunner;
 use pumice::providers;
@@ -107,6 +108,23 @@ async fn run_service(loaded: LoadedConfig) -> ExitCode {
     };
     let pipeline = Arc::new(Pipeline::new(&config, providers));
 
+    // The debug log holds dictated text, so it opens before serving and a
+    // misconfigured path fails startup (exit 1) instead of silently losing
+    // records.
+    let debug_log = match DebugLog::open(&config.debug_log) {
+        Ok(debug_log) => debug_log,
+        Err(error) => {
+            eprintln!("error: cannot open debug_log.path: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    if debug_log.is_enabled() {
+        eprintln!(
+            "warning: debug log enabled: dictated text is written to {}",
+            config.debug_log.path.display()
+        );
+    }
+
     // Bind before serving so an occupied port fails at startup with an
     // actionable message instead of after the event loop starts.
     let listener = match api::bind(config.port).await {
@@ -126,7 +144,14 @@ async fn run_service(loaded: LoadedConfig) -> ExitCode {
     };
 
     println!("pumice listening on http://127.0.0.1:{}/v1", config.port);
-    match api::serve(listener, pipeline, Arc::new(api::StderrLog)).await {
+    match api::serve(
+        listener,
+        pipeline,
+        Arc::new(api::StderrLog),
+        Arc::new(debug_log),
+    )
+    .await
+    {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: the service stopped unexpectedly: {error}");
