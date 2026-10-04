@@ -63,6 +63,10 @@ struct Scenario {
     /// delete the file.
     #[serde(default)]
     report_arg_files: Vec<String>,
+    /// `-c` keys whose `key="<path>"` argument value is a TOML-quoted file
+    /// path to capture in the report (for example `model_instructions_file`).
+    #[serde(default)]
+    report_config_files: Vec<String>,
     /// Read stdin to EOF before doing anything else. When false, stdin is never
     /// read (a CLI that ignores its input).
     #[serde(default = "default_true")]
@@ -104,6 +108,8 @@ struct Report {
     env: BTreeMap<String, Option<String>>,
     /// Contents of files named after the requested flags, keyed by flag.
     arg_files: BTreeMap<String, Option<ArgFile>>,
+    /// Contents of files named by `-c key="<path>"` arguments, keyed by key.
+    config_files: BTreeMap<String, Option<ArgFile>>,
     pid: u32,
     grandchild_pid: Option<u32>,
 }
@@ -273,6 +279,22 @@ fn build_report(
         })
         .collect();
 
+    let config_files = scenario
+        .report_config_files
+        .iter()
+        .map(|key| {
+            let file = argv
+                .windows(2)
+                .filter(|pair| pair[0].as_str() == "-c")
+                .find_map(|pair| config_path_argument(&pair[1], key))
+                .map(|path| ArgFile {
+                    path: path.clone(),
+                    contents: std::fs::read_to_string(&path).ok(),
+                });
+            (key.clone(), file)
+        })
+        .collect();
+
     Report {
         argv,
         stdin,
@@ -280,9 +302,55 @@ fn build_report(
         cwd_entries,
         env,
         arg_files,
+        config_files,
         pid: process::id(),
         grandchild_pid,
     }
+}
+
+/// Returns the decoded path from a `-c` argument of the form
+/// `key="<TOML-quoted path>"` when `key` matches. An undecodable value falls
+/// back to the raw text so the report still shows what was passed.
+fn config_path_argument(argument: &str, wanted: &str) -> Option<String> {
+    let (key, value) = argument.split_once('=')?;
+    if key != wanted {
+        return None;
+    }
+    Some(decode_toml_basic_string(value).unwrap_or_else(|| value.to_owned()))
+}
+
+/// Decodes the TOML basic string produced by the adapter's encoder.
+fn decode_toml_basic_string(value: &str) -> Option<String> {
+    let inner = value.strip_prefix('"')?.strip_suffix('"')?;
+    let mut out = String::new();
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next()? {
+            '"' => out.push('"'),
+            '\\' => out.push('\\'),
+            'b' => out.push('\u{8}'),
+            't' => out.push('\t'),
+            'n' => out.push('\n'),
+            'f' => out.push('\u{c}'),
+            'r' => out.push('\r'),
+            'u' => out.push(decode_hex(&mut chars, 4)?),
+            'U' => out.push(decode_hex(&mut chars, 8)?),
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+fn decode_hex(chars: &mut impl Iterator<Item = char>, n: usize) -> Option<char> {
+    let hex: String = chars.by_ref().take(n).collect();
+    if hex.len() != n {
+        return None;
+    }
+    char::from_u32(u32::from_str_radix(&hex, 16).ok()?)
 }
 
 /// Writes the report through a temporary file and a rename so a reader never

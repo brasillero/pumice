@@ -54,6 +54,10 @@ fn claude(config: &Config) -> &ProviderSettings {
         .expect("claude is configured")
 }
 
+fn codex(config: &Config) -> &ProviderSettings {
+    config.providers.get("codex").expect("codex is configured")
+}
+
 fn no_env(_: &str) -> Option<OsString> {
     None
 }
@@ -69,7 +73,7 @@ fn empty_file_gives_all_defaults() {
     assert_eq!(config.prompts.system, None);
     assert_eq!(config.prompts.user, None);
     assert!(!config.debug_log.enabled);
-    assert_eq!(config.providers.len(), 1);
+    assert_eq!(config.providers.len(), 2);
 
     let claude = claude(&config);
     assert!(claude.enabled);
@@ -78,6 +82,14 @@ fn empty_file_gives_all_defaults() {
     assert_eq!(claude.timeout, Duration::from_secs(30));
     assert!(claude.env.is_empty());
     assert!(claude.options.is_empty());
+
+    let codex = codex(&config);
+    assert!(codex.enabled);
+    assert_eq!(codex.binary, None);
+    assert_eq!(codex.model, "gpt-6.1-sol");
+    assert_eq!(codex.timeout, Duration::from_secs(30));
+    assert!(codex.env.is_empty());
+    assert!(codex.options.is_empty());
 }
 
 #[test]
@@ -398,6 +410,110 @@ fn claude_options_are_rejected_at_the_key() {
 }
 
 #[test]
+fn codex_openai_base_url_option_is_kept() {
+    let config = load_text(
+        "providers:\n  codex:\n    options:\n      openai_base_url: \"https://gw.example/v1\"\n",
+    )
+    .expect("allowed option loads");
+    assert_eq!(
+        codex(&config)
+            .options
+            .get("openai_base_url")
+            .map(String::as_str),
+        Some("https://gw.example/v1")
+    );
+
+    let config = load_text(
+        "providers:\n  codex:\n    options:\n      openai_base_url: \"http://127.0.0.1:9999\"\n",
+    )
+    .expect("http option loads");
+    assert_eq!(
+        codex(&config)
+            .options
+            .get("openai_base_url")
+            .map(String::as_str),
+        Some("http://127.0.0.1:9999")
+    );
+}
+
+#[test]
+fn codex_rejects_invalid_openai_base_url_at_the_value() {
+    assert_error(
+        "providers:\n  codex:\n    options:\n      openai_base_url: \"ftp://gw.example/v1\"\n",
+        4,
+        24,
+        "providers.codex.options.openai_base_url must be an http:// or https:// URL with a valid host",
+    );
+    assert_error(
+        "providers:\n  codex:\n    options:\n      openai_base_url: \"http://exa mple\"\n",
+        4,
+        24,
+        "providers.codex.options.openai_base_url must be an http:// or https:// URL with a valid host",
+    );
+}
+
+#[test]
+fn codex_rejects_hostless_or_malformed_base_urls() {
+    for bad in [
+        "https://?",
+        "http:///",
+        "https://[invalid",
+        "http://host:99999",
+        "https://user@host",
+        "https://a..b",
+    ] {
+        assert_error(
+            &format!("providers:\n  codex:\n    options:\n      openai_base_url: \"{bad}\"\n"),
+            4,
+            24,
+            "providers.codex.options.openai_base_url must be an http:// or https:// URL with a valid host",
+        );
+    }
+}
+
+#[test]
+fn codex_accepts_realistic_base_urls() {
+    for good in [
+        "http://localhost:8317/v1",
+        "https://gw.example.ts.net/v1",
+        "http://[::1]:8080",
+        "https://10.0.0.2",
+    ] {
+        let config = load_text(&format!(
+            "providers:\n  codex:\n    options:\n      openai_base_url: \"{good}\"\n"
+        ))
+        .unwrap_or_else(|e| panic!("{good} should load: {e}"));
+        assert_eq!(
+            codex(&config)
+                .options
+                .get("openai_base_url")
+                .map(String::as_str),
+            Some(good)
+        );
+    }
+}
+
+#[test]
+fn codex_unknown_options_are_rejected_at_the_key() {
+    assert_error(
+        "providers:\n  codex:\n    options:\n      web_search: disabled\n",
+        4,
+        7,
+        "providers.codex.options.web_search is not supported",
+    );
+}
+
+#[test]
+fn codex_env_overrides_are_rejected_at_the_key() {
+    assert_error(
+        "providers:\n  codex:\n    env:\n      OPENAI_BASE_URL: http://gw.example\n",
+        4,
+        7,
+        "providers.codex.env.OPENAI_BASE_URL is not an allowed environment variable (no environment overrides are allowed for this provider)",
+    );
+}
+
+#[test]
 fn relative_binary_path_resolves_against_the_config_directory() {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join(CONFIG_NAME);
@@ -539,8 +655,8 @@ fn registry_builds_enabled_providers_from_config() {
     let config = load_text("").expect("empty file loads");
     let built = providers::build_from_config(&config, Arc::new(ProcessRunner::new()))
         .expect("providers build");
-    assert_eq!(built.len(), 1);
-    assert_eq!(built[0].id(), "claude");
+    let ids: Vec<&str> = built.iter().map(|provider| provider.id()).collect();
+    assert_eq!(ids, ["claude", "codex"]);
 }
 
 #[test]
@@ -667,7 +783,7 @@ fn configured_env_reaches_the_cli_invocation() {
     .expect("config loads");
     let built = providers::build_from_config(&config, Arc::new(ProcessRunner::new()))
         .expect("provider builds");
-    assert_eq!(built.len(), 1);
+    assert_eq!(built.len(), 2);
 
     // The adapter built from config forwards the override; its own
     // variables are still present.
@@ -701,6 +817,55 @@ fn configured_env_reaches_the_cli_invocation() {
         env.get("MAX_THINKING_TOKENS").map(String::as_str),
         Some("0")
     );
+}
+
+#[test]
+fn configured_openai_base_url_reaches_the_codex_invocation() {
+    use pumice::providers::cli::CliAdapter;
+    use pumice::providers::codex::CodexAdapter;
+    use pumice::providers::{FormatInput, UserPrompt};
+
+    let config = load_text(
+        "providers:\n  codex:\n    options:\n      openai_base_url: \"https://gw.example/v1\"\n",
+    )
+    .expect("config loads");
+    let codex_settings = codex(&config);
+    assert_eq!(
+        codex_settings
+            .options
+            .get("openai_base_url")
+            .map(String::as_str),
+        Some("https://gw.example/v1")
+    );
+
+    let adapter = CodexAdapter::new(
+        PathBuf::from("codex"),
+        codex_settings.model.clone(),
+        codex_settings.options.get("openai_base_url").cloned(),
+    );
+    let invocation = adapter
+        .invocation(FormatInput {
+            system_prompt: "system",
+            user_prompt: UserPrompt::default(),
+            text: "text",
+        })
+        .expect("invocation builds");
+    let args: Vec<String> = invocation
+        .args
+        .iter()
+        .map(|a| match a {
+            pumice::process::Argument::Literal(value) => value.to_string_lossy().into_owned(),
+            // Path-bearing variants are materialized by the runner; the key
+            // is enough to recognize them here.
+            pumice::process::Argument::ControlPath { .. } => String::new(),
+            pumice::process::Argument::ConfigControlPath { key, .. } => (*key).to_owned(),
+        })
+        .collect();
+    let position = args
+        .iter()
+        .position(|a| a == "openai_base_url=\"https://gw.example/v1\"")
+        .expect("encoded base URL argument is present");
+    assert_eq!(args[position - 1], "-c");
 }
 
 #[test]
