@@ -24,17 +24,14 @@ use crate::pipeline::Pipeline;
 #[derive(Clone)]
 pub(crate) struct ApiState {
     pipeline: Arc<Pipeline>,
-    /// Enabled provider IDs, listed as models.
-    models: Vec<String>,
     counter: Arc<AtomicU64>,
     log: Arc<dyn RequestLog>,
 }
 
 impl ApiState {
-    fn new(pipeline: Arc<Pipeline>, models: Vec<String>, log: Arc<dyn RequestLog>) -> ApiState {
+    fn new(pipeline: Arc<Pipeline>, log: Arc<dyn RequestLog>) -> ApiState {
         ApiState {
             pipeline,
-            models,
             counter: Arc::new(AtomicU64::new(1)),
             log,
         }
@@ -71,10 +68,9 @@ pub async fn bind(port: u16) -> io::Result<TcpListener> {
 pub async fn serve(
     listener: TcpListener,
     pipeline: Arc<Pipeline>,
-    enabled_models: Vec<String>,
     log: Arc<dyn RequestLog>,
 ) -> io::Result<()> {
-    let state = ApiState::new(pipeline, enabled_models, log);
+    let state = ApiState::new(pipeline, log);
     axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await

@@ -18,7 +18,7 @@ use tokio::time::Instant;
 use crate::cleanup::cleanup;
 use crate::config::{Config, PromptSettings};
 use crate::prompts::compose_with_settings;
-use crate::providers::{FormatInput, Provider, ProviderError};
+use crate::providers::{self, FormatInput, Provider, ProviderError};
 use crate::request::ExtractedRequest;
 
 /// Part of the total budget reserved for killing the CLI and building the
@@ -92,6 +92,42 @@ impl Pipeline {
         }
     }
 
+    /// The provider IDs offered as models on `GET /v1/models`: the default
+    /// provider first, then the remaining enabled providers in registry
+    /// order, so a client that picks the first model gets the default.
+    /// Never invokes a CLI.
+    pub fn model_ids(&self) -> Vec<&str> {
+        let mut ids = Vec::with_capacity(self.providers.len());
+        let default = self.default_provider.as_str();
+        if self.providers.contains_key(default) {
+            ids.push(default);
+        }
+        for descriptor in providers::PROVIDERS {
+            if descriptor.id != default && self.providers.contains_key(descriptor.id) {
+                ids.push(descriptor.id);
+            }
+        }
+        ids
+    }
+
+    /// Selection rule for the request's `model` field: the value is trimmed
+    /// and matched case-insensitively against the configured provider IDs
+    /// (Handy users type the field by hand), so `"Claude "` selects
+    /// `claude`. An absent or empty value selects the default provider.
+    /// Returns the canonical configured ID — including a disabled one, which
+    /// `format` reports as [`RawReason::ProviderDisabled`] — or `None` when
+    /// the value names no configured provider.
+    pub fn select(&self, requested: Option<&str>) -> Option<&str> {
+        match requested.map(str::trim) {
+            None | Some("") => Some(self.default_provider.as_str()),
+            Some(requested) => self
+                .configured
+                .iter()
+                .find(|id| id.eq_ignore_ascii_case(requested))
+                .map(String::as_str),
+        }
+    }
+
     /// Formats one extracted request. `started` is when the HTTP request
     /// arrived; the total budget counts from it.
     ///
@@ -109,13 +145,12 @@ impl Pipeline {
             return FormatOutcome::finished(String::new(), OutcomeKind::Empty, None, 0, started);
         }
 
-        let selected = request.model.as_deref().unwrap_or(&self.default_provider);
         // An unknown or disabled selected provider is a configuration
         // mistake, not a transient failure: return raw text at once so the
         // user notices, never silently formatting through another provider.
-        if !self.configured.contains(selected) {
+        let Some(selected) = self.select(request.model.as_deref()) else {
             return self.raw(request, RawReason::UnknownProvider, started, 0);
-        }
+        };
         if !self.providers.contains_key(selected) {
             return self.raw(request, RawReason::ProviderDisabled, started, 0);
         }

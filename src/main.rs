@@ -106,12 +106,6 @@ async fn run_service(loaded: LoadedConfig) -> ExitCode {
         }
     };
     let pipeline = Arc::new(Pipeline::new(&config, providers));
-    let enabled_models: Vec<String> = config
-        .providers
-        .iter()
-        .filter(|(_, settings)| settings.enabled)
-        .map(|(id, _)| id.clone())
-        .collect();
 
     // Bind before serving so an occupied port fails at startup with an
     // actionable message instead of after the event loop starts.
@@ -132,7 +126,7 @@ async fn run_service(loaded: LoadedConfig) -> ExitCode {
     };
 
     println!("pumice listening on http://127.0.0.1:{}/v1", config.port);
-    match api::serve(listener, pipeline, enabled_models, Arc::new(api::StderrLog)).await {
+    match api::serve(listener, pipeline, Arc::new(api::StderrLog)).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: the service stopped unexpectedly: {error}");
