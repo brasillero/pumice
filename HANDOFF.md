@@ -62,11 +62,11 @@ Update this table in the PR that finishes each story.
 
 | Story | Status | PR | Notes |
 | --- | --- | --- | --- |
-| S0.1 Handy request format | Not started | | Needs the owner to configure Handy on Windows |
-| S0.2 CLI matrix | Not started | | Start with Claude |
-| S0.3 Terms of use | Done (pending review) | #1 | Claude: unclear; Codex: OK; Kimi: risky (subscription is interactive-only); OpenCode: unclear; Antigravity: risky. June 2026 headless quota split is paused. |
-| S0.4 Validate the stack | Not started | | |
-| S0.5 WSL localhost | Not started | | Can run together with S0.1 |
+| S0.1 Handy request format | Done | #4 | `GET /v1/models` plus `POST /v1/chat/completions`. One user message with the prompt and a `<transcript>`, no system message. `stream: false`, `reasoning_effort: none`, no language field, no auth. Response pasted verbatim. |
+| S0.2 CLI matrix | Done | #2 | Claude viable: median 6.5 s, ~1.9 s with thinking off. Codex 5.2 s, OpenCode 6.0 s, Kimi 5.7 s. Gateway caveat. Warm modes not measured. |
+| S0.3 Terms of use | Done | #1 | Claude: unclear; Codex: OK; Kimi: risky (subscription is interactive-only); OpenCode: unclear; Antigravity: risky. June 2026 headless quota split is paused. |
+| S0.4 Validate the stack | Done | #3 | Rust prototype: `pumice listen` (for S0.1) and `pumice claude-probe` (real call 2.8 s). CI on 3 OSes with a Windows CRT DLL check. |
+| S0.5 WSL localhost | Done | #5 | Works in NAT mode with no changes. Use `127.0.0.1` in Handy: `localhost` first tries IPv6 `::1`, which is not forwarded (~2 s delay). |
 
 ## After Phase 0
 
