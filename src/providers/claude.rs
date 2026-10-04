@@ -134,11 +134,13 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
     let is_error = envelope.get("is_error").and_then(Value::as_bool);
     let result = envelope.get("result");
 
-    if !exited_ok || is_error != Some(false) {
-        if is_error.is_none() && exited_ok {
-            return Err(ProviderError::other(ProviderErrorCode::InvalidOutput));
-        }
-        return Err(classify_failure(result.and_then(Value::as_str)));
+    match (is_error, exited_ok) {
+        // Only an error envelope's `result` is diagnostic text. Any other
+        // `result` may be formatted dictation and is never classified.
+        (Some(true), _) => return Err(classify_failure(result.and_then(Value::as_str))),
+        (_, false) => return Err(ProviderError::other(ProviderErrorCode::NonzeroExit)),
+        (None, true) => return Err(ProviderError::other(ProviderErrorCode::InvalidOutput)),
+        (Some(false), true) => {}
     }
     if envelope.get("type").and_then(Value::as_str) != Some("result") {
         return Err(ProviderError::other(ProviderErrorCode::InvalidOutput));
@@ -153,8 +155,8 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
 ///
 /// Only the "not logged in" text is verified. Limit messages are matched
 /// only when they clearly name one kind of limit; anything else is a generic
-/// failure. This runs on failures only, so dictated text that mentions
-/// limits cannot be misread as an error.
+/// failure. This runs on `is_error: true` envelopes only, so dictated text
+/// that mentions limits or logins cannot be misread as an error.
 fn classify_failure(result: Option<&str>) -> ProviderError {
     let Some(text) = result.map(str::trim) else {
         return ProviderError::other(ProviderErrorCode::NonzeroExit);

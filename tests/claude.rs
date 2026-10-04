@@ -176,6 +176,39 @@ async fn nonzero_exit_with_success_envelope_is_an_error() {
 }
 
 #[tokio::test]
+async fn nonzero_exit_with_success_envelope_is_never_classified() {
+    // The result of a success envelope may be dictation: it must not be
+    // read as a diagnostic even when the process fails.
+    for result in [
+        "We hit the rate limit again.",
+        "Not logged in · Please run /login",
+    ] {
+        let fake = fake_claude(&envelope(false, result), 1);
+        assert_eq!(
+            format(&fake, "text").await.unwrap_err(),
+            ProviderError::Other {
+                code: ProviderErrorCode::NonzeroExit
+            },
+            "result: {result}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn error_envelope_with_nonzero_exit_is_classified() {
+    let fake = fake_claude(&envelope(true, "API Error: rate_limit_error"), 1);
+    assert_eq!(
+        format(&fake, "text").await.unwrap_err(),
+        ProviderError::RateLimited { retry_after: None }
+    );
+    let fake = fake_claude(&envelope(true, "Claude AI usage limit reached"), 1);
+    assert_eq!(
+        format(&fake, "text").await.unwrap_err(),
+        ProviderError::QuotaExceeded { retry_after: None }
+    );
+}
+
+#[tokio::test]
 async fn nonzero_exit_without_json_is_an_error() {
     let fake = fake_claude("", 2);
     assert_eq!(
