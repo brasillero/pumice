@@ -31,7 +31,9 @@ const MIN_STARTUP: Duration = Duration::from_millis(100);
 /// Grace between a provider's deadline and the hard stop that cancels it.
 /// The process runner enforces the deadline itself; this slack only backs up
 /// a provider that ignores it (dropping its future kills the process tree).
-const HARD_STOP_SLACK: Duration = Duration::from_millis(500);
+/// It stays below `RESPONSE_RESERVE`, so even then the response goes out
+/// before the total timeout and Handy still receives the raw text.
+const HARD_STOP_SLACK: Duration = Duration::from_millis(150);
 
 /// A provider ready to run and its configured timeout.
 struct ProviderEntry {
@@ -253,3 +255,6 @@ pub enum RawReason {
 /// Text-free summary of a provider failure. [`ProviderError`] already
 /// carries no captured output or dictated text, so the kind is the error.
 pub type ProviderErrorKind = ProviderError;
+
+// The hard stop must fire inside the reserved part of the total budget.
+const _: () = assert!(HARD_STOP_SLACK.as_millis() < RESPONSE_RESERVE.as_millis());
