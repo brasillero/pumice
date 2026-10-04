@@ -524,14 +524,14 @@ mod tests {
 
     #[test]
     fn per_user_path_honours_xdg() {
+        // An absolute path on every OS (`/tmp/xdg` is relative on Windows).
+        let xdg = std::env::temp_dir().join("xdg");
+        let env_value = xdg.clone().into_os_string();
         let path = per_user_config_path_for(
-            &|key| (key == "XDG_CONFIG_HOME").then(|| OsString::from("/tmp/xdg")),
+            &|key| (key == "XDG_CONFIG_HOME").then(|| env_value.clone()),
             false,
         );
-        assert_eq!(
-            path,
-            Some(PathBuf::from("/tmp/xdg").join("pumice").join("pumice.yaml"))
-        );
+        assert_eq!(path, Some(xdg.join("pumice").join("pumice.yaml")));
     }
 
     #[test]
