@@ -64,6 +64,23 @@ providers:
     #   openai_base_url: "https://your-existing-gateway.example/v1"
     options: {}
 
+  # OpenCode is off by default. Enabling it requires an explicit
+  # provider/model: with no configured provider, OpenCode silently answers
+  # through a hosted default model. Upstream terms vary; startup
+  # customizations and CLI-owned transcript retention remain unverified.
+  # Uncomment to use, replacing the model with a provider/model you are
+  # authorized to use (for example opencode/<free-model>):
+  # opencode:
+  #   enabled: true
+  #   model: opencode/<free-model>
+  #   timeout_secs: 30
+  #   # OpenCode accepts no environment overrides; the adapter owns the
+  #   # child environment (an inline deny-all configuration).
+  #   env: {}
+  #   # The only supported option selects a provider-specific reasoning
+  #   # variant, for example variant: low.
+  #   options: {}
+
   # Antigravity (agy) is registered but cannot be enabled yet: no supported
   # per-launch tool policy exists, and third-party integration may risk
   # account access (docs/research/phase2-architecture.md §3.2). Writing

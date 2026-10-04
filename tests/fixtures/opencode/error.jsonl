@@ -1,0 +1,2 @@
+{"type":"step_start","timestamp":1760000000000,"sessionID":"ses_pumicefixture2","part":{"id":"prt_1","messageID":"msg_1","sessionID":"ses_pumicefixture2","type":"step-start"}}
+{"type":"error","timestamp":1760000000200,"sessionID":"ses_pumicefixture2","error":{"name":"ProviderAuthError","data":{"providerID":"opencode","message":"missing authentication"}}}

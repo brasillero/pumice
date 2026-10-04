@@ -201,7 +201,7 @@ fn empty_file_gives_all_defaults() {
     assert_eq!(config.prompts.system, None);
     assert_eq!(config.prompts.user, None);
     assert!(!config.debug_log.enabled);
-    assert_eq!(config.providers.len(), 3);
+    assert_eq!(config.providers.len(), 4);
 
     let claude = claude(&config);
     assert!(claude.enabled);
@@ -229,6 +229,17 @@ fn empty_file_gives_all_defaults() {
     assert_eq!(antigravity.timeout, Duration::from_secs(30));
     assert!(antigravity.env.is_empty());
     assert!(antigravity.options.is_empty());
+
+    // OpenCode is registered but dormant: off by default, with no model.
+    let opencode = config
+        .providers
+        .get("opencode")
+        .expect("opencode is configured");
+    assert!(!opencode.enabled);
+    assert!(opencode.model.is_empty());
+    assert_eq!(opencode.timeout, Duration::from_secs(30));
+    assert!(opencode.env.is_empty());
+    assert!(opencode.options.is_empty());
 }
 
 #[test]
