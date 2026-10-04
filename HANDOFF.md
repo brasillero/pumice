@@ -32,7 +32,7 @@ Update this table in the PR that finishes each story. Merge order follows the ta
 | 3 | S6.1 + S1.5 YAML config and default port | Done (pending review) | | `serde-saphyr` with `file:line:column` errors, per-user lookup, `pumice check-config`; port 7567 |
 | 4 | S2.3 Codex adapter | Not started | | Keeps `--ignore-user-config`; allows only `openai_base_url` |
 | 5 | S3.1 + S3.3 Adapter instruction and prompt composition | Done | #10 | Fixed instruction, transcript extraction, lossless Handy reconstruction, plain-text envelope escaping; pure functions + tests |
-| 6 | S3.2 Optional Pumice prompts | Not started | | |
+| 6 | S3.2 Optional Pumice prompts | Done (pending review) | | `compose_with_settings` wires `PromptSettings` into composition; block-scalar, whitespace-only and fake-CLI order tests |
 | 7 | S3.4 Output cleanup | Done | #9 | `cleanup` pure function + tests; preservation guard on every rule, idempotence over positive fixtures |
 | 8 | S4.1 Timeouts | Not started | | |
 | 9 | S4.3 Raw-text fallback | Not started | | |
