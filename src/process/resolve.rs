@@ -110,7 +110,8 @@ fn translate_npm_shim(
     let Some(shim_dir) = shim_path.parent() else {
         return Err(unsupported_shim());
     };
-    let entrypoint_path = shim_dir.join(&entrypoint);
+    // `entrypoint` is the package path inside `node_modules`.
+    let entrypoint_path = shim_dir.join("node_modules").join(&entrypoint);
     if !entrypoint_path.is_file() {
         return Err(unsupported_shim());
     }
@@ -357,7 +358,7 @@ mod tests {
     /// shim's directory, and returns the shim path next to it.
     fn shim_with_entrypoint(shim_name: &str, entrypoint: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let entry = dir.path().join(entrypoint);
+        let entry = dir.path().join("node_modules").join(entrypoint);
         std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
         std::fs::write(&entry, b"// entrypoint").unwrap();
         let shim = dir.path().join(shim_name);
@@ -377,7 +378,12 @@ mod tests {
             assert_eq!(resolved.path, node);
             assert_eq!(
                 resolved.prefix_args,
-                [shim.parent().unwrap().join(entrypoint).into_os_string()]
+                [shim
+                    .parent()
+                    .unwrap()
+                    .join("node_modules")
+                    .join(entrypoint)
+                    .into_os_string()]
             );
         }
     }
