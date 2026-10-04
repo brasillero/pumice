@@ -97,7 +97,7 @@ macro_rules! register_providers {
     };
 }
 
-register_providers!(claude);
+register_providers!(claude, codex);
 
 /// Looks up a provider by ID.
 pub fn descriptor(id: &str) -> Option<&'static ProviderDescriptor> {
@@ -148,5 +148,16 @@ mod tests {
         let provider = (d.build)(&settings, Arc::new(ProcessRunner::new()))
             .expect("claude builds from its defaults");
         assert_eq!(provider.id(), "claude");
+
+        let d = descriptor("codex").expect("codex is registered");
+        let settings = (d.defaults)();
+        assert!(settings.enabled);
+        assert_eq!(settings.binary, None);
+        assert_eq!(settings.model, "gpt-6.1-sol");
+        assert_eq!(settings.timeout, Duration::from_secs(30));
+        assert!(d.allowed_env.is_empty());
+        let provider = (d.build)(&settings, Arc::new(ProcessRunner::new()))
+            .expect("codex builds from its defaults");
+        assert_eq!(provider.id(), "codex");
     }
 }

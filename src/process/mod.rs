@@ -24,6 +24,7 @@ use tokio::time::Instant;
 
 pub use invocation::{
     Argument, CliInvocation, ControlFile, OutputParser, ProcessOutput, ProgramSpec,
+    toml_basic_string,
 };
 pub use resolve::resolve_program;
 
@@ -100,6 +101,15 @@ async fn run_in(
             Argument::ControlPath { file } => control_paths
                 .get(*file)
                 .map(|path| path.clone().into_os_string())
+                .ok_or(ProviderError::other(
+                    ProviderErrorCode::InvalidConfiguration,
+                )),
+            Argument::ConfigControlPath { key, file } => control_paths
+                .get(*file)
+                .map(|path| {
+                    let value = toml_basic_string(&path.to_string_lossy());
+                    OsString::from(format!("{key}={value}"))
+                })
                 .ok_or(ProviderError::other(
                     ProviderErrorCode::InvalidConfiguration,
                 )),

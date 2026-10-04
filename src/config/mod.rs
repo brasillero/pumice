@@ -345,6 +345,11 @@ fn provider_settings(
 
     settings.env = validate_env(descriptor, &base, &raw.env)?;
     validate_options(descriptor, &raw.options)?;
+    for (key, value) in &raw.options {
+        settings
+            .options
+            .insert(key.value.clone(), value.value.clone());
+    }
     Ok(settings)
 }
 

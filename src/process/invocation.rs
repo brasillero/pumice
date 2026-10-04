@@ -18,11 +18,118 @@ pub enum Argument {
     Literal(OsString),
     /// Absolute path of `control_files[file]`, materialized by the runner.
     ControlPath { file: usize },
+    /// One `key="<absolute path>"` argument (for example Codex's
+    /// `-c model_instructions_file="…"`), with the path of
+    /// `control_files[file]` TOML-encoded inside the value. Materialized by
+    /// the runner; paths never go through a shell.
+    ConfigControlPath { key: &'static str, file: usize },
 }
 
 impl Argument {
     pub fn literal(value: impl Into<OsString>) -> Argument {
         Argument::Literal(value.into())
+    }
+}
+
+/// Encodes `value` as a TOML basic string, surrounding quotes included, so it
+/// can be embedded in a `-c key="<value>"` argument. Backslashes and quotes
+/// are escaped (Windows paths contain backslashes); control characters use
+/// the short or `\uXXXX` escapes; other characters, including non-ASCII, stay
+/// literal.
+pub fn toml_basic_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{8}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{c}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            c if (c <= '\u{1f}') || c == '\u{7f}' => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Inverse of [`toml_basic_string`] for the escapes it produces.
+    fn decode(encoded: &str) -> String {
+        let inner = encoded
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .expect("quoted");
+        let mut out = String::new();
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next().expect("escape") {
+                '"' => out.push('"'),
+                '\\' => out.push('\\'),
+                'b' => out.push('\u{8}'),
+                't' => out.push('\t'),
+                'n' => out.push('\n'),
+                'f' => out.push('\u{c}'),
+                'r' => out.push('\r'),
+                'u' => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    out.push(char::from_u32(u32::from_str_radix(&hex, 16).unwrap()).unwrap());
+                }
+                other => panic!("unexpected escape \\{other}"),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn toml_string_escapes_windows_paths() {
+        // A Windows temp path: backslashes double, nothing else changes.
+        let path = r"C:\Users\João\AppData\Local\Temp\pumice-ab12\control\system.txt";
+        assert_eq!(
+            toml_basic_string(path),
+            r#""C:\\Users\\João\\AppData\\Local\\Temp\\pumice-ab12\\control\\system.txt""#
+        );
+    }
+
+    #[test]
+    fn toml_string_escapes_quotes_and_control_characters() {
+        assert_eq!(toml_basic_string("say \"hi\""), r#""say \"hi\"""#);
+        assert_eq!(
+            toml_basic_string("tab\tnul\u{0}bell\u{7}del\u{7f}"),
+            "\"tab\\tnul\\u0000bell\\u0007del\\u007f\""
+        );
+    }
+
+    #[test]
+    fn toml_string_keeps_unicode_literal() {
+        let value = "Olá, coração 🎤 — ação";
+        assert_eq!(toml_basic_string(value), format!("\"{value}\""));
+    }
+
+    #[test]
+    fn toml_string_round_trips() {
+        for value in [
+            r"C:\a\b.txt",
+            "plain",
+            "with \"quotes\" and \\ backslashes",
+            "tab\tnewline\nfeed\u{c}return\r",
+            "ünïcodé 🎤",
+            "",
+        ] {
+            assert_eq!(decode(&toml_basic_string(value)), value);
+        }
     }
 }
 
