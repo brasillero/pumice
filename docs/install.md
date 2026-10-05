@@ -6,12 +6,9 @@ receives text transcribed by [Handy](https://github.com/cjpais/Handy) (or any
 app with an OpenAI-compatible post-processing endpoint), formats it through
 the official CLI of your subscription, and returns the result to be pasted.
 
-> **Availability:** the first GitHub release and the npm package are not
-> published yet (as of 2026-10-05). The commands below describe the intended
-> usage once the owner publishes them; until then, build from source with
-> Cargo (see the [README](../README.md)). Check
-> [GitHub Releases](https://github.com/brasillero/pumice/releases) for the
-> current published versions.
+> **Availability:** check [GitHub Releases](https://github.com/brasillero/pumice/releases)
+> and the [npm registry](https://www.npmjs.com/package/pumice) for published
+> versions. You can also build from source with Cargo (see the [README](../README.md)).
 
 ## What you need
 

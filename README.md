@@ -19,7 +19,7 @@ Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude
 
 Pumice works end to end through Claude and Codex (with a fallback chain), and optionally OpenCode. Run `pumice doctor` to see which CLIs it found.
 
-Nothing is published yet: the first GitHub release and the npm package (`npm install -g pumice`, installable with npm, pnpm, Bun or npx) are prepared and preview-built in CI, but publication is still the owner's call. Until then, run from source below. See the [installation guide](docs/install.md) for the intended install, run and Handy setup flow.
+Pumice supports standalone downloads and the npm package `pumice` (installable with npm, pnpm, Bun or npx). Check [GitHub Releases](https://github.com/brasillero/pumice/releases) and the [npm registry](https://www.npmjs.com/package/pumice) for published versions. See the [installation guide](docs/install.md) for installation, startup and Handy setup; building from source is also supported below.
 
 ### Run from source (preview)
 
