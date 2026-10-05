@@ -24,7 +24,7 @@ import package_release
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VERSION = package_release.crate_version()
 
-FRONT_TARBALL = f"pumice-{VERSION}.tgz"
+FRONT_TARBALL = f"brasillero-pumice-{VERSION}.tgz"
 NATIVE_TARBALLS = [
     f"brasillero-pumice-{key}-{VERSION}.tgz" for key, _ in package_npm.TARGET_TO_NPM.values()
 ]
@@ -119,7 +119,7 @@ class PackageNpmTests(unittest.TestCase):
         self.pack()
         members = read_tarball(self.output, FRONT_TARBALL)
         manifest = json.loads(members["package/package.json"])
-        self.assertEqual(manifest["name"], "pumice")
+        self.assertEqual(manifest["name"], "@brasillero/pumice")
         self.assertEqual(manifest["version"], VERSION)
         self.assertEqual(manifest["bin"], {"pumice": "bin/pumice.js"})
         self.assertEqual(manifest["engines"], {"node": ">=22"})

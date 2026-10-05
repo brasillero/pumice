@@ -61,7 +61,7 @@ try {
   fail(
     `missing native package ${nativeName}.\n` +
       'Reinstall pumice so the optional dependency is present, for example:\n' +
-      '  npm install -g pumice'
+      '  npm install -g @brasillero/pumice'
   );
 }
 

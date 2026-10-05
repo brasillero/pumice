@@ -298,7 +298,7 @@ jobs:
         run: |
           : > npm-userconfig.ini
           : > npm-globalconfig.ini
-          npm install -g "pumice@${{ steps.meta.outputs.version }}" \
+          npm install -g "@brasillero/pumice@${{ steps.meta.outputs.version }}" \
             --registry "$PUMICE_TEST_REGISTRY_URL" \
             --prefix "$PWD/prefix" \
             --userconfig "$PWD/npm-userconfig.ini" \
@@ -373,7 +373,7 @@ jobs:
           mkdir -p "$PNPM_HOME"
           # pnpm refuses a global install whose bin dir is not on PATH.
           export PATH="$PNPM_HOME/bin:$PATH"
-          pnpm add -g "pumice@${{ steps.meta.outputs.version }}" \
+          pnpm add -g "@brasillero/pumice@${{ steps.meta.outputs.version }}" \
             --registry "$PUMICE_TEST_REGISTRY_URL" \
             --store-dir "$PWD/pnpm-store" \
             --reporter=append-only
@@ -385,7 +385,7 @@ jobs:
         shell: bash
         run: |
           export BUN_INSTALL="$PWD/bun-install"
-          bun add -g "pumice@${{ steps.meta.outputs.version }}" \
+          bun add -g "@brasillero/pumice@${{ steps.meta.outputs.version }}" \
             --registry "$PUMICE_TEST_REGISTRY_URL"
           out="$("$BUN_INSTALL/bin/pumice" --version)"
           echo "$out"

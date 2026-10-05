@@ -68,7 +68,7 @@ class LauncherTests(unittest.TestCase):
         (self.front / "package.json").write_text(
             json.dumps(
                 {
-                    "name": "pumice",
+                    "name": "@brasillero/pumice",
                     "version": FRONT_VERSION,
                     "optionalDependencies": {native_name: FRONT_VERSION},
                 }
