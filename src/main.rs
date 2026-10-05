@@ -1,9 +1,10 @@
 //! Pumice command-line entry point.
 //!
-//! `serve` runs the local OpenAI-compatible dictation-formatting service on
-//! IPv4 loopback; `check-config` validates and summarizes the configuration;
-//! `doctor` reports which provider CLIs are installed and can run one real
-//! formatting call to check a provider's login.
+//! A bare `pumice` (or the explicit `serve` alias) runs the local
+//! OpenAI-compatible dictation-formatting service on IPv4 loopback;
+//! `check-config` validates and summarizes the configuration; `doctor`
+//! reports which provider CLIs are installed and can run one real formatting
+//! call to check a provider's login.
 
 use std::io;
 use std::path::Path;
@@ -22,13 +23,14 @@ const USAGE: &str = "\
 pumice - local dictation formatting service
 
 usage:
-  pumice --help                          print this help
-  pumice --version                       print the version
-  pumice check-config [--config <path>]  validate and summarize the configuration
-  pumice doctor [--config <path>]        show which provider CLIs are installed
+  pumice [--config <path>]                 run the local service on 127.0.0.1 (default)
+  pumice serve [--config <path>]           alias for the command above
+  pumice check-config [--config <path>]    validate and summarize the configuration
+  pumice doctor [--config <path>]          show which provider CLIs are installed
   pumice doctor --login-check --provider <id>
-                                         run one real formatting call to check login
-  pumice serve [--config <path>]         run the local service on 127.0.0.1
+                                           run one real formatting call to check login
+  pumice --help                            print this help
+  pumice --version                         print the version
 ";
 
 const DOCTOR_USAGE: &str = "usage: pumice doctor [--config <path>] [--login-check --provider <id>]";
@@ -47,11 +49,10 @@ fn main() -> ExitCode {
         }
         ["check-config", rest @ ..] => check_config(rest),
         ["doctor", rest @ ..] => doctor(rest),
-        ["serve", rest @ ..] => serve(rest),
-        [] => {
-            eprint!("{USAGE}");
-            ExitCode::from(2)
-        }
+        ["serve", rest @ ..] => serve(rest, "pumice serve"),
+        // Bare `pumice` starts the service; a leading `--config <path>` is
+        // the explicit-configuration form of the same command.
+        [] | ["--config", ..] => serve(&args, "pumice"),
         [first, ..] => {
             eprintln!("error: unexpected argument '{first}'\n");
             eprint!("{USAGE}");
@@ -60,14 +61,14 @@ fn main() -> ExitCode {
     }
 }
 
-/// Parses a trailing `[--config <path>]`; shared by `check-config` and
-/// `serve`.
+/// Parses a trailing `[--config <path>]`; shared by `check-config` and the
+/// service command (`serve` is the explicit alias of the bare form).
 fn config_flag<'a>(args: &'a [&'a str], command: &str) -> Result<Option<&'a Path>, ExitCode> {
     match args {
         [] => Ok(None),
         ["--config", path] => Ok(Some(Path::new(path))),
         _ => {
-            eprintln!("error: usage: pumice {command} [--config <path>]\n");
+            eprintln!("error: usage: {command} [--config <path>]\n");
             Err(ExitCode::from(2))
         }
     }
@@ -92,7 +93,7 @@ fn build_runtime() -> Result<tokio::runtime::Runtime, ExitCode> {
 }
 
 fn check_config(args: &[&str]) -> ExitCode {
-    let explicit = match config_flag(args, "check-config") {
+    let explicit = match config_flag(args, "pumice check-config") {
         Ok(explicit) => explicit,
         Err(code) => return code,
     };
@@ -105,8 +106,8 @@ fn check_config(args: &[&str]) -> ExitCode {
     }
 }
 
-fn serve(args: &[&str]) -> ExitCode {
-    let explicit = match config_flag(args, "serve") {
+fn serve(args: &[&str], command: &str) -> ExitCode {
+    let explicit = match config_flag(args, command) {
         Ok(explicit) => explicit,
         Err(code) => return code,
     };
