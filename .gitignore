@@ -12,3 +12,7 @@
 *.swp
 .DS_Store
 Thumbs.db
+
+# Development-only release and package staging
+/dist/
+__pycache__/
