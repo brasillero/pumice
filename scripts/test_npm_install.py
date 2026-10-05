@@ -89,7 +89,7 @@ def build_fake_packages(root: Path) -> None:
     launcher = LAUNCHER_SOURCE.read_bytes()
     license_bytes = (REPO_ROOT / "LICENSE").read_bytes()
     optional = {
-        f"@brasillero/pumice-{key}": FRONT_VERSION for key in PLATFORMS
+        f"@bresillero/pumice-{key}": FRONT_VERSION for key in PLATFORMS
     }
     make_tarball(
         root,
@@ -121,7 +121,7 @@ def build_fake_packages(root: Path) -> None:
                 "package/package.json": (
                     json.dumps(
                         {
-                            "name": f"@brasillero/pumice-{key}",
+                            "name": f"@bresillero/pumice-{key}",
                             "version": FRONT_VERSION,
                             "license": "MIT",
                             "os": [npm_os],
@@ -226,14 +226,14 @@ class InstallTests(unittest.TestCase):
         return prefix / "bin" / self.bin_name()
 
     def assert_wrong_platforms_skipped(self, node_modules: Path):
-        # npm/Bun hoist the native package to node_modules/@brasillero;
+        # npm/Bun hoist the native package to node_modules/@bresillero;
         # pnpm keeps it in its isolated store and links it only into the
         # front package. Search the whole tree either way.
         installed = sorted(
             {
                 path.name
                 for path in node_modules.rglob("pumice-*")
-                if path.is_dir() and path.parent.name == "@brasillero"
+                if path.is_dir() and path.parent.name == "@bresillero"
             }
         )
         expected = f"pumice-{self.current_platform_key()}"

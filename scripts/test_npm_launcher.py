@@ -27,7 +27,7 @@ LAUNCHER_SOURCE = REPO_ROOT / "scripts" / "npm" / "bin" / "pumice.js"
 NODE = shutil.which(os.environ.get("PUMICE_NODE", "node"))
 
 FRONT_VERSION = "9.9.9"
-NATIVE_NAME = "@brasillero/pumice-linux-x64"
+NATIVE_NAME = "@bresillero/pumice-linux-x64"
 
 # Echoes every argument, the working directory and stdin; writes one line to
 # stderr; exits with FAKE_PUMICE_EXIT (default 0). Plain /bin/sh, no bashisms.
@@ -58,7 +58,7 @@ class LauncherTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.front = self.root / "front"
         self.native = (
-            self.front / "node_modules" / "@brasillero" / "pumice-linux-x64"
+            self.front / "node_modules" / "@bresillero" / "pumice-linux-x64"
         )
         self._write_layout()
 
@@ -157,7 +157,7 @@ class LauncherTests(unittest.TestCase):
         # rescue an installation whose real dependency is missing.
         shutil.rmtree(self.front / "node_modules")
         cwd = self.root / "elsewhere"
-        fake = cwd / "node_modules" / "@brasillero" / "pumice-linux-x64"
+        fake = cwd / "node_modules" / "@bresillero" / "pumice-linux-x64"
         (fake / "bin").mkdir(parents=True)
         (fake / "package.json").write_text(
             json.dumps({"name": NATIVE_NAME, "version": FRONT_VERSION})
@@ -177,7 +177,7 @@ class LauncherTests(unittest.TestCase):
         self.assertIn(FRONT_VERSION, result.stderr)
 
     def test_unsupported_platform_fails_clearly(self):
-        self._write_layout(native_name="@brasillero/pumice-fuchsia-arm64")
+        self._write_layout(native_name="@bresillero/pumice-fuchsia-arm64")
         # Point the layout at a dependency name that cannot match this host.
         result = self.run_launcher([])
         self.assertNotEqual(result.returncode, 0)
