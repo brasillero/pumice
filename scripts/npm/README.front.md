@@ -8,10 +8,10 @@ Whisper (through the [Handy](https://github.com/cjpais/Handy) app), lightly
 corrects it (transcription mistakes, punctuation, lists), and returns it ready
 to paste.
 
-**Status: not published yet.** This package is prepared for the npm registry
-but has not been published, and no GitHub release exists yet either. The
-commands below are the intended usage once the owner publishes it. In the
-meantime you can build pumice from source with Cargo — see the
+**Availability:** see [GitHub Releases](https://github.com/brasillero/pumice/releases)
+and the [npm registry](https://www.npmjs.com/package/pumice) for the current
+published versions. The commands below are the usage once installed. You can
+also build pumice from source with Cargo — see the
 [repository](https://github.com/brasillero/pumice).
 
 ## Requirements
@@ -19,7 +19,8 @@ meantime you can build pumice from source with Cargo — see the
 - **Node.js >= 22** to run the launcher, even when you install with pnpm or
   Bun. The pumice service executable itself is a standalone native binary
   with no runtime dependencies.
-- One of the supported platforms (see below).
+- One of the supported platforms: Linux x64 (glibc and musl), Windows x64,
+  macOS x64 (Intel) or macOS ARM64 (Apple Silicon).
 
 ## Install
 
@@ -31,32 +32,23 @@ npx pumice@latest --version
 ```
 
 The `pumice` package is a small launcher. It selects the native binary for
-your platform from the `@brasillero/pumice-<os>-<arch>` optional
-dependencies, verifies that the versions match, and runs it. **Do not remove
-the optional dependencies** or the launcher reports the missing native
-package instead of running. The launcher itself performs no downloads and
-runs no install scripts. Your package manager fetches the front package and
-the native package matching your platform from the registry.
-
-## Platforms
-
-| Platform | Package |
-| --- | --- |
-| Linux x64 (glibc and musl) | `@brasillero/pumice-linux-x64` |
-| Windows x64 | `@brasillero/pumice-win32-x64` |
-| macOS x64 (Intel) | `@brasillero/pumice-darwin-x64` |
-| macOS arm64 (Apple Silicon) | `@brasillero/pumice-darwin-arm64` |
-
-Package managers skip the optional dependencies that do not match your
-platform, so only one native binary is downloaded.
+your platform from its optional dependencies, verifies that the versions
+match, and runs it. **Do not remove the optional dependencies** or the
+launcher reports the missing native package instead of running. The launcher
+itself performs no downloads and runs no install scripts. Your package
+manager fetches the front package and the single native binary matching your
+platform from the registry.
 
 ## Use
 
 ```sh
+pumice               # starts the service on http://127.0.0.1:7567/v1
 pumice doctor        # shows which AI CLIs are installed and reachable
-pumice serve         # starts the service on http://127.0.0.1:7567/v1
 pumice check-config  # validates the optional YAML config
 ```
+
+(`pumice serve` is an explicit alias for the start command, and
+`pumice --config <path>` starts it with an explicit config file.)
 
 In Handy: **Settings → Advanced → Experimental Features → Post Processing**,
 set the provider to **Custom**, base URL `http://127.0.0.1:7567/v1`, API key
@@ -69,7 +61,8 @@ customize, create the per-user config and edit it:
 - Linux and macOS: `~/.config/pumice/pumice.yaml`
 
 The service listens on `127.0.0.1` only, sends no telemetry and makes no
-outbound connections of its own.
+external connections of its own. The optional generic adapter connects only
+to local services.
 
 ## AI CLIs
 

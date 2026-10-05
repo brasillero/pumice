@@ -19,17 +19,17 @@ Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude
 
 Pumice works end to end through Claude and Codex (with a fallback chain), and optionally OpenCode. Run `pumice doctor` to see which CLIs it found.
 
-Nothing is published yet: the first GitHub release and the npm package (`npm install -g pumice`, front package `pumice` plus `@brasillero/pumice-<platform>` native packages) are prepared and preview-built in CI, but publication is still the owner's call. Until then, run from source below.
+Nothing is published yet: the first GitHub release and the npm package (`npm install -g pumice`, installable with npm, pnpm, Bun or npx) are prepared and preview-built in CI, but publication is still the owner's call. Until then, run from source below. See the [installation guide](docs/install.md) for the intended install, run and Handy setup flow.
 
 ### Run from source (preview)
 
 With [Rust](https://rustup.rs/) installed:
 
 ```sh
-cargo build --release
+cargo build --release --locked --bin pumice
 ./target/release/pumice check-config   # validates pumice.yaml or the built-in defaults
 ./target/release/pumice doctor         # checks which CLIs are installed
-./target/release/pumice serve
+./target/release/pumice                # starts the service
 ```
 
 In Handy: **Settings → Advanced → Experimental Features → Post Processing**, set the provider to **Custom**, base URL `http://127.0.0.1:7567/v1`, API key empty, model `claude` or `codex`. Choose `passthrough` to return the original transcript exactly, including whitespace and line breaks, without calling an AI. With Handy, only the text inside its `<transcript>` envelope is returned; its formatting prompt is omitted. See [`pumice.example.yaml`](pumice.example.yaml) for every configuration setting. On WSL, use `127.0.0.1`, not `localhost` (see [`docs/research/S0.5-wsl-localhost.md`](docs/research/S0.5-wsl-localhost.md)).
@@ -40,11 +40,14 @@ In Handy: **Settings → Advanced → Experimental Features → Post Processing*
 
 ## Roadmap
 
-| Version | Goal |
+| Stage | Status |
 | --- | --- |
-| v0.1 | Claude and Codex, fallback chain |
-| v0.2 | OpenCode, Antigravity (dormant), generic adapter, auto-detection |
-| v1.0 | GitHub release binaries and npm distribution (in preparation; replaces the deferred Tauri installer/auto-update path for now); start-with-the-system remains deferred |
+| Local formatting service (Claude, Codex, fallback chain) | Implemented |
+| OpenCode, generic loopback adapter, auto-detection | Implemented |
+| Antigravity execution, Kimi integration | Deferred |
+| Distribution: GitHub release archives + npm package | In review (publication is the owner's call) |
+| CLI-managed configuration (one model per provider) | Next |
+| Tauri installer, auto-update, start-with-the-system | Deferred |
 
 ## License
 
