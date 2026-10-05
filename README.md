@@ -5,19 +5,21 @@ Polish your dictation with the AI subscriptions you already have.
 Pumice is a small local service that sits between a dictation app and the AI coding CLIs you already pay for. It receives the raw text transcribed by Whisper, lightly corrects it (transcription mistakes, punctuation, lists), and returns it ready to paste. No separately billed API keys required.
 
 ```
-Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude / Codex / Kimi / OpenCode CLI
+Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude / Codex / OpenCode CLI
                                   ◀──polished text──
 ```
 
 - **Works with [Handy](https://github.com/cjpais/Handy)** through its Custom post-processing provider, and with any app that talks to an OpenAI-compatible endpoint.
-- **Uses the official CLIs** of your subscriptions (Claude, Codex, Kimi, OpenCode; Antigravity opt-in), or any OpenAI-compatible API.
+- **Uses the official CLIs** of your subscriptions (Claude, Codex, OpenCode; Kimi deferred, Antigravity dormant), or a local OpenAI-compatible service such as Ollama or LM Studio.
 - **Never loses a dictation:** if every provider fails or times out, you get the raw text back.
 - **Local and private:** listens on localhost only, no telemetry.
 - **Single executable** for Windows, Linux and macOS, with nothing else to install.
 
 ## Status
 
-Pumice works end to end through Claude and Codex (with a fallback chain), and optionally OpenCode, but there is no release or installer yet. Run `pumice doctor` to see which CLIs it found.
+Pumice works end to end through Claude and Codex (with a fallback chain), and optionally OpenCode. Run `pumice doctor` to see which CLIs it found.
+
+Nothing is published yet: the first GitHub release and the npm package (`npm install -g pumice`, front package `pumice` plus `@brasillero/pumice-<platform>` native packages) are prepared and preview-built in CI, but publication is still the owner's call. Until then, run from source below.
 
 ### Run from source (preview)
 
@@ -41,8 +43,8 @@ In Handy: **Settings → Advanced → Experimental Features → Post Processing*
 | Version | Goal |
 | --- | --- |
 | v0.1 | Claude and Codex, fallback chain |
-| v0.2 | OpenCode, Antigravity (opt-in), generic adapter, auto-detection |
-| v1.0 | Installers, auto-update and start with the system on Windows, Linux and macOS |
+| v0.2 | OpenCode, Antigravity (dormant), generic adapter, auto-detection |
+| v1.0 | GitHub release binaries and npm distribution (in preparation; replaces the deferred Tauri installer/auto-update path for now); start-with-the-system remains deferred |
 
 ## License
 

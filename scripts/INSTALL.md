@@ -5,6 +5,14 @@ Pumice is a local dictation-formatting service. It listens on
 [Handy](https://github.com/cjpais/Handy), formats it with an AI CLI you
 already have installed and logged into, and returns the result to be pasted.
 
+> **Distribution status:** the first GitHub release and the npm package are
+> not published yet. This guide describes the standalone release archive,
+> which needs nothing but the executable. An npm package (`pumice`, with
+> per-platform `@brasillero/pumice-<os>-<arch>` native packages and a
+> Node.js >= 22 launcher) is prepared in this repository and will provide
+> `npm install -g pumice`, `pnpm add -g pumice`, `bun add -g pumice` and
+> `npx pumice@latest` once the owner publishes it.
+
 ## Run the service
 
 Extract this archive anywhere and start the service from the extracted
