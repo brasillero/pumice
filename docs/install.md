@@ -88,9 +88,11 @@ then:
 - Provider: **Custom**
 - Base URL: `http://127.0.0.1:7567/v1`
 - API key: leave **empty**
-- Model: `claude` or `codex` (the CLIs you installed above), or `passthrough`
-  to get the raw transcript back exactly as dictated — useful to test the
-  connection without spending any quota.
+- Model: `claude` or `codex` (the CLIs you installed above), `passthrough`
+  to get the raw transcript back exactly as dictated, or `inspect` to echo
+  the full JSON request body for diagnostics. `inspect` includes Handy's
+  attached prompt and pastes the result as JSON; neither `passthrough` nor
+  `inspect` spends quota or calls an AI.
 
 No Handy changes are needed beyond this Custom provider configuration.
 

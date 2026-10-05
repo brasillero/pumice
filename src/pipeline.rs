@@ -131,7 +131,7 @@ impl Pipeline {
     /// provider first, then the remaining enabled providers in registry
     /// order, so a client that picks the first model gets the default. With
     /// detection cached, only providers confirmed installed are listed.
-    /// The built-in `passthrough` model is always listed last.
+    /// The built-in `passthrough` and `inspect` models are always listed last.
     /// Never invokes a CLI.
     pub fn model_ids(&self) -> Vec<&str> {
         let mut ids = Vec::with_capacity(self.providers.len());
@@ -148,6 +148,7 @@ impl Pipeline {
             }
         }
         ids.push("passthrough");
+        ids.push("inspect");
         ids
     }
 
@@ -171,6 +172,7 @@ impl Pipeline {
         match requested.map(str::trim) {
             None | Some("") => Some(self.default_provider.as_str()),
             Some(requested) if requested.eq_ignore_ascii_case("passthrough") => Some("passthrough"),
+            Some(requested) if requested.eq_ignore_ascii_case("inspect") => Some("inspect"),
             Some(requested) => self
                 .configured
                 .iter()
@@ -395,6 +397,9 @@ pub enum OutcomeKind {
     Formatted,
     /// Original transcript returned by explicit request, with no provider call.
     Passthrough,
+    /// The full request body returned by explicit `inspect` selection, with no
+    /// provider call and no transcript extraction.
+    Inspect,
     /// The transcript held no text; no CLI was invoked.
     Empty,
     /// The raw dictation is returned; the reason says why.

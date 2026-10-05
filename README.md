@@ -34,7 +34,7 @@ cargo build --release --locked --bin pumice
 ./target/release/pumice                # starts the service
 ```
 
-In Handy: **Settings → Advanced → Experimental Features → Post Processing**, set the provider to **Custom**, base URL `http://127.0.0.1:7567/v1`, API key empty, model `claude` or `codex`. Choose `passthrough` to return the original transcript exactly, including whitespace and line breaks, without calling an AI. With Handy, only the text inside its `<transcript>` envelope is returned; its formatting prompt is omitted. See [`pumice.example.yaml`](pumice.example.yaml) for every configuration setting. On WSL, use `127.0.0.1`, not `localhost` (see [`docs/research/S0.5-wsl-localhost.md`](docs/research/S0.5-wsl-localhost.md)).
+In Handy: **Settings → Advanced → Experimental Features → Post Processing**, set the provider to **Custom**, base URL `http://127.0.0.1:7567/v1`, API key empty, model `claude` or `codex`. Choose `passthrough` to return the original transcript exactly, including whitespace and line breaks, without calling an AI. With Handy, only the text inside its `<transcript>` envelope is returned; its formatting prompt is omitted. Choose `inspect` to echo the full JSON request body that Pumice received, including Handy's attached prompt and every message and option; the result is pasted as JSON, which is useful for diagnostics, and it never calls an AI. See [`pumice.example.yaml`](pumice.example.yaml) for every configuration setting. On WSL, use `127.0.0.1`, not `localhost` (see [`docs/research/S0.5-wsl-localhost.md`](docs/research/S0.5-wsl-localhost.md)).
 
 - Product spec: [`docs/spec.md`](docs/spec.md)
 - Current plan and status: [`HANDOFF.md`](HANDOFF.md)
