@@ -9,7 +9,7 @@ corrects it (transcription mistakes, punctuation, lists), and returns it ready
 to paste.
 
 **Availability:** see [GitHub Releases](https://github.com/brasillero/pumice/releases)
-and the [npm registry](https://www.npmjs.com/package/pumice) for the current
+and the [npm registry](https://www.npmjs.com/package/@brasillero/pumice) for the current
 published versions. The commands below are the usage once installed. You can
 also build pumice from source with Cargo — see the
 [repository](https://github.com/brasillero/pumice).
@@ -25,13 +25,16 @@ also build pumice from source with Cargo — see the
 ## Install
 
 ```sh
-npm install -g pumice
-pnpm add -g pumice
-bun add -g pumice
-npx pumice@latest --version
+npm install -g @brasillero/pumice
+pnpm add -g @brasillero/pumice
+bun add -g @brasillero/pumice
+npx @brasillero/pumice@latest --version
 ```
 
-The `pumice` package is a small launcher. It selects the native binary for
+(The package lives under the `@brasillero` scope because the unscoped npm
+name `pumice` is unavailable; the installed command is still `pumice`.)
+
+The `@brasillero/pumice` package is a small launcher. It selects the native binary for
 your platform from its optional dependencies, verifies that the versions
 match, and runs it. **Do not remove the optional dependencies** or the
 launcher reports the missing native package instead of running. The launcher
@@ -76,17 +79,17 @@ out, Pumice returns the raw text unchanged.
 ## Upgrade
 
 ```sh
-npm update -g pumice
-pnpm update -g pumice
-bun update -g pumice
+npm update -g @brasillero/pumice
+pnpm update -g @brasillero/pumice
+bun update -g @brasillero/pumice
 ```
 
 ## Remove
 
 ```sh
-npm uninstall -g pumice
-pnpm remove -g pumice
-bun remove -g pumice
+npm uninstall -g @brasillero/pumice
+pnpm remove -g @brasillero/pumice
+bun remove -g @brasillero/pumice
 ```
 
 ## License

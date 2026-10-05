@@ -7,7 +7,7 @@ app with an OpenAI-compatible post-processing endpoint), formats it through
 the official CLI of your subscription, and returns the result to be pasted.
 
 > **Availability:** check [GitHub Releases](https://github.com/brasillero/pumice/releases)
-> and the [npm registry](https://www.npmjs.com/package/pumice) for published
+> and the [npm registry](https://www.npmjs.com/package/@brasillero/pumice) for published
 > versions. You can also build from source with Cargo (see the [README](../README.md)).
 
 ## What you need
@@ -32,18 +32,18 @@ it anywhere. The executable inside is self-contained.
 
 ### Option 2: package manager (Node.js 22+)
 
-The npm upload is pending account two-factor authentication as of 2026-10-05.
+The npm upload is being finalized after correcting the account scope as of 2026-10-05.
 Use the standalone GitHub release for now; the commands below work after npm publication.
 
 ```sh
-npm install -g pumice
-pnpm add -g pumice
-bun add -g pumice
-npx pumice@latest --version   # run without installing
+npm install -g @brasillero/pumice
+pnpm add -g @brasillero/pumice
+bun add -g @brasillero/pumice
+npx @brasillero/pumice@latest --version   # run without installing
 ```
 
-Your package manager fetches the `pumice` package and the single native
-binary matching your platform. Bun works through the same package, with
+Your package manager fetches the `@brasillero/pumice` package and the single
+native binary matching your platform. Bun works through the same package, with
 Node.js installed for the launcher.
 
 ## Run the service
@@ -127,9 +127,9 @@ command for your package manager:
 
 | Package manager | Upgrade | Remove |
 | --- | --- | --- |
-| npm | `npm update -g pumice` | `npm uninstall -g pumice` |
-| pnpm | `pnpm update -g pumice` | `pnpm remove -g pumice` |
-| Bun | `bun update -g pumice` | `bun remove -g pumice` |
+| npm | `npm update -g @brasillero/pumice` | `npm uninstall -g @brasillero/pumice` |
+| pnpm | `pnpm update -g @brasillero/pumice` | `pnpm remove -g @brasillero/pumice` |
+| Bun | `bun update -g @brasillero/pumice` | `bun remove -g @brasillero/pumice` |
 
 For archive installs, extract the newer archive into a fresh folder and
 replace the old executable. Your per-user config is kept. Restart with

@@ -24,9 +24,9 @@ import package_release
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VERSION = package_release.crate_version()
 
-FRONT_TARBALL = f"pumice-{VERSION}.tgz"
+FRONT_TARBALL = f"brasillero-pumice-{VERSION}.tgz"
 NATIVE_TARBALLS = [
-    f"bresillero-pumice-{key}-{VERSION}.tgz" for key, _ in package_npm.TARGET_TO_NPM.values()
+    f"brasillero-pumice-{key}-{VERSION}.tgz" for key, _ in package_npm.TARGET_TO_NPM.values()
 ]
 
 # Minimal `npm pack --ignore-scripts` stand-in: tars the folder into
@@ -119,7 +119,7 @@ class PackageNpmTests(unittest.TestCase):
         self.pack()
         members = read_tarball(self.output, FRONT_TARBALL)
         manifest = json.loads(members["package/package.json"])
-        self.assertEqual(manifest["name"], "pumice")
+        self.assertEqual(manifest["name"], "@brasillero/pumice")
         self.assertEqual(manifest["version"], VERSION)
         self.assertEqual(manifest["bin"], {"pumice": "bin/pumice.js"})
         self.assertEqual(manifest["engines"], {"node": ">=22"})
@@ -144,11 +144,11 @@ class PackageNpmTests(unittest.TestCase):
     def test_native_tarballs_have_exact_binary_and_selectors(self):
         self.pack()
         for key, executable in package_npm.TARGET_TO_NPM.values():
-            filename = f"bresillero-pumice-{key}-{VERSION}.tgz"
+            filename = f"brasillero-pumice-{key}-{VERSION}.tgz"
             members = read_tarball(self.output, filename)
             manifest = json.loads(members["package/package.json"])
             npm_os, _, npm_cpu = key.partition("-")
-            self.assertEqual(manifest["name"], f"@bresillero/pumice-{key}")
+            self.assertEqual(manifest["name"], f"@brasillero/pumice-{key}")
             self.assertEqual(manifest["version"], VERSION)
             self.assertEqual(manifest["os"], [npm_os])
             self.assertEqual(manifest["cpu"], [npm_cpu])

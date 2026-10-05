@@ -42,6 +42,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 LAUNCHER_SOURCE = REPO_ROOT / "scripts" / "npm" / "bin" / "pumice.js"
 
 FRONT_VERSION = "9.9.9"
+FRONT_NAME = "@brasillero/pumice"
 PLATFORMS = ("linux-x64", "win32-x64", "darwin-x64", "darwin-arm64")
 
 # Echoes its arguments so tests can prove the .bin entry reached the native
@@ -89,7 +90,7 @@ def build_fake_packages(root: Path) -> None:
     launcher = LAUNCHER_SOURCE.read_bytes()
     license_bytes = (REPO_ROOT / "LICENSE").read_bytes()
     optional = {
-        f"@bresillero/pumice-{key}": FRONT_VERSION for key in PLATFORMS
+        f"@brasillero/pumice-{key}": FRONT_VERSION for key in PLATFORMS
     }
     make_tarball(
         root,
@@ -97,7 +98,7 @@ def build_fake_packages(root: Path) -> None:
             "package/package.json": (
                 json.dumps(
                     {
-                        "name": "pumice",
+                        "name": FRONT_NAME,
                         "version": FRONT_VERSION,
                         "license": "MIT",
                         "type": "commonjs",
@@ -121,7 +122,7 @@ def build_fake_packages(root: Path) -> None:
                 "package/package.json": (
                     json.dumps(
                         {
-                            "name": f"@bresillero/pumice-{key}",
+                            "name": f"@brasillero/pumice-{key}",
                             "version": FRONT_VERSION,
                             "license": "MIT",
                             "os": [npm_os],
@@ -226,14 +227,14 @@ class InstallTests(unittest.TestCase):
         return prefix / "bin" / self.bin_name()
 
     def assert_wrong_platforms_skipped(self, node_modules: Path):
-        # npm/Bun hoist the native package to node_modules/@bresillero;
+        # npm/Bun hoist the native package to node_modules/@brasillero;
         # pnpm keeps it in its isolated store and links it only into the
         # front package. Search the whole tree either way.
         installed = sorted(
             {
                 path.name
                 for path in node_modules.rglob("pumice-*")
-                if path.is_dir() and path.parent.name == "@bresillero"
+                if path.is_dir() and path.parent.name == "@brasillero"
             }
         )
         expected = f"pumice-{self.current_platform_key()}"
@@ -254,7 +255,7 @@ class InstallTests(unittest.TestCase):
         result = self.run_tool(
             NPM,
             "install",
-            f"pumice@{FRONT_VERSION}",
+            f"{FRONT_NAME}@{FRONT_VERSION}",
             "--registry",
             self.registry.base_url,
             "--no-save",
@@ -277,7 +278,7 @@ class InstallTests(unittest.TestCase):
             NPM,
             "install",
             "-g",
-            f"pumice@{FRONT_VERSION}",
+            f"{FRONT_NAME}@{FRONT_VERSION}",
             "--registry",
             self.registry.base_url,
             "--prefix",
@@ -302,7 +303,7 @@ class InstallTests(unittest.TestCase):
             "--yes",
             f"--registry={self.registry.base_url}",
             "--",
-            f"pumice@{FRONT_VERSION}",
+            f"{FRONT_NAME}@{FRONT_VERSION}",
             "via-npx",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -314,7 +315,7 @@ class InstallTests(unittest.TestCase):
         result = self.run_tool(
             PNPM,
             "add",
-            f"pumice@{FRONT_VERSION}",
+            f"{FRONT_NAME}@{FRONT_VERSION}",
             f"--registry={self.registry.base_url}",
             f"--store-dir={store}",
             "--reporter=silent",
@@ -332,7 +333,7 @@ class InstallTests(unittest.TestCase):
         result = self.run_tool(
             BUN,
             "add",
-            f"pumice@{FRONT_VERSION}",
+            f"{FRONT_NAME}@{FRONT_VERSION}",
             f"--registry={self.registry.base_url}",
             "--no-progress",
         )

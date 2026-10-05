@@ -3,9 +3,11 @@
 
 Stages and packs five npm packages from the S7.1 release archives:
 
-- ``pumice`` — the front package: a zero-dependency Node.js launcher
-  (``bin/pumice.js``) plus LICENSE and README.
-- ``@bresillero/pumice-{linux-x64,win32-x64,darwin-x64,darwin-arm64}`` —
+- ``@brasillero/pumice`` — the front package: a zero-dependency Node.js
+  launcher (``bin/pumice.js``) plus LICENSE and README. The installed
+  command stays ``pumice`` (the unscoped npm name ``pumice`` is rejected
+  by the registry's similarity rule).
+- ``@brasillero/pumice-{linux-x64,win32-x64,darwin-x64,darwin-arm64}`` —
   native packages, each with exactly one executable and a LICENSE.
 
 The input directory must contain exactly the four release archives produced
@@ -48,10 +50,12 @@ NPM_DIR = Path(__file__).resolve().parent / "npm"
 # Source repository, linked from the published package pages.
 REPO_URL = "https://github.com/brasillero/pumice"
 
-# Centralized package naming: the front package is "pumice" and every native
-# package lives under the @bresillero scope as "pumice-<os>-<arch>".
-FRONT_PACKAGE_NAME = "pumice"
-NATIVE_SCOPE = "@bresillero"
+# Centralized package naming: the front package is "@brasillero/pumice"
+# and every native package lives under the @brasillero scope as
+# "pumice-<os>-<arch>". The installed command (npm "bin" key) stays "pumice".
+FRONT_PACKAGE_NAME = "@brasillero/pumice"
+FRONT_BIN_NAME = "pumice"
+NATIVE_SCOPE = "@brasillero"
 
 # Keep in sync with package_release.SUPPORTED_TARGETS and the release.yml
 # build matrix. Values are ("<npm os>-<npm arch>", executable name inside the
@@ -72,8 +76,9 @@ LICENSE_SOURCE = REPO_ROOT / "LICENSE"
 
 
 def native_package_name(platform_key: str) -> str:
-    """``linux-x64`` -> ``@bresillero/pumice-linux-x64``."""
-    return f"{NATIVE_SCOPE}/{FRONT_PACKAGE_NAME}-{platform_key}"
+    """``linux-x64`` -> ``@brasillero/pumice-linux-x64``."""
+    short_name = FRONT_PACKAGE_NAME.rsplit("/", 1)[-1]
+    return f"{NATIVE_SCOPE}/{short_name}-{platform_key}"
 
 
 def _repo_fields() -> dict:
@@ -99,7 +104,7 @@ def front_manifest(version: str) -> dict:
         ),
         "license": "MIT",
         "type": "commonjs",
-        "bin": {FRONT_PACKAGE_NAME: "bin/pumice.js"},
+        "bin": {FRONT_BIN_NAME: "bin/pumice.js"},
         "engines": {"node": ">=22"},
         "files": ["bin/pumice.js", "README.md", "LICENSE"],
         # Exact-version pins to the matching native packages; managers

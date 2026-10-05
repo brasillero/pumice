@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Restore the original `@brasillero` npm native-package scope after correcting the misspelled account, before the first npm publication.
+- Scope the npm front package as `@brasillero/pumice` (keeping the installed command `pumice`): the registry rejects the unscoped name `pumice` as too similar to the existing package `juice`.
+
 ## [0.1.0] — 2026-10-05
 
 Initial public release: a local service that lightly formats dictation text with the AI coding CLIs you already pay for, distributed as a single executable per platform and through npm.

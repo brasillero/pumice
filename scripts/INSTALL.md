@@ -8,9 +8,9 @@ already have installed and logged into, and returns the result to be pasted.
 > **Availability:** check
 > [GitHub Releases](https://github.com/brasillero/pumice/releases) for the
 > current published versions. For package-manager availability, see the
-> [npm registry](https://www.npmjs.com/package/pumice). When available, install
-> `pumice` with npm, pnpm, Bun or npx (Node.js >= 22 for the launcher; the
-> executable itself is standalone).
+> [npm registry](https://www.npmjs.com/package/@brasillero/pumice). Install the
+> `@brasillero/pumice` package with npm, pnpm, Bun or npx (Node.js >= 22 for the
+> launcher; the executable itself is standalone). The installed command is `pumice`.
 
 ## Run the service
 
