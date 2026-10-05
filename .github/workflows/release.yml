@@ -284,8 +284,9 @@ jobs:
         run: |
           python3 scripts/npm_registry_fixture.py --root dist/npm > registry.log 2>&1 &
           echo "PUMICE_TEST_REGISTRY_PID=$!" >> "$GITHUB_ENV"
-          for _ in $(seq 1 30); do
+          for _ in $(seq 1 120); do
             grep -q "listening on" registry.log && break
+            kill -0 "$!" 2>/dev/null || break
             sleep 1
           done
           cat registry.log
@@ -356,8 +357,9 @@ jobs:
         run: |
           python3 scripts/npm_registry_fixture.py --root dist/npm > registry.log 2>&1 &
           echo "PUMICE_TEST_REGISTRY_PID=$!" >> "$GITHUB_ENV"
-          for _ in $(seq 1 30); do
+          for _ in $(seq 1 120); do
             grep -q "listening on" registry.log && break
+            kill -0 "$!" 2>/dev/null || break
             sleep 1
           done
           cat registry.log
