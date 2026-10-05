@@ -53,6 +53,9 @@ Update this table in the PR that finishes each story. Order follows the plan in 
 | 7 | S2.8 part 2: `pumice doctor` | Done | #29 | `doctor` renders a fresh detection report (found/missing + install hints + warnings + Kimi standby note), exit 0/1/2; `--login-check --provider <id>` is the only quota-bearing path: one fixed call through the selected provider, no fallback, text-free result |
 | 8 | S6.4 follow-up: Phase 2 config examples | Done | #25, #26 (#27) | Delivered with the adapters: commented `opencode` block, Antigravity note; the `generic` block ships with #27. Example-config tests cover them |
 | 9 | S8.3 follow-up: Phase 2 gate | Done | #30 | Gate evidence below |
+| 10 | S7.1 portable release builds | In review | — | Owner authorized a fresh, small GitHub-release + npm distribution path (2026-10-05); Tauri installer/auto-update stays deferred. PRs #33–#35 remain closed. Findings in `docs/research/S7.1-portable-releases.md` |
+
+**Distribution note (2026-10-05):** the owner authorized easy CLI distribution — GitHub release binaries now (S7.1), npm packaging in a follow-up story. This supersedes the Tauri-based installer/auto-update for now; the spec is unchanged. S7.1 previews build and verify archives on PRs/manual dispatch only (no publishing, no tags); first public version and publication are the owner's call. The preferred npm package name is `pumice` (currently unregistered, not reserved); package-manager installation is part of the approved scope. CLI-managed configuration with one model per provider remains the next feature; Kimi integration remains deferred at the owner's request.
 
 ## Phase 1 (done)
 

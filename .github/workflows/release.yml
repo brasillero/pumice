@@ -1,0 +1,198 @@
+name: Release preview
+
+# Builds portable release archives for all supported targets and uploads them
+# as short-lived artifacts. This workflow never publishes anything: previews
+# validate the packaging on pull requests and manual dispatch only. The owner
+# cuts real releases from these artifacts by hand (see
+# docs/research/S7.1-portable-releases.md).
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/package_release.py
+      - scripts/test_package_release.py
+      - scripts/INSTALL.md
+      - src/**
+      - .cargo/config.toml
+      - LICENSE
+      - pumice.example.yaml
+      - Cargo.toml
+      - Cargo.lock
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  package-tests:
+    name: Packaging helper tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # tomllib needs Python >= 3.11; pin it instead of trusting the image.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Run packaging helper unit tests
+        run: python3 -m unittest discover -s scripts -p "test_*.py" -v
+
+  build:
+    name: ${{ matrix.target }}
+    needs: package-tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Extract crate version
+        id: meta
+        run: echo "version=$(python3 scripts/package_release.py --print-version)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # The musl target needs the musl toolchain for linking; install it only
+      # on the Linux runner that cross-compiles to musl.
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      # Only the product executable; the fake CLI is a test-only binary and
+      # must never ship in a release archive.
+      - name: cargo build --release --locked --bin pumice
+        run: cargo build --release --locked --bin pumice --target ${{ matrix.target }}
+
+      - name: Smoke test binary --version
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/pumice"
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          out="$("$bin" --version)"
+          echo "$out"
+          test "$out" = "pumice ${{ steps.meta.outputs.version }}"
+
+      # Locate dumpbin through vswhere instead of ilammy/msvc-dev-cmd (which
+      # still pins an old Node runtime). A static CRT means no vcruntime /
+      # msvcp / ucrtbase / api-ms-win-crt dependencies.
+      - name: Verify exe has no CRT DLL dependencies
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find '**\dumpbin.exe' | Select-Object -First 1
+          if (-not $dumpbin) { Write-Error 'FAIL: dumpbin.exe not found via vswhere'; exit 1 }
+          $output = & $dumpbin /dependents "target\${{ matrix.target }}\release\pumice.exe"
+          if ($LASTEXITCODE -ne 0) { Write-Error "FAIL: dumpbin exited with $LASTEXITCODE"; exit 1 }
+          $output | ForEach-Object { Write-Host $_ }
+          $text = ($output | Out-String).ToLowerInvariant()
+          foreach ($name in @('vcruntime', 'msvcp', 'ucrtbase', 'api-ms-win-crt')) {
+            if ($text.Contains($name)) {
+              Write-Error "FAIL: pumice.exe depends on '$name' (CRT must be statically linked)"
+              exit 1
+            }
+          }
+          Write-Host 'OK: pumice.exe has no CRT DLL dependencies'
+
+      - name: Verify Linux binary is statically linked
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          bin="target/${{ matrix.target }}/release/pumice"
+          file "$bin"
+          python3 - "$bin" <<'PYCODE'
+          import subprocess
+          import sys
+          binary = sys.argv[1]
+          headers = subprocess.check_output(["readelf", "-l", binary], text=True)
+          dynamic = subprocess.check_output(["readelf", "-d", binary], text=True)
+          if "INTERP" in headers or "(NEEDED)" in dynamic:
+              sys.exit("FAIL: Linux release binary needs a dynamic loader or library")
+          print("OK: fully static musl executable")
+          PYCODE
+
+      - name: Package archive
+        run: >
+          python3 scripts/package_release.py
+          --target ${{ matrix.target }}
+          --binary "target/${{ matrix.target }}/release/pumice"
+          --output-dir dist
+
+      - name: Smoke test packaged archive
+        shell: bash
+        run: |
+          archive="$(ls "dist/pumice-${{ steps.meta.outputs.version }}-${{ matrix.target }}".*)"
+          tmp="$(mktemp -d)"
+          python3 - "$archive" "$tmp" <<'PY'
+          import sys
+          import tarfile
+          import zipfile
+
+          archive, dest = sys.argv[1], sys.argv[2]
+          if archive.endswith(".zip"):
+              zipfile.ZipFile(archive).extractall(dest)
+          else:
+              tarfile.open(archive).extractall(dest)
+          PY
+          exe="pumice"
+          if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then exe="pumice.exe"; fi
+          bin="$tmp/pumice-${{ steps.meta.outputs.version }}-${{ matrix.target }}/$exe"
+          out="$("$bin" --version)"
+          echo "$out"
+          test "$out" = "pumice ${{ steps.meta.outputs.version }}"
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: pumice-${{ steps.meta.outputs.version }}-${{ matrix.target }}
+          path: dist/pumice-${{ steps.meta.outputs.version }}-${{ matrix.target }}.*
+          if-no-files-found: error
+          retention-days: 7
+
+  checksums:
+    name: Aggregate checksums
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: pumice-*
+          merge-multiple: true
+          path: dist
+
+      - name: Generate SHA256SUMS
+        working-directory: dist
+        run: |
+          sha256sum pumice-* > SHA256SUMS
+          cat SHA256SUMS
+          echo '### Release preview assets' >> "$GITHUB_STEP_SUMMARY"
+          cat SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload release preview
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-preview
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
