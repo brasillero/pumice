@@ -221,6 +221,137 @@ async fn debug_log_disabled_creates_no_file_at_the_default_path() {
 }
 
 #[tokio::test]
+async fn inspect_debug_log_disabled_creates_no_file_and_no_text_in_metadata() {
+    let server = start_server(
+        CLAUDE_AT_FAKE,
+        json!({"stdout": success_envelope("unused"), "exit_code": 0}),
+    )
+    .await;
+    let marker = "pumice-inspect-marker-7d4a";
+    let body = format!(r#"{{"model":"inspect","custom":123,"marker":"{marker}","messages":[]}}"#);
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            body.as_bytes(),
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    let response_body = response.body_json();
+    assert_eq!(response_body["model"], "inspect");
+    let echoed = response_body["choices"][0]["message"]["content"]
+        .as_str()
+        .expect("content is a string");
+    assert_eq!(echoed, body, "inspect echoes the exact request body");
+
+    let default_path = server._config_dir.path().join("pumice-debug.jsonl");
+    assert!(
+        !default_path.exists(),
+        "a disabled debug log must not create {}",
+        default_path.display()
+    );
+    let lines = server.log.lines();
+    assert_eq!(lines.len(), 1, "one metadata line: {lines:?}");
+    assert!(lines[0].contains("kind=inspect"), "line: {}", lines[0]);
+    assert!(
+        !lines[0].contains(marker),
+        "metadata line leaked the marker: {}",
+        lines[0]
+    );
+}
+
+#[tokio::test]
+async fn inspect_debug_log_enabled_records_exact_body_and_redacts_headers() {
+    let yaml =
+        CLAUDE_AT_FAKE.to_owned() + "debug_log:\n  enabled: true\n  path: inspect-debug.jsonl\n";
+    let server = start_server(
+        &yaml,
+        json!({"stdout": success_envelope("unused"), "exit_code": 0}),
+    )
+    .await;
+    let marker = "pumice-inspect-marker-7d4a";
+    let body = format!(
+        r#"{{"model":"inspect","arbitrary_option":true,"messages":[{{"role":"assistant","content":{}}}]}}"#,
+        serde_json::to_string(marker).unwrap()
+    );
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[
+                ("content-type", "application/json"),
+                ("authorization", "Bearer secret-token"),
+                ("cookie", "session=abc"),
+                ("user-agent", "pumice-inspect-test"),
+            ],
+            body.as_bytes(),
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+
+    let log_path = server.config.debug_log.path.clone();
+    let contents = fs::read_to_string(&log_path)
+        .unwrap_or_else(|e| panic!("debug log {} not readable: {e}", log_path.display()));
+    assert!(
+        !contents.contains("secret-token"),
+        "authorization leaked into the debug log: {contents}"
+    );
+    assert!(
+        !contents.contains("session=abc"),
+        "cookie leaked into the debug log: {contents}"
+    );
+    let lines: Vec<&str> = contents.lines().collect();
+    assert_eq!(lines.len(), 1, "exactly one JSONL line: {contents}");
+    let record: Value = serde_json::from_str(lines[0]).expect("the line is JSON");
+
+    assert_eq!(record["request_id"], response.body_json()["id"]);
+    assert_eq!(record["request"]["model"], "inspect");
+    assert_eq!(record["request"]["arbitrary_option"], true);
+    assert_eq!(
+        record["request"]["messages"][0]["content"], marker,
+        "the marker is in the recorded request"
+    );
+    assert_eq!(
+        record["request"]["headers"]["user-agent"],
+        "pumice-inspect-test"
+    );
+    assert_eq!(
+        record["request"]["headers"]["content-type"],
+        "application/json"
+    );
+    assert_eq!(
+        record["request"]["headers"]["authorization"],
+        Value::Null,
+        "credential-bearing headers are never recorded"
+    );
+    assert_eq!(record["raw_text"], "");
+    assert_eq!(
+        record["response_text"], body,
+        "response_text is the exact echoed body"
+    );
+    assert_eq!(record["outcome"]["kind"], "inspect");
+    assert_eq!(record["outcome"]["provider"], Value::Null);
+    assert_eq!(record["outcome"]["reason"], Value::Null);
+    assert!(record["outcome"]["elapsed_ms"].is_number());
+
+    let lines = server.log.lines();
+    assert_eq!(lines.len(), 1, "one metadata line: {lines:?}");
+    assert!(lines[0].contains("kind=inspect"), "line: {}", lines[0]);
+    assert!(
+        !lines[0].contains(marker),
+        "metadata line leaked the marker: {}",
+        lines[0]
+    );
+}
+
+#[tokio::test]
 async fn debug_log_records_one_redacted_line_when_enabled() {
     let yaml =
         CLAUDE_AT_FAKE.to_owned() + "debug_log:\n  enabled: true\n  path: nested/debug.jsonl\n";

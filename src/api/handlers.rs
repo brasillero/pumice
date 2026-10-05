@@ -25,6 +25,15 @@ use crate::time::{format_rfc3339, now_unix_secs};
 use super::ApiState;
 use super::types::*;
 
+/// Minimal pre-flight parse: just enough to detect `inspect` before the
+/// stricter dictation validation runs. Unknown fields are ignored, so a
+/// diagnostic request can carry arbitrary messages, options and shapes.
+#[derive(serde::Deserialize)]
+struct ModelSelection {
+    model: Option<String>,
+    stream: Option<bool>,
+}
+
 /// POST /v1/chat/completions accepts bodies up to 10 MiB, read within 5 s.
 /// Both bounds are enforced before parsing, so a slow or oversized client
 /// never eats the formatting budget reserved for the CLI.
@@ -67,7 +76,84 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
     };
 
     // The serde error is deliberately dropped: its messages can quote values
-    // from the body, which may be dictated text.
+    // from the body, which may be dictated text. First do a minimal parse so
+    // `inspect` can be selected without rejecting requests that would fail the
+    // normal dictation validation (missing messages, non-string content, etc.).
+    // Ignored JSON string fields need not be UTF-8-checked by serde, so
+    // validate the entire body before selecting the diagnostic path.
+    let selection: ModelSelection = match std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(|body| serde_json::from_str(body).ok())
+    {
+        Some(selection) => selection,
+        None => {
+            return openai_error(
+                StatusCode::BAD_REQUEST,
+                "the request body is not valid JSON",
+            );
+        }
+    };
+    let stream = selection.stream.unwrap_or(false);
+
+    // The response id is minted before any processing so the opt-in debug log
+    // can name the exact completion it records.
+    let id = format!("chatcmpl-pumice-{}", state.next_id());
+
+    // Built-in inspect diagnostic: echo the original request body verbatim,
+    // bypassing transcript extraction, the busy guard, the fallback chain and
+    // every AI CLI call. This path still requires valid JSON and respects the
+    // body size/time bounds above. `stream` follows the same rule as normal
+    // requests: missing or null means false; a non-boolean value is rejected
+    // by the initial parse with the same text-free 400.
+    if is_inspect_model(selection.model.as_deref()) {
+        let echo_text = String::from_utf8(bytes.clone()).expect("request body is valid UTF-8");
+        let outcome = FormatOutcome {
+            text: echo_text.clone(),
+            kind: OutcomeKind::Inspect,
+            provider: None,
+            attempts: 0,
+            elapsed: started.elapsed(),
+        };
+        if let Some(headers) = &debug_headers {
+            // A skipped field can contain an escape that cannot be decoded
+            // into a JSON value. Keep that error controlled and text-free.
+            let body = match serde_json::from_slice(&bytes) {
+                Ok(body) => body,
+                Err(_) => {
+                    return openai_error(
+                        StatusCode::BAD_REQUEST,
+                        "the request body is not valid JSON",
+                    );
+                }
+            };
+            state
+                .debug_log
+                .record(&DebugRecord::new(&id, body, headers, "", &outcome));
+        }
+        state.log.write_line(&completion_line(&outcome));
+        let created = now_unix_secs();
+        return if stream {
+            sse_response(&id, created, "inspect", echo_text)
+        } else {
+            Json(ChatCompletion {
+                id,
+                object: "chat.completion",
+                created,
+                model: "inspect".to_owned(),
+                choices: vec![CompletionChoice {
+                    index: 0,
+                    message: AssistantMessage {
+                        role: "assistant",
+                        content: echo_text,
+                    },
+                    finish_reason: "stop",
+                }],
+            })
+            .into_response()
+        };
+    }
+
+    // Normal dictation path: stricter parsing and transcript extraction.
     let request: ChatCompletionRequest = match serde_json::from_slice(&bytes) {
         Ok(request) => request,
         Err(_) => {
@@ -77,16 +163,12 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
             );
         }
     };
-    let stream = request.stream.unwrap_or(false);
 
     let extracted = match extract_request(request) {
         Ok(extracted) => extracted,
         Err(error) => return openai_error(StatusCode::BAD_REQUEST, &error.to_string()),
     };
 
-    // The response id is minted before the run so the opt-in debug log can
-    // name the exact completion it records.
-    let id = format!("chatcmpl-pumice-{}", state.next_id());
     let outcome = state.pipeline.format(&extracted, started).await;
 
     // The opt-in debug log (S1.4) records the full exchange — dictation
@@ -222,6 +304,7 @@ fn completion_line(outcome: &FormatOutcome) -> String {
     let (kind, reason) = match &outcome.kind {
         OutcomeKind::Formatted => ("formatted", "-".to_owned()),
         OutcomeKind::Passthrough => ("passthrough", "-".to_owned()),
+        OutcomeKind::Inspect => ("inspect", "-".to_owned()),
         OutcomeKind::Empty => ("empty", "-".to_owned()),
         OutcomeKind::Raw(reason) => ("raw", format!("{reason:?}")),
     };
@@ -245,6 +328,13 @@ fn openai_error(status: StatusCode, message: &str) -> Response {
         }),
     )
         .into_response()
+}
+
+/// Whether the request's `model` field selects the built-in `inspect` model.
+fn is_inspect_model(model: Option<&str>) -> bool {
+    model
+        .map(str::trim)
+        .is_some_and(|trimmed| trimmed.eq_ignore_ascii_case("inspect"))
 }
 
 /// Builds the SSE body: one chunk carrying the complete text, a final empty

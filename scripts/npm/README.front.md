@@ -55,7 +55,10 @@ pumice check-config  # validates the optional YAML config
 
 In Handy: **Settings → Advanced → Experimental Features → Post Processing**,
 set the provider to **Custom**, base URL `http://127.0.0.1:7567/v1`, API key
-empty, model `claude` or `codex`. Stop the service with Ctrl-C.
+empty, model `claude` or `codex`. Use `passthrough` to return the raw transcript
+without calling an AI, or `inspect` to echo the full JSON request body for
+diagnostics; `inspect` includes Handy's attached prompt and pastes the result
+as JSON. Stop the service with Ctrl-C.
 
 Every setting has a built-in default, so a config file is not required. To
 customize, create the per-user config and edit it:

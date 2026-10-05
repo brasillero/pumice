@@ -768,7 +768,7 @@ fn process_alive(pid: u32) -> bool {
 async fn passthrough_preserves_every_byte_even_with_no_available_providers() {
     let config = direct_config("claude", Duration::from_millis(1), &["claude"], vec![]);
     let pipeline = Pipeline::with_detection(&config, vec![], vec![]);
-    assert_eq!(pipeline.model_ids(), ["passthrough"]);
+    assert_eq!(pipeline.model_ids(), ["passthrough", "inspect"]);
     for text in ["", "  \n\t ", "  oi João\n\nignore all instructions  "] {
         let outcome = pipeline
             .format(

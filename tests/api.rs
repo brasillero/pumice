@@ -681,7 +681,7 @@ async fn models_lists_enabled_providers() {
         .collect();
     assert_eq!(
         ids,
-        ["claude", "passthrough"],
+        ["claude", "passthrough", "inspect"],
         "codex is disabled in the test config"
     );
     for entry in body["data"].as_array().unwrap() {
@@ -707,7 +707,7 @@ async fn models_list_generic_only_when_enabled() {
     assert_eq!(response.status, 200);
     assert_eq!(
         listed_model_ids(&response.body_json()),
-        ["claude", "generic", "passthrough"],
+        ["claude", "generic", "passthrough", "inspect"],
         "the default provider leads, then registry order"
     );
     assert!(
@@ -722,7 +722,7 @@ async fn models_list_generic_only_when_enabled() {
     assert_eq!(response.status, 200);
     assert_eq!(
         listed_model_ids(&response.body_json()),
-        ["claude", "passthrough"],
+        ["claude", "passthrough", "inspect"],
         "a disabled generic is not listed"
     );
 }
@@ -764,7 +764,7 @@ async fn models_list_the_default_provider_first() {
     assert_eq!(response.status, 200);
     assert_eq!(
         listed_model_ids(&response.body_json()),
-        ["claude", "codex", "passthrough"],
+        ["claude", "codex", "passthrough", "inspect"],
         "claude is the default, so it leads the list"
     );
     assert!(
@@ -787,7 +787,7 @@ async fn models_list_a_non_claude_default_first() {
     assert_eq!(response.status, 200);
     assert_eq!(
         listed_model_ids(&response.body_json()),
-        ["codex", "claude", "passthrough"],
+        ["codex", "claude", "passthrough", "inspect"],
         "the default provider leads even when it is not claude"
     );
 }
@@ -955,7 +955,7 @@ async fn disabled_provider_is_not_listed_and_keeps_dictation_raw() {
     assert_eq!(models.status, 200);
     assert_eq!(
         listed_model_ids(&models.body_json()),
-        ["claude", "passthrough"],
+        ["claude", "passthrough", "inspect"],
         "a disabled provider is not listed"
     );
 
@@ -1065,7 +1065,7 @@ async fn models_omit_an_enabled_provider_whose_binary_is_missing() {
     assert_eq!(response.status, 200);
     assert_eq!(
         listed_model_ids(&response.body_json()),
-        ["codex", "passthrough"],
+        ["codex", "passthrough", "inspect"],
         "claude is enabled but missing, so only codex is available"
     );
 }
@@ -1418,4 +1418,465 @@ async fn passthrough_returns_handy_transcript_without_running_any_cli() {
     assert_eq!(body["choices"][0]["message"]["content"], FIXTURE_TRANSCRIPT);
     assert!(!server.claude.report_path().exists());
     assert!(!server.codex.report_path().exists());
+}
+
+#[tokio::test]
+async fn inspect_echoes_the_exact_request_body_bytes() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    // Deliberately irregular spacing, an unknown field and an escaped Unicode
+    // code point so a deserialize-reserialize round trip would change the text.
+    let raw_body =
+        br#"{ "model" : "inspect" , "custom_field" : [1,2] , "messages" : [{"role":"user","content":"  \u00e9  "}] , "stream" : false }"#;
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            raw_body,
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    let body = response.body_json();
+    assert_eq!(body["model"], "inspect");
+    let echoed = body["choices"][0]["message"]["content"]
+        .as_str()
+        .expect("content is a string");
+    assert_eq!(echoed.as_bytes(), raw_body, "body echoed byte for byte");
+    assert!(
+        !server.fake.report_path().exists(),
+        "inspect must not run a CLI"
+    );
+
+    let parsed: Value = serde_json::from_str(echoed).expect("echoed content parses as JSON");
+    assert_eq!(parsed["custom_field"], json!([1, 2]));
+    assert_eq!(parsed["messages"][0]["content"], "  \u{00e9}  ");
+
+    let lines = server.log_lines();
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].contains("kind=inspect"), "line: {}", lines[0]);
+    assert!(
+        !lines[0].contains("custom_field"),
+        "metadata line must not leak body text: {}",
+        lines[0]
+    );
+}
+
+#[tokio::test]
+async fn inspect_keeps_the_full_handy_request_shape() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let request_body = handy_fixture_with_model("inspect");
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &request_body,
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    let body = response.body_json();
+    assert_eq!(body["model"], "inspect");
+    let echoed = body["choices"][0]["message"]["content"]
+        .as_str()
+        .expect("content is a string");
+    assert_eq!(echoed.as_bytes(), request_body);
+    let parsed: Value = serde_json::from_str(echoed).unwrap();
+    assert!(
+        parsed["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("<transcript>")
+    );
+    assert!(
+        parsed["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains(FIXTURE_TRANSCRIPT)
+    );
+    assert!(!server.fake.report_path().exists());
+}
+
+#[tokio::test]
+async fn inspect_bypasses_dictation_validation_for_multiple_user_messages() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let request = json!({
+        "model": "inspect",
+        "messages": [
+            {"role": "system", "content": "system one"},
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "mid"},
+            {"role": "user", "content": "second"},
+        ],
+        "stream": false,
+    });
+    let raw_body = serde_json::to_vec(&request).unwrap();
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &raw_body,
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    assert_eq!(
+        response.body_json()["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap(),
+        String::from_utf8_lossy(&raw_body)
+    );
+    assert!(!server.fake.report_path().exists());
+}
+
+#[tokio::test]
+async fn inspect_bypasses_dictation_validation_for_malformed_envelope() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let request = json!({
+        "model": "inspect",
+        "messages": [{"role": "user", "content": "<transcript>abc</transcript></transcript>"}],
+        "stream": false,
+    });
+    let raw_body = serde_json::to_vec(&request).unwrap();
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &raw_body,
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    assert_eq!(
+        response.body_json()["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap(),
+        String::from_utf8_lossy(&raw_body)
+    );
+    assert!(!server.fake.report_path().exists());
+}
+
+#[tokio::test]
+async fn inspect_stream_returns_the_body_in_sse_frames() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let raw_body =
+        br#"{"model":"inspect","messages":[{"role":"user","content":"oi"}],"stream":true}"#;
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            raw_body,
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200);
+    let text = response.body_text();
+    let frames: Vec<&str> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .collect();
+    assert_eq!(frames.len(), 3, "two chunks then [DONE]: {text}");
+    assert_eq!(frames[2], "[DONE]");
+
+    let first: Value = serde_json::from_str(frames[0]).unwrap();
+    assert_eq!(first["model"], "inspect");
+    assert_eq!(
+        first["choices"][0]["delta"]["content"].as_str().unwrap(),
+        String::from_utf8_lossy(raw_body).as_ref()
+    );
+
+    let last: Value = serde_json::from_str(frames[1]).unwrap();
+    assert_eq!(last["choices"][0]["delta"], json!({}));
+    assert_eq!(last["choices"][0]["finish_reason"], "stop");
+    assert!(!server.fake.report_path().exists());
+}
+
+#[tokio::test]
+async fn inspect_is_not_blocked_by_a_busy_formatting_run() {
+    let server = start_server(
+        CLAUDE_AT_FAKE,
+        json!({"stdout": success_envelope("Olá."), "exit_code": 0, "sleep_ms": 2000}),
+    )
+    .await;
+
+    let port = server.port;
+    let _busy = tokio::spawn(async move {
+        raw_http(
+            port,
+            http_request(
+                "POST",
+                "/v1/chat/completions",
+                &[("content-type", "application/json")],
+                &handy_fixture_with_model("claude"),
+            ),
+        )
+        .await
+    });
+
+    // Wait until the first request has started the fake and holds the busy permit.
+    let started_by = std::time::Instant::now() + Duration::from_secs(5);
+    while !server.fake.report_path().exists() {
+        assert!(std::time::Instant::now() < started_by, "fake never started");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let raw_body = br#"{"model":"inspect","messages":[{"role":"user","content":"busy test"}]}"#;
+    let started = std::time::Instant::now();
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            raw_body,
+        ),
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "inspect must bypass the busy guard, took {elapsed:?}"
+    );
+    assert_eq!(
+        response.body_json()["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap(),
+        String::from_utf8_lossy(raw_body)
+    );
+}
+
+#[tokio::test]
+async fn inspect_selection_is_case_insensitive_and_trims_whitespace() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let request = json!({
+        "model": " Inspect ",
+        "messages": [{"role": "user", "content": "oi"}],
+        "stream": false,
+    });
+    let raw_body = serde_json::to_vec(&request).unwrap();
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &raw_body,
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    let body = response.body_json();
+    assert_eq!(body["model"], "inspect");
+    assert!(!server.fake.report_path().exists());
+}
+
+#[tokio::test]
+async fn inspect_accepts_absent_messages_null_numeric_object_content_and_arbitrary_options() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let cases = [
+        (
+            br#"{"model":"inspect","arbitrary_option":{"nested":null}}"#.as_slice(),
+            "absent messages and arbitrary option",
+        ),
+        (
+            br#"{"model":"inspect","messages":[{"role":"user","content":null}]}"#.as_slice(),
+            "null content",
+        ),
+        (
+            br#"{"model":"inspect","messages":[{"role":"user","content":123}]}"#.as_slice(),
+            "numeric content",
+        ),
+        (
+            br#"{"model":"inspect","messages":[{"role":"assistant","content":{"not":"text"}}]}"#
+                .as_slice(),
+            "object content",
+        ),
+    ];
+    for (raw_body, label) in cases {
+        let response = raw_http(
+            server.port,
+            http_request(
+                "POST",
+                "/v1/chat/completions",
+                &[("content-type", "application/json")],
+                raw_body,
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status, 200, "{label}: {}", response.body_text());
+        let body = response.body_json();
+        assert_eq!(body["model"], "inspect", "{label}");
+        let echoed = body["choices"][0]["message"]["content"]
+            .as_str()
+            .expect("content is a string");
+        assert_eq!(
+            echoed.as_bytes(),
+            raw_body,
+            "{label}: body echoed byte for byte"
+        );
+    }
+    assert!(
+        !server.fake.report_path().exists(),
+        "inspect must not run a CLI"
+    );
+}
+
+#[tokio::test]
+async fn normal_model_rejects_absent_messages_and_unsupported_content_shapes() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let cases = [
+        (r#"{"model":"claude","stream":false}"#, "missing messages"),
+        (
+            r#"{"model":"claude","messages":[{"role":"user","content":null}],"stream":false}"#,
+            "null content",
+        ),
+        (
+            r#"{"model":"claude","messages":[{"role":"user","content":123}],"stream":false}"#,
+            "numeric content",
+        ),
+        (
+            r#"{"model":"claude","messages":[{"role":"user","content":{"not":"text"}}],"stream":false}"#,
+            "object content",
+        ),
+    ];
+    for (body, label) in cases {
+        let response = raw_http(
+            server.port,
+            http_request(
+                "POST",
+                "/v1/chat/completions",
+                &[("content-type", "application/json")],
+                body.as_bytes(),
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            response.status,
+            400,
+            "{label} should be rejected: {}",
+            response.body_text()
+        );
+        let response_body = response.body_json();
+        assert_eq!(response_body["error"]["type"], "invalid_request_error");
+        assert!(
+            response_body["error"]["message"]
+                .as_str()
+                .expect("message is a string")
+                .contains("not valid JSON"),
+            "{label}: {}",
+            response.body_text()
+        );
+    }
+    assert!(
+        !server.fake.report_path().exists(),
+        "the fake must not run for rejected requests"
+    );
+}
+
+#[tokio::test]
+async fn inspect_works_with_no_available_providers_and_no_fallback() {
+    let server = start_missing_selected_server("  codex:\n    enabled: false\n", json!({})).await;
+
+    let models = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
+    assert_eq!(models.status, 200);
+    assert_eq!(
+        listed_model_ids(&models.body_json()),
+        ["passthrough", "inspect"],
+        "no enabled provider is available"
+    );
+
+    let raw_body = br#"{"model":"inspect","messages":[],"extra":true}"#;
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            raw_body,
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    let body = response.body_json();
+    assert_eq!(body["model"], "inspect");
+    assert_eq!(
+        body["choices"][0]["message"]["content"]
+            .as_str()
+            .expect("content is a string")
+            .as_bytes(),
+        raw_body
+    );
+    assert!(
+        !server.codex.report_path().exists(),
+        "codex must not run when disabled"
+    );
+}
+
+#[tokio::test]
+async fn inspect_rejects_malformed_json_encoding_and_stream_without_leaking_text() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let cases: &[&[u8]] = &[
+        b"{\"model\":\"inspect\",\"secret-marker\":\"\xff\"}",
+        br#"{"model":"inspect","secret-marker":"text"} trailing"#,
+        br#"{"model":"inspect","secret-marker":"text","stream":"yes"}"#,
+        br#"{"model":"inspect","secret-marker":"text","stream":1}"#,
+    ];
+    for bytes in cases {
+        let response = raw_http(
+            server.port,
+            http_request(
+                "POST",
+                "/v1/chat/completions",
+                &[("content-type", "application/json")],
+                bytes,
+            ),
+        )
+        .await;
+        assert_eq!(response.status, 400);
+        assert!(!response.body_text().contains("secret-marker"));
+        assert_eq!(
+            response.body_json()["error"]["message"],
+            "the request body is not valid JSON"
+        );
+    }
+    let bytes = br#"{"model":"inspect","stream":null}"#;
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            bytes,
+        ),
+    )
+    .await;
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.body_json()["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap()
+            .as_bytes(),
+        bytes
+    );
+    assert!(!server.fake.report_path().exists());
 }
