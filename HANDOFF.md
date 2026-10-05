@@ -1,8 +1,14 @@
 # Handoff — start here
 
-**Current phase: Phase 2 — remaining providers (v0.2): gate passed with recorded conditions.** Phase 3 (distribution) has **not** started: the owner postponed the installer, auto-update and Windows-service topic. Phase 1 is [below](#phase-1-done), Phase 0 [further below](#phase-0-done).
+**Current focus: CLI-managed configuration, with one selected model per provider, under discussion.** Phase 2 passed its gate with recorded conditions. The owner cancelled unmerged Phase 3 distribution PRs #33–#35; their branches, active runs and preview artifacts were removed. Distribution remains deferred. Phase 1 is [below](#phase-1-done), Phase 0 [further below](#phase-0-done).
 
 Read [`AGENTS.md`](AGENTS.md) for the rules and [`docs/spec.md`](docs/spec.md) for the full spec. The Phase 2 design, the orchestrator's decisions and the PR-by-PR plan are in [`docs/research/phase2-architecture.md`](docs/research/phase2-architecture.md). The Phase 1 architecture they build on is in [`docs/research/phase1-architecture.md`](docs/research/phase1-architecture.md). Read both before starting a Phase 2 story.
+
+**S2.4 follow-up notes (2026-10-04):** The owner requested investigating Kimi integration before CLI configuration. The registry supports adding adapters, but the official CLI exposes no verified combination of stdin dictation transport and per-launch no-tools/system-prompt control that meets the existing adapter contract. See [`docs/research/S2.4-kimi-integration.md`](docs/research/S2.4-kimi-integration.md). The owner explicitly chose to skip Kimi for now after reviewing the findings. S2.4 is deferred; no adapter or real inference call was added. The intended next scope is CLI-managed configuration with one selected model per enabled provider. Coding remains delegated to official Kimi K2.8 Code at high effort; supervised coding work is separate from the product adapter.
+
+| Follow-up story | Status | Notes |
+| --- | --- | --- |
+| S2.4 Kimi adapter | Deferred by owner | Print mode requires transcript in argv; ACP does not honor the needed agent restriction flag in examined source; subscription restriction remains unresolved |
 
 ## Phase 2 decisions (2026-10-04)
 
