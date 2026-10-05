@@ -2,7 +2,7 @@
 'use strict';
 
 // Launcher for the pumice npm package. It locates the platform-specific
-// native package (@bresillero/pumice-<os>-<arch>, an optionalDependency of
+// native package (@brasillero/pumice-<os>-<arch>, an optionalDependency of
 // this package), verifies it, and runs the real executable with the
 // caller's argv/stdin/stdout/stderr. No network access, no downloads, no
 // shell, zero dependencies. Requires Node.js >= 22.
@@ -29,7 +29,7 @@ const frontPkg = readJson(frontPkgPath);
 const platformKey = `${process.platform}-${process.arch}`;
 
 // The native package for this platform is the optionalDependency whose name
-// ends with the platform key (for example @bresillero/pumice-linux-x64).
+// ends with the platform key (for example @brasillero/pumice-linux-x64).
 const optional = frontPkg.optionalDependencies || {};
 const nativeName = Object.keys(optional).find((name) =>
   name.endsWith(`-${platformKey}`)

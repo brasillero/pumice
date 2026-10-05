@@ -5,7 +5,7 @@ Stages and packs five npm packages from the S7.1 release archives:
 
 - ``pumice`` — the front package: a zero-dependency Node.js launcher
   (``bin/pumice.js``) plus LICENSE and README.
-- ``@bresillero/pumice-{linux-x64,win32-x64,darwin-x64,darwin-arm64}`` —
+- ``@brasillero/pumice-{linux-x64,win32-x64,darwin-x64,darwin-arm64}`` —
   native packages, each with exactly one executable and a LICENSE.
 
 The input directory must contain exactly the four release archives produced
@@ -49,9 +49,9 @@ NPM_DIR = Path(__file__).resolve().parent / "npm"
 REPO_URL = "https://github.com/brasillero/pumice"
 
 # Centralized package naming: the front package is "pumice" and every native
-# package lives under the @bresillero scope as "pumice-<os>-<arch>".
+# package lives under the @brasillero scope as "pumice-<os>-<arch>".
 FRONT_PACKAGE_NAME = "pumice"
-NATIVE_SCOPE = "@bresillero"
+NATIVE_SCOPE = "@brasillero"
 
 # Keep in sync with package_release.SUPPORTED_TARGETS and the release.yml
 # build matrix. Values are ("<npm os>-<npm arch>", executable name inside the
@@ -72,7 +72,7 @@ LICENSE_SOURCE = REPO_ROOT / "LICENSE"
 
 
 def native_package_name(platform_key: str) -> str:
-    """``linux-x64`` -> ``@bresillero/pumice-linux-x64``."""
+    """``linux-x64`` -> ``@brasillero/pumice-linux-x64``."""
     return f"{NATIVE_SCOPE}/{FRONT_PACKAGE_NAME}-{platform_key}"
 
 

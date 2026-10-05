@@ -32,7 +32,7 @@ it anywhere. The executable inside is self-contained.
 
 ### Option 2: package manager (Node.js 22+)
 
-The npm upload is pending account two-factor authentication as of 2026-10-05.
+The npm upload is being finalized after correcting the account scope as of 2026-10-05.
 Use the standalone GitHub release for now; the commands below work after npm publication.
 
 ```sh
