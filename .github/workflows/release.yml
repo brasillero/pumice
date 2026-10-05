@@ -1,9 +1,11 @@
 name: Release preview
 
-# Builds portable release archives for all supported targets and uploads them
-# as short-lived artifacts. This workflow never publishes anything: previews
-# validate the packaging on pull requests and manual dispatch only. The owner
-# cuts real releases from these artifacts by hand (see
+# Builds portable release archives for all supported targets, stages and
+# packs the five npm packages (front + four native) from those archives, and
+# smoke-tests installing the generated tarballs through a loopback registry
+# on every host. This workflow never publishes anything: previews validate
+# the packaging on pull requests and manual dispatch only. The owner cuts
+# real releases from these artifacts by hand (see
 # docs/research/S7.1-portable-releases.md).
 
 on:
@@ -11,7 +13,13 @@ on:
     paths:
       - .github/workflows/release.yml
       - scripts/package_release.py
+      - scripts/package_npm.py
+      - scripts/npm_registry_fixture.py
       - scripts/test_package_release.py
+      - scripts/test_package_npm.py
+      - scripts/test_npm_install.py
+      - scripts/test_npm_launcher.py
+      - scripts/npm/**
       - scripts/INSTALL.md
       - src/**
       - .cargo/config.toml
@@ -196,3 +204,191 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 7
+
+  npm-pack:
+    name: Stage and pack npm packages
+    needs: checksums
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Download release preview archives
+        uses: actions/download-artifact@v8
+        with:
+          name: release-preview
+          path: dist
+
+      # Stages the five packages from the four REAL release archives and
+      # verifies SHA256SUMS before packing anything. Nothing is published.
+      - name: Stage and pack npm tarballs
+        run: >
+          python3 scripts/package_npm.py
+          --archives-dir dist
+          --output-dir dist/npm
+
+      - name: Upload npm preview
+        uses: actions/upload-artifact@v7
+        with:
+          name: npm-preview
+          path: dist/npm
+          if-no-files-found: error
+          retention-days: 7
+
+  npm-smoke:
+    name: npm install smoke (${{ matrix.target }})
+    needs: npm-pack
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Extract crate version
+        id: meta
+        run: echo "version=$(python3 scripts/package_npm.py --print-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Download npm preview
+        uses: actions/download-artifact@v8
+        with:
+          name: npm-preview
+          path: dist/npm
+
+      - name: Start loopback test registry
+        shell: bash
+        run: |
+          python3 scripts/npm_registry_fixture.py --root dist/npm > registry.log 2>&1 &
+          echo "PUMICE_TEST_REGISTRY_PID=$!" >> "$GITHUB_ENV"
+          for _ in $(seq 1 30); do
+            grep -q "listening on" registry.log && break
+            sleep 1
+          done
+          cat registry.log
+          grep -q "listening on" registry.log
+          echo "PUMICE_TEST_REGISTRY_URL=$(sed -n 's/.*listening on //p' registry.log)" >> "$GITHUB_ENV"
+
+      - name: Install pumice through the test registry
+        shell: bash
+        run: |
+          : > npm-userconfig.ini
+          : > npm-globalconfig.ini
+          npm install -g "pumice@${{ steps.meta.outputs.version }}" \
+            --registry "$PUMICE_TEST_REGISTRY_URL" \
+            --prefix "$PWD/prefix" \
+            --userconfig "$PWD/npm-userconfig.ini" \
+            --globalconfig "$PWD/npm-globalconfig.ini" \
+            --cache "$PWD/npm-cache" \
+            --no-audit --no-fund --loglevel=error
+
+      - name: Run installed pumice --version
+        shell: bash
+        run: |
+          bin="$PWD/prefix/bin/pumice"
+          [ -f "$bin" ] || bin="$PWD/prefix/pumice"
+          out="$("$bin" --version)"
+          echo "$out"
+          test "$out" = "pumice ${{ steps.meta.outputs.version }}"
+
+      - name: Stop test registry
+        if: always()
+        run: kill "$PUMICE_TEST_REGISTRY_PID" 2>/dev/null || true
+
+  npm-smoke-managers:
+    name: pnpm/Bun install smoke (linux-x64)
+    needs: npm-pack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: "12.6"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+
+      - name: Extract crate version
+        id: meta
+        run: echo "version=$(python3 scripts/package_npm.py --print-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Download npm preview
+        uses: actions/download-artifact@v8
+        with:
+          name: npm-preview
+          path: dist/npm
+
+      - name: Start loopback test registry
+        shell: bash
+        run: |
+          python3 scripts/npm_registry_fixture.py --root dist/npm > registry.log 2>&1 &
+          echo "PUMICE_TEST_REGISTRY_PID=$!" >> "$GITHUB_ENV"
+          for _ in $(seq 1 30); do
+            grep -q "listening on" registry.log && break
+            sleep 1
+          done
+          cat registry.log
+          grep -q "listening on" registry.log
+          echo "PUMICE_TEST_REGISTRY_URL=$(sed -n 's/.*listening on //p' registry.log)" >> "$GITHUB_ENV"
+
+      - name: Install and run with pnpm
+        shell: bash
+        run: |
+          export PNPM_HOME="$PWD/pnpm-home"
+          mkdir -p "$PNPM_HOME"
+          # pnpm refuses a global install whose bin dir is not on PATH.
+          export PATH="$PNPM_HOME/bin:$PATH"
+          pnpm add -g "pumice@${{ steps.meta.outputs.version }}" \
+            --registry "$PUMICE_TEST_REGISTRY_URL" \
+            --store-dir "$PWD/pnpm-store" \
+            --reporter=append-only
+          out="$("$PNPM_HOME/bin/pumice" --version)"
+          echo "$out"
+          test "$out" = "pumice ${{ steps.meta.outputs.version }}"
+
+      - name: Install and run with Bun
+        shell: bash
+        run: |
+          export BUN_INSTALL="$PWD/bun-install"
+          bun add -g "pumice@${{ steps.meta.outputs.version }}" \
+            --registry "$PUMICE_TEST_REGISTRY_URL"
+          out="$("$BUN_INSTALL/bin/pumice" --version)"
+          echo "$out"
+          test "$out" = "pumice ${{ steps.meta.outputs.version }}"
+
+      - name: Stop test registry
+        if: always()
+        run: kill "$PUMICE_TEST_REGISTRY_PID" 2>/dev/null || true
