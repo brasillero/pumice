@@ -110,10 +110,10 @@ def prepare(repo, version, release_date, output, cli):
     expected = f"## [{version}] - {release_date}"
     if not notes.startswith(expected + "\n"):
         raise ValueError("rendered release heading does not match version/date")
-    notes = notes.rstrip() + "\n\n"
-    changelog = header + "## [Unreleased]\n\n" + notes + tail
-    if not tail:
-        changelog = changelog.rstrip("\n") + "\n"
+    notes = notes.rstrip() + "\n"
+    changelog = header + "## [Unreleased]\n\n" + notes
+    if tail:
+        changelog += "\n" + tail
     output.mkdir(parents=True, exist_ok=True)
     (output / "release-notes.md").write_bytes(notes.encode("utf-8"))
     (output / "CHANGELOG.md").write_bytes(changelog.encode("utf-8"))

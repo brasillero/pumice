@@ -210,23 +210,30 @@ class PrepareReleaseTests(unittest.TestCase):
 
         notes, rendered = fixture.prepare("0.2.0", "2021-07-04", self.output())
 
-        expected = HEADER + "## [Unreleased]\n\n" + notes + RELEASED_0_1_0_TAIL
+        expected = HEADER + "## [Unreleased]\n\n" + notes + "\n" + RELEASED_0_1_0_TAIL
         self.assertEqual(rendered, expected)
         self.assertTrue(rendered.endswith(RELEASED_0_1_0_TAIL))
         self.assertNotIn("stale preview entry", rendered)
-        notes_file = (self.output() / "release-notes.md").read_text(encoding="utf-8")
-        self.assertEqual(notes_file, notes)
+        notes_file = (self.output() / "release-notes.md").read_bytes()
+        self.assertEqual(notes_file, notes.encode("utf-8"))
+        self.assertIn(notes, rendered)
+        changelog_file = (self.output() / "CHANGELOG.md").read_bytes()
+        self.assertEqual(changelog_file, rendered.encode("utf-8"))
 
     def test_first_release_has_no_tail(self):
         fixture = self.make_fixture()
         fixture.commit("feat: add alpha")
         notes, changelog = fixture.prepare("0.1.0", "2021-02-01", self.output())
-        self.assertEqual(
-            changelog,
-            HEADER + "## [Unreleased]\n\n" + notes.rstrip("\n") + "\n",
-        )
-        self.assertTrue(changelog.endswith("\n"))
+        expected = HEADER + "## [Unreleased]\n\n" + notes
+        self.assertEqual(changelog, expected)
+        self.assertTrue(changelog.endswith(notes))
         self.assertFalse(changelog.endswith("\n\n"))
+        self.assertEqual(
+            (self.output() / "release-notes.md").read_bytes(), notes.encode("utf-8"),
+        )
+        self.assertEqual(
+            (self.output() / "CHANGELOG.md").read_bytes(), changelog.encode("utf-8"),
+        )
 
     # -- determinism and repo immutability ---------------------------------
 
