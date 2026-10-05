@@ -8,7 +8,7 @@ Read [`AGENTS.md`](AGENTS.md) for the rules and [`docs/spec.md`](docs/spec.md) f
 
 | Phase 3 story | Status | PR | Notes |
 | --- | --- | --- | --- |
-| S7.1 Release archives | Done | #33 (open) | Four native targets passed at `ad6a448`: Windows x64 MSVC, static Linux x64 MUSL, macOS arm64/x64; extracted-binary smoke checks, archive contents and SHA256SUMS verified. Unsigned Actions artifacts only |
+| S7.1 Release archives | Done | #33 (open) | Four native targets passed at `ad6a448`: Windows x64 MSVC, static Linux x64 MUSL, macOS arm64/x64; extracted-binary smoke checks, archive contents and SHA256SUMS verified. Unsigned Actions artifacts only; Node 24 action-runtime follow-up in review |
 | S7.5 Generated changelog | In review | #34 (open, stacked on #33) | Pinned offline git-cliff, deterministic release-note artifacts, 21 fixture tests passed locally; all ten checks passed at 6c640b5, then artifact review found and fixed first-release newline reuse; follow-up CI/review pending, no tag/public release |
 | S7.2 Automatic startup | Pending | — | Owner selected startup after sign-in under their own account; Unix SIGTERM shutdown and explicit executable/config paths required |
 | S7.4 Installer and updates | Pending | — | Owner selected Tauri with its runtime tradeoffs; explicit official GitHub release checks/downloads approved |

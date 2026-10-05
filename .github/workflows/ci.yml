@@ -51,15 +51,17 @@ jobs:
           echo "pumice release binary: $size bytes"
           echo "pumice release binary (${{ matrix.os }}): $size bytes" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Set up MSVC environment
+      - name: Locate dumpbin for dependency inspection
         if: matrix.os == 'windows-latest'
-        uses: ilammy/msvc-dev-cmd@v1
+        shell: pwsh
+        run: .github/scripts/find-dumpbin.ps1
 
       - name: Verify release exe has no CRT DLL dependencies
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
           $output = dumpbin /dependents target\release\pumice.exe
+          if ($LASTEXITCODE -ne 0) { throw 'dumpbin failed' }
           $output | ForEach-Object { Write-Host $_ }
           $text = ($output | Out-String).ToLowerInvariant()
           $forbidden = @('vcruntime', 'msvcp', 'ucrtbase', 'api-ms-win-crt')
@@ -72,7 +74,7 @@ jobs:
           Write-Host "OK: pumice.exe has no CRT DLL dependencies"
 
       - name: Upload release binary
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: pumice-release-${{ matrix.os }}
           path: |
