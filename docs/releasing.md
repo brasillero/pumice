@@ -40,3 +40,21 @@ Every target runs the fake-CLI test suite and a release build. The workflow veri
 The current package version comes from Cargo metadata and appears in the archive names. The workflow only packages the product executable, never the test CLI.
 
 These preview artifacts are unsigned and macOS artifacts are not notarized. Windows or macOS may show a security prompt. Signing, installers, automatic startup, generated release notes and updates are later Phase 3 work. A successful archive workflow is evidence for S7.1, not completion of the distribution gate.
+
+## Prepare release notes
+
+The `Release notes` workflow generates preview artifacts from Conventional Commits with pinned git-cliff 2.14.2. Its full-history checkout and fixture tests verify grouping, compatibility-change visibility and preservation of previously released sections. It runs offline after downloading the build-time tool.
+
+Manual workflow runs accept a version and date; blank inputs use Cargo’s version and the HEAD commit date in UTC. After publishing a release, advance Cargo to the next intended version before generating another preview; preparing an existing release is deliberately rejected.
+
+The committed `CHANGELOG.md` contains an Unreleased snapshot. Cargo's current version is not a published release. The prepared artifact contains a proposed version section; preparing it does not create a Git tag, change Cargo or publish a GitHub Release.
+
+For local preparation, use Python 3.12 and git-cliff 2.14.2 on the development machine:
+
+```sh
+python3 .github/scripts/prepare-release.py --version 0.1.0 --date 2026-10-04
+```
+
+Replace the example version/date with the intended release values. The version must exactly match Cargo.toml, be valid SemVer, and not already exist as a release/tag. Use a complete Git checkout. The generated files are `dist/release/CHANGELOG.md` and `dist/release/release-notes.md`; tracked files and tags remain unchanged.
+
+The proposed version section and release-notes.md contain the same bytes. When publishing is separately approved, reuse release-notes.md for GitHub release notes and Tauri's updater `notes` field. Copy the generated full changelog into the release commit rather than manually editing historical release sections. Future version changes, signing keys and publication remain owner-controlled.

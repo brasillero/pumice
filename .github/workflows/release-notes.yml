@@ -1,0 +1,129 @@
+name: Release notes
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to prepare (blank = Cargo.toml version)
+        required: false
+        type: string
+      date:
+        description: Release date YYYY-MM-DD (blank = HEAD committer date, UTC)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  GIT_CLIFF_VERSION: 2.14.2
+  GIT_CLIFF_ARCHIVE: git-cliff-2.14.2-x86_64-unknown-linux-musl.tar.gz
+  # Fixed digest of the pinned release archive (see the 2.14.2 release assets).
+  GIT_CLIFF_SHA512: 95b0c55ab3e351ca7c0285fbbde8f1e8c42906466a173e6884f5c7ca814523bda44cbd4ab26b0aa28cace4c02c5ee6b553e9742bd9d7df47a73b9ef58ea429a9
+
+jobs:
+  release-notes:
+    name: Prepare release notes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Download and verify pinned git-cliff
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/${GIT_CLIFF_ARCHIVE}"
+          curl --fail --silent --show-error --location --retry 3 \
+            -o "$archive" \
+            "https://github.com/orhun/git-cliff/releases/download/v${GIT_CLIFF_VERSION}/${GIT_CLIFF_ARCHIVE}"
+          echo "${GIT_CLIFF_SHA512}  $archive" | sha512sum --check -
+          tool_dir="${RUNNER_TEMP}/git-cliff-${GIT_CLIFF_VERSION}"
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          "${tool_dir}/git-cliff" --version | grep -Fx "git-cliff ${GIT_CLIFF_VERSION}"
+          echo "${tool_dir}" >> "$GITHUB_PATH"
+      # The tests build throwaway Git repositories and call only the pinned,
+      # offline git-cliff binary; no AI service is involved.
+      - name: Test release preparation
+        env:
+          GIT_CLIFF_BINARY: git-cliff
+        run: python3 .github/scripts/test_prepare_release.py
+      - name: Resolve effective version and date
+        id: effective
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_DATE: ${{ inputs.date }}
+        run: |
+          python3 - <<'PY'
+          import datetime as dt
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          import tomllib
+
+          sys.path.insert(0, ".github/scripts")
+          import importlib.util
+          spec = importlib.util.spec_from_file_location(
+              "prepare_release", ".github/scripts/prepare-release.py"
+          )
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+
+          version = os.environ["INPUT_VERSION"].strip()
+          if not version:
+              with open("Cargo.toml", "rb") as file:
+                  version = tomllib.load(file)["package"]["version"]
+          module.version_key(version)
+
+          date = os.environ["INPUT_DATE"].strip()
+          if not date:
+              committer = subprocess.run(
+                  ["git", "log", "-1", "--format=%cI"],
+                  check=True, capture_output=True, text=True,
+              ).stdout.strip()
+              date = dt.datetime.fromisoformat(committer).astimezone(
+                  dt.timezone.utc
+              ).date().isoformat()
+          module.date_value(date)
+
+          output = Path(os.environ["GITHUB_OUTPUT"])
+          with output.open("a", encoding="utf-8") as file:
+              file.write(f"version={version}\n")
+              file.write(f"date={date}\n")
+          PY
+      - name: Prepare release artifacts
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.effective.outputs.version }}
+          RELEASE_DATE: ${{ steps.effective.outputs.date }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/prepare-release.py \
+            --version "${RELEASE_VERSION}" \
+            --date "${RELEASE_DATE}" \
+            --git-cliff git-cliff
+      - name: Validate artifacts
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.effective.outputs.version }}
+          RELEASE_DATE: ${{ steps.effective.outputs.date }}
+        run: |
+          set -euo pipefail
+          test -s dist/release/CHANGELOG.md
+          test -s dist/release/release-notes.md
+          grep -Fx "## [${RELEASE_VERSION}] - ${RELEASE_DATE}" \
+            dist/release/release-notes.md
+      - name: Upload release notes bundle
+        uses: actions/upload-artifact@v5
+        with:
+          name: pumice-${{ steps.effective.outputs.version }}-release-notes
+          path: dist/release/
+          if-no-files-found: error
