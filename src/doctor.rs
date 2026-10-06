@@ -26,23 +26,14 @@ use crate::request::{ChatCompletionRequest, Content, Message, extract_request};
 /// The fixed tiny dictation the login check formats.
 pub const LOGIN_CHECK_SAMPLE: &str = "pumice login check";
 
-/// Static note printed after the provider lines: Kimi (S2.4) has no adapter
-/// in this version and stays on standby.
-pub const KIMI_NOTE: &str = "kimi: on standby (not supported in this version)";
-
 /// Fixed refusal for `--login-check --provider antigravity`: dormant until a
 /// supported per-launch tool policy exists, so no real call may ever run.
 pub const ANTIGRAVITY_REFUSAL: &str =
     "antigravity cannot be login-checked: it cannot be enabled yet (see docs)";
 
-/// Fixed refusal for `--login-check --provider kimi`: no adapter exists.
-pub const KIMI_REFUSAL: &str =
-    "kimi cannot be login-checked: it is on standby and not supported in this version";
-
 /// Renders the full doctor report: the config source, one line per registered
-/// provider, the static Kimi standby note and the readiness summary. Pure
-/// over the config and the detection statuses; never prints dictated text or
-/// probe output.
+/// provider and the readiness summary. Pure over the config and the detection
+/// statuses; never prints dictated text or probe output.
 pub fn render(config: &Config, source: &ConfigSource, statuses: &[ProviderStatus]) -> String {
     let mut out = String::new();
     match source {
@@ -62,8 +53,6 @@ pub fn render(config: &Config, source: &ConfigSource, statuses: &[ProviderStatus
             out.push_str(&format!("  warning: {}: {warning}\n", status.id));
         }
     }
-    out.push_str(KIMI_NOTE);
-    out.push('\n');
     let (ready, total) = enabled_ready(statuses);
     out.push_str(&format!("{ready} of {total} enabled providers ready\n"));
     out
@@ -119,7 +108,7 @@ pub fn enabled_ready(statuses: &[ProviderStatus]) -> (usize, usize) {
 /// Why a login check could not start; every variant carries a fixed,
 /// text-free message.
 pub enum LoginCheckError {
-    /// Antigravity and standby Kimi are refused before anything runs.
+    /// Antigravity is refused before anything runs.
     Refused(&'static str),
     /// The ID names no registered provider.
     UnknownProvider,
@@ -177,9 +166,6 @@ pub async fn prepare_login_check(
 ) -> Result<Arc<dyn Provider>, LoginCheckError> {
     if id == antigravity::ID {
         return Err(LoginCheckError::Refused(ANTIGRAVITY_REFUSAL));
-    }
-    if id == "kimi" {
-        return Err(LoginCheckError::Refused(KIMI_REFUSAL));
     }
     let descriptor = providers::descriptor(id).ok_or(LoginCheckError::UnknownProvider)?;
     let settings = config
@@ -304,11 +290,12 @@ mod tests {
             status("opencode", false, Found::Missing, Version::Unavailable),
             status("antigravity", false, found(), Version::Skipped),
             status("generic", false, Found::NotApplicable, Version::Skipped),
+            status("kimi", false, Found::Missing, Version::Unavailable),
         ]
     }
 
     #[test]
-    fn render_lists_every_provider_the_kimi_note_and_the_summary() {
+    fn render_lists_every_provider_and_the_summary() {
         let report = render(
             &default_config(),
             &ConfigSource::BuiltInDefaults,
@@ -336,7 +323,12 @@ mod tests {
             report.contains("generic: disabled, local endpoint (checked at call time)\n"),
             "{report}"
         );
-        assert!(report.contains(KIMI_NOTE), "{report}");
+        assert!(
+            report.contains(
+                "kimi: disabled, missing (install: curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash)\n"
+            ),
+            "{report}"
+        );
         assert!(
             report.contains("2 of 2 enabled providers ready\n"),
             "{report}"

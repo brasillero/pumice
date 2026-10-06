@@ -213,7 +213,7 @@ fn empty_file_gives_all_defaults() {
     assert_eq!(config.prompts.system, None);
     assert_eq!(config.prompts.user, None);
     assert!(!config.debug_log.enabled);
-    assert_eq!(config.providers.len(), 5);
+    assert_eq!(config.providers.len(), 6);
 
     let claude = claude(&config);
     assert!(claude.enabled);
@@ -265,6 +265,16 @@ fn empty_file_gives_all_defaults() {
     assert!(generic.binary.is_none());
     assert!(generic.env.is_empty());
     assert!(generic.options.is_empty());
+
+    // Kimi is registered but off by default, with the cheapest verified
+    // model alias as its default.
+    let kimi = config.providers.get("kimi").expect("kimi is configured");
+    assert!(!kimi.enabled);
+    assert_eq!(kimi.model, "kimi-k2.7-code-highspeed");
+    assert_eq!(kimi.timeout, Duration::from_secs(30));
+    assert!(kimi.binary.is_none());
+    assert!(kimi.env.is_empty());
+    assert!(kimi.options.is_empty());
 }
 
 #[test]

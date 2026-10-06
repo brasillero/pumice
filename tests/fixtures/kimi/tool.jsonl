@@ -1,0 +1,4 @@
+{"role":"meta","type":"system.version","version":"2.1.1"}
+{"role":"assistant","content":"Let me list the files first.","tool_calls":[{"type":"function","id":"call_00000000","function":{"name":"Bash","arguments":"{\"command\":\"ls -la\"}"}}]}
+{"role":"tool","tool_call_id":"call_00000000","content":"total 0"}
+{"role":"meta","type":"session.resume_hint","session_id":"session_00000000-0000-4000-8000-000000000000","command":"kimi -r session_00000000-0000-4000-8000-000000000000","content":"To resume this session: kimi -r session_00000000-0000-4000-8000-000000000000"}

@@ -1,14 +1,22 @@
 # Handoff — start here
 
-**Current phase: Phase 2 — remaining providers (v0.2): gate passed with recorded conditions.** Phase 3 (distribution) has **not** started: the owner postponed the installer, auto-update and Windows-service topic. Phase 1 is [below](#phase-1-done), Phase 0 [further below](#phase-0-done).
+**Current focus: CLI-managed configuration, with one selected model per provider, under discussion.** Phase 2 passed its gate with recorded conditions. The owner cancelled unmerged Phase 3 distribution PRs #33–#35; their branches, active runs and preview artifacts were removed. Distribution remains deferred. Phase 1 is [below](#phase-1-done), Phase 0 [further below](#phase-0-done).
 
 Read [`AGENTS.md`](AGENTS.md) for the rules and [`docs/spec.md`](docs/spec.md) for the full spec. The Phase 2 design, the orchestrator's decisions and the PR-by-PR plan are in [`docs/research/phase2-architecture.md`](docs/research/phase2-architecture.md). The Phase 1 architecture they build on is in [`docs/research/phase1-architecture.md`](docs/research/phase1-architecture.md). Read both before starting a Phase 2 story.
+
+**S2.4 follow-up notes (2026-10-04, updated 2026-10-06):** The owner requested investigating Kimi integration before CLI configuration. The registry supports adding adapters, but the official CLI exposes no verified combination of stdin dictation transport and per-launch no-tools/system-prompt control that meets the existing adapter contract. See [`docs/research/S2.4-kimi-integration.md`](docs/research/S2.4-kimi-integration.md). The owner explicitly chose to skip Kimi for now after reviewing the findings. The intended next scope is CLI-managed configuration with one selected model per enabled provider. Coding remains delegated to official Kimi K2.8 Code at high effort; supervised coding work is separate from the product adapter.
+
+**Update (2026-10-06):** the orchestrator reactivated S2.4 accepting print-mode argv transport. The adapter shipped off by default with a risk warning: the dictation travels as one size-capped `-p` argv element, the system prompt rides in a no-tools/no-subagents agent file, and user hooks, plugins and CLI-owned session retention remain the documented residuals. Four real calls verified the invocation, an injection attempt, the end-to-end service path and `doctor --login-check`. See [`docs/research/S2.4-kimi-adapter.md`](docs/research/S2.4-kimi-adapter.md).
+
+| Follow-up story | Status | Notes |
+| --- | --- | --- |
+| S2.4 Kimi adapter | In review | #52 — argv transport (24 KiB cap) with a no-tools agent file; off by default citing the S0.3 terms risk; 4 real calls; hooks/plugins/session-retention residuals documented |
 
 ## Phase 2 decisions (2026-10-04)
 
 The owner was away and authorized the orchestrator to set specifications and proceed, reporting afterwards. These are the decisions taken (full list in the architecture doc). The spec is unchanged.
 
-- **Scope:** OpenCode (S2.6), Antigravity (S2.5, dormant), the loopback-only generic adapter (S2.7), auto-detection and `pumice doctor` (S2.8), and a shared adapter contract suite. **Kimi (S2.4) stays on standby.**
+- **Scope:** OpenCode (S2.6), Antigravity (S2.5, dormant), the loopback-only generic adapter (S2.7), auto-detection and `pumice doctor` (S2.8), and a shared adapter contract suite. **Kimi (S2.4) stays on standby** (2026-10-04 decision; reactivated 2026-10-06 — see the update note above).
 - **New providers are off by default.** Only `enabled: true` turns one on; detection never does.
 - **OpenCode:** an explicit `provider/model` is required when enabled; there is no hosted default.
 - **Antigravity:** the protocol is built against the fake CLI only, and turning it on is refused until a safe per-launch tool policy exists. `agy` is never run.
@@ -27,7 +35,7 @@ All adapters pass the same criteria: the shared contract suite (no tools, empty 
 | Claude, real | `pumice doctor --login-check --provider claude`: ok, 2.6 s |
 | Codex, real | `pumice doctor --login-check --provider codex`: ok, 4.5 s |
 | Fallback chain, real | Claude binary missing, Codex formatted the Handy-shaped Portuguese dictation in 5.2 s (`provider=codex`) |
-| Detection, real | `pumice doctor`: claude 2.1.288, codex 0.160.0, opencode 1.18.34 found; antigravity missing; Kimi standby note; no quota spent |
+| Detection, real | `pumice doctor`: claude 2.1.288, codex 0.160.0, opencode 1.18.34 found; antigravity missing; Kimi standby note (superseded 2026-10-06: Kimi is registered, #52); no quota spent |
 | OpenCode | Contract suite only. **No real call:** its only configured upstream here is Kimi (standby) |
 | Antigravity | **Protocol coverage plus safe refusal**, not executable conformance: `enabled: true` is refused, `agy` was never run |
 | Generic | Implemented in #27, **not merged** pending the owner's AGENTS.md exception |
@@ -50,8 +58,9 @@ Update this table in the PR that finishes each story. Order follows the plan in 
 | 4 | S2.6 OpenCode adapter | Done | #26 | Off by default, explicit provider/model, deny-all inline agent via `OPENCODE_CONFIG_CONTENT`; full contract suite passes |
 | 5 | S2.5 Antigravity adapter | Done | #25 | Dormant: documentation-derived invocation/parser tested against the fake CLI, `enabled: true` refused at the enabled line, build fails as defense in depth, `agy` never spawned |
 | 6 | S2.7 Generic loopback adapter | Done | #27 | Loopback-only (Ollama/LM Studio on this machine), off by default; merged with the owner's approval (2026-10-04). The matching AGENTS.md exception is the owner's to add |
-| 7 | S2.8 part 2: `pumice doctor` | Done | #29 | `doctor` renders a fresh detection report (found/missing + install hints + warnings + Kimi standby note), exit 0/1/2; `--login-check --provider <id>` is the only quota-bearing path: one fixed call through the selected provider, no fallback, text-free result |
+| 7 | S2.8 part 2: `pumice doctor` | Done | #29 | `doctor` renders a fresh detection report (found/missing + install hints + warnings), exit 0/1/2; `--login-check --provider <id>` is the only quota-bearing path: one fixed call through the selected provider, no fallback, text-free result |
 | 8 | S6.4 follow-up: Phase 2 config examples | Done | #25, #26 (#27) | Delivered with the adapters: commented `opencode` block, Antigravity note; the `generic` block ships with #27. Example-config tests cover them |
+| 9 | S2.4 Kimi adapter | In review | #52 | Off by default with the S0.3 terms risk warning. Print-mode argv transport (24 KiB cap, `InputTooLarge` beyond) with the system prompt in a no-tools/no-subagents agent file; `tools: []` is the load-bearing restriction, tool stream records are rejected. Default model `kimi-k2.7-code-highspeed`. Doctor lists it and `--login-check --provider kimi` works; 4 real calls (2.6–5.0 s). Hooks/plugins/session-retention residuals documented in docs/research/S2.4-kimi-adapter.md |
 | 9 | S8.3 follow-up: Phase 2 gate | Done | #30 | Gate evidence below |
 | 10 | S7.1 portable release builds | Done | #36 | Owner authorized a fresh, small GitHub-release + npm distribution path (2026-10-05); Tauri installer/auto-update stays deferred. PRs #33–#35 remain closed. Findings in `docs/research/S7.1-portable-releases.md` |
 | 11 | S7.4 npm distribution | Done | #37 | npm portion of the approved distribution channel: front package `@brasillero/pumice` + four `@brasillero/pumice-<platform>` natives, launcher, loopback-registry install tests (npm/pnpm/Bun/npx), release.yml pack + four-host smoke. Published to npmjs at 0.1.0 on 2026-10-05. Findings in `docs/research/S7.4-npm-distribution.md` |
@@ -80,7 +89,7 @@ These change the spec's phasing. The spec itself is unchanged; product-doc updat
 - **Modular adapters:** a new CLI is a new module behind a common interface (S2.1), plus one registry entry.
 - **Two adapters in Phase 1:** Claude (S2.2) and **Codex (S2.3)**. Codex moved up from Phase 2. OpenCode, Antigravity, the generic adapter and auto-detection come later.
 - **Fallback chain (S4.2) is in Phase 1:** after the selected provider fails, try the next in `fallback_order`, then return raw text, all within the total timeout.
-- **Kimi is on standby:** its subscription terms allow interactive use only (S0.3). No Kimi adapter.
+- **Kimi is on standby:** its subscription terms allow interactive use only (S0.3). No Kimi adapter. (Superseded 2026-10-06: the adapter shipped in #52, off by default with the terms risk warning.)
 - **Default port: 7567** (S1.5). Handy points at `http://127.0.0.1:7567/v1`.
 - **Claude thinking off by default** (`MAX_THINKING_TOKENS=0`). Effort tuning and Handy's `reasoning_effort` field come later.
 - **Plan quota is intended:** Pumice runs on the user's subscription through the official CLIs.

@@ -104,6 +104,23 @@ providers:
   #   options:
   #     base_url: "http://127.0.0.1:11434/v1"
 
+  # Kimi Code CLI (kimi) is off by default. Moonshot subscription terms rate
+  # non-interactive automation as risky (docs/research/S0.3-provider-terms.md),
+  # and the dictation travels in the command line (size-capped), so enabling
+  # this is the owner's call. When enabled, the adapter runs the CLI with a
+  # no-tools agent file in a fresh empty workspace; user-configured hooks,
+  # plugins and CLI-owned session retention have no per-launch off switch.
+  # The default model is the cheapest alias verified in the owner's account;
+  # any alias from `kimi provider list` works.
+  # kimi:
+  #   enabled: true
+  #   # model: kimi-k2.7-code-highspeed
+  #   timeout_secs: 30
+  #   # Kimi accepts no environment overrides; the adapter owns the child
+  #   # environment (no-tools agent file, skills off, telemetry off).
+  #   env: {}
+  #   options: {}
+
 # Optional formatting instructions, added after Pumice's fixed instruction.
 # Both are off by default (null); a block scalar (|) keeps line breaks.
 prompts:
