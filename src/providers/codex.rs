@@ -5,12 +5,17 @@
 //! is the last completed `agent_message` item, and a failed turn ends in
 //! `turn.failed` after a handful of retried `error` events.
 //!
-//! Codex accepts exactly one adapter option in Phase 1:
-//! `options.openai_base_url`, a non-secret `http://`/`https://` routing
-//! override forwarded as `-c openai_base_url="<url>"`. `--ignore-user-config`
-//! also drops the user's own `openai_base_url` (the S0.2 config trap, which
-//! made Codex fall back to an environment API key against api.openai.com), so
-//! an account that needs a gateway must set it here explicitly.
+//! Codex reads the user's own `~/.codex/config.toml` (or `$CODEX_HOME`), so a
+//! gateway, provider or profile configured there applies without repeating
+//! it in Pumice (owner decision, 2026-10-05). What that file could add to the
+//! tool surface is switched off per call: every MCP server it names is
+//! disabled by name (Pumice reads only the table names, never values), and
+//! plugins, apps and `notify` are off. When the file exists but cannot be
+//! read or parsed, or names a server that cannot be addressed safely, the
+//! call falls back to `--ignore-user-config` (fail closed).
+//!
+//! `options.openai_base_url` stays available as an explicit, non-secret
+//! override forwarded as `-c openai_base_url="<url>"`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -36,8 +41,8 @@ pub const DEFAULT_BINARY: &str = "codex";
 pub const DEFAULT_MODEL: &str = "gpt-6.1-sol";
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Codex accepts no environment overrides: `--ignore-user-config` would drop
-/// them anyway, and routing belongs in `options.openai_base_url`.
+/// Codex accepts no environment overrides: routing belongs in the user's
+/// own Codex config or `options.openai_base_url`.
 const ALLOWED_ENV: &[&str] = &[];
 
 const OPENAI_BASE_URL_KEY: &str = "openai_base_url";
@@ -150,8 +155,13 @@ fn build(
         .clone()
         .unwrap_or_else(|| PathBuf::from(DEFAULT_BINARY));
     let base_url = settings.options.get(OPENAI_BASE_URL_KEY).cloned();
+    let adapter = CodexAdapter::new(binary, settings.model.clone(), base_url);
+    let adapter = match codex_home() {
+        Some(home) => adapter.with_codex_home(home),
+        None => adapter,
+    };
     Ok(Arc::new(CliProvider::new(
-        CodexAdapter::new(binary, settings.model.clone(), base_url),
+        adapter,
         runner,
         settings.timeout,
     )))
@@ -165,6 +175,9 @@ pub struct CodexAdapter {
     /// Non-secret routing override, forwarded as a `-c openai_base_url=…`
     /// argument when set.
     base_url: Option<String>,
+    /// Codex's home directory, whose `config.toml` the call inherits. `None`
+    /// keeps `--ignore-user-config`.
+    codex_home: Option<PathBuf>,
 }
 
 impl CodexAdapter {
@@ -175,8 +188,72 @@ impl CodexAdapter {
             binary,
             model,
             base_url,
+            codex_home: None,
         }
     }
+
+    /// Lets calls inherit `<codex_home>/config.toml`.
+    pub fn with_codex_home(mut self, codex_home: PathBuf) -> CodexAdapter {
+        self.codex_home = Some(codex_home);
+        self
+    }
+
+    /// How this call treats the user's config, read fresh for every call so
+    /// edits apply without a restart.
+    fn user_config(&self) -> UserConfig {
+        let Some(home) = &self.codex_home else {
+            return UserConfig::Ignore;
+        };
+        match std::fs::read_to_string(home.join("config.toml")) {
+            Ok(text) => inherit_plan(&text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                UserConfig::Inherit { mcp_servers: Vec::new() }
+            }
+            Err(_) => UserConfig::Ignore,
+        }
+    }
+}
+
+/// Whether a call inherits the user's Codex config.
+#[derive(Debug, PartialEq, Eq)]
+enum UserConfig {
+    /// Inherit it, disabling these MCP servers by name.
+    Inherit { mcp_servers: Vec<String> },
+    /// Pass `--ignore-user-config`.
+    Ignore,
+}
+
+/// Reads only the names under `[mcp_servers]`. Anything unexpected falls
+/// back to ignoring the file.
+fn inherit_plan(text: &str) -> UserConfig {
+    let Ok(table) = text.parse::<toml::Table>() else {
+        return UserConfig::Ignore;
+    };
+    let mcp_servers = match table.get("mcp_servers") {
+        None => Vec::new(),
+        Some(toml::Value::Table(servers)) => servers.keys().cloned().collect(),
+        Some(_) => return UserConfig::Ignore,
+    };
+    if !mcp_servers.iter().all(|name| is_bare_key(name)) {
+        return UserConfig::Ignore;
+    }
+    UserConfig::Inherit { mcp_servers }
+}
+
+/// A TOML bare key, safe to place unquoted in a `-c` key path.
+fn is_bare_key(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// `$CODEX_HOME`, else `~/.codex`, as Codex itself resolves it.
+fn codex_home() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("CODEX_HOME").filter(|home| !home.is_empty()) {
+        return Some(PathBuf::from(home));
+    }
+    std::env::home_dir().map(|home| home.join(".codex"))
 }
 
 impl CliAdapter for CodexAdapter {
@@ -190,10 +267,16 @@ impl CliAdapter for CodexAdapter {
             return Err(ProviderError::other(ProviderErrorCode::InvalidConfiguration));
         }
 
-        let mut args: Vec<Argument> = [
-            "--no-daemon",
-            "exec",
-            "--ignore-user-config",
+        let user_config = self.user_config();
+        let mut args: Vec<Argument> = ["--no-daemon", "exec"]
+            .into_iter()
+            .map(Argument::literal)
+            .collect();
+        if user_config == UserConfig::Ignore {
+            args.push(Argument::literal("--ignore-user-config"));
+        }
+        args.extend(
+            [
             "--ignore-rules",
             "--ephemeral",
             "--skip-git-repo-check",
@@ -204,8 +287,8 @@ impl CliAdapter for CodexAdapter {
             "--json",
         ]
         .into_iter()
-        .map(Argument::literal)
-        .collect();
+        .map(Argument::literal),
+        );
 
         // The routing override sits after --json, matching the invocation
         // verified in S0.2. The URL is TOML-encoded inside the value.
@@ -229,9 +312,22 @@ impl CliAdapter for CodexAdapter {
             // the JSONL stream, so it must be off.
             "features.view_image=false",
             "features.remote_plugin=false",
+            // Plugins and apps can bring their own tools; `notify` runs a
+            // program after the turn. None of them belongs in a format call.
+            "features.plugins=false",
+            "features.apps=false",
+            "notify=[]",
         ] {
             args.push(Argument::literal("-c"));
             args.push(Argument::literal(value));
+        }
+        // `-c mcp_servers={}` merges instead of clearing, so each inherited
+        // server is disabled by name.
+        if let UserConfig::Inherit { mcp_servers } = &user_config {
+            for name in mcp_servers {
+                args.push(Argument::literal("-c"));
+                args.push(Argument::literal(format!("mcp_servers.{name}.enabled=false")));
+            }
         }
         // The system prompt is a control file outside the workspace; the path
         // is embedded in the -c value as a TOML string.
@@ -381,6 +477,88 @@ fn classify_failure(messages: &[impl AsRef<str>]) -> ProviderError {
 mod tests {
     use super::*;
     use serde_saphyr::Location;
+
+    fn literal_args(adapter: &CodexAdapter) -> Vec<String> {
+        let input = FormatInput {
+            system_prompt: "system",
+            user_prompt: Default::default(),
+            text: "oi",
+        };
+        adapter
+            .invocation(input)
+            .expect("invocation builds")
+            .args
+            .into_iter()
+            .filter_map(|argument| match argument {
+                Argument::Literal(value) => Some(value.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn adapter_with_config(config: Option<&str>) -> (tempfile::TempDir, CodexAdapter) {
+        let home = tempfile::tempdir().expect("temp dir");
+        if let Some(config) = config {
+            std::fs::write(home.path().join("config.toml"), config).expect("config written");
+        }
+        let adapter = CodexAdapter::new(PathBuf::from("codex"), "gpt-6.1-sol".to_owned(), None)
+            .with_codex_home(home.path().to_path_buf());
+        (home, adapter)
+    }
+
+    #[test]
+    fn inherits_user_config_and_disables_its_mcp_servers() {
+        let (_home, adapter) = adapter_with_config(Some(
+            "openai_base_url = \"http://gateway:8317/v1\"\n\
+             [mcp_servers.files]\ncommand = \"secret-cmd\"\n\
+             [mcp_servers.web-search]\ncommand = \"x\"\n",
+        ));
+        let args = literal_args(&adapter);
+        assert!(!args.contains(&"--ignore-user-config".to_owned()), "{args:?}");
+        for wanted in [
+            "mcp_servers.files.enabled=false",
+            "mcp_servers.web-search.enabled=false",
+            "features.plugins=false",
+            "features.apps=false",
+            "notify=[]",
+        ] {
+            assert!(args.contains(&wanted.to_owned()), "missing {wanted}: {args:?}");
+        }
+        assert!(
+            !args.iter().any(|arg| arg.contains("secret-cmd") || arg.contains("gateway")),
+            "config values are never copied: {args:?}"
+        );
+    }
+
+    #[test]
+    fn missing_config_inherits_nothing_to_disable() {
+        let (_home, adapter) = adapter_with_config(None);
+        let args = literal_args(&adapter);
+        assert!(!args.contains(&"--ignore-user-config".to_owned()), "{args:?}");
+        assert!(!args.iter().any(|arg| arg.starts_with("mcp_servers.")), "{args:?}");
+    }
+
+    #[test]
+    fn unreadable_or_odd_config_fails_closed() {
+        for config in [
+            "this is = = not toml",
+            "mcp_servers = 3",
+            "[mcp_servers.\"has space\"]\ncommand = \"x\"\n",
+        ] {
+            let (_home, adapter) = adapter_with_config(Some(config));
+            let args = literal_args(&adapter);
+            assert!(
+                args.contains(&"--ignore-user-config".to_owned()),
+                "{config:?} must fall back: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn without_a_codex_home_the_user_config_is_ignored() {
+        let adapter = CodexAdapter::new(PathBuf::from("codex"), "gpt-6.1-sol".to_owned(), None);
+        assert!(literal_args(&adapter).contains(&"--ignore-user-config".to_owned()));
+    }
 
     fn option(key: &'static str, value: &'static str) -> RawOption<'static> {
         RawOption {
