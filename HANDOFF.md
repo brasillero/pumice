@@ -10,7 +10,7 @@ Read [`AGENTS.md`](AGENTS.md) for the rules and [`docs/spec.md`](docs/spec.md) f
 
 | Follow-up story | Status | Notes |
 | --- | --- | --- |
-| S2.4 Kimi adapter | In review | PR #TBD — argv transport (24 KiB cap) with a no-tools agent file; off by default citing the S0.3 terms risk; 4 real calls; hooks/plugins/session-retention residuals documented |
+| S2.4 Kimi adapter | In review | #52 — argv transport (24 KiB cap) with a no-tools agent file; off by default citing the S0.3 terms risk; 4 real calls; hooks/plugins/session-retention residuals documented |
 
 ## Phase 2 decisions (2026-10-04)
 
@@ -60,7 +60,7 @@ Update this table in the PR that finishes each story. Order follows the plan in 
 | 6 | S2.7 Generic loopback adapter | Done | #27 | Loopback-only (Ollama/LM Studio on this machine), off by default; merged with the owner's approval (2026-10-04). The matching AGENTS.md exception is the owner's to add |
 | 7 | S2.8 part 2: `pumice doctor` | Done | #29 | `doctor` renders a fresh detection report (found/missing + install hints + warnings), exit 0/1/2; `--login-check --provider <id>` is the only quota-bearing path: one fixed call through the selected provider, no fallback, text-free result |
 | 8 | S6.4 follow-up: Phase 2 config examples | Done | #25, #26 (#27) | Delivered with the adapters: commented `opencode` block, Antigravity note; the `generic` block ships with #27. Example-config tests cover them |
-| 9 | S2.4 Kimi adapter | In review | #TBD | Off by default with the S0.3 terms risk warning. Print-mode argv transport (24 KiB cap, `InputTooLarge` beyond) with the system prompt in a no-tools/no-subagents agent file; `tools: []` is the load-bearing restriction, tool stream records are rejected. Default model `kimi-k2.7-code-highspeed`. Doctor lists it and `--login-check --provider kimi` works; 4 real calls (2.6–5.0 s). Hooks/plugins/session-retention residuals documented in docs/research/S2.4-kimi-adapter.md |
+| 9 | S2.4 Kimi adapter | In review | #52 | Off by default with the S0.3 terms risk warning. Print-mode argv transport (24 KiB cap, `InputTooLarge` beyond) with the system prompt in a no-tools/no-subagents agent file; `tools: []` is the load-bearing restriction, tool stream records are rejected. Default model `kimi-k2.7-code-highspeed`. Doctor lists it and `--login-check --provider kimi` works; 4 real calls (2.6–5.0 s). Hooks/plugins/session-retention residuals documented in docs/research/S2.4-kimi-adapter.md |
 | 9 | S8.3 follow-up: Phase 2 gate | Done | #30 | Gate evidence below |
 | 10 | S7.1 portable release builds | Done | #36 | Owner authorized a fresh, small GitHub-release + npm distribution path (2026-10-05); Tauri installer/auto-update stays deferred. PRs #33–#35 remain closed. Findings in `docs/research/S7.1-portable-releases.md` |
 | 11 | S7.4 npm distribution | Done | #37 | npm portion of the approved distribution channel: front package `@brasillero/pumice` + four `@brasillero/pumice-<platform>` natives, launcher, loopback-registry install tests (npm/pnpm/Bun/npx), release.yml pack + four-host smoke. Published to npmjs at 0.1.0 on 2026-10-05. Findings in `docs/research/S7.4-npm-distribution.md` |
