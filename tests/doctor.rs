@@ -59,6 +59,7 @@ fn full_fake_yaml() -> (Vec<FakeCli>, String) {
         ("codex", "codex-cli 0.160.0\n"),
         ("opencode", ""),
         ("antigravity", ""),
+        ("kimi", "2.1.1\n"),
     ] {
         let fake = FakeCli::new(json!({"stdout": stdout, "exit_code": 0}));
         yaml.push_str(&format!(
@@ -109,7 +110,7 @@ fn all_enabled_found_lists_every_provider_and_the_kimi_note() {
         "stdout: {stdout}"
     );
     assert!(
-        stdout.contains("kimi: on standby (not supported in this version)\n"),
+        stdout.contains("kimi: disabled, found 2.1.1\n"),
         "stdout: {stdout}"
     );
     assert!(
@@ -318,15 +319,28 @@ fn login_check_refuses_antigravity_without_spawning() {
 }
 
 #[test]
-fn login_check_refuses_kimi() {
-    let (_fakes, yaml) = full_fake_yaml();
-    let (_dir, config_path) = write_config(&yaml);
+fn login_check_runs_kimi_through_the_fake() {
+    // One fake serves the probe and the call: `--version` gets the success
+    // stream too, which only makes the parsed version unavailable.
+    let fake = FakeCli::new(json!({
+        "stdout": support::fixture("kimi/success.jsonl"),
+        "exit_code": 0,
+    }));
+    let (_dir, config_path) = write_config(&format!(
+        "providers:\n  kimi:\n    enabled: true\n    binary: '{}'\n",
+        fake.path().display()
+    ));
 
     let output = run_doctor(&config_path, &["--login-check", "--provider", "kimi"]);
     let text = combined(&output);
 
-    assert_eq!(output.status.code(), Some(2), "output: {text}");
-    assert!(text.contains("on standby"), "output: {text}");
+    assert_eq!(output.status.code(), Some(0), "output: {text}");
+    assert!(text.contains("login check: ok ("), "output: {text}");
+    assert!(
+        !text.contains(FIXTURE_RESULT),
+        "the response text must never be printed: {text}"
+    );
+    assert!(fake.report_path().exists(), "the fake ran");
 }
 
 #[test]
