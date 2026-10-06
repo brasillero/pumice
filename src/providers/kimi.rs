@@ -250,9 +250,10 @@ impl CliAdapter for KimiAdapter {
             env,
             remove_env: REMOVE_ENV_VARS.into_iter().map(OsString::from).collect(),
             control_files: vec![ControlFile {
-                name: AGENT_FILE_NAME,
+                name: AGENT_FILE_NAME.to_owned(),
                 contents: agent_file(input.system_prompt).into_bytes(),
             }],
+            workspace_files: Vec::new(),
             parser: parse_output,
         })
     }

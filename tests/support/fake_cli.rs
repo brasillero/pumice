@@ -67,6 +67,11 @@ struct Scenario {
     /// path to capture in the report (for example `model_instructions_file`).
     #[serde(default)]
     report_config_files: Vec<String>,
+    /// Arbitrary files to read and report, resolved relative to the working
+    /// directory (for example `../control/agents/pumice.json`). A directory
+    /// reports every regular file inside it, keyed by its relative path.
+    #[serde(default)]
+    report_files: Vec<String>,
     /// Read stdin to EOF before doing anything else. When false, stdin is never
     /// read (a CLI that ignores its input).
     #[serde(default = "default_true")]
@@ -110,6 +115,8 @@ struct Report {
     arg_files: BTreeMap<String, Option<ArgFile>>,
     /// Contents of files named by `-c key="<path>"` arguments, keyed by key.
     config_files: BTreeMap<String, Option<ArgFile>>,
+    /// Contents of arbitrary files requested by `report_files`.
+    report_files: BTreeMap<String, Option<ArgFile>>,
     pid: u32,
     grandchild_pid: Option<u32>,
 }
@@ -242,6 +249,8 @@ fn build_report(
             &format!("cannot read working directory: {e}"),
         )
     });
+    let cwd = normalize_canonical_path(&cwd.canonicalize().unwrap_or(cwd));
+    let cwd = PathBuf::from(cwd);
     let mut cwd_entries: Vec<String> = std::fs::read_dir(&cwd)
         .unwrap_or_else(|e| {
             fail(
@@ -295,6 +304,25 @@ fn build_report(
         })
         .collect();
 
+    let mut report_files: BTreeMap<String, Option<ArgFile>> = BTreeMap::new();
+    for path in &scenario.report_files {
+        let resolved = cwd.join(path);
+        if resolved.is_dir() {
+            collect_report_files(&resolved, path, &cwd, &mut report_files);
+        } else {
+            let file = if resolved.exists() {
+                let canonical = resolved.canonicalize().unwrap_or(resolved);
+                Some(ArgFile {
+                    path: normalize_canonical_path(&canonical),
+                    contents: std::fs::read_to_string(&canonical).ok(),
+                })
+            } else {
+                None
+            };
+            report_files.insert(path.clone(), file);
+        }
+    }
+
     Report {
         argv,
         stdin,
@@ -303,9 +331,48 @@ fn build_report(
         env,
         arg_files,
         config_files,
+        report_files,
         pid: process::id(),
         grandchild_pid,
     }
+}
+
+/// Recursively collects regular files under `dir` into `out`, keyed by their
+/// path relative to `cwd`.
+fn collect_report_files(
+    dir: &Path,
+    prefix: &str,
+    cwd: &Path,
+    out: &mut BTreeMap<String, Option<ArgFile>>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let relative = strip_prefix_or_key(&path, cwd, prefix);
+        if path.is_dir() {
+            collect_report_files(&path, prefix, cwd, out);
+        } else if path.is_file() {
+            let canonical = path.canonicalize().unwrap_or(path.clone());
+            out.insert(
+                relative,
+                Some(ArgFile {
+                    path: normalize_canonical_path(&canonical),
+                    contents: std::fs::read_to_string(&canonical).ok(),
+                }),
+            );
+        }
+    }
+}
+
+/// Returns `path` relative to `cwd`, falling back to the original `prefix` if
+/// stripping fails.
+fn strip_prefix_or_key(path: &Path, cwd: &Path, prefix: &str) -> String {
+    path.strip_prefix(cwd)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| prefix.to_owned())
 }
 
 /// Returns the decoded path from a `-c` argument of the form
@@ -369,6 +436,17 @@ fn write_report(path: &Path, report: &Report) {
                 &format!("cannot write report {}: {e}", path.display()),
             )
         });
+}
+
+/// Converts a canonicalized path to a comparable form. On Windows
+/// `std::fs::canonicalize` returns a verbatim UNC path (`\\?\C:\...`)
+/// that does not prefix-match ordinary absolute paths, so strip that
+/// prefix when present.
+fn normalize_canonical_path(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    s.strip_prefix(r"\\?\")
+        .map(String::from)
+        .unwrap_or_else(|| s.into_owned())
 }
 
 fn write_filler(out: &mut impl Write, mut remaining: u64) -> io::Result<()> {

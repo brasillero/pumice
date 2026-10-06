@@ -166,9 +166,10 @@ impl CliAdapter for ClaudeAdapter {
             env,
             remove_env: Vec::new(),
             control_files: vec![ControlFile {
-                name: "system.txt",
+                name: "system.txt".to_owned(),
                 contents: input.system_prompt.as_bytes().to_vec(),
             }],
+            workspace_files: Vec::new(),
             parser: parse_output,
         })
     }

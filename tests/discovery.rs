@@ -183,12 +183,14 @@ async fn detection_covers_every_registered_provider_enabled_or_not() {
     let codex = FakeCli::new(json!({"stdout": "codex-cli 0.160.0"}));
     let opencode = FakeCli::new(json!({"stdout": "1.18.34"}));
     let antigravity = FakeCli::new(json!({}));
+    let kiro = FakeCli::new(json!({"stdout": "2.24.1"}));
     let config = load(&format!(
-        "providers:\n  claude:\n    binary: '{0}'\n  codex:\n    binary: '{1}'\n  opencode:\n    binary: '{2}'\n  antigravity:\n    binary: '{3}'\n",
+        "providers:\n  claude:\n    binary: '{0}'\n  codex:\n    binary: '{1}'\n  opencode:\n    binary: '{2}'\n  antigravity:\n    binary: '{3}'\n  kiro:\n    binary: '{4}'\n",
         claude.path().display(),
         codex.path().display(),
         opencode.path().display(),
         antigravity.path().display(),
+        kiro.path().display(),
     ));
     let statuses = discovery::detect(&config, providers::PROVIDERS, &ProcessRunner::new()).await;
 
@@ -218,6 +220,9 @@ async fn detection_covers_every_registered_provider_enabled_or_not() {
     // NotApplicable: no CLI to resolve or probe, whatever the config says.
     assert_eq!(status("generic").found, Found::NotApplicable);
     assert_eq!(status("generic").version, Version::Skipped);
+    // Kiro is disabled by default but still probed.
+    assert!(!status("kiro").enabled);
+    assert_eq!(status("kiro").version, Version::Parsed("2.24.1".into()));
 }
 
 #[test]

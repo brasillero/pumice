@@ -1,0 +1,2 @@
+{"sessionUpdate":"state_update","state":"running"}
+{"sessionUpdate":"state_update","state":"idle","stopReason":"error","error":{"code":-32000,"message":"Authentication required"}}

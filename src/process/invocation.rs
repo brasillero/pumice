@@ -137,8 +137,10 @@ mod tests {
 /// call, such as a system prompt.
 #[derive(Clone)]
 pub struct ControlFile {
-    /// Plain file name (no directory parts), e.g. `"system.txt"`.
-    pub name: &'static str,
+    /// File name or relative subpath, e.g. `"system.txt"` or
+    /// `"agents/pumice.json"`. Must be relative and contain only normal path
+    /// components (`..` is rejected).
+    pub name: String,
     pub contents: Vec<u8>,
 }
 
@@ -194,6 +196,12 @@ pub struct CliInvocation {
     /// Variables removed from the child's environment.
     pub remove_env: Vec<OsString>,
     pub control_files: Vec<ControlFile>,
+    /// Files written inside the CLI's working directory before spawn.
+    ///
+    /// This lets an adapter supply workspace-local configuration (for
+    /// example Kiro's `.kiro/agents/pumice.json`) without relocating the
+    /// user's global profile. The directory is otherwise empty.
+    pub workspace_files: Vec<ControlFile>,
     pub parser: OutputParser,
 }
 
@@ -208,6 +216,7 @@ impl fmt::Debug for CliInvocation {
             .field("env_keys", &self.env.keys().collect::<Vec<_>>())
             .field("remove_env", &self.remove_env)
             .field("control_files", &self.control_files)
+            .field("workspace_files", &self.workspace_files)
             .finish_non_exhaustive()
     }
 }

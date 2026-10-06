@@ -60,6 +60,7 @@ fn full_fake_yaml() -> (Vec<FakeCli>, String) {
         ("opencode", ""),
         ("antigravity", ""),
         ("kimi", "2.1.1\n"),
+        ("kiro", ""),
     ] {
         let fake = FakeCli::new(json!({"stdout": stdout, "exit_code": 0}));
         yaml.push_str(&format!(
@@ -111,6 +112,10 @@ fn all_enabled_found_lists_every_provider_and_the_summary() {
     );
     assert!(
         stdout.contains("kimi: disabled, found 2.1.1\n"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("kiro: disabled, found (version unavailable)\n"),
         "stdout: {stdout}"
     );
     assert!(

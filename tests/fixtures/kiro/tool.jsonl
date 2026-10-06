@@ -1,0 +1,3 @@
+{"sessionUpdate":"agent_message","messageId":"msg_1","content":[{"type":"text","text":"I'll run a tool."}]}
+{"sessionUpdate":"tool_call_update","toolCallId":"call_1","status":"pending"}
+{"sessionUpdate":"state_update","state":"idle","stopReason":"end_turn"}
