@@ -198,6 +198,7 @@ fn probe_invocation(program: &ProgramSpec, version_args: &'static [&'static str]
         env: BTreeMap::new(),
         remove_env: Vec::new(),
         control_files: Vec::new(),
+        workspace_files: Vec::new(),
         parser: ignore_output,
     }
 }

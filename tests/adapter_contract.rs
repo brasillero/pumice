@@ -26,6 +26,22 @@ use support::adapter_contract::{
 };
 use support::fixture;
 
+/// True when `child` is located inside `parent`, compared case-insensitively
+/// and with separators normalized. This lets tests compare a canonicalized
+/// path reported by the fake CLI against a non-canonical `cwd` string on
+/// Windows.
+fn path_is_inside(parent: &Path, child: &Path) -> bool {
+    let normalize = |p: &Path| {
+        p.to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_lowercase()
+    };
+    let parent = normalize(parent);
+    let child = normalize(child);
+    child.starts_with(&format!("{parent}/"))
+}
+
 adapter_contract!(claude, ClaudeContract);
 adapter_contract!(codex, CodexContract);
 adapter_contract!(opencode, OpenCodeContract);
@@ -1032,8 +1048,15 @@ impl ContractAdapter for KiroContract {
         let (path, contents) = Self::captured_system_prompt(report);
         assert_eq!(contents, SYSTEM_PROMPT);
         assert!(path.is_absolute(), "{}", path.display());
-        assert!(path.starts_with(cwd), "agent file should be inside cwd");
-        assert_eq!(path, cwd.join(".kiro/agents/pumice.json"));
+        assert!(
+            path_is_inside(cwd, &path),
+            "agent file should be inside cwd"
+        );
+        let suffix = ".kiro/agents/pumice.json";
+        assert!(
+            path.to_string_lossy().replace('\\', "/").ends_with(suffix),
+            "agent file should end with {suffix}"
+        );
     }
 
     fn assert_restricted_argv(argv: &[String]) {

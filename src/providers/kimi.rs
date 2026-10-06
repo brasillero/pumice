@@ -253,6 +253,7 @@ impl CliAdapter for KimiAdapter {
                 name: AGENT_FILE_NAME,
                 contents: agent_file(input.system_prompt).into_bytes(),
             }],
+            workspace_files: Vec::new(),
             parser: parse_output,
         })
     }

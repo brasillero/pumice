@@ -18,13 +18,14 @@
 //!
 //! * `--trust-tools=` (empty) trusts no individual tools.
 //! * No `--trust-all-tools`.
-//! * A per-call `KIRO_HOME` control directory supplies a custom `pumice` agent
-//!   with `tools: []` and `excludedTools: ["knowledge"]`, plus a
-//!   `settings/cli.json` that disables `chat.enableKnowledge` and
-//!   `chat.enableCodeIntelligence`.
+//! * A workspace-local custom agent (`.kiro/agents/pumice.json`) supplies the
+//!   system prompt in its `prompt` field, exposes no tools (`tools: []`),
+//!   excludes the `knowledge` tool, and disables MCP JSON / Powers inclusion.
 //!
 //! The system prompt travels in the agent file's `prompt` field; the user
-//! message (the wrapped dictation) travels on stdin.
+//! message (the wrapped dictation) travels on stdin. The user's own Kiro
+//! profile (`~/.kiro`) is left untouched: the adapter does not set `KIRO_HOME`
+//! or read any credential or token file.
 //!
 //! Output parsing: `--output-format stream-json` emits ACP v2
 //! `session/update` events as JSON Lines. The parser collects
@@ -34,7 +35,6 @@
 //! `stopReason: end_turn` before accepting the result.
 
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -186,19 +186,6 @@ impl CliAdapter for KiroAdapter {
         let user = input.user_prompt;
         let stdin = [user.before_text, input.text, user.after_text].concat();
 
-        let mut env: BTreeMap<OsString, OsString> = BTreeMap::new();
-        // The runner places control files in `<temp-root>/control` and runs the
-        // CLI in `<temp-root>/workspace`. Point Kiro's profile directory at the
-        // control directory so the custom agent and settings are picked up
-        // without touching the user's real `~/.kiro`.
-        // Use a forward-slash literal so the value is identical on Unix and
-        // Windows; Kiro's profile path is interpreted by the CLI, not by Rust's
-        // native path encoding.
-        env.insert(
-            OsString::from("KIRO_HOME"),
-            OsString::from("../control"),
-        );
-
         Ok(CliInvocation {
             program: ProgramSpec {
                 binary: self.binary.clone(),
@@ -206,24 +193,20 @@ impl CliAdapter for KiroAdapter {
             },
             args,
             stdin: stdin.into_bytes(),
-            env,
+            env: BTreeMap::new(),
             remove_env: Vec::new(),
-            control_files: vec![
-                ControlFile {
-                    name: "agents/pumice.json",
-                    contents: agent_config(input.system_prompt).into_bytes(),
-                },
-                ControlFile {
-                    name: "settings/cli.json",
-                    contents: settings_config().into_bytes(),
-                },
-            ],
+            control_files: Vec::new(),
+            workspace_files: vec![ControlFile {
+                name: ".kiro/agents/pumice.json",
+                contents: agent_config(input.system_prompt).into_bytes(),
+            }],
             parser: parse_output,
         })
     }
 }
 
-/// Custom agent configuration that carries the system prompt and denies tools.
+/// Workspace-local custom agent configuration that carries the system prompt
+/// and denies tools.
 fn agent_config(system_prompt: &str) -> String {
     serde_json::json!({
         "name": AGENT_NAME,
@@ -233,15 +216,6 @@ fn agent_config(system_prompt: &str) -> String {
         "includeMcpJson": false,
         "includePowers": false,
         "prompt": system_prompt,
-    })
-    .to_string()
-}
-
-/// Per-call settings that disable V3 knowledge/code-intelligence tools.
-fn settings_config() -> String {
-    serde_json::json!({
-        "chat.enableKnowledge": false,
-        "chat.enableCodeIntelligence": false,
     })
     .to_string()
 }
@@ -501,13 +475,6 @@ mod tests {
         assert_eq!(config["excludedTools"], Value::from(vec!["knowledge"]));
         assert_eq!(config["includeMcpJson"], Value::from(false));
         assert_eq!(config["includePowers"], Value::from(false));
-    }
-
-    #[test]
-    fn settings_config_disables_knowledge_tools() {
-        let config: Value = serde_json::from_str(&settings_config()).unwrap();
-        assert_eq!(config["chat.enableKnowledge"], Value::from(false));
-        assert_eq!(config["chat.enableCodeIntelligence"], Value::from(false));
     }
 
     fn output_with(stdout: &str, exit_code: i32) -> ProcessOutput {

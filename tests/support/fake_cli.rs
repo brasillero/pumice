@@ -248,6 +248,7 @@ fn build_report(
             &format!("cannot read working directory: {e}"),
         )
     });
+    let cwd = cwd.canonicalize().unwrap_or(cwd);
     let mut cwd_entries: Vec<String> = std::fs::read_dir(&cwd)
         .unwrap_or_else(|e| {
             fail(
@@ -309,7 +310,7 @@ fn build_report(
             let file = if resolved.exists() {
                 let canonical = resolved.canonicalize().unwrap_or(resolved);
                 Some(ArgFile {
-                    path: canonical.to_string_lossy().into_owned(),
+                    path: normalize_canonical_path(&canonical),
                     contents: std::fs::read_to_string(&canonical).ok(),
                 })
             } else {
@@ -394,6 +395,17 @@ fn write_report(path: &Path, report: &Report) {
                 &format!("cannot write report {}: {e}", path.display()),
             )
         });
+}
+
+/// Converts a canonicalized path to a comparable form. On Windows
+/// `std::fs::canonicalize` returns a verbatim UNC path (`\\?\C:\...`)
+/// that does not prefix-match ordinary absolute paths, so strip that
+/// prefix when present.
+fn normalize_canonical_path(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    s.strip_prefix(r"\\?\")
+        .map(String::from)
+        .unwrap_or_else(|| s.into_owned())
 }
 
 fn write_filler(out: &mut impl Write, mut remaining: u64) -> io::Result<()> {

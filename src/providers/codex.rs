@@ -359,6 +359,7 @@ impl CliAdapter for CodexAdapter {
                 name: "system.txt",
                 contents: input.system_prompt.as_bytes().to_vec(),
             }],
+            workspace_files: Vec::new(),
             parser: parse_output,
         })
     }

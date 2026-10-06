@@ -83,13 +83,14 @@ providers:
 
   # Kiro (AWS) is off by default and unverified in this version. Enabling it
   # requires an explicit model and accepts no adapter options or env overrides.
+  # The adapter supplies a workspace-local no-tools agent; your own Kiro login
+  # and profile in ~/.kiro stay untouched.
   # Uncomment to use, replacing the model with one you are authorized to use:
   # kiro:
   #   enabled: true
   #   model: claude-sonnet-4.6
   #   timeout_secs: 30
-  #   # Kiro accepts no environment overrides; the adapter owns the child
-  #   # environment (a per-call KIRO_HOME control directory).
+  #   # Kiro accepts no environment overrides.
   #   env: {}
   #   options: {}
 

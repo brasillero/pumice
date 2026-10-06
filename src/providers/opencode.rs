@@ -275,6 +275,7 @@ impl CliAdapter for OpenCodeAdapter {
             // The system prompt travels inside the inline configuration, not
             // in a control file.
             control_files: Vec::new(),
+            workspace_files: Vec::new(),
             parser: parse_output,
         })
     }

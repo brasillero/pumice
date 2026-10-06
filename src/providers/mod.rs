@@ -227,7 +227,7 @@ mod tests {
 
     #[test]
     fn registry_ids_are_unique_and_found() {
-        assert_eq!(PROVIDERS.len(), 6, "six providers are registered");
+        assert_eq!(PROVIDERS.len(), 7, "seven providers are registered");
         for (i, d) in PROVIDERS.iter().enumerate() {
             assert!(PROVIDERS[..i].iter().all(|other| other.id != d.id));
             assert!(std::ptr::eq(descriptor(d.id).unwrap(), d));

@@ -79,6 +79,13 @@ pub trait ContractAdapter {
     /// the default no-op.
     fn capture_system_prompt(_scenario: &mut Value) {}
 
+    /// Names of files or directories the adapter writes inside the working
+    /// directory. The empty-workspace contract asserts that the cwd contains
+    /// exactly these entries (and nothing else).
+    fn expected_workspace_entries() -> Vec<&'static str> {
+        Vec::new()
+    }
+
     /// The captured system prompt control file: its absolute path (which
     /// must stay outside the call's workspace) and its contents. Only called
     /// for adapters with a control-file channel; the default panics because
@@ -345,9 +352,10 @@ pub async fn restricted<A: ContractAdapter>() {
     A::assert_restricted_argv(&report_argv(&fake.report()));
 }
 
-/// Empty workspace: the cwd is empty when the call starts, two successive
-/// calls get different cwds, the system prompt control file stays outside
-/// the cwd, and every temporary root is removed afterwards.
+/// Empty workspace: the cwd contains only the adapter's expected workspace
+/// files when the call starts, two successive calls get different cwds, the
+/// system prompt stays separate from the user message, and every temporary
+/// root is removed afterwards.
 pub async fn empty_workspace<A: ContractAdapter>() {
     let fake = success_fake::<A>("Texto formatado.");
     let provider = A::provider(fake.path(), CALL_TIMEOUT);
@@ -356,7 +364,9 @@ pub async fn empty_workspace<A: ContractAdapter>() {
     let first = fake.report();
     let cwd = Path::new(first["cwd"].as_str().unwrap());
     assert_eq!(cwd.file_name().unwrap(), "workspace");
-    assert_eq!(first["cwd_entries"], json!([]));
+    let mut expected = A::expected_workspace_entries();
+    expected.sort();
+    assert_eq!(first["cwd_entries"], json!(expected));
 
     A::assert_system_prompt_placement(&first);
     let first_root = temp_root(&first);
@@ -364,7 +374,7 @@ pub async fn empty_workspace<A: ContractAdapter>() {
     format_with(&provider, "second call").await.unwrap();
     let second = fake.report();
     assert_ne!(first["cwd"], second["cwd"], "each call gets its own root");
-    assert_eq!(second["cwd_entries"], json!([]));
+    assert_eq!(second["cwd_entries"], json!(expected));
 
     assert!(!first_root.exists(), "the first root is removed too");
     assert!(!temp_root(&second).exists());

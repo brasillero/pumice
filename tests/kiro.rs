@@ -23,15 +23,14 @@ const BEFORE: &str = "Format this dictation:\n<transcript>\n";
 const AFTER: &str = "\n</transcript>";
 const MODEL: &str = "claude-sonnet-4.6";
 
-/// Environment variables and files the fake reports back.
-const REPORTED_ENV: [&str; 1] = ["KIRO_HOME"];
+/// Files the fake reports back.
+const REPORTED_FILES: [&str; 1] = [".kiro/agents/pumice.json"];
 
 fn fake_kiro(stdout: &str, exit_code: i32) -> FakeCli {
     FakeCli::new(json!({
         "stdout": stdout,
         "exit_code": exit_code,
-        "report_env": REPORTED_ENV,
-        "report_files": ["../control/agents/pumice.json", "../control/settings/cli.json"],
+        "report_files": REPORTED_FILES,
     }))
 }
 
@@ -66,10 +65,10 @@ fn argv(report: &Value) -> Vec<String> {
         .collect()
 }
 
-fn control_file(report: &Value, relative: &str) -> String {
+fn workspace_file(report: &Value, relative: &str) -> String {
     report["report_files"][relative]["contents"]
         .as_str()
-        .unwrap_or_else(|| panic!("control file {relative} not reported"))
+        .unwrap_or_else(|| panic!("workspace file {relative} not reported"))
         .to_owned()
 }
 
@@ -99,45 +98,32 @@ async fn passes_the_exact_invocation() {
         report["stdin"],
         json!(format!("{BEFORE}hello world{AFTER}"))
     );
-    assert_eq!(report["cwd_entries"], json!([]));
+    assert_eq!(report["cwd_entries"], json!([".kiro"]));
 }
 
 #[tokio::test]
-async fn kiro_home_points_to_the_control_directory() {
+async fn invocation_does_not_set_kiro_home() {
     let fake = fake_kiro(&fixture("kiro/success.jsonl"), 0);
     format(&fake, "text").await.expect("success");
     let report = fake.report();
 
-    let kiro_home = report["env"]["KIRO_HOME"]
-        .as_str()
-        .expect("KIRO_HOME reported");
-    assert_eq!(kiro_home, "../control");
+    assert_eq!(report["env"]["KIRO_HOME"], Value::Null);
 }
 
 #[tokio::test]
-async fn control_directory_supplies_the_agent_and_settings() {
+async fn workspace_supplies_the_agent_file() {
     let fake = fake_kiro(&fixture("kiro/success.jsonl"), 0);
     format(&fake, "text").await.expect("success");
 
-    let agent: Value = serde_json::from_str(&control_file(
-        &fake.report(),
-        "../control/agents/pumice.json",
-    ))
-    .expect("agent file is JSON");
+    let agent: Value =
+        serde_json::from_str(&workspace_file(&fake.report(), ".kiro/agents/pumice.json"))
+            .expect("agent file is JSON");
     assert_eq!(agent["name"], json!("pumice"));
     assert_eq!(agent["prompt"], json!(SYSTEM_PROMPT));
     assert_eq!(agent["tools"], json!([]));
     assert_eq!(agent["excludedTools"], json!(vec!["knowledge"]));
     assert_eq!(agent["includeMcpJson"], json!(false));
     assert_eq!(agent["includePowers"], json!(false));
-
-    let settings: Value = serde_json::from_str(&control_file(
-        &fake.report(),
-        "../control/settings/cli.json",
-    ))
-    .expect("settings file is JSON");
-    assert_eq!(settings["chat.enableKnowledge"], json!(false));
-    assert_eq!(settings["chat.enableCodeIntelligence"], json!(false));
 }
 
 #[tokio::test]
@@ -191,8 +177,7 @@ async fn errors_never_contain_captured_output() {
         "stdout": format!("{event}\n"),
         "stderr": format!("stderr {MARKER}"),
         "exit_code": 1,
-        "report_env": REPORTED_ENV,
-        "report_files": ["../control/agents/pumice.json"],
+        "report_files": REPORTED_FILES,
     }));
     let err = format(&fake, MARKER).await.unwrap_err();
     assert_eq!(err, ProviderError::NotLoggedIn);

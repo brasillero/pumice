@@ -92,7 +92,8 @@ async fn run_in(
     let control = root.join(CONTROL_DIR);
     std::fs::create_dir(&workspace).map_err(io_error)?;
     std::fs::create_dir(&control).map_err(io_error)?;
-    let control_paths = write_control_files(&control, &invocation.control_files)?;
+    write_files(&workspace, &invocation.workspace_files)?;
+    let control_paths = write_files(&control, &invocation.control_files)?;
     let args = invocation
         .args
         .iter()
@@ -167,12 +168,12 @@ async fn remove_root(root: tempfile::TempDir) {
     }
 }
 
-/// Writes control files into `dir` and returns their absolute paths.
+/// Writes files into `dir` and returns their absolute paths.
 ///
 /// Names may be plain file names or relative subpaths such as
 /// `agents/pumice.json`; all components must be normal (`..` and absolute
 /// paths are rejected) and intermediate directories are created as needed.
-fn write_control_files(dir: &Path, files: &[ControlFile]) -> Result<Vec<PathBuf>, ProviderError> {
+fn write_files(dir: &Path, files: &[ControlFile]) -> Result<Vec<PathBuf>, ProviderError> {
     files
         .iter()
         .map(|file| {

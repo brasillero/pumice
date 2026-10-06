@@ -36,6 +36,7 @@ fn invocation(program: &Path) -> CliInvocation {
         env: BTreeMap::new(),
         remove_env: Vec::new(),
         control_files: Vec::new(),
+        workspace_files: Vec::new(),
         parser: unused_parser,
     }
 }
@@ -117,6 +118,29 @@ async fn workspace_is_empty_and_control_file_is_outside_it() {
     assert!(!path.starts_with(report["cwd"].as_str().unwrap()));
     // Removed with the temporary root.
     assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn workspace_files_are_written_inside_workspace() {
+    let fake = FakeCli::new(json!({"report_files": [".kiro/agents/pumice.json"]}));
+    let mut inv = invocation(fake.path());
+    inv.workspace_files = vec![ControlFile {
+        name: ".kiro/agents/pumice.json",
+        contents: br#"{"name":"pumice","tools":[]}"#.to_vec(),
+    }];
+
+    run(inv).await.expect("run succeeds");
+    let report = fake.report();
+    assert_eq!(report["cwd_entries"], json!([".kiro"]));
+
+    let file = &report["report_files"][".kiro/agents/pumice.json"];
+    assert_eq!(file["contents"], json!(r#"{"name":"pumice","tools":[]}"#));
+    let path = PathBuf::from(file["path"].as_str().unwrap());
+    assert!(path.is_absolute(), "{}", path.display());
+    let cwd = Path::new(report["cwd"].as_str().unwrap());
+    assert!(path.starts_with(cwd), "workspace file should be inside cwd");
+    assert_eq!(path, cwd.join(".kiro/agents/pumice.json"));
+    assert!(!path.exists(), "removed with the temporary root");
 }
 
 #[tokio::test]

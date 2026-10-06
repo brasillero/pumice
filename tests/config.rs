@@ -213,7 +213,7 @@ fn empty_file_gives_all_defaults() {
     assert_eq!(config.prompts.system, None);
     assert_eq!(config.prompts.user, None);
     assert!(!config.debug_log.enabled);
-    assert_eq!(config.providers.len(), 6);
+    assert_eq!(config.providers.len(), 7);
 
     let claude = claude(&config);
     assert!(claude.enabled);

@@ -193,6 +193,7 @@ impl CliAdapter for AntigravityAdapter {
             env: BTreeMap::new(),
             remove_env: Vec::new(),
             control_files: Vec::new(),
+            workspace_files: Vec::new(),
             parser: parse_output,
         })
     }
