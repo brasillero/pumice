@@ -353,9 +353,9 @@ async fn handy_request_formats_and_returns_fake_output() {
         "the fake ran and formatted"
     );
     let lines = server.log_lines();
-    assert_eq!(lines.len(), 1, "one metadata line: {lines:?}");
-    assert!(lines[0].contains("kind=formatted"), "line: {}", lines[0]);
-    assert!(lines[0].contains("provider=claude"), "line: {}", lines[0]);
+    assert_eq!(lines.len(), 1, "one log entry: {lines:?}");
+    assert!(lines[0].contains(" formatted "), "line: {}", lines[0]);
+    assert!(lines[0].contains(" claude ("), "line: {}", lines[0]);
 }
 
 #[tokio::test]
@@ -384,12 +384,8 @@ async fn handy_fixture_verbatim_keeps_unknown_model_dictation_raw() {
         "no provider may run for an unknown model"
     );
     let lines = server.log_lines();
-    assert!(lines[0].contains("kind=raw"), "line: {}", lines[0]);
-    assert!(
-        lines[0].contains("reason=UnknownProvider"),
-        "line: {}",
-        lines[0]
-    );
+    assert!(lines[0].contains(" RAW "), "line: {}", lines[0]);
+    assert!(lines[0].contains("no provider named"), "line: {}", lines[0]);
 }
 
 #[tokio::test]
@@ -430,7 +426,7 @@ async fn failing_provider_returns_the_raw_transcript_with_200() {
     );
     let lines = server.log_lines();
     assert!(
-        lines[0].contains("reason=ProviderFailed(NotLoggedIn)"),
+        lines[0].contains("original text returned: not logged in"),
         "line: {}",
         lines[0]
     );
@@ -973,7 +969,7 @@ async fn disabled_provider_is_not_listed_and_keeps_dictation_raw() {
     );
     let lines = server.log_lines();
     assert!(
-        lines[0].contains("reason=ProviderDisabled"),
+        lines[0].contains("is disabled in the config"),
         "line: {}",
         lines[0]
     );
@@ -1095,7 +1091,9 @@ async fn selecting_a_missing_provider_still_falls_back_through_the_chain() {
         server
             .log_lines()
             .iter()
-            .any(|line| line.contains("kind=formatted") && line.contains("provider=codex")),
+            .any(|line| line.contains(" formatted ")
+                && line.contains(" codex")
+                && line.contains("fallback")),
         "a formatted outcome through the fallback: {:?}",
         server.log_lines()
     );
@@ -1456,7 +1454,7 @@ async fn inspect_echoes_the_exact_request_body_bytes() {
 
     let lines = server.log_lines();
     assert_eq!(lines.len(), 1);
-    assert!(lines[0].contains("kind=inspect"), "line: {}", lines[0]);
+    assert!(lines[0].contains(" inspect "), "line: {}", lines[0]);
     assert!(
         !lines[0].contains("custom_field"),
         "metadata line must not leak body text: {}",

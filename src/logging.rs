@@ -252,6 +252,7 @@ mod tests {
             kind: OutcomeKind::Formatted,
             provider: Some("claude"),
             attempts: 1,
+            trail: Vec::new(),
             elapsed: std::time::Duration::from_millis(7),
         };
         let headers = HeaderMap::new();
@@ -286,6 +287,7 @@ mod tests {
             kind: OutcomeKind::Formatted,
             provider: Some("claude"),
             attempts: 1,
+            trail: Vec::new(),
             elapsed: std::time::Duration::from_millis(3),
         };
         log.record(&DebugRecord::new(

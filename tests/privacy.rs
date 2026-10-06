@@ -255,8 +255,8 @@ async fn inspect_debug_log_disabled_creates_no_file_and_no_text_in_metadata() {
         default_path.display()
     );
     let lines = server.log.lines();
-    assert_eq!(lines.len(), 1, "one metadata line: {lines:?}");
-    assert!(lines[0].contains("kind=inspect"), "line: {}", lines[0]);
+    assert_eq!(lines.len(), 1, "one log entry: {lines:?}");
+    assert!(lines[0].contains(" inspect "), "line: {}", lines[0]);
     assert!(
         !lines[0].contains(marker),
         "metadata line leaked the marker: {}",
@@ -342,8 +342,8 @@ async fn inspect_debug_log_enabled_records_exact_body_and_redacts_headers() {
     assert!(record["outcome"]["elapsed_ms"].is_number());
 
     let lines = server.log.lines();
-    assert_eq!(lines.len(), 1, "one metadata line: {lines:?}");
-    assert!(lines[0].contains("kind=inspect"), "line: {}", lines[0]);
+    assert_eq!(lines.len(), 1, "one log entry: {lines:?}");
+    assert!(lines[0].contains(" inspect "), "line: {}", lines[0]);
     assert!(
         !lines[0].contains(marker),
         "metadata line leaked the marker: {}",
@@ -445,7 +445,7 @@ async fn debug_log_records_one_redacted_line_when_enabled() {
     // Normal operation is unchanged: the metadata line still never carries
     // dictated text.
     let lines = server.log.lines();
-    assert_eq!(lines.len(), 1, "one metadata line: {lines:?}");
+    assert_eq!(lines.len(), 1, "one log entry: {lines:?}");
     assert!(
         !lines[0].contains(marker),
         "the metadata line leaked the dictation: {}",

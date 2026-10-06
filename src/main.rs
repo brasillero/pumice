@@ -294,6 +294,7 @@ async fn run_service(loaded: LoadedConfig) -> ExitCode {
     };
 
     println!("pumice listening on http://127.0.0.1:{}/v1", config.port);
+    println!("{}", route_line(&pipeline, config.total_timeout));
     match api::serve(
         listener,
         pipeline,
@@ -308,6 +309,28 @@ async fn run_service(loaded: LoadedConfig) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// The chain a request without a model runs, e.g.
+/// `route: claude (haiku) → codex (gpt-6.1-sol), total timeout 30s`.
+fn route_line(pipeline: &Pipeline, total_timeout: std::time::Duration) -> String {
+    let route: Vec<String> = pipeline
+        .default_route()
+        .into_iter()
+        .map(|(id, model)| {
+            if model.is_empty() {
+                id.to_owned()
+            } else {
+                format!("{id} ({model})")
+            }
+        })
+        .collect();
+    let chain = if route.is_empty() {
+        "no enabled provider: every request returns the original text".to_owned()
+    } else {
+        route.join(" → ")
+    };
+    format!("route: {chain}, total timeout {}s", total_timeout.as_secs())
 }
 
 fn config_location(source: &ConfigSource) -> String {
