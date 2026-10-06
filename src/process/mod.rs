@@ -177,7 +177,9 @@ fn write_control_files(dir: &Path, files: &[ControlFile]) -> Result<Vec<PathBuf>
         .iter()
         .map(|file| {
             let name = Path::new(file.name);
-            if name.components().any(|c| !matches!(c, std::path::Component::Normal(_)))
+            if name
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
                 || name.as_os_str().is_empty()
             {
                 return Err(ProviderError::other(

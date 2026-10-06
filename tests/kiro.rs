@@ -119,9 +119,11 @@ async fn control_directory_supplies_the_agent_and_settings() {
     let fake = fake_kiro(&fixture("kiro/success.jsonl"), 0);
     format(&fake, "text").await.expect("success");
 
-    let agent: Value =
-        serde_json::from_str(&control_file(&fake.report(), "../control/agents/pumice.json"))
-            .expect("agent file is JSON");
+    let agent: Value = serde_json::from_str(&control_file(
+        &fake.report(),
+        "../control/agents/pumice.json",
+    ))
+    .expect("agent file is JSON");
     assert_eq!(agent["name"], json!("pumice"));
     assert_eq!(agent["prompt"], json!(SYSTEM_PROMPT));
     assert_eq!(agent["tools"], json!([]));
@@ -129,9 +131,11 @@ async fn control_directory_supplies_the_agent_and_settings() {
     assert_eq!(agent["includeMcpJson"], json!(false));
     assert_eq!(agent["includePowers"], json!(false));
 
-    let settings: Value =
-        serde_json::from_str(&control_file(&fake.report(), "../control/settings/cli.json"))
-            .expect("settings file is JSON");
+    let settings: Value = serde_json::from_str(&control_file(
+        &fake.report(),
+        "../control/settings/cli.json",
+    ))
+    .expect("settings file is JSON");
     assert_eq!(settings["chat.enableKnowledge"], json!(false));
     assert_eq!(settings["chat.enableCodeIntelligence"], json!(false));
 }
@@ -145,7 +149,10 @@ async fn success_fixture_returns_its_text() {
 #[tokio::test]
 async fn auth_fixture_is_not_logged_in() {
     let fake = fake_kiro(&fixture("kiro/auth-required.jsonl"), 1);
-    assert_eq!(format(&fake, "text").await.unwrap_err(), ProviderError::NotLoggedIn);
+    assert_eq!(
+        format(&fake, "text").await.unwrap_err(),
+        ProviderError::NotLoggedIn
+    );
 }
 
 #[tokio::test]
@@ -266,9 +273,8 @@ fn malformed_model_reports_the_value() {
 
 #[test]
 fn enabled_with_an_explicit_model_loads() {
-    let config =
-        load("providers:\n  kiro:\n    enabled: true\n    model: claude-sonnet-4.6\n")
-            .expect("explicit model loads");
+    let config = load("providers:\n  kiro:\n    enabled: true\n    model: claude-sonnet-4.6\n")
+        .expect("explicit model loads");
     let kiro = config.providers.get(ID).expect("kiro configured");
     assert!(kiro.enabled);
     assert_eq!(kiro.model, "claude-sonnet-4.6");
