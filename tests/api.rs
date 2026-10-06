@@ -430,6 +430,11 @@ async fn failing_provider_returns_the_raw_transcript_with_200() {
         "line: {}",
         lines[0]
     );
+    assert!(
+        lines[0].contains("✗ claude") && lines[0].contains("(exit "),
+        "the attempt line carries the CLI's exit code: {}",
+        lines[0]
+    );
 }
 
 #[tokio::test]

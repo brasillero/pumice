@@ -18,6 +18,7 @@ use tokio::time::Instant;
 use crate::cleanup::cleanup;
 use crate::config::{Config, PromptSettings};
 use crate::prompts::compose_with_settings;
+use crate::providers::diagnostic::{self, Diagnostic};
 use crate::providers::discovery::{Found, ProviderStatus};
 use crate::providers::{self, FormatInput, Provider, ProviderError};
 use crate::request::ExtractedRequest;
@@ -258,14 +259,19 @@ impl Pipeline {
                 break;
             }
             let attempt_started = Instant::now();
-            let result =
-                match run_within_budget(candidate, prompts.format_input(), total_deadline).await {
-                    Ok(output) => match cleanup(&output, &request.raw_text) {
-                        Ok(text) => Ok(text),
-                        Err(_) => Err(ChainFailure::Cleanup),
-                    },
-                    Err(kind) => Err(ChainFailure::Provider(kind)),
-                };
+            let (run, diagnostic) = diagnostic::capture(run_within_budget(
+                candidate,
+                prompts.format_input(),
+                total_deadline,
+            ))
+            .await;
+            let result = match run {
+                Ok(output) => match cleanup(&output, &request.raw_text) {
+                    Ok(text) => Ok(text),
+                    Err(_) => Err(ChainFailure::Cleanup),
+                },
+                Err(kind) => Err(ChainFailure::Provider(kind)),
+            };
             trail.push(Attempt {
                 provider: candidate.provider.id(),
                 model: candidate.model.clone(),
@@ -275,6 +281,7 @@ impl Pipeline {
                     Err(ChainFailure::Cleanup) => AttemptResult::CleanupRejected,
                 },
                 elapsed: attempt_started.elapsed(),
+                diagnostic,
             });
             match result {
                 Ok(text) => {
@@ -396,7 +403,8 @@ pub struct FormatOutcome {
     pub elapsed: Duration,
 }
 
-/// One provider run inside a request; safe to log (no text).
+/// One provider run inside a request. Safe to log except
+/// `diagnostic.detail`, which belongs in the debug log only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Attempt {
     pub provider: &'static str,
@@ -404,6 +412,9 @@ pub struct Attempt {
     pub model: String,
     pub result: AttemptResult,
     pub elapsed: Duration,
+    /// What the CLI said when it failed; only its safe summary reaches the
+    /// ordinary log.
+    pub diagnostic: Option<Diagnostic>,
 }
 
 /// How one [`Attempt`] ended.

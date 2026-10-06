@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use crate::pipeline::{Attempt, AttemptResult, FormatOutcome, OutcomeKind, RawReason};
 use crate::providers::ProviderError;
+use crate::providers::diagnostic::Diagnostic;
 
 /// Longest requested model name shown; a client controls it.
 const MAX_REQUESTED_CHARS: usize = 40;
@@ -102,7 +103,15 @@ fn render_at(entry: &Entry<'_>, color: bool, timestamp: &str) -> String {
             .map(|attempt| {
                 let (mark, style, result) = match attempt.result {
                     AttemptResult::Formatted => ("✓", Style::Green, "formatted".to_owned()),
-                    AttemptResult::Failed(error) => ("✗", Style::Red, provider_error(error)),
+                    AttemptResult::Failed(error) => {
+                        let mut label = provider_error(error);
+                        if let Some(summary) =
+                            attempt.diagnostic.as_ref().and_then(Diagnostic::summary)
+                        {
+                            label.push_str(&format!(" ({summary})"));
+                        }
+                        ("✗", Style::Red, label)
+                    }
                     AttemptResult::CleanupRejected => {
                         ("✗", Style::Red, "output rejected by cleanup".to_owned())
                     }
@@ -236,6 +245,7 @@ mod tests {
             model: model.to_owned(),
             result,
             elapsed: Duration::from_millis(ms),
+            diagnostic: None,
         }
     }
 
@@ -348,6 +358,38 @@ mod tests {
         );
         assert!(text.contains("not logged in"), "{text}");
         assert!(text.contains("rate limited (retry in 60s)"), "{text}");
+    }
+
+    #[test]
+    fn failure_shows_the_safe_diagnostic_summary_only() {
+        let mut failed = attempt(
+            "claude",
+            "haiku",
+            AttemptResult::Failed(ProviderError::other(
+                crate::providers::ProviderErrorCode::NonzeroExit,
+            )),
+            2_100,
+        );
+        failed.diagnostic = Some(Diagnostic {
+            exit_code: Some(1),
+            api_status: Some(400),
+            subtype: None,
+            detail: "stderr: secret dictation".to_owned(),
+        });
+        let outcome = outcome(
+            OutcomeKind::Raw(RawReason::ProviderFailed(ProviderError::other(
+                crate::providers::ProviderErrorCode::NonzeroExit,
+            ))),
+            None,
+            vec![failed],
+        );
+        let text = plain(&Entry {
+            number: 1,
+            requested: None,
+            outcome: &outcome,
+        });
+        assert!(text.contains("(exit 1, API status 400)"), "{text}");
+        assert!(!text.contains("secret"), "{text}");
     }
 
     #[test]
