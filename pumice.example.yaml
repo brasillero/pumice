@@ -81,6 +81,18 @@ providers:
   #   # variant, for example variant: low.
   #   options: {}
 
+  # Kiro (AWS) is off by default and unverified in this version. Enabling it
+  # requires an explicit model and accepts no adapter options or env overrides.
+  # Uncomment to use, replacing the model with one you are authorized to use:
+  # kiro:
+  #   enabled: true
+  #   model: claude-sonnet-4.6
+  #   timeout_secs: 30
+  #   # Kiro accepts no environment overrides; the adapter owns the child
+  #   # environment (a per-call KIRO_HOME control directory).
+  #   env: {}
+  #   options: {}
+
   # Antigravity (agy) is registered but cannot be enabled yet: no supported
   # per-launch tool policy exists, and third-party integration may risk
   # account access (docs/research/phase2-architecture.md §3.2). Writing

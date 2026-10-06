@@ -291,6 +291,7 @@ mod tests {
             status("antigravity", false, found(), Version::Skipped),
             status("generic", false, Found::NotApplicable, Version::Skipped),
             status("kimi", false, Found::Missing, Version::Unavailable),
+            status("kiro", false, Found::Missing, Version::Unavailable),
         ]
     }
 
@@ -327,6 +328,10 @@ mod tests {
             report.contains(
                 "kimi: disabled, missing (install: curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash)\n"
             ),
+            "{report}"
+        );
+        assert!(
+            report.contains("kiro: disabled, missing (install: curl -fsSL https://cli.kiro.dev/install | bash)\n"),
             "{report}"
         );
         assert!(

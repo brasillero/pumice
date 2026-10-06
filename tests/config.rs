@@ -275,6 +275,18 @@ fn empty_file_gives_all_defaults() {
     assert!(kimi.binary.is_none());
     assert!(kimi.env.is_empty());
     assert!(kimi.options.is_empty());
+
+    // Kiro is registered but dormant: off by default, with no model.
+    let kiro = config
+        .providers
+        .get("kiro")
+        .expect("kiro is configured");
+    assert!(!kiro.enabled);
+    assert!(kiro.model.is_empty());
+    assert_eq!(kiro.timeout, Duration::from_secs(30));
+    assert!(kiro.binary.is_none());
+    assert!(kiro.env.is_empty());
+    assert!(kiro.options.is_empty());
 }
 
 #[test]
