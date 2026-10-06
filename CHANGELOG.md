@@ -6,10 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-10-06
+
+Claude and Codex now use the credentials and gateway already configured for them, and the request log says which provider and model answered, whether a fallback happened, and why an attempt failed.
+
+### Added
+
+- Built-in `inspect` model that echoes the complete request JSON, for checking what a client sends (#43).
+- Readable request log: local time, request number, outcome, the provider and model that produced the text, total time and text length. After a fallback or failure, one line per attempt with its result and time. Startup prints the default route, e.g. `claude (haiku) → codex (gpt-6.1-sol)` (#44).
+- Failure cause for every failed attempt: the request log shows the exit code, API status and error type; the opt-in debug log adds the CLI's stderr and output excerpts (#45).
+
+### Changed
+
+- Codex reads the user's own `~/.codex/config.toml` (or `$CODEX_HOME`), so a gateway, provider or profile configured there applies without repeating it in Pumice. MCP servers named there are disabled per call, plugins, apps and `notify` are off, and an unreadable config falls back to ignoring it (#48).
+
 ### Fixed
 
-- Restore the original `@brasillero` npm native-package scope after correcting the misspelled account, before the first npm publication.
-- Scope the npm front package as `@brasillero/pumice` (keeping the installed command `pumice`): the registry rejects the unscoped name `pumice` as too similar to the existing package `juice`.
+- Claude ignored `~/.claude/settings.json`, including a gateway configured in its `env` block, and fell back to the subscription login: the `--restricted` flag is removed; `--tools ""` and `--safe-mode` keep tools and customizations off (#46).
+- Claude's "weekly limit" message is reported as an exhausted quota (#46).
+- The startup route line could stop the service when a client closed stdout after reading the first line; it now prints on stderr (#47).
+- Restore the original `@brasillero` npm native-package scope after correcting the misspelled account (#41).
+- Scope the npm front package as `@brasillero/pumice` (keeping the installed command `pumice`): the registry rejects the unscoped name `pumice` as too similar to the existing package `juice` (#41).
 
 ## [0.1.0] — 2026-10-05
 
