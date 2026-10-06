@@ -168,22 +168,26 @@ async fn remove_root(root: tempfile::TempDir) {
 }
 
 /// Writes control files into `dir` and returns their absolute paths.
+///
+/// Names may be plain file names or relative subpaths such as
+/// `agents/pumice.json`; all components must be normal (`..` and absolute
+/// paths are rejected) and intermediate directories are created as needed.
 fn write_control_files(dir: &Path, files: &[ControlFile]) -> Result<Vec<PathBuf>, ProviderError> {
     files
         .iter()
         .map(|file| {
             let name = Path::new(file.name);
-            let mut components = name.components();
-            let plain = matches!(
-                (components.next(), components.next()),
-                (Some(std::path::Component::Normal(_)), None)
-            );
-            if !plain {
+            if name.components().any(|c| !matches!(c, std::path::Component::Normal(_)))
+                || name.as_os_str().is_empty()
+            {
                 return Err(ProviderError::other(
                     ProviderErrorCode::InvalidConfiguration,
                 ));
             }
             let path = dir.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(io_error)?;
+            }
             std::fs::write(&path, &file.contents).map_err(io_error)?;
             Ok(path)
         })

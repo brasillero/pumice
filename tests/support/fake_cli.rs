@@ -67,6 +67,10 @@ struct Scenario {
     /// path to capture in the report (for example `model_instructions_file`).
     #[serde(default)]
     report_config_files: Vec<String>,
+    /// Arbitrary files to read and report, resolved relative to the working
+    /// directory (for example `../control/agents/pumice.json`).
+    #[serde(default)]
+    report_files: Vec<String>,
     /// Read stdin to EOF before doing anything else. When false, stdin is never
     /// read (a CLI that ignores its input).
     #[serde(default = "default_true")]
@@ -110,6 +114,8 @@ struct Report {
     arg_files: BTreeMap<String, Option<ArgFile>>,
     /// Contents of files named by `-c key="<path>"` arguments, keyed by key.
     config_files: BTreeMap<String, Option<ArgFile>>,
+    /// Contents of arbitrary files requested by `report_files`.
+    report_files: BTreeMap<String, Option<ArgFile>>,
     pid: u32,
     grandchild_pid: Option<u32>,
 }
@@ -295,6 +301,24 @@ fn build_report(
         })
         .collect();
 
+    let report_files = scenario
+        .report_files
+        .iter()
+        .map(|path| {
+            let resolved = cwd.join(path);
+            let file = if resolved.exists() {
+                let canonical = resolved.canonicalize().unwrap_or(resolved);
+                Some(ArgFile {
+                    path: canonical.to_string_lossy().into_owned(),
+                    contents: std::fs::read_to_string(&canonical).ok(),
+                })
+            } else {
+                None
+            };
+            (path.clone(), file)
+        })
+        .collect();
+
     Report {
         argv,
         stdin,
@@ -303,6 +327,7 @@ fn build_report(
         env,
         arg_files,
         config_files,
+        report_files,
         pid: process::id(),
         grandchild_pid,
     }

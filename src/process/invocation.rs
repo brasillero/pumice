@@ -137,7 +137,9 @@ mod tests {
 /// call, such as a system prompt.
 #[derive(Clone)]
 pub struct ControlFile {
-    /// Plain file name (no directory parts), e.g. `"system.txt"`.
+    /// File name or relative subpath, e.g. `"system.txt"` or
+    /// `"agents/pumice.json"`. Must be relative and contain only normal path
+    /// components (`..` is rejected).
     pub name: &'static str,
     pub contents: Vec<u8>,
 }
