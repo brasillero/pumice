@@ -235,6 +235,20 @@ async fn retrying_meta_events_classify_failures() {
 }
 
 #[tokio::test]
+async fn a_retry_the_run_recovers_from_is_not_a_failure() {
+    let stream = concat!(
+        r#"{"role":"meta","type":"system.version","version":"2.1.1"}"#,
+        "\n",
+        r#"{"role":"meta","type":"turn.step.retrying","failed_attempt":1,"next_attempt":2,"max_attempts":3,"delay_ms":1000,"error_name":"RateLimitedError","error_message":"slow down","status_code":429}"#,
+        "\n",
+        r#"{"role":"assistant","content":"Recovered."}"#,
+        "\n",
+    );
+    let fake = fake_kimi(stream, 0);
+    assert_eq!(format(&fake, "text").await.unwrap(), "Recovered.");
+}
+
+#[tokio::test]
 async fn tool_fixture_is_rejected_even_with_exit_zero() {
     let fake = fake_kimi(&fixture("kimi/tool.jsonl"), 0);
     assert_eq!(

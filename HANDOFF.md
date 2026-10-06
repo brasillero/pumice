@@ -16,7 +16,7 @@ Read [`AGENTS.md`](AGENTS.md) for the rules and [`docs/spec.md`](docs/spec.md) f
 
 The owner was away and authorized the orchestrator to set specifications and proceed, reporting afterwards. These are the decisions taken (full list in the architecture doc). The spec is unchanged.
 
-- **Scope:** OpenCode (S2.6), Antigravity (S2.5, dormant), the loopback-only generic adapter (S2.7), auto-detection and `pumice doctor` (S2.8), and a shared adapter contract suite. **Kimi (S2.4) stays on standby.**
+- **Scope:** OpenCode (S2.6), Antigravity (S2.5, dormant), the loopback-only generic adapter (S2.7), auto-detection and `pumice doctor` (S2.8), and a shared adapter contract suite. **Kimi (S2.4) stays on standby** (2026-10-04 decision; reactivated 2026-10-06 — see the update note above).
 - **New providers are off by default.** Only `enabled: true` turns one on; detection never does.
 - **OpenCode:** an explicit `provider/model` is required when enabled; there is no hosted default.
 - **Antigravity:** the protocol is built against the fake CLI only, and turning it on is refused until a safe per-launch tool policy exists. `agy` is never run.
@@ -35,7 +35,7 @@ All adapters pass the same criteria: the shared contract suite (no tools, empty 
 | Claude, real | `pumice doctor --login-check --provider claude`: ok, 2.6 s |
 | Codex, real | `pumice doctor --login-check --provider codex`: ok, 4.5 s |
 | Fallback chain, real | Claude binary missing, Codex formatted the Handy-shaped Portuguese dictation in 5.2 s (`provider=codex`) |
-| Detection, real | `pumice doctor`: claude 2.1.288, codex 0.160.0, opencode 1.18.34 found; antigravity missing; Kimi standby note; no quota spent |
+| Detection, real | `pumice doctor`: claude 2.1.288, codex 0.160.0, opencode 1.18.34 found; antigravity missing; Kimi standby note (superseded 2026-10-06: Kimi is registered, #52); no quota spent |
 | OpenCode | Contract suite only. **No real call:** its only configured upstream here is Kimi (standby) |
 | Antigravity | **Protocol coverage plus safe refusal**, not executable conformance: `enabled: true` is refused, `agy` was never run |
 | Generic | Implemented in #27, **not merged** pending the owner's AGENTS.md exception |
@@ -89,7 +89,7 @@ These change the spec's phasing. The spec itself is unchanged; product-doc updat
 - **Modular adapters:** a new CLI is a new module behind a common interface (S2.1), plus one registry entry.
 - **Two adapters in Phase 1:** Claude (S2.2) and **Codex (S2.3)**. Codex moved up from Phase 2. OpenCode, Antigravity, the generic adapter and auto-detection come later.
 - **Fallback chain (S4.2) is in Phase 1:** after the selected provider fails, try the next in `fallback_order`, then return raw text, all within the total timeout.
-- **Kimi is on standby:** its subscription terms allow interactive use only (S0.3). No Kimi adapter.
+- **Kimi is on standby:** its subscription terms allow interactive use only (S0.3). No Kimi adapter. (Superseded 2026-10-06: the adapter shipped in #52, off by default with the terms risk warning.)
 - **Default port: 7567** (S1.5). Handy points at `http://127.0.0.1:7567/v1`.
 - **Claude thinking off by default** (`MAX_THINKING_TOKENS=0`). Effort tuning and Handy's `reasoning_effort` field come later.
 - **Plan quota is intended:** Pumice runs on the user's subscription through the official CLIs.

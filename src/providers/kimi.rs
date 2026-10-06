@@ -286,7 +286,9 @@ fn agent_file(system_prompt: &str) -> String {
 /// with a clean exit. `turn.step.retrying` meta messages carry the
 /// failure's `status_code`, `error_name` and `error_message`: those
 /// structured fields (never message text) classify authentication, quota
-/// and rate-limit failures. Anything outside this vocabulary, or an
+/// and rate-limit failures of a run that ultimately failed; a retry the
+/// run recovered from (assistant text, clean exit) is not a failure.
+/// Anything outside this vocabulary, or an
 /// assistant `content` that is not a string, is invalid output.
 pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -340,13 +342,19 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
             ProviderErrorCode::UnexpectedToolActivity,
         ));
     }
-    if let Some(err) = failure {
-        return Err(err);
+    // The structured failure evidence only classifies a run that ultimately
+    // failed; a retry the run recovered from (assistant text, clean exit)
+    // is not a failure.
+    if !output.status.success() || texts.is_empty() {
+        if let Some(err) = failure {
+            return Err(err);
+        }
+        if !output.status.success() {
+            return Err(ProviderError::other(ProviderErrorCode::NonzeroExit));
+        }
+        return Err(ProviderError::other(ProviderErrorCode::InvalidOutput));
     }
-    if !output.status.success() {
-        return Err(ProviderError::other(ProviderErrorCode::NonzeroExit));
-    }
-    if !saw_version || texts.is_empty() {
+    if !saw_version {
         return Err(ProviderError::other(ProviderErrorCode::InvalidOutput));
     }
     Ok(texts.concat())

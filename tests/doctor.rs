@@ -1,5 +1,5 @@
 //! Tests for `pumice doctor` (S2.8 part 2): the default detection report
-//! (found/missing states, install hints, warnings, the Kimi standby note and
+//! (found/missing states, install hints, warnings and
 //! the exit-code contract) and the single quota-bearing `--login-check` path
 //! (one fixed call through the selected provider, never the fallback chain,
 //! text-free results). Every spawned `pumice` runs with a hermetic config:
@@ -72,7 +72,7 @@ fn full_fake_yaml() -> (Vec<FakeCli>, String) {
 }
 
 #[test]
-fn all_enabled_found_lists_every_provider_and_the_kimi_note() {
+fn all_enabled_found_lists_every_provider_and_the_summary() {
     let (_fakes, yaml) = full_fake_yaml();
     let (_dir, config_path) = write_config(&yaml);
 
