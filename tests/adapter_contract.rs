@@ -126,12 +126,17 @@ impl ContractAdapter for ClaudeContract {
         for flag in [
             "--strict-mcp-config",
             "--safe-mode",
-            "--restricted",
             "--disable-slash-commands",
             "--no-session-persistence",
         ] {
             assert!(argv.contains(&flag), "missing {flag}");
         }
+        // `--restricted` ignores the user's settings files, dropping a
+        // gateway configured in their `env` block (2026-10-06 regression).
+        assert!(
+            !argv.contains(&"--restricted"),
+            "--restricted must not return"
+        );
     }
 }
 

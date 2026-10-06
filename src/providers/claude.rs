@@ -118,10 +118,14 @@ impl CliAdapter for ClaudeAdapter {
             return Err(ProviderError::other(ProviderErrorCode::InvalidConfiguration));
         }
 
+        // No `--restricted`: it also ignores the user's settings files,
+        // including the `env` block where a gateway URL and token usually
+        // live, so Claude silently fell back to the subscription login.
+        // `--tools ""` already removes every tool and `--safe-mode` every
+        // customization (hooks, MCP servers, plugins, skills, CLAUDE.md).
         let flags = [
             "-p",
             "--safe-mode",
-            "--restricted",
             "--tools",
             "",
             "--strict-mcp-config",
@@ -215,7 +219,9 @@ fn classify_failure(result: Option<&str>) -> ProviderError {
         return ProviderError::NotLoggedIn;
     }
     let lower = text.to_lowercase();
-    let usage = lower.contains("usage limit");
+    // "You've hit your weekly limit · resets …" is the subscription's quota
+    // message (verified 2026-10-06).
+    let usage = lower.contains("usage limit") || lower.contains("weekly limit");
     let rate = lower.contains("rate limit") || lower.contains("rate_limit");
     match (usage, rate) {
         (true, false) => ProviderError::QuotaExceeded { retry_after: None },
@@ -243,6 +249,12 @@ mod tests {
                 r#"API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}"#
             )),
             ProviderError::RateLimited { retry_after: None }
+        );
+        assert_eq!(
+            classify_failure(Some(
+                "You've hit your weekly limit · resets Oct 8, 4am (America/Sao_Paulo)"
+            )),
+            ProviderError::QuotaExceeded { retry_after: None }
         );
         assert_eq!(
             classify_failure(Some("usage limit and rate limit")),
