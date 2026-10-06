@@ -5,6 +5,7 @@
 //! `register_providers!` below.
 
 pub mod cli;
+pub mod diagnostic;
 pub mod discovery;
 mod interface;
 

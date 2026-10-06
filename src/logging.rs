@@ -22,7 +22,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::config::DebugLogSettings;
-use crate::pipeline::{FormatOutcome, OutcomeKind};
+use crate::pipeline::{AttemptResult, FormatOutcome, OutcomeKind};
 use crate::time::{format_rfc3339, now_unix_secs};
 
 /// The JSONL sink for debug records. One mutex-guarded file handle, opened
@@ -193,6 +193,26 @@ pub struct OutcomeSummary {
     pub provider: Option<&'static str>,
     pub attempts: u8,
     pub elapsed_ms: u128,
+    /// Every provider started, with what the CLI said when it failed.
+    pub trail: Vec<AttemptSummary>,
+}
+
+/// One provider attempt in the debug log, including the CLI's stderr and
+/// stdout excerpt on failure (which may contain dictated text).
+#[derive(Serialize)]
+pub struct AttemptSummary {
+    pub provider: &'static str,
+    pub model: String,
+    pub result: String,
+    pub elapsed_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtype: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 impl OutcomeSummary {
@@ -210,6 +230,29 @@ impl OutcomeSummary {
             provider: outcome.provider,
             attempts: outcome.attempts,
             elapsed_ms: outcome.elapsed.as_millis(),
+            trail: outcome
+                .trail
+                .iter()
+                .map(|attempt| {
+                    let diagnostic = attempt.diagnostic.as_ref();
+                    AttemptSummary {
+                        provider: attempt.provider,
+                        model: attempt.model.clone(),
+                        result: match attempt.result {
+                            AttemptResult::Formatted => "formatted".to_owned(),
+                            AttemptResult::Failed(error) => format!("{error:?}"),
+                            AttemptResult::CleanupRejected => "cleanup_rejected".to_owned(),
+                        },
+                        elapsed_ms: attempt.elapsed.as_millis(),
+                        exit_code: diagnostic.and_then(|d| d.exit_code),
+                        api_status: diagnostic.and_then(|d| d.api_status),
+                        subtype: diagnostic.and_then(|d| d.subtype.clone()),
+                        detail: diagnostic
+                            .map(|d| d.detail.clone())
+                            .filter(|detail| !detail.is_empty()),
+                    }
+                })
+                .collect(),
         }
     }
 }

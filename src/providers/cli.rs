@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
+use super::diagnostic::{self, Diagnostic};
 use super::{FormatInput, Provider, ProviderError, ProviderFuture};
 use crate::process::{CliInvocation, ProcessRunner};
 
@@ -49,7 +50,11 @@ impl<A: CliAdapter> Provider for CliProvider<A> {
                 .checked_add(self.timeout)
                 .map_or(deadline, |own| own.min(deadline));
             let output = self.runner.run(invocation, deadline).await?;
-            parser(&output)
+            let result = parser(&output);
+            if result.is_err() {
+                diagnostic::record(Diagnostic::from_output(&output));
+            }
+            result
         })
     }
 }
