@@ -21,7 +21,7 @@ Pumice works end to end through Claude and Codex (with a fallback chain), and op
 
 Pumice supports standalone downloads and the npm package `@brasillero/pumice` (installable with npm, pnpm, Bun or npx; the installed command is `pumice`). Check [GitHub Releases](https://github.com/brasillero/pumice/releases) and the [npm registry](https://www.npmjs.com/package/@brasillero/pumice) for published versions. See the [installation guide](docs/install.md) for installation, startup and Handy setup; building from source is also supported below.
 
-The [0.1.0 standalone release](https://github.com/brasillero/pumice/releases/tag/v0.1.0) is available. npm publication is being finalized under the `@brasillero` scope after the registry rejected the unscoped name `pumice` as too similar to an existing package; `pnpm add -g @brasillero/pumice` will work after that upload.
+The [latest standalone release](https://github.com/brasillero/pumice/releases/latest) is available, and the npm package installs with `pnpm add -g @brasillero/pumice` (or `npm install -g @brasillero/pumice`). The package is scoped because the registry rejected the unscoped name `pumice` as too similar to an existing package.
 
 ### Run from source (preview)
 
