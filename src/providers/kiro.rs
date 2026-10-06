@@ -20,7 +20,9 @@
 //! * No `--trust-all-tools`.
 //! * A workspace-local custom agent (`.kiro/agents/pumice.json`) supplies the
 //!   system prompt in its `prompt` field, exposes no tools (`tools: []`),
-//!   excludes the `knowledge` tool, and disables MCP JSON / Powers inclusion.
+//!   excludes the `knowledge` tool, disables MCP JSON / Powers inclusion, and
+//!   clears per-agent `mcpServers` and `hooks` so the user's global MCP servers
+//!   and hooks stay out of the call.
 //!
 //! The system prompt travels in the agent file's `prompt` field; the user
 //! message (the wrapped dictation) travels on stdin. The user's own Kiro
@@ -215,6 +217,8 @@ fn agent_config(system_prompt: &str) -> String {
         "excludedTools": ["knowledge"],
         "includeMcpJson": false,
         "includePowers": false,
+        "mcpServers": {},
+        "hooks": {},
         "prompt": system_prompt,
     })
     .to_string()
@@ -475,6 +479,8 @@ mod tests {
         assert_eq!(config["excludedTools"], Value::from(vec!["knowledge"]));
         assert_eq!(config["includeMcpJson"], Value::from(false));
         assert_eq!(config["includePowers"], Value::from(false));
+        assert_eq!(config["mcpServers"], serde_json::json!({}));
+        assert_eq!(config["hooks"], serde_json::json!({}));
     }
 
     fn output_with(stdout: &str, exit_code: i32) -> ProcessOutput {

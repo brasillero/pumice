@@ -124,6 +124,8 @@ async fn workspace_supplies_the_agent_file() {
     assert_eq!(agent["excludedTools"], json!(vec!["knowledge"]));
     assert_eq!(agent["includeMcpJson"], json!(false));
     assert_eq!(agent["includePowers"], json!(false));
+    assert_eq!(agent["mcpServers"], json!({}));
+    assert_eq!(agent["hooks"], json!({}));
 }
 
 #[tokio::test]

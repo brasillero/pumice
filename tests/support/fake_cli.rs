@@ -248,7 +248,8 @@ fn build_report(
             &format!("cannot read working directory: {e}"),
         )
     });
-    let cwd = cwd.canonicalize().unwrap_or(cwd);
+    let cwd = normalize_canonical_path(&cwd.canonicalize().unwrap_or(cwd));
+    let cwd = PathBuf::from(cwd);
     let mut cwd_entries: Vec<String> = std::fs::read_dir(&cwd)
         .unwrap_or_else(|e| {
             fail(

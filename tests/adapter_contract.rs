@@ -1050,12 +1050,12 @@ impl ContractAdapter for KiroContract {
         assert!(path.is_absolute(), "{}", path.display());
         assert!(
             path_is_inside(cwd, &path),
-            "agent file should be inside cwd"
+            "agent file should be inside cwd: cwd={cwd:?}, path={path:?}"
         );
         let suffix = ".kiro/agents/pumice.json";
         assert!(
             path.to_string_lossy().replace('\\', "/").ends_with(suffix),
-            "agent file should end with {suffix}"
+            "agent file should end with {suffix}: path={path:?}"
         );
     }
 
