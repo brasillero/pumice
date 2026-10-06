@@ -6,12 +6,13 @@
 
 mod support;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use pumice::config::{self, Config};
-use pumice::process::ProcessRunner;
-use pumice::providers::cli::CliProvider;
+use pumice::process::{Argument, ProcessRunner};
+use pumice::providers::cli::{CliAdapter, CliProvider};
 use pumice::providers::kiro::{DESCRIPTOR, ID, KiroAdapter, RISK_WARNING};
 use pumice::providers::{FormatInput, Provider, ProviderError, ProviderErrorCode, UserPrompt};
 use serde_json::{Value, json};
@@ -23,14 +24,10 @@ const BEFORE: &str = "Format this dictation:\n<transcript>\n";
 const AFTER: &str = "\n</transcript>";
 const MODEL: &str = "claude-sonnet-4.6";
 
-/// Files the fake reports back.
-const REPORTED_FILES: [&str; 1] = [".kiro/agents/pumice.json"];
-
 fn fake_kiro(stdout: &str, exit_code: i32) -> FakeCli {
     FakeCli::new(json!({
         "stdout": stdout,
         "exit_code": exit_code,
-        "report_files": REPORTED_FILES,
     }))
 }
 
@@ -65,11 +62,10 @@ fn argv(report: &Value) -> Vec<String> {
         .collect()
 }
 
-fn workspace_file(report: &Value, relative: &str) -> String {
-    report["report_files"][relative]["contents"]
-        .as_str()
-        .unwrap_or_else(|| panic!("workspace file {relative} not reported"))
-        .to_owned()
+fn agent_name_from_argv(argv: &[String]) -> Option<&str> {
+    argv.windows(2)
+        .find(|pair| pair[0] == "--agent")
+        .map(|pair| pair[1].as_str())
 }
 
 #[tokio::test]
@@ -78,21 +74,28 @@ async fn passes_the_exact_invocation() {
     format(&fake, "hello world").await.expect("success");
     let report = fake.report();
 
+    let args = argv(&report);
+    let agent_name = agent_name_from_argv(&args).expect("--agent value");
+    assert!(
+        agent_name.starts_with("pumice-") && agent_name.len() > "pumice-".len(),
+        "agent name should be pumice-<hex>, got {agent_name:?}"
+    );
+
+    let expected = vec![
+        "chat",
+        "--v3",
+        "--no-interactive",
+        "--agent",
+        agent_name,
+        "--model",
+        MODEL,
+        "--output-format",
+        "stream-json",
+        "--trust-tools=",
+    ];
     assert_eq!(
-        argv(&report),
-        [
-            "chat",
-            "--v3",
-            "--no-interactive",
-            "--agent",
-            "pumice",
-            "--model",
-            MODEL,
-            "--output-format",
-            "stream-json",
-            "--trust-tools=",
-        ]
-        .map(String::from)
+        args,
+        expected.iter().map(|s| s.to_string()).collect::<Vec<_>>()
     );
     assert_eq!(
         report["stdin"],
@@ -110,15 +113,37 @@ async fn invocation_does_not_set_kiro_home() {
     assert_eq!(report["env"]["KIRO_HOME"], Value::Null);
 }
 
-#[tokio::test]
-async fn workspace_supplies_the_agent_file() {
-    let fake = fake_kiro(&fixture("kiro/success.jsonl"), 0);
-    format(&fake, "text").await.expect("success");
+fn kiro_input(text: &str) -> FormatInput<'_> {
+    FormatInput {
+        system_prompt: SYSTEM_PROMPT,
+        user_prompt: UserPrompt {
+            before_text: BEFORE,
+            after_text: AFTER,
+        },
+        text,
+    }
+}
 
-    let agent: Value =
-        serde_json::from_str(&workspace_file(&fake.report(), ".kiro/agents/pumice.json"))
-            .expect("agent file is JSON");
-    assert_eq!(agent["name"], json!("pumice"));
+#[test]
+fn workspace_supplies_the_agent_file() {
+    let adapter = KiroAdapter::new(PathBuf::from("kiro-cli"), MODEL.to_owned());
+    let invocation = adapter
+        .invocation(kiro_input("text"))
+        .expect("invocation builds");
+
+    assert_eq!(invocation.workspace_files.len(), 1);
+    let file = &invocation.workspace_files[0];
+    let relative = file.name.replace('\\', "/");
+    let prefix = ".kiro/agents/";
+    let suffix = ".json";
+    assert!(
+        relative.starts_with(prefix) && relative.ends_with(suffix),
+        "agent file should be {prefix}<name>{suffix}, got {relative:?}"
+    );
+    let agent_name = &relative[prefix.len()..relative.len() - suffix.len()];
+
+    let agent: Value = serde_json::from_slice(&file.contents).expect("agent file is JSON");
+    assert_eq!(agent["name"], json!(agent_name));
     assert_eq!(agent["prompt"], json!(SYSTEM_PROMPT));
     assert_eq!(agent["tools"], json!([]));
     assert_eq!(agent["excludedTools"], json!(vec!["knowledge"]));
@@ -126,6 +151,51 @@ async fn workspace_supplies_the_agent_file() {
     assert_eq!(agent["includePowers"], json!(false));
     assert_eq!(agent["mcpServers"], json!({}));
     assert_eq!(agent["hooks"], json!({}));
+
+    let args: Vec<String> = invocation
+        .args
+        .iter()
+        .map(|a| match a {
+            Argument::Literal(s) => s.to_string_lossy().into_owned(),
+            _ => panic!("unexpected argument variant"),
+        })
+        .collect();
+    assert_eq!(agent_name_from_argv(&args), Some(agent_name));
+}
+
+#[test]
+fn agent_name_is_unique_per_invocation() {
+    let adapter = KiroAdapter::new(PathBuf::from("kiro-cli"), MODEL.to_owned());
+    let first = adapter
+        .invocation(kiro_input("a"))
+        .expect("first invocation");
+    let second = adapter
+        .invocation(kiro_input("b"))
+        .expect("second invocation");
+
+    let first_name = first.workspace_files[0].name.replace('\\', "/");
+    let second_name = second.workspace_files[0].name.replace('\\', "/");
+    assert_ne!(first_name, second_name, "agent file names must differ");
+
+    let first_argv: Vec<String> = first
+        .args
+        .iter()
+        .map(|a| match a {
+            Argument::Literal(s) => s.to_string_lossy().into_owned(),
+            _ => panic!("unexpected argument variant"),
+        })
+        .collect();
+    let second_argv: Vec<String> = second
+        .args
+        .iter()
+        .map(|a| match a {
+            Argument::Literal(s) => s.to_string_lossy().into_owned(),
+            _ => panic!("unexpected argument variant"),
+        })
+        .collect();
+    let first_arg = agent_name_from_argv(&first_argv);
+    let second_arg = agent_name_from_argv(&second_argv);
+    assert_ne!(first_arg, second_arg, "agent argv names must differ");
 }
 
 #[tokio::test]
@@ -179,7 +249,6 @@ async fn errors_never_contain_captured_output() {
         "stdout": format!("{event}\n"),
         "stderr": format!("stderr {MARKER}"),
         "exit_code": 1,
-        "report_files": REPORTED_FILES,
     }));
     let err = format(&fake, MARKER).await.unwrap_err();
     assert_eq!(err, ProviderError::NotLoggedIn);

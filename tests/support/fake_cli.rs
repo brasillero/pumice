@@ -68,7 +68,8 @@ struct Scenario {
     #[serde(default)]
     report_config_files: Vec<String>,
     /// Arbitrary files to read and report, resolved relative to the working
-    /// directory (for example `../control/agents/pumice.json`).
+    /// directory (for example `../control/agents/pumice.json`). A directory
+    /// reports every regular file inside it, keyed by its relative path.
     #[serde(default)]
     report_files: Vec<String>,
     /// Read stdin to EOF before doing anything else. When false, stdin is never
@@ -303,11 +304,12 @@ fn build_report(
         })
         .collect();
 
-    let report_files = scenario
-        .report_files
-        .iter()
-        .map(|path| {
-            let resolved = cwd.join(path);
+    let mut report_files: BTreeMap<String, Option<ArgFile>> = BTreeMap::new();
+    for path in &scenario.report_files {
+        let resolved = cwd.join(path);
+        if resolved.is_dir() {
+            collect_report_files(&resolved, path, &cwd, &mut report_files);
+        } else {
             let file = if resolved.exists() {
                 let canonical = resolved.canonicalize().unwrap_or(resolved);
                 Some(ArgFile {
@@ -317,9 +319,9 @@ fn build_report(
             } else {
                 None
             };
-            (path.clone(), file)
-        })
-        .collect();
+            report_files.insert(path.clone(), file);
+        }
+    }
 
     Report {
         argv,
@@ -333,6 +335,44 @@ fn build_report(
         pid: process::id(),
         grandchild_pid,
     }
+}
+
+/// Recursively collects regular files under `dir` into `out`, keyed by their
+/// path relative to `cwd`.
+fn collect_report_files(
+    dir: &Path,
+    prefix: &str,
+    cwd: &Path,
+    out: &mut BTreeMap<String, Option<ArgFile>>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let relative = strip_prefix_or_key(&path, cwd, prefix);
+        if path.is_dir() {
+            collect_report_files(&path, prefix, cwd, out);
+        } else if path.is_file() {
+            let canonical = path.canonicalize().unwrap_or(path.clone());
+            out.insert(
+                relative,
+                Some(ArgFile {
+                    path: normalize_canonical_path(&canonical),
+                    contents: std::fs::read_to_string(&canonical).ok(),
+                }),
+            );
+        }
+    }
+}
+
+/// Returns `path` relative to `cwd`, falling back to the original `prefix` if
+/// stripping fails.
+fn strip_prefix_or_key(path: &Path, cwd: &Path, prefix: &str) -> String {
+    path.strip_prefix(cwd)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| prefix.to_owned())
 }
 
 /// Returns the decoded path from a `-c` argument of the form

@@ -7,7 +7,7 @@
 //! Documented invocation (Kiro CLI headless mode, V3 engine):
 //!
 //! ```text
-//! kiro-cli chat --v3 --no-interactive --agent pumice --model <model> \
+//! kiro-cli chat --v3 --no-interactive --agent pumice-<random hex> --model <model> \
 //!     --output-format stream-json --trust-tools=
 //! ```
 //!
@@ -18,11 +18,13 @@
 //!
 //! * `--trust-tools=` (empty) trusts no individual tools.
 //! * No `--trust-all-tools`.
-//! * A workspace-local custom agent (`.kiro/agents/pumice.json`) supplies the
-//!   system prompt in its `prompt` field, exposes no tools (`tools: []`),
-//!   excludes the `knowledge` tool, disables MCP JSON / Powers inclusion, and
-//!   clears per-agent `mcpServers` and `hooks` so the user's global MCP servers
-//!   and hooks stay out of the call.
+//! * A workspace-local custom agent (`.kiro/agents/pumice-<random hex>.json`)
+//!   supplies the system prompt in its `prompt` field, exposes no tools
+//!   (`tools: []`), excludes the `knowledge` tool, disables MCP JSON / Powers
+//!   inclusion, and clears per-agent `mcpServers` and `hooks` so the user's
+//!   global MCP servers and hooks stay out of the call. The agent name is
+//!   unique per call so a user agent named `pumice` cannot collide with or
+//!   override the workspace-local file.
 //!
 //! The system prompt travels in the agent file's `prompt` field; the user
 //! message (the wrapped dictation) travels on stdin. The user's own Kiro
@@ -36,10 +38,13 @@
 //! and waits for a final `state_update` with `state: idle` and
 //! `stopReason: end_turn` before accepting the result.
 
+use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, HashMap};
+use std::hash::{BuildHasher, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -54,7 +59,33 @@ use crate::process::{Argument, CliInvocation, ControlFile, ProcessOutput, Proces
 pub const ID: &str = "kiro";
 pub const DEFAULT_BINARY: &str = "kiro-cli";
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-pub const AGENT_NAME: &str = "pumice";
+
+/// Counter mixed into every per-call agent name so two invocations made in
+/// the same nanosecond cannot collide.
+static AGENT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Returns a fresh agent name for each call: `pumice-<64-bit hex>`.
+///
+/// The name is derived from OS-random hash keys (`RandomState`), the process
+/// id, a per-call atomic counter and the current time. It is unique enough
+/// that no user-created global agent can plausibly share it, preventing the
+/// workspace-local agent file from being shadowed or merged with a global
+/// `~/.kiro/agents/pumice.json`.
+fn unique_agent_name() -> String {
+    let mut entropy = Vec::with_capacity(32);
+    entropy.extend_from_slice(&std::process::id().to_le_bytes());
+    entropy.extend_from_slice(&AGENT_COUNTER.fetch_add(1, Ordering::Relaxed).to_le_bytes());
+    entropy.extend_from_slice(
+        &SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .to_le_bytes(),
+    );
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write(&entropy);
+    format!("pumice-{:016x}", hasher.finish())
+}
 
 /// Fixed notice shown by `check-config` and startup while the adapter is
 /// enabled. It explains why the adapter ships disabled.
@@ -169,17 +200,15 @@ impl CliAdapter for KiroAdapter {
             return Err(ProviderError::other(ProviderErrorCode::InvalidConfiguration));
         }
 
-        let mut args: Vec<Argument> = [
-            "chat",
-            "--v3",
-            "--no-interactive",
-            "--agent",
-            AGENT_NAME,
-            "--model",
-        ]
-        .into_iter()
-        .map(Argument::literal)
-        .collect();
+        let agent_name = unique_agent_name();
+        let agent_path = format!(".kiro/agents/{agent_name}.json");
+
+        let mut args: Vec<Argument> = ["chat", "--v3", "--no-interactive", "--agent"]
+            .into_iter()
+            .map(Argument::literal)
+            .collect();
+        args.push(Argument::literal(agent_name.as_str()));
+        args.push(Argument::literal("--model"));
         args.push(Argument::literal(&self.model));
         args.push(Argument::literal("--output-format"));
         args.push(Argument::literal("stream-json"));
@@ -199,8 +228,8 @@ impl CliAdapter for KiroAdapter {
             remove_env: Vec::new(),
             control_files: Vec::new(),
             workspace_files: vec![ControlFile {
-                name: ".kiro/agents/pumice.json",
-                contents: agent_config(input.system_prompt).into_bytes(),
+                name: agent_path,
+                contents: agent_config(input.system_prompt, &agent_name).into_bytes(),
             }],
             parser: parse_output,
         })
@@ -209,9 +238,9 @@ impl CliAdapter for KiroAdapter {
 
 /// Workspace-local custom agent configuration that carries the system prompt
 /// and denies tools.
-fn agent_config(system_prompt: &str) -> String {
+fn agent_config(system_prompt: &str, agent_name: &str) -> String {
     serde_json::json!({
-        "name": AGENT_NAME,
+        "name": agent_name,
         "description": "Formats dictation without taking actions.",
         "tools": [],
         "excludedTools": ["knowledge"],
@@ -472,8 +501,8 @@ mod tests {
 
     #[test]
     fn agent_config_carries_prompt_and_empty_tools() {
-        let config: Value = serde_json::from_str(&agent_config("the prompt")).unwrap();
-        assert_eq!(config["name"], Value::from(AGENT_NAME));
+        let config: Value = serde_json::from_str(&agent_config("the prompt", "pumice-abc123")).unwrap();
+        assert_eq!(config["name"], Value::from("pumice-abc123"));
         assert_eq!(config["prompt"], Value::from("the prompt"));
         assert_eq!(config["tools"], Value::Array(Vec::new()));
         assert_eq!(config["excludedTools"], Value::from(vec!["knowledge"]));

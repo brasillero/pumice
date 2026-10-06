@@ -140,7 +140,7 @@ pub struct ControlFile {
     /// File name or relative subpath, e.g. `"system.txt"` or
     /// `"agents/pumice.json"`. Must be relative and contain only normal path
     /// components (`..` is rejected).
-    pub name: &'static str,
+    pub name: String,
     pub contents: Vec<u8>,
 }
 

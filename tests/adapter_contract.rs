@@ -938,6 +938,18 @@ struct KiroContract;
 
 const KIRO_MODEL: &str = "claude-sonnet-4.6";
 
+/// Finds the reported Kiro agent file key under `.kiro/agents/`.
+fn kiro_agent_file_key(report: &Value) -> String {
+    let files = report["report_files"]
+        .as_object()
+        .expect("report_files is a map");
+    files
+        .keys()
+        .find(|k| k.replace('\\', "/").starts_with(".kiro/agents/"))
+        .expect("agent file reported")
+        .clone()
+}
+
 impl ContractAdapter for KiroContract {
     const ID: &'static str = "kiro";
 
@@ -1030,15 +1042,17 @@ impl ContractAdapter for KiroContract {
     }
 
     fn capture_system_prompt(scenario: &mut Value) {
-        scenario["report_files"] = json!([".kiro/agents/pumice.json"]);
+        scenario["report_files"] = json!([".kiro/agents"]);
     }
 
     fn captured_system_prompt(report: &Value) -> (PathBuf, String) {
-        let file = &report["report_files"][".kiro/agents/pumice.json"];
-        let contents = file["contents"].as_str().expect("agent file reported");
+        let key = kiro_agent_file_key(report);
+        let file = &report["report_files"][&key];
+        let contents = file["contents"].as_str().expect("agent file contents");
         let agent: Value = serde_json::from_str(contents).expect("agent file is JSON");
+        let path = file["path"].as_str().unwrap();
         (
-            PathBuf::from(file["path"].as_str().unwrap()),
+            PathBuf::from(path),
             agent["prompt"].as_str().unwrap().to_owned(),
         )
     }
@@ -1056,10 +1070,14 @@ impl ContractAdapter for KiroContract {
             path_is_inside(cwd, &path),
             "agent file should be inside cwd: cwd={cwd:?}, path={path:?}"
         );
-        let suffix = ".kiro/agents/pumice.json";
+        let normalized = path.to_string_lossy().replace('\\', "/");
         assert!(
-            path.to_string_lossy().replace('\\', "/").ends_with(suffix),
-            "agent file should end with {suffix}: path={path:?}"
+            normalized.contains("/.kiro/agents/"),
+            "agent file should be under .kiro/agents/: path={path:?}"
+        );
+        assert!(
+            normalized.ends_with(".json"),
+            "agent file should end with .json: path={path:?}"
         );
     }
 
@@ -1071,7 +1089,15 @@ impl ContractAdapter for KiroContract {
             argv.contains(&"--no-interactive"),
             "missing --no-interactive"
         );
-        assert!(has_pair(&argv, "--agent", "pumice"));
+        let agent = argv
+            .windows(2)
+            .find(|pair| pair[0] == "--agent")
+            .map(|pair| pair[1])
+            .expect("missing --agent");
+        assert!(
+            agent.starts_with("pumice-") && agent.len() > "pumice-".len(),
+            "agent should be pumice-<hex>, got {agent:?}"
+        );
         assert!(has_pair(&argv, "--model", KIRO_MODEL));
         assert!(has_pair(&argv, "--output-format", "stream-json"));
         assert!(

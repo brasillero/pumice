@@ -92,7 +92,7 @@ async fn workspace_is_empty_and_control_file_is_outside_it() {
         Argument::ControlPath { file: 0 },
     ];
     inv.control_files = vec![ControlFile {
-        name: "system.txt",
+        name: "system.txt".to_owned(),
         contents: "You format dictated text. ✓".as_bytes().to_vec(),
     }];
 
@@ -125,7 +125,7 @@ async fn workspace_files_are_written_inside_workspace() {
     let fake = FakeCli::new(json!({"report_files": [".kiro/agents/pumice.json"]}));
     let mut inv = invocation(fake.path());
     inv.workspace_files = vec![ControlFile {
-        name: ".kiro/agents/pumice.json",
+        name: ".kiro/agents/pumice.json".to_owned(),
         contents: br#"{"name":"pumice","tools":[]}"#.to_vec(),
     }];
 
@@ -306,7 +306,7 @@ async fn temp_root_is_removed_afterwards() {
     let fake = FakeCli::new(json!({"stdout": "ok"}));
     let mut inv = invocation(fake.path());
     inv.control_files = vec![ControlFile {
-        name: "system.txt",
+        name: "system.txt".to_owned(),
         contents: b"prompt".to_vec(),
     }];
     run(inv).await.expect("run succeeds");
@@ -319,7 +319,7 @@ async fn control_file_names_must_be_plain() {
     let fake = FakeCli::new(json!({}));
     let mut inv = invocation(fake.path());
     inv.control_files = vec![ControlFile {
-        name: "../escape.txt",
+        name: "../escape.txt".to_owned(),
         contents: Vec::new(),
     }];
     assert_eq!(
