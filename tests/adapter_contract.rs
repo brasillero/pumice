@@ -32,10 +32,14 @@ use support::fixture;
 /// Windows.
 fn path_is_inside(parent: &Path, child: &Path) -> bool {
     let normalize = |p: &Path| {
-        p.to_string_lossy()
-            .replace('\\', "/")
-            .trim_end_matches('/')
-            .to_lowercase()
+        let s = p.to_string_lossy();
+        // On Windows `std::fs::canonicalize` returns verbatim paths
+        // (`\\?\C:\...`) that do not prefix-match ordinary absolute paths.
+        let s = s
+            .strip_prefix(r"\\?\")
+            .map(String::from)
+            .unwrap_or_else(|| s.into_owned());
+        s.replace('\\', "/").trim_end_matches('/').to_lowercase()
     };
     let parent = normalize(parent);
     let child = normalize(child);
