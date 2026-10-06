@@ -293,8 +293,11 @@ async fn run_service(loaded: LoadedConfig) -> ExitCode {
         }
     };
 
+    // The route goes to stderr with the other status lines, before the
+    // listening line: a client may read that first stdout line and close the
+    // pipe, and a later `println!` would then panic and stop the service.
+    eprintln!("{}", route_line(&pipeline, config.total_timeout));
     println!("pumice listening on http://127.0.0.1:{}/v1", config.port);
-    println!("{}", route_line(&pipeline, config.total_timeout));
     match api::serve(
         listener,
         pipeline,
