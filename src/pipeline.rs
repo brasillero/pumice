@@ -37,10 +37,12 @@ const MIN_STARTUP: Duration = Duration::from_millis(100);
 /// before the total timeout and Handy still receives the raw text.
 const HARD_STOP_SLACK: Duration = Duration::from_millis(150);
 
-/// A provider ready to run and its configured timeout.
+/// A provider ready to run, its configured timeout and model (the model is
+/// only shown in logs).
 struct ProviderEntry {
     provider: Arc<dyn Provider>,
     timeout: Duration,
+    model: String,
 }
 
 /// Selects a provider, runs it inside the request's budget and cleans the
@@ -106,13 +108,16 @@ impl Pipeline {
         for provider in providers {
             // A built provider with no configured entry (not possible through
             // `build_from_config`) would run under the total budget alone.
-            let timeout = config
-                .providers
-                .get(provider.id())
-                .map_or(config.total_timeout, |settings| settings.timeout);
+            let settings = config.providers.get(provider.id());
+            let timeout = settings.map_or(config.total_timeout, |settings| settings.timeout);
+            let model = settings.map_or_else(String::new, |settings| settings.model.clone());
             entries.insert(
                 provider.id().to_owned(),
-                ProviderEntry { provider, timeout },
+                ProviderEntry {
+                    provider,
+                    timeout,
+                    model,
+                },
             );
         }
         Pipeline {
@@ -201,44 +206,50 @@ impl Pipeline {
                 request.raw_text.clone(),
                 OutcomeKind::Passthrough,
                 None,
-                0,
+                Vec::new(),
                 started,
             );
         }
         if request.is_empty() {
-            return FormatOutcome::finished(String::new(), OutcomeKind::Empty, None, 0, started);
+            return FormatOutcome::finished(
+                String::new(),
+                OutcomeKind::Empty,
+                None,
+                Vec::new(),
+                started,
+            );
         }
 
         // An unknown or disabled selected provider is a configuration
         // mistake, not a transient failure: return raw text at once so the
         // user notices, never silently formatting through another provider.
         let Some(selected) = self.select(request.model.as_deref()) else {
-            return self.raw(request, RawReason::UnknownProvider, started, 0);
+            return self.raw(request, RawReason::UnknownProvider, started, Vec::new());
         };
         if !self.providers.contains_key(selected) {
-            return self.raw(request, RawReason::ProviderDisabled, started, 0);
+            return self.raw(request, RawReason::ProviderDisabled, started, Vec::new());
         }
 
         // Held for the whole run; dropping it (including on cancellation)
         // releases the permit.
         let Ok(_permit) = self.busy.try_acquire() else {
-            return self.raw(request, RawReason::Busy, started, 0);
+            return self.raw(request, RawReason::Busy, started, Vec::new());
         };
 
         let Some(total_deadline) = started.checked_add(self.total_timeout) else {
-            return self.raw(request, RawReason::BudgetExhausted, started, 0);
+            return self.raw(request, RawReason::BudgetExhausted, started, Vec::new());
         };
         let total_deadline = total_deadline
             .checked_sub(RESPONSE_RESERVE)
             .unwrap_or(started);
         if total_deadline.duration_since(Instant::now()) < MIN_STARTUP {
-            return self.raw(request, RawReason::BudgetExhausted, started, 0);
+            return self.raw(request, RawReason::BudgetExhausted, started, Vec::new());
         }
 
         let prompts = compose_with_settings(request, &self.prompt_settings);
         let candidates = self.candidates(selected);
 
-        let mut attempts: u8 = 0;
+        let mut trail: Vec<Attempt> = Vec::with_capacity(candidates.len());
         let mut last_failure = None;
         for candidate in candidates.iter().copied() {
             // The whole chain shares one budget: never start a CLI when
@@ -246,21 +257,36 @@ impl Pipeline {
             if total_deadline.duration_since(Instant::now()) < MIN_STARTUP {
                 break;
             }
-            attempts = attempts.saturating_add(1);
-            match run_within_budget(candidate, prompts.format_input(), total_deadline).await {
-                Ok(output) => match cleanup(&output, &request.raw_text) {
-                    Ok(text) => {
-                        return FormatOutcome::finished(
-                            text,
-                            OutcomeKind::Formatted,
-                            Some(candidate.provider.id()),
-                            attempts,
-                            started,
-                        );
-                    }
-                    Err(_) => last_failure = Some(ChainFailure::Cleanup),
+            let attempt_started = Instant::now();
+            let result =
+                match run_within_budget(candidate, prompts.format_input(), total_deadline).await {
+                    Ok(output) => match cleanup(&output, &request.raw_text) {
+                        Ok(text) => Ok(text),
+                        Err(_) => Err(ChainFailure::Cleanup),
+                    },
+                    Err(kind) => Err(ChainFailure::Provider(kind)),
+                };
+            trail.push(Attempt {
+                provider: candidate.provider.id(),
+                model: candidate.model.clone(),
+                result: match &result {
+                    Ok(_) => AttemptResult::Formatted,
+                    Err(ChainFailure::Provider(kind)) => AttemptResult::Failed(*kind),
+                    Err(ChainFailure::Cleanup) => AttemptResult::CleanupRejected,
                 },
-                Err(kind) => last_failure = Some(ChainFailure::Provider(kind)),
+                elapsed: attempt_started.elapsed(),
+            });
+            match result {
+                Ok(text) => {
+                    return FormatOutcome::finished(
+                        text,
+                        OutcomeKind::Formatted,
+                        Some(candidate.provider.id()),
+                        trail,
+                        started,
+                    );
+                }
+                Err(failure) => last_failure = Some(failure),
             }
         }
 
@@ -268,10 +294,19 @@ impl Pipeline {
             Some(ChainFailure::Provider(kind)) => RawReason::ProviderFailed(kind),
             Some(ChainFailure::Cleanup) => RawReason::CleanupFailed,
             // The budget died before the first candidate started; the
-            // pre-loop check normally returns earlier, so `attempts` is 0.
+            // pre-loop check normally returns earlier, so the trail is empty.
             None => RawReason::BudgetExhausted,
         };
-        self.raw(request, reason, started, attempts)
+        self.raw(request, reason, started, trail)
+    }
+
+    /// The chain a request without a model runs: `(provider, model)` for the
+    /// default provider, then its fallbacks. Shown once at startup.
+    pub fn default_route(&self) -> Vec<(&'static str, &str)> {
+        self.candidates(&self.default_provider)
+            .into_iter()
+            .map(|entry| (entry.provider.id(), entry.model.as_str()))
+            .collect()
     }
 
     /// Builds the fallback chain for `selected`: the selected provider
@@ -305,13 +340,13 @@ impl Pipeline {
         request: &ExtractedRequest,
         reason: RawReason,
         started: Instant,
-        attempts: u8,
+        trail: Vec<Attempt>,
     ) -> FormatOutcome {
         FormatOutcome::finished(
             request.raw_text.clone(),
             OutcomeKind::Raw(reason),
             None,
-            attempts,
+            trail,
             started,
         )
     }
@@ -354,8 +389,30 @@ pub struct FormatOutcome {
     /// after fallbacks, 0 when no CLI was started (selection errors, busy,
     /// an exhausted budget).
     pub attempts: u8,
+    /// Every provider started for this request, in order; empty when no
+    /// CLI was started.
+    pub trail: Vec<Attempt>,
     /// Time since the HTTP request arrived.
     pub elapsed: Duration,
+}
+
+/// One provider run inside a request; safe to log (no text).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attempt {
+    pub provider: &'static str,
+    /// The configured model, as written in the configuration.
+    pub model: String,
+    pub result: AttemptResult,
+    pub elapsed: Duration,
+}
+
+/// How one [`Attempt`] ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttemptResult {
+    Formatted,
+    Failed(ProviderErrorKind),
+    /// The provider answered, but output cleanup refused the text.
+    CleanupRejected,
 }
 
 // Manual impl: `text` may be the raw dictation, which must never reach logs
@@ -367,6 +424,7 @@ impl fmt::Debug for FormatOutcome {
             .field("kind", &self.kind)
             .field("provider", &self.provider)
             .field("attempts", &self.attempts)
+            .field("trail", &self.trail)
             .field("elapsed", &self.elapsed)
             .finish()
     }
@@ -377,14 +435,15 @@ impl FormatOutcome {
         text: String,
         kind: OutcomeKind,
         provider: Option<&'static str>,
-        attempts: u8,
+        trail: Vec<Attempt>,
         started: Instant,
     ) -> FormatOutcome {
         FormatOutcome {
             text,
             kind,
             provider,
-            attempts,
+            attempts: u8::try_from(trail.len()).unwrap_or(u8::MAX),
+            trail,
             elapsed: started.elapsed(),
         }
     }

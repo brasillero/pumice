@@ -20,7 +20,7 @@ use tokio::time::Instant;
 use crate::logging::DebugRecord;
 use crate::pipeline::{FormatOutcome, OutcomeKind};
 use crate::request::{ChatCompletionRequest, extract_request};
-use crate::time::{format_rfc3339, now_unix_secs};
+use crate::time::now_unix_secs;
 
 use super::ApiState;
 use super::types::*;
@@ -97,7 +97,8 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
 
     // The response id is minted before any processing so the opt-in debug log
     // can name the exact completion it records.
-    let id = format!("chatcmpl-pumice-{}", state.next_id());
+    let number = state.next_id();
+    let id = format!("chatcmpl-pumice-{number}");
 
     // Built-in inspect diagnostic: echo the original request body verbatim,
     // bypassing transcript extraction, the busy guard, the fallback chain and
@@ -112,6 +113,7 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
             kind: OutcomeKind::Inspect,
             provider: None,
             attempts: 0,
+            trail: Vec::new(),
             elapsed: started.elapsed(),
         };
         if let Some(headers) = &debug_headers {
@@ -130,7 +132,7 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
                 .debug_log
                 .record(&DebugRecord::new(&id, body, headers, "", &outcome));
         }
-        state.log.write_line(&completion_line(&outcome));
+        state.log_request(number, selection.model.as_deref(), &outcome);
         let created = now_unix_secs();
         return if stream {
             sse_response(&id, created, "inspect", echo_text)
@@ -186,7 +188,7 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
             &outcome,
         ));
     }
-    state.log.write_line(&completion_line(&outcome));
+    state.log_request(number, extracted.model.as_deref(), &outcome);
 
     let created = now_unix_secs();
     // The producing provider when formatting succeeded; otherwise the
@@ -296,25 +298,6 @@ async fn read_body_bounded(body: Body) -> Result<Vec<u8>, ReadBodyError> {
         Ok(result) => result,
         Err(_) => Err(ReadBodyError::Timeout),
     }
-}
-
-/// Builds the single metadata line for one completion request: time, outcome
-/// kind, raw reason, provider, elapsed and text length. Never the text.
-fn completion_line(outcome: &FormatOutcome) -> String {
-    let (kind, reason) = match &outcome.kind {
-        OutcomeKind::Formatted => ("formatted", "-".to_owned()),
-        OutcomeKind::Passthrough => ("passthrough", "-".to_owned()),
-        OutcomeKind::Inspect => ("inspect", "-".to_owned()),
-        OutcomeKind::Empty => ("empty", "-".to_owned()),
-        OutcomeKind::Raw(reason) => ("raw", format!("{reason:?}")),
-    };
-    format!(
-        "{} route=chat.completions kind={kind} reason={reason} provider={} elapsed_ms={} text_len={}",
-        format_rfc3339(now_unix_secs()),
-        outcome.provider.unwrap_or("-"),
-        outcome.elapsed.as_millis(),
-        outcome.text.len(),
-    )
 }
 
 fn openai_error(status: StatusCode, message: &str) -> Response {

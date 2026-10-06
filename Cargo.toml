@@ -50,6 +50,7 @@ tokio = { version = "1.53.2", features = [
     "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync",
     "time",
 ] }
+jiff = "0.2.38"
 
 [target.'cfg(unix)'.dependencies]
 # `waitid(WNOWAIT)`: observe the CLI's exit without reaping it (src/process/tree.rs).
