@@ -191,9 +191,12 @@ impl CliAdapter for KiroAdapter {
         // CLI in `<temp-root>/workspace`. Point Kiro's profile directory at the
         // control directory so the custom agent and settings are picked up
         // without touching the user's real `~/.kiro`.
+        // Use a forward-slash literal so the value is identical on Unix and
+        // Windows; Kiro's profile path is interpreted by the CLI, not by Rust's
+        // native path encoding.
         env.insert(
             OsString::from("KIRO_HOME"),
-            PathBuf::from("..").join("control").as_os_str().to_owned(),
+            OsString::from("../control"),
         );
 
         Ok(CliInvocation {
