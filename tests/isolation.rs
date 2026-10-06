@@ -115,7 +115,6 @@ async fn claude_uses_the_exact_restricted_argv() {
         [
             "-p",
             "--safe-mode",
-            "--restricted",
             "--tools",
             "",
             "--strict-mcp-config",

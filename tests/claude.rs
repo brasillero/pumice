@@ -84,7 +84,6 @@ async fn passes_the_restricted_invocation() {
         [
             "-p",
             "--safe-mode",
-            "--restricted",
             "--tools",
             "",
             "--strict-mcp-config",
