@@ -193,7 +193,7 @@ fn doctor_report(explicit: Option<&Path>) -> ExitCode {
 }
 
 /// The quota-bearing path: one real formatting call through the selected
-/// provider's normal adapter, never the fallback chain.
+/// provider's normal adapter.
 fn doctor_login_check(explicit: Option<&Path>, id: &str) -> ExitCode {
     let loaded = match load_config(explicit) {
         Ok(loaded) => loaded,

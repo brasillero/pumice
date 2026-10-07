@@ -225,22 +225,14 @@ pub fn extract_request(request: ChatCompletionRequest) -> Result<ExtractedReques
                 return Err(RequestError::MalformedEnvelope);
             }
             let open_end = open + OPEN_TAG.len();
-            // Strip exactly one framing '\n' after the opening tag and one
-            // before the closing tag; all other whitespace is transcript.
-            // The stripped newlines stay in before/after so the message
-            // still reconstructs byte for byte.
-            let mut text_start = if user_text[open_end..].starts_with('\n') {
-                open_end + 1
-            } else {
-                open_end
-            };
-            let text_end = if user_text[..close].ends_with('\n') {
-                close - 1
-            } else {
-                close
-            };
-            // When the only content between the tags is a single '\n', both
-            // framing strips point at the same character. Clamp so the slice
+            // Strip exactly one framing line break ('\n' or '\r\n') after the
+            // opening tag and one before the closing tag; all other whitespace
+            // is transcript. The stripped line breaks stay in before/after so
+            // the message still reconstructs byte for byte.
+            let mut text_start = open_end + leading_line_break(&user_text[open_end..]);
+            let text_end = close - trailing_line_break(&user_text[..close]);
+            // When the only content between the tags is one line break, both
+            // framing strips can claim the same characters. Clamp so the slice
             // is empty instead of crossing, then the usual empty-transcript
             // path returns the raw text unchanged.
             if text_start > text_end {
@@ -256,6 +248,30 @@ pub fn extract_request(request: ChatCompletionRequest) -> Result<ExtractedReques
                 raw_text: transcript,
             })
         }
+    }
+}
+
+/// Length of the line break `text` starts with: 2 for `\r\n`, 1 for `\n`,
+/// else 0.
+fn leading_line_break(text: &str) -> usize {
+    if text.starts_with("\r\n") {
+        2
+    } else if text.starts_with('\n') {
+        1
+    } else {
+        0
+    }
+}
+
+/// Length of the line break `text` ends with: 2 for `\r\n`, 1 for `\n`,
+/// else 0.
+fn trailing_line_break(text: &str) -> usize {
+    if text.ends_with("\r\n") {
+        2
+    } else if text.ends_with('\n') {
+        1
+    } else {
+        0
     }
 }
 
@@ -366,6 +382,39 @@ mod tests {
             ),
             content
         );
+    }
+
+    #[test]
+    fn crlf_framing_is_stripped_like_lf() {
+        let content = "<transcript>\r\nhello\r\n</transcript>\r\nClean it.";
+        let extracted = extract(content);
+        assert_eq!(extracted.text, "hello");
+        assert_eq!(extracted.raw_text, "hello");
+        assert_eq!(
+            format!(
+                "{}{}{}",
+                extracted.before_text, extracted.text, extracted.after_text
+            ),
+            content
+        );
+    }
+
+    #[test]
+    fn empty_crlf_envelope_is_empty() {
+        for content in [
+            "<transcript>\r\n</transcript>",
+            "<transcript>\r\n\r\n</transcript>",
+        ] {
+            let extracted = extract(content);
+            assert_eq!(extracted.text, "", "{content:?}");
+            assert_eq!(
+                format!(
+                    "{}{}{}",
+                    extracted.before_text, extracted.text, extracted.after_text
+                ),
+                content
+            );
+        }
     }
 
     fn extract(content: &str) -> ExtractedRequest {

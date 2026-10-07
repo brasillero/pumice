@@ -1,6 +1,9 @@
 //! The human-readable request log: one entry per completion request on the
 //! ordinary log sink, never dictated text.
 //!
+//! A request that gets no completion (an HTTP error, or a client that
+//! disconnects) still gets one line, labelled `REJECTED` or `DROPPED`.
+//!
 //! An entry is a header line with the outcome, the provider and model that
 //! produced the text, the total time and the text length. When the provider
 //! ran but failed, one indented attempt line follows with the safe reason:
@@ -40,7 +43,7 @@ pub(super) fn render(entry: &Entry<'_>, color: bool) -> String {
 fn render_at(entry: &Entry<'_>, color: bool, timestamp: &str) -> String {
     let paint = Paint(color);
     let outcome = entry.outcome;
-    let fell_back = outcome
+    let failed = outcome
         .trail
         .iter()
         .any(|attempt| attempt.result != AttemptResult::Formatted);
@@ -85,7 +88,7 @@ fn render_at(entry: &Entry<'_>, color: bool, timestamp: &str) -> String {
         paint.apply(Style::Dim, &format!("[{notes}]")),
     );
 
-    if fell_back {
+    if failed {
         let name_width = outcome
             .trail
             .iter()
@@ -193,6 +196,55 @@ fn provider_error(error: ProviderError) -> String {
     }
 }
 
+/// How a completion request ended without a completion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Unanswered<'a> {
+    /// Answered with an HTTP error; the message is the fixed, text-free one
+    /// the client received.
+    Rejected { status: u16, message: &'a str },
+    /// The client went away before the answer was ready; any CLI run was
+    /// cancelled.
+    Disconnected,
+}
+
+/// Renders the entry for a request that got no completion, so every request
+/// still leaves exactly one entry.
+pub(super) fn render_unanswered(
+    number: u64,
+    unanswered: Unanswered<'_>,
+    elapsed: Duration,
+    color: bool,
+) -> String {
+    render_unanswered_at(number, unanswered, elapsed, color, &local_timestamp())
+}
+
+fn render_unanswered_at(
+    number: u64,
+    unanswered: Unanswered<'_>,
+    elapsed: Duration,
+    color: bool,
+    timestamp: &str,
+) -> String {
+    let paint = Paint(color);
+    let (label, what) = match unanswered {
+        Unanswered::Rejected { status, message } => {
+            ("REJECTED", format!("HTTP {status}: {message}"))
+        }
+        Unanswered::Disconnected => (
+            "DROPPED",
+            "the client disconnected before the answer was ready".to_owned(),
+        ),
+    };
+    format!(
+        "{}  {}  {}  {}  {}",
+        paint.apply(Style::Dim, timestamp),
+        paint.apply(Style::Dim, &format!("#{:<3}", number)),
+        paint.apply(Style::Red, &format!("{label:<11}")),
+        what,
+        seconds(elapsed),
+    )
+}
+
 fn seconds(elapsed: Duration) -> String {
     format!("{:.1}s", elapsed.as_secs_f64())
 }
@@ -256,6 +308,35 @@ mod tests {
             trail,
             elapsed: Duration::from_millis(9_100),
         }
+    }
+
+    #[test]
+    fn rejected_and_dropped_requests_get_one_line() {
+        let rejected = render_unanswered_at(
+            7,
+            Unanswered::Rejected {
+                status: 400,
+                message: "the request body is not valid JSON",
+            },
+            Duration::from_millis(3),
+            false,
+            "2026-10-06 14:04:01",
+        );
+        assert_eq!(
+            rejected,
+            "2026-10-06 14:04:01  #7    REJECTED     HTTP 400: the request body is not valid JSON  0.0s"
+        );
+        let dropped = render_unanswered_at(
+            8,
+            Unanswered::Disconnected,
+            Duration::from_millis(2_100),
+            false,
+            "2026-10-06 14:04:01",
+        );
+        assert!(dropped.contains("#8 "), "{dropped}");
+        assert!(dropped.contains("DROPPED"), "{dropped}");
+        assert!(dropped.ends_with("2.1s"), "{dropped}");
+        assert!(!dropped.contains('\n'));
     }
 
     fn plain(entry: &Entry<'_>) -> String {

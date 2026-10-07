@@ -622,6 +622,69 @@ async fn malformed_json_is_400_without_running_the_fake() {
 }
 
 #[tokio::test]
+async fn rejected_request_writes_one_rejected_log_entry() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            b"{\"messages\": [",
+        ),
+    )
+    .await;
+    assert_eq!(response.status, 400);
+    let lines = server.log_lines();
+    assert_eq!(lines.len(), 1, "one log entry: {lines:?}");
+    assert!(lines[0].contains("REJECTED"), "line: {}", lines[0]);
+    assert!(
+        lines[0].contains("HTTP 400: the request body is not valid JSON"),
+        "line: {}",
+        lines[0]
+    );
+}
+
+#[tokio::test]
+async fn client_disconnect_writes_one_dropped_log_entry() {
+    let server = start_server(
+        CLAUDE_AT_FAKE,
+        json!({"stdout": "unused", "exit_code": 0, "sleep_ms": 5_000}),
+    )
+    .await;
+    let request = json!({
+        "messages": [{"role": "user", "content": "<transcript>\nolá\n</transcript>"}],
+        "model": "claude",
+    });
+    let mut stream = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, server.port))
+        .await
+        .expect("connect to server");
+    stream
+        .write_all(&http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &serde_json::to_vec(&request).unwrap(),
+        ))
+        .await
+        .expect("send request");
+    // Wait until the CLI is running, then go away mid-request.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !server.fake.report_path().exists() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    drop(stream);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while server.log_lines().is_empty() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let lines = server.log_lines();
+    assert_eq!(lines.len(), 1, "one log entry: {lines:?}");
+    assert!(lines[0].contains("DROPPED"), "line: {}", lines[0]);
+}
+
+#[tokio::test]
 async fn conversation_history_is_400_without_running_the_fake() {
     let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
     let request = json!({

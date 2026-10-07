@@ -150,14 +150,28 @@ async fn formats_cleaned_text_and_reports_the_provider() {
 }
 
 #[tokio::test]
-async fn empty_transcript_never_invokes_a_cli() {
+async fn empty_transcript_returns_the_original_whitespace_and_runs_no_cli() {
     let (pipeline, fake) = pipeline(CLAUDE_AT_FAKE, success_scenario("unused"));
     let outcome = pipeline
-        .format(&handy_request(None, "  \n\t "), Instant::now())
+        .format(&handy_request(Some("claude"), "  \n\t "), Instant::now())
         .await;
     assert_eq!(outcome.kind, OutcomeKind::Empty);
-    assert_eq!(outcome.text, "");
+    assert_eq!(outcome.text, "  \n\t ", "original text, byte for byte");
     assert_eq!(outcome.provider, None);
+    assert!(!fake.report_path().exists(), "the fake must not run");
+}
+
+#[tokio::test]
+async fn empty_transcript_still_reports_a_selection_problem() {
+    let (pipeline, fake) = pipeline(CLAUDE_AT_FAKE, success_scenario("unused"));
+    let outcome = pipeline
+        .format(&handy_request(None, "  "), Instant::now())
+        .await;
+    assert_raw(&outcome, RawReason::NoModel, "  ");
+    let outcome = pipeline
+        .format(&handy_request(Some("nope"), "  "), Instant::now())
+        .await;
+    assert_raw(&outcome, RawReason::UnknownProvider, "  ");
     assert!(!fake.report_path().exists(), "the fake must not run");
 }
 

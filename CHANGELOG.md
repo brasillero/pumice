@@ -28,6 +28,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   ```
   The removed `default_provider` and `fallback_order` keys, and the old mapping form of `providers:`, are rejected with a migration error that points at the offending line. `enabled` is required on every entry and `model` on every enabled entry.
 
+### Fixed
+
+- No more crash on an empty transcript envelope (`<transcript>\n</transcript>`), or on a request field the debug log cannot re-read (#57).
+- The temporary directory and control files of each CLI call are private (0700/0600) whatever the umask (#56).
+- A whitespace-only dictation returns the original text byte for byte instead of an empty string. A request without a valid model still logs that reason.
+- Windows line endings (`\r\n`) around the transcript are stripped like `\n`.
+- Every completion request writes exactly one log entry: HTTP errors are logged as `REJECTED` with the fixed error message, and a client that disconnects mid-request as `DROPPED`.
+
 ## [0.1.1] — 2026-10-06
 
 Claude and Codex now use the credentials and gateway already configured for them, and the request log says which provider and model answered, whether a fallback happened, and why an attempt failed.

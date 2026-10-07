@@ -219,16 +219,6 @@ impl Pipeline {
                 started,
             );
         }
-        if request.is_empty() {
-            return FormatOutcome::finished(
-                String::new(),
-                OutcomeKind::Empty,
-                None,
-                Vec::new(),
-                started,
-            );
-        }
-
         // An unknown or disabled selected provider is a configuration
         // mistake, not a transient failure: return raw text at once so the
         // user notices, never silently formatting through another provider.
@@ -242,6 +232,19 @@ impl Pipeline {
         let Some(candidate) = self.providers.get(selected) else {
             return self.raw(request, RawReason::ProviderDisabled, started, Vec::new());
         };
+
+        // Nothing to format: the original text (empty or whitespace only)
+        // returns byte for byte, without running the provider. Checked after
+        // selection so a wrong model still shows its own reason in the log.
+        if request.is_empty() {
+            return FormatOutcome::finished(
+                request.raw_text.clone(),
+                OutcomeKind::Empty,
+                None,
+                Vec::new(),
+                started,
+            );
+        }
 
         // Held for the whole run; dropping it (including on cancellation)
         // releases the permit.

@@ -23,7 +23,52 @@ use crate::request::{ChatCompletionRequest, extract_request};
 use crate::time::now_unix_secs;
 
 use super::ApiState;
+use super::log_entry::Unanswered;
 use super::types::*;
+
+/// Writes the one log entry of a completion request. Each exit path logs
+/// through [`reject`](Self::reject) or [`finish`](Self::finish); when the
+/// handler future is dropped first (the client disconnected, which also
+/// cancels any CLI run), `Drop` logs the request as dropped.
+struct EntryGuard {
+    state: ApiState,
+    number: u64,
+    started: Instant,
+    logged: bool,
+}
+
+impl EntryGuard {
+    /// Logs the rejection and builds the error response.
+    fn reject(&mut self, status: StatusCode, message: &str) -> Response {
+        self.logged = true;
+        self.state.log_unanswered(
+            self.number,
+            Unanswered::Rejected {
+                status: status.as_u16(),
+                message,
+            },
+            self.started.elapsed(),
+        );
+        openai_error(status, message)
+    }
+
+    fn finish(&mut self, requested: Option<&str>, outcome: &FormatOutcome) {
+        self.logged = true;
+        self.state.log_request(self.number, requested, outcome);
+    }
+}
+
+impl Drop for EntryGuard {
+    fn drop(&mut self) {
+        if !self.logged {
+            self.state.log_unanswered(
+                self.number,
+                Unanswered::Disconnected,
+                self.started.elapsed(),
+            );
+        }
+    }
+}
 
 /// Minimal pre-flight parse: just enough to detect `inspect` before the
 /// stricter dictation validation runs. Unknown fields are ignored, so a
@@ -45,6 +90,16 @@ const BODY_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// return the raw dictation as a normal completion.
 pub async fn chat_completions(State(state): State<ApiState>, request: Request) -> Response {
     let started = Instant::now();
+    // Every request gets its number and exactly one log entry, whatever
+    // happens next: the guard logs a rejection, a completion, or (when this
+    // future is dropped because the client went away) a dropped request.
+    let number = state.next_id();
+    let mut entry = EntryGuard {
+        state: state.clone(),
+        number,
+        started,
+        logged: false,
+    };
     // The debug log (when enabled) is the only reader of request headers, and
     // only through `DebugRecord::new`; the map must be captured before the
     // request is consumed. Disabled (the default): nothing is captured.
@@ -56,19 +111,19 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
     let bytes = match read_body_bounded(request.into_body()).await {
         Ok(bytes) => bytes,
         Err(ReadBodyError::Timeout) => {
-            return openai_error(
+            return entry.reject(
                 StatusCode::REQUEST_TIMEOUT,
                 "reading the request body timed out",
             );
         }
         Err(ReadBodyError::TooLarge) => {
-            return openai_error(
+            return entry.reject(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "the request body is larger than 10 MiB",
             );
         }
         Err(ReadBodyError::Malformed) => {
-            return openai_error(
+            return entry.reject(
                 StatusCode::BAD_REQUEST,
                 "the request body could not be read",
             );
@@ -87,7 +142,7 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
     {
         Some(selection) => selection,
         None => {
-            return openai_error(
+            return entry.reject(
                 StatusCode::BAD_REQUEST,
                 "the request body is not valid JSON",
             );
@@ -95,9 +150,8 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
     };
     let stream = selection.stream.unwrap_or(false);
 
-    // The response id is minted before any processing so the opt-in debug log
+    // The response id comes from the request number, so the opt-in debug log
     // can name the exact completion it records.
-    let number = state.next_id();
     let id = format!("chatcmpl-pumice-{number}");
 
     // Built-in inspect diagnostic: echo the original request body verbatim,
@@ -117,22 +171,15 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
             elapsed: started.elapsed(),
         };
         if let Some(headers) = &debug_headers {
-            // A skipped field can contain an escape that cannot be decoded
-            // into a JSON value. Keep that error controlled and text-free.
-            let body = match serde_json::from_slice(&bytes) {
-                Ok(body) => body,
-                Err(_) => {
-                    return openai_error(
-                        StatusCode::BAD_REQUEST,
-                        "the request body is not valid JSON",
-                    );
-                }
-            };
-            state
-                .debug_log
-                .record(&DebugRecord::new(&id, body, headers, "", &outcome));
+            state.debug_log.record(&DebugRecord::new(
+                &id,
+                debug_body(&bytes),
+                headers,
+                "",
+                &outcome,
+            ));
         }
-        state.log_request(number, selection.model.as_deref(), &outcome);
+        entry.finish(selection.model.as_deref(), &outcome);
         let created = now_unix_secs();
         return if stream {
             sse_response(&id, created, "inspect", echo_text)
@@ -159,7 +206,7 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
     let request: ChatCompletionRequest = match serde_json::from_slice(&bytes) {
         Ok(request) => request,
         Err(_) => {
-            return openai_error(
+            return entry.reject(
                 StatusCode::BAD_REQUEST,
                 "the request body is not valid JSON",
             );
@@ -168,7 +215,7 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
 
     let extracted = match extract_request(request) {
         Ok(extracted) => extracted,
-        Err(error) => return openai_error(StatusCode::BAD_REQUEST, &error.to_string()),
+        Err(error) => return entry.reject(StatusCode::BAD_REQUEST, &error.to_string()),
     };
 
     let outcome = state.pipeline.format(&extracted, started).await;
@@ -177,28 +224,21 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
     // included — only when `debug_log.enabled` turns it on; the metadata
     // line below stays text-free either way.
     if let Some(headers) = &debug_headers {
-        // The body already parsed as a request, but a field skipped by the
-        // typed deserializer can contain an escape that does not decode into a
-        // JSON value (for example a lone surrogate). Keep that error controlled
-        // and text-free: record the exchange without the raw body value.
-        let body = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
-            serde_json::Value::String("request body could not be re-parsed".to_owned())
-        });
         state.debug_log.record(&DebugRecord::new(
             &id,
-            body,
+            debug_body(&bytes),
             headers,
             &extracted.raw_text,
             &outcome,
         ));
     }
-    state.log_request(number, extracted.model.as_deref(), &outcome);
+    entry.finish(extracted.model.as_deref(), &outcome);
 
     let created = now_unix_secs();
     // The producing provider when formatting succeeded; otherwise the
-    // provider selection resolved to (on a raw fallback this names the
-    // selected provider), else the requested string, else a neutral
-    // fallback.
+    // provider selection resolved to (when the original text comes back this
+    // names the selected provider), else the requested string, else a
+    // neutral default.
     let model = outcome
         .provider
         .map(str::to_owned)
@@ -302,6 +342,16 @@ async fn read_body_bounded(body: Body) -> Result<Vec<u8>, ReadBodyError> {
         Ok(result) => result,
         Err(_) => Err(ReadBodyError::Timeout),
     }
+}
+
+/// The request body as a JSON value for the debug log. The body already
+/// parsed once, but a field the typed parse skipped can hold an escape that
+/// does not decode into a value (for example a lone surrogate): then a fixed,
+/// text-free marker stands in for the body.
+fn debug_body(bytes: &[u8]) -> serde_json::Value {
+    serde_json::from_slice(bytes).unwrap_or_else(|_| {
+        serde_json::Value::String("request body could not be re-parsed".to_owned())
+    })
 }
 
 fn openai_error(status: StatusCode, message: &str) -> Response {

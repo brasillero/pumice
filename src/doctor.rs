@@ -8,7 +8,7 @@
 //!
 //! `--login-check` spends quota: it composes one fixed tiny dictation through
 //! the selected provider's normal adapter — same restrictions, fresh empty
-//! workspace and configured timeout — never the fallback chain, and it never
+//! workspace and configured timeout — and it never
 //! prints the response: only `ok (<ms> ms)` or a text-free error category.
 
 use std::sync::Arc;
@@ -195,7 +195,7 @@ pub async fn prepare_login_check(
 
 /// Runs exactly one formatting call through `provider`: the normal adapter
 /// with its configured restrictions and timeout inside a fresh empty
-/// workspace. Never the fallback chain; the returned text is discarded, so
+/// workspace. The returned text is discarded, so
 /// cleanup does not run and the response never reaches the output.
 pub async fn run_login_call(config: &Config, provider: &Arc<dyn Provider>) -> LoginCheck {
     let request = extract_request(ChatCompletionRequest {
