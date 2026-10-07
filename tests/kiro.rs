@@ -391,3 +391,17 @@ async fn agent_message_without_message_id_is_accepted() {
     let fake = fake_kiro(stream, 0);
     assert_eq!(format(&fake, "text").await.unwrap(), "No id.");
 }
+
+#[tokio::test]
+async fn a_later_running_state_reopens_the_turn() {
+    let stream = concat!(
+        "{\"sessionUpdate\":\"agent_message\",\"messageId\":\"m1\",\"content\":[{\"type\":\"text\",\"text\":\"First.\"}]}\n",
+        "{\"sessionUpdate\":\"state_update\",\"state\":\"idle\",\"stopReason\":\"end_turn\"}\n",
+        "{\"sessionUpdate\":\"state_update\",\"state\":\"running\"}\n",
+    );
+    let fake = fake_kiro(stream, 0);
+    assert_eq!(
+        format(&fake, "text").await.unwrap_err(),
+        ProviderError::other(ProviderErrorCode::InvalidOutput)
+    );
+}

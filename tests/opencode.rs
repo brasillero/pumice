@@ -542,11 +542,14 @@ fn opencode_step(message: &str, text: Option<&str>, reason: Option<&str>) -> Str
 }
 
 #[tokio::test]
-async fn text_of_an_unfinished_later_message_is_not_mixed_in() {
+async fn an_unfinished_later_message_is_invalid_output() {
     let stream = opencode_step("m1", Some("First."), Some("stop"))
         + &opencode_step("m2", Some("Partial"), None);
     let fake = fake_opencode(&stream, 0);
-    assert_eq!(format(&fake, "text").await.unwrap(), "First.");
+    assert_eq!(
+        format(&fake, "text").await.unwrap_err(),
+        ProviderError::other(ProviderErrorCode::InvalidOutput)
+    );
 }
 
 #[tokio::test]

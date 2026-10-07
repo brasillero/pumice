@@ -57,11 +57,6 @@ const ALLOWED_ENV: &[&str] = &[];
 const MAX_REQUEST_BYTES: usize = 10 * 1024 * 1024;
 /// Successful response cap, counted as bytes actually received.
 const MAX_SUCCESS_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
-/// Error responses are classified by status alone; the body is only drained
-/// up to this bound.
-const MAX_ERROR_RESPONSE_BYTES: usize = 64 * 1024;
-/// Longest wait for an error body to drain; its status already decided.
-const ERROR_BODY_DRAIN: Duration = Duration::from_millis(500);
 /// Connect cap, inside the call deadline.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -449,14 +444,9 @@ impl GenericProvider {
 
         let status = response.status();
         if status != StatusCode::OK {
-            // Classification is by status alone; the body is drained only to
-            // that bound, briefly, and never inspected or copied. A stalled
-            // error body must not turn the status into a timeout.
-            let _ = tokio::time::timeout(
-                ERROR_BODY_DRAIN,
-                read_body(response.into_body(), MAX_ERROR_RESPONSE_BYTES, &mut connection),
-            )
-            .await;
+            // Classification is by status alone; the body is never read, so
+            // a stalled error body cannot turn the status into a timeout.
+            // Dropping the response closes the one-shot connection.
             return Err(status_error(status));
         }
         reject_unsupported_encoding(response.headers())?;

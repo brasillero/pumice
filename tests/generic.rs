@@ -1187,8 +1187,10 @@ async fn error_status_with_a_stalled_body_keeps_its_status() {
     // The headers promise a body that never arrives.
     let head = "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{";
     let server = FakeHttp::spawn(Behavior::RawThenStall(head.as_bytes().to_vec())).await;
-    let provider = build_provider(&server.endpoint(), CALL_TIMEOUT);
-    let err = format_with(&provider, "ditado", Instant::now() + CALL_TIMEOUT)
+    // A short budget: the status must win without waiting for the body.
+    let budget = Duration::from_millis(300);
+    let provider = build_provider(&server.endpoint(), budget);
+    let err = format_with(&provider, "ditado", Instant::now() + budget)
         .await
         .unwrap_err();
     assert_eq!(err, ProviderError::RateLimited { retry_after: None });

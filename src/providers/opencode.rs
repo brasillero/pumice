@@ -314,8 +314,9 @@ fn json_string_with_escaped_braces(value: &str) -> String {
 /// line).
 ///
 /// Success requires exit code 0 and a final `step_finish` whose `reason` is
-/// `stop`, with no tool event or tool part. The result is the text parts of
-/// that final step's message, concatenated in order and de-duplicated by
+/// `stop` and belongs to the last message the stream names, with no tool
+/// event or tool part. The result is the text parts of that final step's
+/// message, concatenated in order and de-duplicated by
 /// part id (a repeated id is an updated part: its latest text wins); text
 /// from other messages is never mixed in. Completed tool calls print as
 /// `tool_use` events, and any `step_finish` with reason `tool-calls` means
@@ -334,6 +335,8 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
     let mut text_indexes: HashMap<String, usize> = HashMap::new();
     // The last step_finish: its message and its reason.
     let mut last_finish: Option<(Option<String>, Option<String>)> = None;
+    // The most recent message any event named: the run's final message.
+    let mut last_message: Option<String> = None;
     let mut tool_finish = false;
     let mut session: Option<String> = None;
     let mut tool_activity = false;
@@ -356,6 +359,9 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
             } else {
                 session = Some(id.to_owned());
             }
+        }
+        if let Some(message) = event.pointer("/part/messageID").and_then(Value::as_str) {
+            last_message = Some(message.to_owned());
         }
         match event_type {
             "step_start" => {}
@@ -445,6 +451,13 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
         return Err(ProviderError::other(ProviderErrorCode::InvalidOutput));
     };
     if reason != "stop" {
+        return Err(ProviderError::other(ProviderErrorCode::InvalidOutput));
+    }
+    // A later message that started but never finished means the run's
+    // final answer is incomplete.
+    if let (Some(finished), Some(last)) = (&final_message, &last_message)
+        && finished != last
+    {
         return Err(ProviderError::other(ProviderErrorCode::InvalidOutput));
     }
     // Only the final message's text: another message's text is not the

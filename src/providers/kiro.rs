@@ -255,9 +255,8 @@ fn agent_config(system_prompt: &str, agent_name: &str) -> String {
 ///
 /// Success requires exit code 0, at least one `agent_message` or
 /// `agent_message_chunk` carrying text, and a final `state_update` with
-/// `state: idle` / `stopReason: end_turn` as the last state: text that
-/// arrives after it, or a later idle state with another reason, means the
-/// turn did not end cleanly. Any `tool_call_update` or
+/// `state: idle` / `stopReason: end_turn` as the last state: text or any
+/// other state that arrives after it means the turn did not end cleanly. Any `tool_call_update` or
 /// `tool_call_content_chunk` is rejected as unexpected tool activity.
 pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
     let stdout = super::cli::stdout_text(output)?;
@@ -321,11 +320,13 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
             "tool_call_update" | "tool_call_content_chunk" => {
                 tool_activity = true;
             }
-            "state_update"
-                if update.get("state").and_then(Value::as_str) == Some("idle") =>
-            {
-                // Only the last idle state counts as the turn's end.
+            "state_update" => {
+                // Only the last state counts: any later state (running,
+                // requires_action, another idle) reopens the turn.
                 saw_end_turn = false;
+                if update.get("state").and_then(Value::as_str) != Some("idle") {
+                    continue;
+                }
                 match update.get("stopReason").and_then(Value::as_str) {
                     Some("end_turn") => saw_end_turn = true,
                     Some("error") => {
