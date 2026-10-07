@@ -360,3 +360,38 @@ fn fence_with_crlf_line_endings_is_unwrapped() {
     let out = "```\r\nFormatted text.\r\n```";
     assert_eq!(cleanup(out, "formatted text").unwrap(), "Formatted text.");
 }
+
+#[test]
+fn keeps_dictated_heading_the_model_punctuated_like_a_preamble() {
+    // The user dictated a heading; the model only added a colon.
+    assert_eq!(
+        ok(
+            "Formatted text:\nThe report is ready.",
+            "formatted text\nthe report is ready"
+        ),
+        "Formatted text:\nThe report is ready."
+    );
+}
+
+#[test]
+fn still_strips_a_preamble_the_dictation_does_not_open_with() {
+    assert_eq!(
+        ok(
+            "Formatted text:\nSend the formatted text to John.",
+            "send the formatted text to john"
+        ),
+        "Send the formatted text to John."
+    );
+}
+
+#[test]
+fn keeps_dictated_quotes_when_the_model_changes_their_style() {
+    assert_eq!(
+        ok("“Ship it on Friday.”", "\"ship it on friday\""),
+        "“Ship it on Friday.”"
+    );
+    assert_eq!(
+        ok("\"Ship it on Friday.\"", "“ship it on friday”"),
+        "\"Ship it on Friday.\""
+    );
+}

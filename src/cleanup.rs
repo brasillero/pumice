@@ -86,11 +86,14 @@ pub fn cleanup(output: &str, raw_text: &str) -> Result<String, CleanupError> {
     // 1. Balanced reasoning blocks at the start, possibly more than one.
     work = strip_reasoning_tags(work, raw_text)?;
 
-    // 2. One allow-listed preamble line.
+    // 2. One allow-listed preamble line, unless the dictation opens with the
+    //    same words (a dictated heading such as "Formatted text" that the
+    //    model punctuated as "Formatted text:").
     let start = work.trim_start();
     let line = first_line(start);
-    let raw_line = first_line(raw_text.trim_start()).to_lowercase();
-    if is_preamble(line) && raw_line != line.to_lowercase() {
+    if is_preamble(line)
+        && preamble_words(line) != preamble_words(first_line(raw_text.trim_start()))
+    {
         work = start.split_once('\n').map_or("", |(_, rest)| rest);
     }
 
@@ -101,14 +104,22 @@ pub fn cleanup(output: &str, raw_text: &str) -> Result<String, CleanupError> {
         work = inner;
     }
 
-    // 4. One quote pair wrapping the whole output.
+    // 4. One quote pair wrapping the whole output. Skipped when the
+    //    dictation itself is wrapped in any quote marks: the model may have
+    //    changed their style ("…" to “…”), and they are the user's.
     let trimmed = work.trim();
     let raw_trimmed = raw_text.trim();
+    let raw_quoted = QUOTE_PAIRS
+        .iter()
+        .any(|&(open, _)| raw_trimmed.starts_with(open))
+        && QUOTE_PAIRS
+            .iter()
+            .any(|&(_, close)| raw_trimmed.ends_with(close));
     for &(open, close) in QUOTE_PAIRS {
-        if trimmed.len() < open.len() + close.len() {
-            continue;
+        if raw_quoted {
+            break;
         }
-        if raw_trimmed.starts_with(open) && raw_trimmed.ends_with(close) {
+        if trimmed.len() < open.len() + close.len() {
             continue;
         }
         if trimmed.starts_with(open) && trimmed.ends_with(close) {
@@ -164,6 +175,15 @@ fn strip_reasoning_tags<'a>(mut work: &'a str, raw_text: &str) -> Result<&'a str
 fn is_preamble(line: &str) -> bool {
     let line = line.to_lowercase();
     PREAMBLES.iter().any(|p| p.to_lowercase() == line)
+}
+
+/// The words of a line for preamble comparison: lowercased, without
+/// surrounding whitespace or trailing colons and periods.
+fn preamble_words(line: &str) -> String {
+    line.trim()
+        .trim_end_matches([':', '.'])
+        .trim_end()
+        .to_lowercase()
 }
 
 /// Unwraps one fence pair enclosing all of `t` (`t` must be trimmed already).

@@ -47,6 +47,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Generic: a malformed `tool_calls` value or a non-string `finish_reason` is rejected, and an error status with a stalled body keeps its classification instead of becoming a timeout.
 
 
+### Fixed
+
+- Cleanup keeps a dictated heading that the model only punctuated like a preamble (`Formatted text` → `Formatted text:`), and keeps quotes the user dictated around the whole text even when the model changed their style.
+- A CLI that exits successfully without reading its whole prompt is treated as a failure (the original text comes back) instead of answering a truncated prompt.
+- A cancelled call's temporary directory is still removed, in the background, with the usual retries; a directory that cannot be removed is reported on stderr.
+- An existing debug log file is made private (0600) when Pumice opens it, not only when it creates it.
+
 ## [0.1.1] — 2026-10-06
 
 Claude and Codex now use the credentials and gateway already configured for them, and the request log says which provider and model answered, whether a fallback happened, and why an attempt failed.

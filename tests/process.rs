@@ -182,18 +182,33 @@ async fn missing_program_is_not_installed() {
 }
 
 #[tokio::test]
-async fn cli_that_never_reads_stdin_still_finishes() {
+async fn cli_that_never_reads_stdin_finishes_and_is_rejected() {
     let fake = FakeCli::new(json!({"read_stdin": false, "stdout": "done"}));
     let mut inv = invocation(fake.path());
     // Larger than any pipe buffer, so the write cannot complete unread.
     inv.stdin = vec![b'a'; 4 * 1024 * 1024];
 
     let start = Instant::now();
-    let output = run(inv).await.expect("run succeeds");
-    assert!(output.status.success());
-    assert_eq!(output.stdout, b"done");
+    // A clean exit without taking the whole prompt answered a truncated
+    // prompt: the caller gets an error and returns the original text.
+    assert_eq!(
+        run(inv).await.unwrap_err(),
+        ProviderError::other(ProviderErrorCode::Io)
+    );
     assert!(start.elapsed() < Duration::from_secs(10));
     assert_eq!(fake.report()["stdin"], Value::Null);
+}
+
+#[tokio::test]
+async fn cli_that_fails_without_reading_stdin_keeps_its_exit_status() {
+    let fake = FakeCli::new(json!({"read_stdin": false, "stdout": "", "exit_code": 3}));
+    let mut inv = invocation(fake.path());
+    inv.stdin = vec![b'a'; 4 * 1024 * 1024];
+
+    let output = run(inv)
+        .await
+        .expect("a failed exit is the parser's to classify");
+    assert_eq!(output.status.code(), Some(3));
 }
 
 #[tokio::test]
@@ -275,6 +290,18 @@ async fn cancelled_run_kills_the_whole_tree() {
     assert!(process_alive(std::process::id()));
     wait_until_gone(parent);
     wait_until_gone(grandchild);
+
+    // The temporary root is still removed, in the background.
+    let root = temp_root(&report);
+    let gone_by = std::time::Instant::now() + RELAXED;
+    while root.exists() {
+        assert!(
+            std::time::Instant::now() < gone_by,
+            "temp root left behind: {}",
+            root.display()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test]
