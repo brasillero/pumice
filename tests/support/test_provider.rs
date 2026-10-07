@@ -1,8 +1,8 @@
-//! A scripted [`Provider`] double for fallback-chain tests.
+//! A scripted [`Provider`] double for pipeline tests.
 //!
 //! Every `format` call pops the next [`Step`] and counts as one call. Real
-//! fake-CLI providers cannot build two chain entries (every adapter reports
-//! one fixed id), so chain logic runs against this double, with one real
+//! fake-CLI providers cannot build two providers (every adapter reports
+//! one fixed id), so multi-provider logic runs against this double, with one real
 //! adapter mixed in where the protocol matters.
 
 use std::collections::VecDeque;
@@ -24,7 +24,7 @@ pub enum Step {
     Sleep(Duration),
 }
 
-/// A scripted [`Provider`] for fallback-chain tests.
+/// A scripted [`Provider`] for pipeline tests.
 pub struct TestProvider {
     id: &'static str,
     calls: AtomicUsize,
