@@ -35,6 +35,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A whitespace-only dictation returns the original text byte for byte instead of an empty string. A request without a valid model still logs that reason.
 - Windows line endings (`\r\n`) around the transcript are stripped like `\n`.
 - Every completion request writes exactly one log entry: HTTP errors are logged as `REJECTED` with the fixed error message, and a client that disconnects mid-request as `DROPPED`.
+- Config validation: removed keys set to `null` (`default: null`, `default_provider: ~`, `fallback_order: null`) are rejected like any other value; an empty `binary`, and a `model` starting with `-` for a CLI provider, are rejected at their line; an empty `APPDATA` no longer resolves the config path relative to the current directory.
+- A command-line argument that is not valid Unicode is a usage error (exit 2) instead of a crash.
 
 ## [0.1.1] — 2026-10-06
 
