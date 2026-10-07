@@ -46,8 +46,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Kiro: text after the end of the turn, or a later idle state without `end_turn`, is rejected; an `agent_message` without `messageId` is accepted.
 - Generic: a malformed `tool_calls` value or a non-string `finish_reason` is rejected, and an error status with a stalled body keeps its classification instead of becoming a timeout.
 
-
 ### Fixed
+
+- Kimi: a dictation full of quotes or backslashes that fits the byte cap but would overflow the Windows command line after escaping is refused as too large, instead of failing to start.
 
 - Cleanup keeps a dictated heading that the model only punctuated like a preamble (`Formatted text` → `Formatted text:`), and keeps quotes the user dictated around the whole text even when the model changed their style.
 - A CLI that exits successfully without reading its whole prompt is treated as a failure (the original text comes back) instead of answering a truncated prompt.
