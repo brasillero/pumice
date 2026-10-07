@@ -373,3 +373,102 @@ async fn past_deadline_never_starts_the_cli() {
     assert_eq!(result.unwrap_err(), ProviderError::Timeout);
     assert!(!fake.report_path().exists());
 }
+
+/// Serializes tests that change the process-wide umask.
+#[cfg(unix)]
+static UMASK_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Restores the previous umask when dropped.
+#[cfg(unix)]
+struct UmaskGuard(libc::mode_t);
+
+#[cfg(unix)]
+impl UmaskGuard {
+    fn set(mask: libc::mode_t) -> UmaskGuard {
+        let previous = unsafe { libc::umask(mask) };
+        UmaskGuard(previous)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UmaskGuard {
+    fn drop(&mut self) {
+        unsafe { libc::umask(self.0) };
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn temp_root_and_control_files_are_private() {
+    // umask is process-wide, so serialize with any future umask-changing test.
+    let _lock = UMASK_LOCK.lock().await;
+    // With a permissive umask the runner must still create 0700 dirs and
+    // 0600 files, so other users cannot read or tamper with control files.
+    let _umask = UmaskGuard::set(0o002);
+
+    let fake = FakeCli::new(json!({
+        "report_modes": [
+            "..",
+            ".",
+            "../control",
+            "../control/system.txt",
+            "../control/pumice-agent.md",
+            ".kiro",
+            ".kiro/agents",
+            ".kiro/agents/pumice-abc123.json"
+        ]
+    }));
+    let mut inv = invocation(fake.path());
+    inv.control_files = vec![
+        ControlFile {
+            name: "system.txt".to_owned(),
+            contents: b"system prompt".to_vec(),
+        },
+        // Kimi uses this exact control file name.
+        ControlFile {
+            name: "pumice-agent.md".to_owned(),
+            contents: b"agent body".to_vec(),
+        },
+    ];
+    // Kiro uses a workspace-local agent file like this.
+    inv.workspace_files = vec![ControlFile {
+        name: ".kiro/agents/pumice-abc123.json".to_owned(),
+        contents: br#"{"name":"pumice","tools":[]}"#.to_vec(),
+    }];
+
+    run(inv).await.expect("run succeeds");
+    let report = fake.report();
+    let modes = report["modes"].as_object().expect("modes reported");
+
+    let dir_mode = 0o700;
+    let file_mode = 0o600;
+
+    assert_eq!(modes[".."].as_u64().unwrap(), dir_mode, "temp root");
+    assert_eq!(modes["."].as_u64().unwrap(), dir_mode, "workspace dir");
+    assert_eq!(
+        modes["../control"].as_u64().unwrap(),
+        dir_mode,
+        "control dir"
+    );
+    assert_eq!(
+        modes["../control/system.txt"].as_u64().unwrap(),
+        file_mode,
+        "system.txt"
+    );
+    assert_eq!(
+        modes["../control/pumice-agent.md"].as_u64().unwrap(),
+        file_mode,
+        "kimi agent file"
+    );
+    assert_eq!(modes[".kiro"].as_u64().unwrap(), dir_mode, ".kiro dir");
+    assert_eq!(
+        modes[".kiro/agents"].as_u64().unwrap(),
+        dir_mode,
+        "agents dir"
+    );
+    assert_eq!(
+        modes[".kiro/agents/pumice-abc123.json"].as_u64().unwrap(),
+        file_mode,
+        "kiro agent file"
+    );
+}
