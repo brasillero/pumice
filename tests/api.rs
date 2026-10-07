@@ -10,6 +10,7 @@ mod support;
 use std::fs;
 use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddrV4};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -176,6 +177,48 @@ async fn start_server(yaml: &str, scenario: Value) -> TestServer {
         fake,
         _config_dir: config_dir,
     }
+}
+
+/// Like [`start_server`], but with the opt-in debug log enabled and its path
+/// returned so tests can read the JSONL file.
+async fn start_server_with_debug_log(yaml: &str, scenario: Value) -> (TestServer, PathBuf) {
+    let fake = FakeCli::new(scenario);
+    let yaml = yaml.replace("{binary}", &fake.path().display().to_string());
+    let config_dir = TempDir::new().expect("temp dir");
+    let config_path = config_dir.path().join("pumice.yaml");
+    let debug_path = config_dir.path().join("debug.log");
+    let yaml = format!(
+        "{}\ndebug_log:\n  enabled: true\n  path: {}\n",
+        yaml,
+        debug_path.display()
+    );
+    fs::write(&config_path, yaml).expect("write config");
+    let config = config::load_with_env(Some(&config_path), |_| None)
+        .expect("config loads")
+        .config;
+    let runner = Arc::new(ProcessRunner::new());
+    let built = providers::build_from_config(&config, runner).expect("provider builds");
+    let pipeline = Arc::new(Pipeline::new(&config, built));
+
+    let listener = tokio::net::TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind ephemeral loopback port");
+    let port = listener.local_addr().unwrap().port();
+    let log = Arc::new(LogCapture::default());
+    let serve_log = Arc::clone(&log);
+    let debug_log = Arc::new(DebugLog::open(&config.debug_log).expect("open debug log"));
+    tokio::spawn(async move {
+        let _ = api::serve(listener, pipeline, serve_log, debug_log).await;
+    });
+    (
+        TestServer {
+            port,
+            log,
+            fake,
+            _config_dir: config_dir,
+        },
+        debug_path,
+    )
 }
 
 /// A parsed HTTP response (status, headers, body).
@@ -432,6 +475,78 @@ async fn failing_provider_returns_the_raw_transcript_with_200() {
         lines[0].contains("✗ claude") && lines[0].contains("(exit "),
         "the attempt line carries the CLI's exit code: {}",
         lines[0]
+    );
+}
+
+#[tokio::test]
+async fn empty_envelope_returns_200_and_logs_without_running_a_provider() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let request = json!({
+        "messages": [{"role": "user", "content": "<transcript>\n</transcript>"}],
+        "model": "claude",
+        "stream": false,
+    });
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &serde_json::to_vec(&request).unwrap(),
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    assert_eq!(response.body_json()["choices"][0]["message"]["content"], "");
+    assert!(
+        !server.fake.report_path().exists(),
+        "an empty transcript runs no provider"
+    );
+    let lines = server.log_lines();
+    assert_eq!(lines.len(), 1, "one log entry: {lines:?}");
+    assert!(lines[0].contains(" empty "), "line: {}", lines[0]);
+}
+
+#[tokio::test]
+async fn malformed_extra_field_with_debug_log_enabled_does_not_panic() {
+    let (server, debug_path) =
+        start_server_with_debug_log(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    // A lone surrogate JSON escape parses as a typed request but cannot be
+    // re-parsed as serde_json::Value. The debug log must still record the
+    // exchange and the request must complete normally.
+    let raw_body =
+        br#"{"model":"passthrough","messages":[{"role":"user","content":"hello"}],"extra":"\uD800"}"#;
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            raw_body,
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    assert_eq!(
+        response.body_json()["choices"][0]["message"]["content"],
+        "hello"
+    );
+    assert!(
+        !server.fake.report_path().exists(),
+        "passthrough must not run a CLI"
+    );
+    let debug_contents = fs::read_to_string(&debug_path).expect("debug log written");
+    assert!(
+        !debug_contents.is_empty(),
+        "debug log must contain one record"
+    );
+    let record: Value =
+        serde_json::from_str(debug_contents.lines().next().unwrap()).expect("record is JSON");
+    assert_eq!(
+        record["request"], "request body could not be re-parsed",
+        "marker is recorded when the Value round trip fails: {record:?}"
     );
 }
 
