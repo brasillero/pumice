@@ -91,10 +91,13 @@ pub fn cleanup(output: &str, raw_text: &str) -> Result<String, CleanupError> {
     //    model punctuated as "Formatted text:").
     let start = work.trim_start();
     let line = first_line(start);
-    if is_preamble(line)
-        && preamble_words(line) != preamble_words(first_line(raw_text.trim_start()))
-    {
-        work = start.split_once('\n').map_or("", |(_, rest)| rest);
+    let rest = start.split_once('\n').map_or("", |(_, rest)| rest);
+    let dictated_heading =
+        preamble_words(line) == preamble_words(first_line(raw_text.trim_start()));
+    // When the heading follows anyway, the first line is a preamble on top.
+    let repeated = preamble_words(line) == preamble_words(first_line(rest));
+    if is_preamble(line) && (!dictated_heading || repeated) {
+        work = rest;
     }
 
     // 3. One code fence pair enclosing the whole remaining output.
@@ -109,12 +112,7 @@ pub fn cleanup(output: &str, raw_text: &str) -> Result<String, CleanupError> {
     //    changed their style ("…" to “…”), and they are the user's.
     let trimmed = work.trim();
     let raw_trimmed = raw_text.trim();
-    let raw_quoted = QUOTE_PAIRS
-        .iter()
-        .any(|&(open, _)| raw_trimmed.starts_with(open))
-        && QUOTE_PAIRS
-            .iter()
-            .any(|&(_, close)| raw_trimmed.ends_with(close));
+    let raw_quoted = is_one_quotation(raw_trimmed);
     for &(open, close) in QUOTE_PAIRS {
         if raw_quoted {
             break;
@@ -175,6 +173,31 @@ fn strip_reasoning_tags<'a>(mut work: &'a str, raw_text: &str) -> Result<&'a str
 fn is_preamble(line: &str) -> bool {
     let line = line.to_lowercase();
     PREAMBLES.iter().any(|p| p.to_lowercase() == line)
+}
+
+/// True when `text` is one quotation: it starts and ends with quote marks
+/// (of any style) and holds no other double or angle quote marks inside.
+/// Apostrophes inside are fine; `“a” and “b”` is two quotations, not one.
+fn is_one_quotation(text: &str) -> bool {
+    let Some(open) = QUOTE_PAIRS
+        .iter()
+        .map(|&(open, _)| open)
+        .find(|open| text.starts_with(open))
+    else {
+        return false;
+    };
+    let Some(close) = QUOTE_PAIRS
+        .iter()
+        .map(|&(_, close)| close)
+        .find(|close| text.ends_with(close))
+    else {
+        return false;
+    };
+    if text.len() < open.len() + close.len() {
+        return false;
+    }
+    let inner = &text[open.len()..text.len() - close.len()];
+    !inner.contains(['"', '“', '”', '«', '»'])
 }
 
 /// The words of a line for preamble comparison: lowercased, without

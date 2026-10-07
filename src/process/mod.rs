@@ -73,13 +73,10 @@ impl ProcessRunner {
             return Err(ProviderError::Timeout);
         }
         let program = resolve_program(&invocation.program)?;
-        let mut root = RootGuard(Some(private_temp::tempdir().map_err(io_error)?));
-        let path = root.path().to_path_buf();
-        let result = run_in(&path, &program, invocation, deadline).await;
-        if let Some(dir) = root.0.take() {
-            remove_root(dir).await;
-        }
-        result
+        // Dropping the guard removes the root, on success, failure and
+        // cancellation alike.
+        let root = RootGuard(Some(private_temp::tempdir().map_err(io_error)?));
+        run_in(root.path(), &program, invocation, deadline).await
     }
 }
 
@@ -160,41 +157,51 @@ async fn run_in(
     })
 }
 
-/// Owns a call's temporary root until it is removed. When the call is
-/// cancelled (the request was dropped), the normal removal never runs: the
-/// guard hands the root to a background task with the same retries.
+/// Owns a call's temporary root and removes it when dropped: after the
+/// call, or when the call is cancelled (the request was dropped). One
+/// attempt runs inline; when it fails (on Windows a killed descendant can
+/// hold the workspace for a moment after termination) a plain thread keeps
+/// retrying, so the retries depend neither on the request nor on the async
+/// runtime still running.
 struct RootGuard(Option<tempfile::TempDir>);
 
 impl RootGuard {
     fn path(&self) -> &Path {
-        self.0.as_ref().expect("root present until removed").path()
+        self.0.as_ref().expect("root present until dropped").path()
     }
 }
 
 impl Drop for RootGuard {
     fn drop(&mut self) {
         let Some(root) = self.0.take() else { return };
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                handle.spawn(remove_root(root));
-            }
-            // No runtime: `TempDir`'s own drop tries once.
-            Err(_) => drop(root),
+        if try_remove(root.path()) {
+            return;
         }
+        let spawned = std::thread::Builder::new()
+            .name("pumice-temp-cleanup".to_owned())
+            .spawn(move || remove_root_with_retries(root));
+        // Could not start a thread: `TempDir`'s drop (inside the failed
+        // closure) tries once more.
+        drop(spawned);
     }
 }
 
-/// Removes the temporary root, retrying briefly: on Windows a killed
-/// descendant can hold the workspace for a moment after termination.
-/// Failure must not hide the call's outcome: after the last attempt it is
-/// reported on stderr (the path only, never dictated text) and `TempDir`'s
-/// drop tries once more.
-async fn remove_root(root: tempfile::TempDir) {
+/// One removal attempt; true when the root is gone.
+fn try_remove(root: &Path) -> bool {
+    match std::fs::remove_dir_all(root) {
+        Ok(()) => true,
+        Err(e) => e.kind() == io::ErrorKind::NotFound,
+    }
+}
+
+/// Retries removal briefly. Failure must not hide the call's outcome: after
+/// the last attempt it is reported on stderr (the path only, never dictated
+/// text) and `TempDir`'s drop tries once more.
+fn remove_root_with_retries(root: tempfile::TempDir) {
     for _ in 0..REMOVE_ATTEMPTS {
-        match std::fs::remove_dir_all(root.path()) {
-            Ok(()) => return,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return,
-            Err(_) => tokio::time::sleep(REMOVE_RETRY_DELAY).await,
+        std::thread::sleep(REMOVE_RETRY_DELAY);
+        if try_remove(root.path()) {
+            return;
         }
     }
     eprintln!(

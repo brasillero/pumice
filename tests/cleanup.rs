@@ -395,3 +395,22 @@ fn keeps_dictated_quotes_when_the_model_changes_their_style() {
         "\"Ship it on Friday.\""
     );
 }
+
+#[test]
+fn strips_added_outer_quotes_around_separate_dictated_quotations() {
+    assert_eq!(
+        ok("\"“Hello” and “goodbye”\"", "“hello” and “goodbye”"),
+        "“Hello” and “goodbye”"
+    );
+}
+
+#[test]
+fn strips_a_preamble_on_top_of_the_dictated_heading() {
+    assert_eq!(
+        ok(
+            "Formatted text:\nFormatted text:\nHello.",
+            "formatted text\nhello"
+        ),
+        "Formatted text:\nHello."
+    );
+}
