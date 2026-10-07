@@ -42,7 +42,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Adapters reject a CLI reply that is not valid UTF-8 (Codex, Kimi, Kiro, OpenCode, Antigravity) instead of returning text with `�` in it.
 - Quota errors reported with HTTP 429 are logged as quota exhausted, not rate limited (Codex, Kimi, OpenCode); Codex also recognizes OpenAI's "exceeded your current quota" wording.
 - Kimi: `tool_calls: null` or `[]` is no longer mistaken for a tool call, and an early transient retry no longer hides a later login or quota failure.
-- OpenCode: the result is the final message's text only, the final step must finish with `stop`, and an error the CLI recovered from no longer fails the run.
+- OpenCode: the result is the final message's text only, every step must finish and the last one with `stop`, and an error the CLI recovered from no longer fails the run.
 - Kiro: text after the end of the turn, or a later idle state without `end_turn`, is rejected; an `agent_message` without `messageId` is accepted.
 - Generic: a malformed `tool_calls` value or a non-string `finish_reason` is rejected, and an error status with a stalled body keeps its classification instead of becoming a timeout.
 
