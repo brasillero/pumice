@@ -467,7 +467,7 @@ fn malformed_model_reports_the_value() {
         "providers:\n  - id: kimi\n    enabled: true\n    model: bad model\n",
         4,
         12,
-        "providers.kimi.model must be a nonempty model alias without whitespace, control characters or a leading '-'",
+        "providers.kimi.model must be a nonempty model alias of at most 256 bytes, without whitespace, control characters or a leading '-'",
     );
 }
 

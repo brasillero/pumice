@@ -27,8 +27,8 @@
 //! for background tasks), `KIMI_DISABLE_TELEMETRY=1` keeps the run off the
 //! telemetry intake, and `KIMI_CODE_NO_AUTO_UPDATE=1` blocks update checks.
 //!
-//! Residual unverifiables (why this adapter ships disabled by default with
-//! a risk warning): user-configured hooks and plugin MCP servers have no
+//! Residual unverifiables (recorded here; Pumice prints no provider
+//! warnings): user-configured hooks and plugin MCP servers have no
 //! per-launch off switch (agent tool removal does not stop hook scripts or
 //! server startup; MCP servers are trust-gated and the fresh empty
 //! workspace is untrusted, which is what keeps them from starting); print
@@ -36,7 +36,8 @@
 //! the agent body is rendered as a `${var}` template (unknown variables
 //! stay verbatim, so only the documented variable names in configured
 //! instructions would expand); and the argv transport caps the user
-//! message at [`MAX_USER_MESSAGE_BYTES`].
+//! message at [`MAX_USER_MESSAGE_BYTES`] and, once quoted for a Windows
+//! command line, at [`MAX_QUOTED_MESSAGE_UNITS`].
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -95,9 +96,14 @@ pub const MAX_USER_MESSAGE_BYTES: usize = 24 * 1024;
 /// Maximum length of the message once quoted for a Windows command line,
 /// in UTF-16 units. Quoting escapes every `"` and may double backslashes,
 /// so a message under the byte cap can still overflow the 32,767-unit
-/// command line; this leaves room for the program, agent-file path and
-/// model. Checked on every platform so the limit does not depend on the OS.
+/// command line. The remaining 4 Ki units hold everything else: the program
+/// path, the agent-file path under the temp directory, the fixed flags
+/// (under 100 units) and the model (at most [`MAX_MODEL_BYTES`]). Checked
+/// on every platform so the limit does not depend on the OS.
 pub const MAX_QUOTED_MESSAGE_UNITS: usize = 28 * 1024;
+
+/// Longest accepted model alias, so the command-line reserve above holds.
+pub const MAX_MODEL_BYTES: usize = 256;
 
 /// Agent file name inside the per-call control directory.
 const AGENT_FILE_NAME: &str = "pumice-agent.md";
@@ -159,7 +165,7 @@ fn validate_settings(
         return Err(ConfigError::at(
             locations.model.unwrap_or(serde_saphyr::Location::UNKNOWN),
             format!(
-                "providers.{ID}.model must be a nonempty model alias without whitespace, control characters or a leading '-'"
+                "providers.{ID}.model must be a nonempty model alias of at most {MAX_MODEL_BYTES} bytes, without whitespace, control characters or a leading '-'"
             ),
         ));
     }
@@ -168,6 +174,7 @@ fn validate_settings(
 
 fn is_valid_model(model: &str) -> bool {
     !model.is_empty()
+        && model.len() <= MAX_MODEL_BYTES
         && !model.starts_with('-')
         && !model.chars().any(|c| c.is_whitespace() || c.is_control())
 }
@@ -461,7 +468,15 @@ mod tests {
         for good in ["kimi-k2.7-code-highspeed", "kimi-k2.8-code", "k3-256k"] {
             assert!(is_valid_model(good), "model: {good:?}");
         }
-        for bad in ["", "-model", "bad model", "bad\tmodel", "bad\u{7f}model"] {
+        let too_long = "k".repeat(MAX_MODEL_BYTES + 1);
+        for bad in [
+            "",
+            "-model",
+            "bad model",
+            "bad\tmodel",
+            "bad\u{7f}model",
+            too_long.as_str(),
+        ] {
             assert!(!is_valid_model(bad), "model: {bad:?}");
         }
     }
