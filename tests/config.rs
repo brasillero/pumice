@@ -1369,3 +1369,12 @@ fn duplicate_option_keys_are_rejected_at_the_second_key() {
         "{error}"
     );
 }
+
+#[test]
+fn generic_model_may_start_with_a_dash() {
+    let config = load_text(
+        "providers:\n  - id: generic\n    enabled: true\n    model: -local-model\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
+    )
+    .expect("a generic model is sent over HTTP, not as an argument");
+    assert_eq!(config.provider("generic").unwrap().model, "-local-model");
+}

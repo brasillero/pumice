@@ -367,8 +367,9 @@ fn provider_settings(
             ));
         }
         // Every CLI receives the model as a command-line argument: a
-        // leading '-' would be read as a flag.
-        if model.value.trim_start().starts_with('-') {
+        // leading '-' would be read as a flag. The generic adapter sends it
+        // as a JSON string over HTTP instead.
+        if descriptor.id != providers::generic::ID && model.value.trim_start().starts_with('-') {
             return Err(ConfigError::at(
                 model.referenced,
                 format!("{base}.model must not start with '-'"),
