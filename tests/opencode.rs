@@ -402,16 +402,13 @@ fn provider_reports_its_id_without_running() {
 }
 
 #[test]
-fn descriptor_is_disabled_by_default_with_the_risk_warning() {
-    // What keeps OpenCode off without a YAML entry; the loader test proves
-    // the behavior end to end.
-    const { assert!(DESCRIPTOR.disabled_by_default) };
+fn descriptor_carries_the_risk_warning_and_disabled_defaults() {
+    // Nothing is enabled unless the configuration says so; the loader tests
+    // prove the behavior end to end.
     assert_eq!(DESCRIPTOR.risk_warning, Some(RISK_WARNING));
     assert!(DESCRIPTOR.allowed_env.is_empty());
     let settings = (DESCRIPTOR.defaults)();
-    // `defaults` leaves every provider on; the loader replaces `enabled`
-    // with `!disabled_by_default` before applying file overrides.
-    assert!(settings.enabled);
+    assert!(!settings.enabled);
     assert_eq!(settings.model, "");
 }
 
@@ -444,17 +441,20 @@ fn assert_error(text: &str, line: u64, column: u64, message: &str) {
 }
 
 #[test]
-fn no_yaml_entry_loads_disabled() {
+fn no_yaml_entry_means_not_configured() {
     let config = load("").expect("empty file loads");
-    let opencode = config.providers.get(ID).expect("opencode is registered");
-    assert!(!opencode.enabled);
-    assert_eq!(opencode.model, "");
+    assert!(
+        config.provider(ID).is_none(),
+        "providers are only configured by list entries"
+    );
+    assert!(config.providers.is_empty());
+    assert_eq!(config.default, None);
 }
 
 #[test]
 fn enabled_without_a_model_reports_the_enabled_line() {
     assert_error(
-        "providers:\n  opencode:\n    enabled: true\n",
+        "providers:\n  - id: opencode\n    enabled: true\n",
         3,
         14,
         "providers.opencode.model is required when the provider is enabled",
@@ -464,7 +464,7 @@ fn enabled_without_a_model_reports_the_enabled_line() {
 #[test]
 fn malformed_model_reports_the_value() {
     assert_error(
-        "providers:\n  opencode:\n    enabled: true\n    model: no-slash\n",
+        "providers:\n  - id: opencode\n    enabled: true\n    model: no-slash\n",
         4,
         12,
         "providers.opencode.model must be a nonempty provider/model pair without whitespace, control characters or a leading '-'",
@@ -474,18 +474,20 @@ fn malformed_model_reports_the_value() {
 #[test]
 fn enabled_with_an_explicit_model_loads() {
     let config =
-        load("providers:\n  opencode:\n    enabled: true\n    model: opencode/big-pickle\n")
+        load("providers:\n  - id: opencode\n    enabled: true\n    model: opencode/big-pickle\n")
             .expect("explicit provider/model loads");
-    let opencode = config.providers.get(ID).expect("opencode configured");
+    let opencode = config.provider(ID).expect("opencode is configured");
     assert!(opencode.enabled);
     assert_eq!(opencode.model, "opencode/big-pickle");
 
     let with_variant = load(
-        "providers:\n  opencode:\n    enabled: true\n    model: p/m\n    options:\n      variant: low\n",
+        "providers:\n  - id: opencode\n    enabled: true\n    model: p/m\n    options:\n      variant: low\n",
     )
     .expect("variant option loads");
     assert_eq!(
-        with_variant.providers[ID]
+        with_variant
+            .provider(ID)
+            .expect("opencode is configured")
             .options
             .get("variant")
             .map(String::as_str),
@@ -496,7 +498,7 @@ fn enabled_with_an_explicit_model_loads() {
 #[test]
 fn unknown_options_are_rejected_at_the_key() {
     assert_error(
-        "providers:\n  opencode:\n    enabled: true\n    model: p/m\n    options:\n      permissions: deny\n",
+        "providers:\n  - id: opencode\n    enabled: true\n    model: p/m\n    options:\n      permissions: deny\n",
         6,
         7,
         "providers.opencode.options.permissions is not supported",
@@ -506,7 +508,7 @@ fn unknown_options_are_rejected_at_the_key() {
 #[test]
 fn malformed_variant_is_rejected_at_the_value() {
     assert_error(
-        "providers:\n  opencode:\n    enabled: true\n    model: p/m\n    options:\n      variant: \"low effort\"\n",
+        "providers:\n  - id: opencode\n    enabled: true\n    model: p/m\n    options:\n      variant: \"low effort\"\n",
         6,
         16,
         "providers.opencode.options.variant must be a nonempty token of letters, digits, dots, underscores and dashes, not starting with '-'",
@@ -516,9 +518,9 @@ fn malformed_variant_is_rejected_at_the_value() {
 #[test]
 fn env_overrides_are_rejected() {
     assert_error(
-        "providers:\n  opencode:\n    enabled: true\n    model: p/m\n    env:\n      OPENCODE_PERMISSION: allow\n",
+        "providers:\n  - id: opencode\n    enabled: true\n    model: p/m\n    env:\n      OPENCODE_PERMISSION: allow\n",
         6,
         7,
-        "providers.opencode.env.OPENCODE_PERMISSION is not an allowed environment variable (no environment overrides are allowed for this provider)",
+        "providers entry \"opencode\".env.OPENCODE_PERMISSION is not an allowed environment variable (no environment overrides are allowed for this provider)",
     );
 }

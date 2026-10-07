@@ -44,8 +44,7 @@ pub fn render(config: &Config, source: &ConfigSource, statuses: &[ProviderStatus
         out.push_str(&provider_line(status));
         out.push('\n');
         if config
-            .providers
-            .get(status.id)
+            .provider(status.id)
             .is_some_and(|settings| settings.enabled)
             && let Some(warning) =
                 providers::descriptor(status.id).and_then(|descriptor| descriptor.risk_warning)
@@ -54,6 +53,9 @@ pub fn render(config: &Config, source: &ConfigSource, statuses: &[ProviderStatus
         }
     }
     let (ready, total) = enabled_ready(statuses);
+    if total == 0 {
+        out.push_str("no providers enabled: every request returns the original text\n");
+    }
     out.push_str(&format!("{ready} of {total} enabled providers ready\n"));
     out
 }
@@ -112,7 +114,11 @@ pub enum LoginCheckError {
     Refused(&'static str),
     /// The ID names no registered provider.
     UnknownProvider,
-    /// The provider is registered but disabled in the configuration.
+    /// The provider is registered but has no entry in the configuration's
+    /// providers list.
+    NotConfigured,
+    /// The provider is registered and listed but disabled in the
+    /// configuration.
     Disabled,
     /// Detection did not find the provider's executable.
     NotInstalled,
@@ -130,6 +136,10 @@ impl LoginCheckError {
             LoginCheckError::UnknownProvider => {
                 (format!("error: provider \"{id}\" is not registered"), 2)
             }
+            LoginCheckError::NotConfigured => (
+                format!("error: cannot check provider \"{id}\": it is not in the providers list"),
+                1,
+            ),
             LoginCheckError::Disabled => (
                 format!("error: cannot check provider \"{id}\": it is disabled"),
                 1,
@@ -168,10 +178,7 @@ pub async fn prepare_login_check(
         return Err(LoginCheckError::Refused(ANTIGRAVITY_REFUSAL));
     }
     let descriptor = providers::descriptor(id).ok_or(LoginCheckError::UnknownProvider)?;
-    let settings = config
-        .providers
-        .get(id)
-        .ok_or(LoginCheckError::UnknownProvider)?;
+    let settings = config.provider(id).ok_or(LoginCheckError::NotConfigured)?;
     if !settings.enabled {
         return Err(LoginCheckError::Disabled);
     }
@@ -391,7 +398,7 @@ mod tests {
     #[test]
     fn render_warns_below_enabled_providers_with_a_risk_warning() {
         let config = crate::config::validate_text_with_descriptors(
-            "providers:\n  opencode:\n    enabled: true\n    model: anthropic/claude-haiku\n",
+            "providers:\n  - id: opencode\n    enabled: true\n    model: anthropic/claude-haiku\n",
             Path::new("pumice.yaml"),
             providers::PROVIDERS,
         )
@@ -417,7 +424,7 @@ mod tests {
     #[test]
     fn render_reports_an_enabled_generic_as_a_local_endpoint() {
         let config = crate::config::validate_text_with_descriptors(
-            "providers:\n  generic:\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
+            "providers:\n  - id: generic\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
             Path::new("pumice.yaml"),
             providers::PROVIDERS,
         )
@@ -487,6 +494,10 @@ mod tests {
         let (line, code) = LoginCheckError::UnknownProvider.line_and_code("nope");
         assert_eq!(line, "error: provider \"nope\" is not registered");
         assert_eq!(code, 2);
+
+        let (line, code) = LoginCheckError::NotConfigured.line_and_code("codex");
+        assert!(line.contains("not in the providers list"));
+        assert_eq!(code, 1);
 
         let (line, code) = LoginCheckError::Disabled.line_and_code("claude");
         assert!(line.contains("disabled"));

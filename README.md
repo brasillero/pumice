@@ -10,14 +10,14 @@ Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude
 ```
 
 - **Works with [Handy](https://github.com/cjpais/Handy)** through its Custom post-processing provider, and with any app that talks to an OpenAI-compatible endpoint.
-- **Uses the official CLIs** of your subscriptions (Claude, Codex, OpenCode; Kimi deferred, Antigravity dormant), or a local OpenAI-compatible service such as Ollama or LM Studio.
-- **Never loses a dictation:** if every provider fails or times out, you get the raw text back.
+- **Uses the official CLIs** of your subscriptions (Claude, Codex, OpenCode, Kimi; Antigravity dormant), or a local OpenAI-compatible service such as Ollama or LM Studio.
+- **Never loses a dictation:** if the selected provider fails or times out, you get the raw text back.
 - **Local and private:** listens on localhost only, no telemetry.
 - **Single executable** for Windows, Linux and macOS, with nothing else to install.
 
 ## Status
 
-Pumice works end to end through Claude and Codex (with a fallback chain), and optionally OpenCode. Run `pumice doctor` to see which CLIs it found.
+Pumice works end to end through Claude and Codex, and optionally OpenCode, Kimi and a local OpenAI-compatible service. You choose the providers in an explicit list in the YAML config — nothing is enabled by default, and there is no fallback: a failure returns the raw dictation. Run `pumice doctor` to see which CLIs it found.
 
 Pumice supports standalone downloads and the npm package `@brasillero/pumice` (installable with npm, pnpm, Bun or npx; the installed command is `pumice`). Check [GitHub Releases](https://github.com/brasillero/pumice/releases) and the [npm registry](https://www.npmjs.com/package/@brasillero/pumice) for published versions. See the [installation guide](docs/install.md) for installation, startup and Handy setup; building from source is also supported below.
 
@@ -44,11 +44,11 @@ In Handy: **Settings → Advanced → Experimental Features → Post Processing*
 
 | Stage | Status |
 | --- | --- |
-| Local formatting service (Claude, Codex, fallback chain) | Implemented |
-| OpenCode, generic loopback adapter, auto-detection | Implemented |
-| Antigravity execution, Kimi integration | Deferred |
+| Local formatting service (Claude, Codex, explicit provider list) | Implemented |
+| OpenCode, Kimi, generic loopback adapter, auto-detection | Implemented |
+| Antigravity execution | Deferred |
 | Distribution: GitHub release archives + npm package | In review (publication is the owner's call) |
-| CLI-managed configuration (one model per provider) | Next |
+| `pumice setup` configuration wizard | Next |
 | Tauri installer, auto-update, start-with-the-system | Deferred |
 
 ## License

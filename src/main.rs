@@ -254,6 +254,9 @@ async fn run_service(loaded: LoadedConfig) -> ExitCode {
     }
     let pipeline = Arc::new(Pipeline::with_detection(&config, built, detection));
 
+    if let Some(line) = default_warning_line(&loaded) {
+        eprintln!("{line}");
+    }
     for warning in providers::risk_warnings(&config, providers::PROVIDERS) {
         eprintln!("{warning}");
     }
@@ -296,7 +299,14 @@ async fn run_service(loaded: LoadedConfig) -> ExitCode {
     // The route goes to stderr with the other status lines, before the
     // listening line: a client may read that first stdout line and close the
     // pipe, and a later `println!` would then panic and stop the service.
-    eprintln!("{}", route_line(&pipeline, config.total_timeout));
+    eprintln!(
+        "{}",
+        route_line(
+            &pipeline,
+            config.total_timeout,
+            &config_location(&loaded.source)
+        )
+    );
     println!("pumice listening on http://127.0.0.1:{}/v1", config.port);
     match api::serve(
         listener,
@@ -314,26 +324,42 @@ async fn run_service(loaded: LoadedConfig) -> ExitCode {
     }
 }
 
-/// The chain a request without a model runs, e.g.
-/// `route: claude (haiku) → codex (gpt-6.1-sol), total timeout 30s`.
-fn route_line(pipeline: &Pipeline, total_timeout: std::time::Duration) -> String {
-    let route: Vec<String> = pipeline
-        .default_route()
-        .into_iter()
-        .map(|(id, model)| {
-            if model.is_empty() {
-                id.to_owned()
-            } else {
-                format!("{id} ({model})")
-            }
-        })
-        .collect();
-    let chain = if route.is_empty() {
-        "no enabled provider: every request returns the original text".to_owned()
-    } else {
-        route.join(" → ")
+/// The startup route line: which provider a model-less request runs, every
+/// enabled provider in list order, and what a failure means — there is no
+/// fallback. When nothing is enabled, one clear line says what that means.
+fn route_line(
+    pipeline: &Pipeline,
+    total_timeout: std::time::Duration,
+    config_path: &str,
+) -> String {
+    let timeout = format!("total timeout {}s", total_timeout.as_secs());
+    let route = pipeline.enabled_route();
+    if route.is_empty() {
+        return format!(
+            "no providers enabled: every request returns the original text (add providers to {config_path}); {timeout}"
+        );
+    }
+    let with_model = |id: &str, model: &str| {
+        if model.is_empty() {
+            id.to_owned()
+        } else {
+            format!("{id} ({model})")
+        }
     };
-    format!("route: {chain}, total timeout {}s", total_timeout.as_secs())
+    let enabled = route
+        .iter()
+        .map(|(id, _)| id.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let default = match pipeline.default_provider() {
+        Some(id) => route
+            .iter()
+            .find(|(entry_id, _)| *entry_id == id)
+            .map(|(entry_id, model)| with_model(entry_id, model))
+            .unwrap_or_else(|| id.to_owned()),
+        None => "none (requests without a model return the original text)".to_owned(),
+    };
+    format!("default: {default}; enabled: {enabled}; on failure: original text; {timeout}")
 }
 
 fn config_location(source: &ConfigSource) -> String {
@@ -352,49 +378,62 @@ fn print_summary(loaded: &LoadedConfig) {
     }
     let config = &loaded.config;
     println!("port: {}", config.port);
-    println!("default provider: {}", config.default_provider);
     println!("total timeout: {}s", config.total_timeout.as_secs());
-    let enabled: Vec<&str> = config
-        .providers
-        .iter()
-        .filter(|(_, settings)| settings.enabled)
-        .map(|(id, _)| id.as_str())
-        .collect();
-    println!(
-        "enabled providers: {}",
-        if enabled.is_empty() {
-            "(none)".to_owned()
-        } else {
-            enabled.join(", ")
+    match (&config.default, &config.default_warning) {
+        (Some(id), _) => println!("default: {id}"),
+        (None, Some(_)) => {
+            println!("default: (not usable; requests without a model return the original text)")
         }
-    );
-    println!(
-        "fallback order: {}",
-        if config.fallback_order.is_empty() {
-            "(none)".to_owned()
-        } else {
-            config.fallback_order.join(", ")
+        (None, None) => {
+            println!("default: (not set; requests without a model return the original text)")
         }
-    );
-    for (id, settings) in &config.providers {
-        if !settings.enabled {
-            continue;
+    }
+    if config.providers.is_empty() {
+        println!("providers: (none configured)");
+    } else {
+        println!("providers (in order):");
+        for entry in &config.providers {
+            let settings = &entry.settings;
+            let state = if settings.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            let mut line = format!("  {}: {state}", entry.id);
+            if !settings.model.is_empty() {
+                line.push_str(&format!(", model {}", settings.model));
+            }
+            if settings.enabled {
+                line.push_str(&format!(", timeout {}s", settings.timeout.as_secs()));
+                if let Some(binary) = &settings.binary {
+                    line.push_str(&format!(", binary {}", binary.display()));
+                }
+            }
+            println!("{line}");
         }
-        match &settings.binary {
-            Some(binary) => println!(
-                "  {id}: model {}, timeout {}s, binary {}",
-                settings.model,
-                settings.timeout.as_secs(),
-                binary.display()
-            ),
-            None => println!(
-                "  {id}: model {}, timeout {}s",
-                settings.model,
-                settings.timeout.as_secs()
-            ),
-        }
+    }
+    if let Some(line) = default_warning_line(loaded) {
+        println!("{line}");
     }
     for warning in providers::risk_warnings(config, providers::PROVIDERS) {
         println!("{warning}");
+    }
+}
+
+/// The positioned warning for a `default:` key that does not resolve to an
+/// enabled provider, e.g. `pumice.yaml:5:10: warning: default "kimi" is
+/// disabled: requests without a model return the original text`. The
+/// position is only known when the configuration came from a file.
+fn default_warning_line(loaded: &LoadedConfig) -> Option<String> {
+    let warning = loaded.config.default_warning.as_ref()?;
+    let line = warning.line();
+    match &loaded.source {
+        ConfigSource::File(path) => Some(format!(
+            "{}:{}:{}: {line}",
+            path.display(),
+            warning.location.line(),
+            warning.location.column()
+        )),
+        ConfigSource::BuiltInDefaults => Some(line),
     }
 }

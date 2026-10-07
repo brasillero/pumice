@@ -96,31 +96,43 @@ then:
 
 No Handy changes are needed beyond this Custom provider configuration.
 
-## Configuration (optional)
+## Configuration
 
-Every setting has a built-in default, so most users never need a config file.
-Provider and model settings are edited manually in a YAML file for now; CLI
-commands to manage them are planned next.
-
-To customize, create the per-user config and edit it:
+Without a config file Pumice starts with no providers: every request
+returns the original text. To format dictations, create the per-user config
+and list the providers you want:
 
 - Windows: `%APPDATA%\pumice\pumice.yaml`
 - Linux and macOS: `~/.config/pumice/pumice.yaml`
   (or `$XDG_CONFIG_HOME/pumice/pumice.yaml`)
 
-Validate it with `pumice check-config`. The config lives outside the install
-folder, so upgrading never touches it.
+```yaml
+default: claude            # used when the client sends no model (optional)
+
+providers:                 # there is no fallback: a failure returns the raw text
+  - id: claude
+    enabled: true          # required on every entry
+    model: haiku           # required when enabled
+  - id: codex
+    enabled: false         # kept in the file, not offered, never run
+```
+
+Every entry needs `id` and `enabled`; `model` is required on enabled
+entries; `timeout_secs`, `binary`, `env` and `options` are optional and
+documented in [`pumice.example.yaml`](../pumice.example.yaml), which shows
+every supported provider. Validate the file with `pumice check-config`. The
+config lives outside the install folder, so upgrading never touches it.
+A `pumice setup` wizard that writes this file is planned next.
 
 Which providers are available today:
 
-- **Claude** and **Codex** — implemented, enabled by default (set the model
-  in Handy to pick one).
-- **OpenCode** — implemented, off by default; enable it in the YAML with an
-  explicit provider/model.
+- **Claude** and **Codex** — implemented; enable them in the YAML (the
+  example config shows how) and set the model in Handy to pick one.
+- **OpenCode** and **Kimi** — implemented, off by default; enable them in
+  the YAML with an explicit model.
 - **Local models (Ollama, LM Studio)** — a generic adapter for
   OpenAI-compatible services listening on `127.0.0.1`, off by default.
 - **Antigravity** — dormant (protocol implemented, opt-in blocked for now).
-- **Kimi** — not integrated (deferred).
 
 ## Upgrade and remove
 
@@ -142,5 +154,5 @@ remove that directory from your PATH if you added it.
 
 Pumice binds to `127.0.0.1` only, sends no telemetry, has no auto-updater and
 makes no external network calls itself. AI CLIs contact their providers;
-the generic adapter connects only to local services. It never loses a dictation: if every
-provider fails or times out, the raw text comes back unchanged.
+the generic adapter connects only to local services. It never loses a dictation: if the
+selected provider fails or times out, the raw text comes back unchanged.

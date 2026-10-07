@@ -56,9 +56,7 @@ use crate::process::{Argument, CliInvocation, ControlFile, ProcessOutput, Proces
 
 pub const ID: &str = "kimi";
 pub const DEFAULT_BINARY: &str = "kimi";
-/// Cheapest model alias that works in the owner's account (verified with
-/// `kimi provider list` and a real call, S2.4).
-pub const DEFAULT_MODEL: &str = "kimi-k2.7-code-highspeed";
+/// Provider default timeout (verified with a real call, S2.4).
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Fixed notice shown by `check-config` and startup while enabled; cites
@@ -101,7 +99,6 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     allowed_env: &[],
     validate_options,
     build,
-    disabled_by_default: true,
     risk_warning: Some(RISK_WARNING),
     validate_settings,
     probe: ProbeSpec::Version(&["--version"]),
@@ -112,9 +109,11 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
 
 fn defaults() -> ProviderSettings {
     ProviderSettings {
-        enabled: true,
+        enabled: false,
         binary: None,
-        model: DEFAULT_MODEL.to_owned(),
+        // The configuration file sets the model on every enabled entry;
+        // nothing is built in.
+        model: String::new(),
         timeout: DEFAULT_TIMEOUT,
         env: BTreeMap::new(),
         options: BTreeMap::new(),
@@ -141,6 +140,12 @@ fn validate_settings(
 ) -> Result<(), ConfigError> {
     if !settings.enabled {
         return Ok(());
+    }
+    if settings.model.is_empty() {
+        return Err(ConfigError::at(
+            locations.model.unwrap_or(serde_saphyr::Location::UNKNOWN),
+            format!("providers.{ID}.model is required when the provider is enabled"),
+        ));
     }
     if !is_valid_model(&settings.model) {
         return Err(ConfigError::at(
@@ -417,9 +422,16 @@ mod tests {
     }
 
     #[test]
-    fn settings_validation_accepts_the_default_model() {
+    fn settings_validation_accepts_a_disabled_entry_without_a_model() {
+        // Built-in defaults are disabled with no model: the loader produces
+        // exactly this from a disabled list entry.
         assert!(validate_settings(&defaults(), &ProviderLocations::default()).is_ok());
+        let mut enabled = defaults();
+        enabled.enabled = true;
+        assert!(validate_settings(&enabled, &ProviderLocations::default()).is_err());
+        // A malformed model on an enabled entry points at the model value.
         let mut settings = defaults();
+        settings.enabled = true;
         settings.model = "-x".to_owned();
         assert!(validate_settings(&settings, &ProviderLocations::default()).is_err());
     }

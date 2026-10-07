@@ -80,7 +80,6 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     allowed_env: ALLOWED_ENV,
     validate_options,
     build,
-    disabled_by_default: true,
     risk_warning: Some(RISK_WARNING),
     validate_settings,
     probe: ProbeSpec::Version(&["--version"]),
@@ -91,7 +90,7 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
 
 fn defaults() -> ProviderSettings {
     ProviderSettings {
-        enabled: true,
+        enabled: false,
         binary: None,
         // No default model: an explicit provider/model is required to
         // enable the adapter, so a hosted default is never selected.
@@ -540,8 +539,7 @@ mod tests {
 
     #[test]
     fn settings_validation_requires_an_explicit_model() {
-        // Disabled is valid; the loader produces it from
-        // `disabled_by_default` when the file has no entry.
+        // Disabled is valid; an unlisted provider never reaches the loader.
         let disabled = ProviderSettings {
             enabled: false,
             ..defaults()

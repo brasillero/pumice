@@ -2,14 +2,12 @@
 //! ordinary log sink, never dictated text.
 //!
 //! An entry is a header line with the outcome, the provider and model that
-//! produced the text, the total time and the text length. When a provider
-//! failed along the way, one indented line per attempt follows, so a fallback
-//! shows where it came from and why:
+//! produced the text, the total time and the text length. When the provider
+//! ran but failed, one indented attempt line follows with the safe reason:
 //!
 //! ```text
-//! 2026-10-06 14:04:01  #13  formatted  codex (gpt-6.1-sol)  9.1s  98 chars  [requested: claude, fallback]
+//! 2026-10-06 14:04:01  #13  RAW          original text returned: timed out  6.2s  98 chars  [requested: claude]
 //!                           ✗ claude (haiku)        timed out          6.0s
-//!                           ✓ codex (gpt-6.1-sol)   formatted          3.1s
 //! ```
 
 use std::fmt::Write as _;
@@ -67,15 +65,12 @@ fn render_at(entry: &Entry<'_>, color: bool, timestamp: &str) -> String {
             Style::Yellow,
             format!(
                 "original text returned: {}",
-                raw_reason(reason, entry.requested, outcome.trail.len())
+                raw_reason(reason, entry.requested)
             ),
         ),
     };
 
-    let mut notes = vec![format!("requested: {}", requested(entry.requested))];
-    if fell_back && outcome.kind == OutcomeKind::Formatted {
-        notes.push("fallback".to_owned());
-    }
+    let notes = format!("requested: {}", requested(entry.requested));
 
     let mut out = String::new();
     let _ = write!(
@@ -87,7 +82,7 @@ fn render_at(entry: &Entry<'_>, color: bool, timestamp: &str) -> String {
         what,
         seconds(outcome.elapsed),
         outcome.text.chars().count(),
-        paint.apply(Style::Dim, &format!("[{}]", notes.join(", "))),
+        paint.apply(Style::Dim, &format!("[{notes}]")),
     );
 
     if fell_back {
@@ -164,7 +159,7 @@ fn requested(requested: Option<&str>) -> String {
     }
 }
 
-fn raw_reason(reason: RawReason, requested_model: Option<&str>, attempts: usize) -> String {
+fn raw_reason(reason: RawReason, requested_model: Option<&str>) -> String {
     match reason {
         RawReason::UnknownProvider => format!(
             "no provider named \"{}\" in the config",
@@ -174,12 +169,13 @@ fn raw_reason(reason: RawReason, requested_model: Option<&str>, attempts: usize)
             "provider \"{}\" is disabled in the config",
             requested(requested_model)
         ),
+        RawReason::NoDefault => {
+            "no usable default: requests without a model return the original text".to_owned()
+        }
         RawReason::Busy => "another dictation was still being formatted".to_owned(),
         RawReason::BudgetExhausted => "the total time budget ran out".to_owned(),
-        RawReason::ProviderFailed(error) if attempts <= 1 => provider_error(error),
-        RawReason::ProviderFailed(_) => "every provider failed".to_owned(),
-        RawReason::CleanupFailed if attempts <= 1 => "output rejected by cleanup".to_owned(),
-        RawReason::CleanupFailed => "every provider failed".to_owned(),
+        RawReason::ProviderFailed(error) => provider_error(error),
+        RawReason::CleanupFailed => "output rejected by cleanup".to_owned(),
     }
 }
 
@@ -287,19 +283,16 @@ mod tests {
     }
 
     #[test]
-    fn fallback_lists_every_attempt_with_its_reason() {
+    fn failure_lists_the_single_attempt_with_its_reason() {
         let outcome = outcome(
-            OutcomeKind::Formatted,
-            Some("codex"),
-            vec![
-                attempt(
-                    "claude",
-                    "haiku",
-                    AttemptResult::Failed(ProviderError::Timeout),
-                    6_000,
-                ),
-                attempt("codex", "gpt-6.1-sol", AttemptResult::Formatted, 3_100),
-            ],
+            OutcomeKind::Raw(RawReason::ProviderFailed(ProviderError::Timeout)),
+            None,
+            vec![attempt(
+                "claude",
+                "haiku",
+                AttemptResult::Failed(ProviderError::Timeout),
+                6_000,
+            )],
         );
         let text = plain(&Entry {
             number: 13,
@@ -307,45 +300,31 @@ mod tests {
             outcome: &outcome,
         });
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 3, "{text}");
-        assert!(
-            lines[0].contains("formatted    codex (gpt-6.1-sol)"),
-            "{text}"
-        );
-        assert!(lines[0].contains("[requested: claude, fallback]"), "{text}");
+        assert_eq!(lines.len(), 2, "{text}");
+        assert!(lines[0].contains("RAW"), "{text}");
+        assert!(lines[0].contains("[requested: claude]"), "{text}");
+        assert!(!lines[0].contains("fallback"), "{text}");
         assert!(
             lines[1].contains("✗ claude (haiku)") && lines[1].contains("timed out"),
-            "{text}"
-        );
-        assert!(
-            lines[2].contains("✓ codex (gpt-6.1-sol)") && lines[2].contains("3.1s"),
             "{text}"
         );
     }
 
     #[test]
-    fn raw_after_chain_says_every_provider_failed() {
+    fn raw_after_failure_names_the_provider_error() {
         let outcome = outcome(
             OutcomeKind::Raw(RawReason::ProviderFailed(ProviderError::RateLimited {
                 retry_after: Some(Duration::from_secs(60)),
             })),
             None,
-            vec![
-                attempt(
-                    "claude",
-                    "haiku",
-                    AttemptResult::Failed(ProviderError::NotLoggedIn),
-                    900,
-                ),
-                attempt(
-                    "codex",
-                    "gpt-6.1-sol",
-                    AttemptResult::Failed(ProviderError::RateLimited {
-                        retry_after: Some(Duration::from_secs(60)),
-                    }),
-                    2_100,
-                ),
-            ],
+            vec![attempt(
+                "claude",
+                "haiku",
+                AttemptResult::Failed(ProviderError::RateLimited {
+                    retry_after: Some(Duration::from_secs(60)),
+                }),
+                2_100,
+            )],
         );
         let text = plain(&Entry {
             number: 14,
@@ -353,10 +332,9 @@ mod tests {
             outcome: &outcome,
         });
         assert!(
-            text.contains("RAW          original text returned: every provider failed"),
+            text.contains("RAW          original text returned: rate limited (retry in 60s)"),
             "{text}"
         );
-        assert!(text.contains("not logged in"), "{text}");
         assert!(text.contains("rate limited (retry in 60s)"), "{text}");
     }
 

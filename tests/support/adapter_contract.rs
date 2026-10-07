@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use pumice::config::{Config, DebugLogSettings, PromptSettings};
+use pumice::config::{Config, DebugLogSettings, PromptSettings, ProviderConfig};
 use pumice::pipeline::{OutcomeKind, Pipeline};
 use pumice::providers::{
     self, FormatInput, Provider, ProviderError, ProviderErrorCode, ProviderSettings, UserPrompt,
@@ -209,8 +209,8 @@ macro_rules! adapter_contract {
             }
 
             #[tokio::test]
-            async fn fallback_participation() {
-                $crate::support::adapter_contract::fallback_participation::<$adapter>().await;
+            async fn failure_is_terminal() {
+                $crate::support::adapter_contract::failure_is_terminal::<$adapter>().await;
             }
         }
     };
@@ -307,26 +307,28 @@ fn settings_at<A: ContractAdapter>(fake: &FakeCli) -> ProviderSettings {
 }
 
 /// Builds a configuration directly (YAML validation knows only registered
-/// ids), like `tests/pipeline.rs` does for its chain tests.
+/// ids), like `tests/pipeline.rs` does for its selection tests.
 fn chain_config(
-    default_provider: &str,
+    default: Option<&str>,
     total_timeout: Duration,
-    fallback_order: &[&str],
     entries: Vec<(&str, ProviderSettings)>,
 ) -> Config {
     Config {
         port: 7567,
-        default_provider: default_provider.to_owned(),
         total_timeout,
-        fallback_order: fallback_order.iter().map(|id| id.to_string()).collect(),
         prompts: PromptSettings::default(),
         debug_log: DebugLogSettings {
             enabled: false,
             path: PathBuf::from("pumice-debug.jsonl"),
         },
+        default: default.map(str::to_owned),
+        default_warning: None,
         providers: entries
             .into_iter()
-            .map(|(id, settings)| (id.to_owned(), settings))
+            .map(|(id, settings)| ProviderConfig {
+                id: id.to_owned(),
+                settings,
+            })
             .collect(),
     }
 }
@@ -533,18 +535,19 @@ pub async fn privacy<A: ContractAdapter>() {
     assert_error_is_text_free(&err, &marker);
 }
 
-/// Fallback participation: with this adapter selected and failing, the
-/// chain moves on to a scripted double; with the double selected and
-/// failing, this adapter formats successfully as the fallback.
-pub async fn fallback_participation<A: ContractAdapter>() {
-    // Selected and failing: the chain advances to the double.
+/// No fallback (owner decision 2026-10-07): with this adapter selected and
+/// failing, the original text comes back raw and a scripted double is never
+/// invoked; the double's failure never reaches this adapter either.
+pub async fn failure_is_terminal<A: ContractAdapter>() {
+    use pumice::pipeline::RawReason;
+
+    // Selected and failing: raw text, the double never runs.
     let (stdout, exit_code) = A::not_logged_in("contract-suite");
     let fake = FakeCli::new(json!({"stdout": stdout, "exit_code": exit_code}));
-    let backup = TestProvider::new("backup", vec![Step::Ready("Olá de novo.".to_owned())]);
+    let backup = TestProvider::new("backup", vec![Step::Ready("unused".to_owned())]);
     let config = chain_config(
-        A::ID,
+        Some(A::ID),
         Duration::from_secs(30),
-        &["backup"],
         vec![
             (A::ID, settings_at::<A>(&fake)),
             ("backup", settings_at::<A>(&fake)),
@@ -557,21 +560,22 @@ pub async fn fallback_participation<A: ContractAdapter>() {
     let outcome = pipeline
         .format(&handy_request(None, "ola mundo"), Instant::now())
         .await;
-    assert_eq!(outcome.kind, OutcomeKind::Formatted);
-    assert_eq!(outcome.provider, Some("backup"));
-    assert_eq!(outcome.attempts, 2);
-    assert_eq!(outcome.text, "Olá de novo.");
+    assert_eq!(
+        outcome.kind,
+        OutcomeKind::Raw(RawReason::ProviderFailed(ProviderError::NotLoggedIn))
+    );
+    assert_eq!(outcome.text, "ola mundo");
+    assert_eq!(outcome.attempts, 1);
     assert!(fake.report_path().exists(), "the adapter ran once");
-    assert_eq!(backup.calls(), 1);
+    assert_eq!(backup.calls(), 0, "a failure never tries another provider");
 
-    // Selected double failing: this adapter formats as the fallback.
-    let (stdout, exit_code) = A::success("Texto formatado.");
+    // The double selected and failing: this adapter never runs.
+    let (stdout, exit_code) = A::success("unused");
     let fake = FakeCli::new(json!({"stdout": stdout, "exit_code": exit_code}));
     let alpha = TestProvider::new("alpha", vec![Step::Fail(ProviderError::NotLoggedIn)]);
     let config = chain_config(
-        "alpha",
+        Some("alpha"),
         Duration::from_secs(30),
-        &[A::ID],
         vec![
             ("alpha", settings_at::<A>(&fake)),
             (A::ID, settings_at::<A>(&fake)),
@@ -584,14 +588,16 @@ pub async fn fallback_participation<A: ContractAdapter>() {
     let outcome = pipeline
         .format(&handy_request(None, "ola mundo"), Instant::now())
         .await;
-    assert_eq!(outcome.kind, OutcomeKind::Formatted);
-    assert_eq!(outcome.provider, Some(A::ID));
-    assert_eq!(outcome.attempts, 2);
-    assert_eq!(outcome.text, "Texto formatado.");
+    assert_eq!(
+        outcome.kind,
+        OutcomeKind::Raw(RawReason::ProviderFailed(ProviderError::NotLoggedIn))
+    );
+    assert_eq!(outcome.text, "ola mundo");
+    assert_eq!(outcome.attempts, 1);
     assert_eq!(alpha.calls(), 1);
     assert!(
-        fake.report_path().exists(),
-        "the adapter ran as the fallback"
+        !fake.report_path().exists(),
+        "the adapter never runs after another provider failed"
     );
 }
 

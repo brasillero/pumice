@@ -125,8 +125,8 @@ mod kimi {
     }
 
     #[tokio::test]
-    async fn fallback_participation() {
-        support::adapter_contract::fallback_participation::<KimiContract>().await;
+    async fn failure_is_terminal() {
+        support::adapter_contract::failure_is_terminal::<KimiContract>().await;
     }
 
     /// Kimi's transport: the prompt is one `-p` argv element (print mode

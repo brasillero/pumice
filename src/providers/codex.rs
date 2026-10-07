@@ -37,8 +37,7 @@ use crate::process::{
 
 pub const ID: &str = "codex";
 pub const DEFAULT_BINARY: &str = "codex";
-/// Recommended initial model, measured in Phase 0.
-pub const DEFAULT_MODEL: &str = "gpt-6.1-sol";
+/// Provider default timeout, measured in Phase 0.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Codex accepts no environment overrides: routing belongs in the user's
@@ -57,7 +56,6 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     allowed_env: ALLOWED_ENV,
     validate_options,
     build,
-    disabled_by_default: false,
     risk_warning: None,
     validate_settings: validate_settings_noop,
     probe: ProbeSpec::Version(&["--version"]),
@@ -68,9 +66,11 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
 
 fn defaults() -> ProviderSettings {
     ProviderSettings {
-        enabled: true,
+        enabled: false,
         binary: None,
-        model: DEFAULT_MODEL.to_owned(),
+        // The configuration file sets the model on every enabled entry;
+        // nothing is built in.
+        model: String::new(),
         timeout: DEFAULT_TIMEOUT,
         env: BTreeMap::new(),
         options: BTreeMap::new(),

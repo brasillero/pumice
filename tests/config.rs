@@ -6,10 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use pumice::config::{self, Config, ConfigSource, DEFAULT_PORT};
+use pumice::config::{self, Config, ConfigSource, DEFAULT_PORT, DefaultWarningKind};
 use pumice::process::ProcessRunner;
 use pumice::providers::{self, ProviderDescriptor, ProviderSettings};
 use tempfile::TempDir;
@@ -49,85 +48,42 @@ fn assert_error(text: &str, line: u64, column: u64, message: &str) {
 }
 
 fn claude(config: &Config) -> &ProviderSettings {
-    config
-        .providers
-        .get("claude")
-        .expect("claude is configured")
+    config.provider("claude").expect("claude is configured")
 }
 
 fn codex(config: &Config) -> &ProviderSettings {
-    config.providers.get("codex").expect("codex is configured")
+    config.provider("codex").expect("codex is configured")
 }
 
 fn no_env(_: &str) -> Option<OsString> {
     None
 }
 
-/// Synthetic provider descriptors exercising registry capabilities
-/// (default-off behavior, risk warnings, full-settings validation) against
-/// `config::validate_text_with_descriptors`, leaving the built-in registry
-/// untouched.
+/// Synthetic provider descriptor exercising registry capabilities (explicit
+/// enablement, risk warnings) against `config::validate_text_with_descriptors`,
+/// leaving the built-in registry untouched.
 mod capability_probe {
     use std::collections::BTreeMap;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use pumice::config::ConfigError;
     use pumice::process::ProcessRunner;
     use pumice::providers::{
-        ProbeSpec, Provider, ProviderDescriptor, ProviderLocations, ProviderSettings, RawOption,
+        ProbeSpec, Provider, ProviderDescriptor, ProviderSettings, RawOption,
+        validate_settings_noop,
     };
-    use serde_saphyr::Location;
 
-    /// How often `COUNTING.validate_settings` ran. Dedicated to one test so
-    /// parallel tests never observe each other's counts.
-    pub static COUNT_VALIDATIONS: AtomicUsize = AtomicUsize::new(0);
-
-    /// The OpenCode shape: off by default, and `enabled` without an explicit
-    /// `model` is rejected at the `enabled` line.
+    /// The OpenCode shape: a risk warning, and off until the file says
+    /// `enabled: true`.
     pub const PROBE: ProviderDescriptor = ProviderDescriptor {
         id: "probe",
         defaults: probe_defaults,
         allowed_env: &[],
         validate_options: probe_validate_options,
         build: probe_build,
-        disabled_by_default: true,
         risk_warning: Some("the probe formats nothing and is not real"),
-        validate_settings: probe_validate_settings,
-        probe: ProbeSpec::PathOnly,
-        default_binary: "probe-cli",
-        npm_entrypoint: None,
-        install_hint: "the probe is not installable",
-    };
-
-    /// The same model requirement without the opt-in: even an absent entry
-    /// is validated, and with no `enabled` line the error has no position.
-    pub const BARE: ProviderDescriptor = ProviderDescriptor {
-        id: "bare",
-        defaults: probe_defaults,
-        allowed_env: &[],
-        validate_options: probe_validate_options,
-        build: probe_build,
-        disabled_by_default: false,
-        risk_warning: None,
-        validate_settings: bare_validate_settings,
-        probe: ProbeSpec::PathOnly,
-        default_binary: "probe-cli",
-        npm_entrypoint: None,
-        install_hint: "the probe is not installable",
-    };
-
-    /// Validates quietly when left disabled; exists only to be counted.
-    pub const COUNTING: ProviderDescriptor = ProviderDescriptor {
-        id: "counting",
-        defaults: probe_defaults,
-        allowed_env: &[],
-        validate_options: probe_validate_options,
-        build: probe_build,
-        disabled_by_default: true,
-        risk_warning: None,
-        validate_settings: counting_validate_settings,
+        validate_settings: validate_settings_noop,
         probe: ProbeSpec::PathOnly,
         default_binary: "probe-cli",
         npm_entrypoint: None,
@@ -136,7 +92,7 @@ mod capability_probe {
 
     fn probe_defaults() -> ProviderSettings {
         ProviderSettings {
-            enabled: true, // the loader replaces this per `disabled_by_default`
+            enabled: false, // the loader replaces this with the entry's explicit value
             binary: None,
             model: String::new(),
             timeout: Duration::from_secs(30),
@@ -162,43 +118,7 @@ mod capability_probe {
         _settings: &ProviderSettings,
         _runner: Arc<ProcessRunner>,
     ) -> Result<Arc<dyn Provider>, ConfigError> {
-        panic!("the probe descriptors are never built")
-    }
-
-    fn probe_validate_settings(
-        settings: &ProviderSettings,
-        locations: &ProviderLocations,
-    ) -> Result<(), ConfigError> {
-        model_required_when_enabled("probe", settings, locations)
-    }
-
-    fn bare_validate_settings(
-        settings: &ProviderSettings,
-        locations: &ProviderLocations,
-    ) -> Result<(), ConfigError> {
-        model_required_when_enabled("bare", settings, locations)
-    }
-
-    fn counting_validate_settings(
-        settings: &ProviderSettings,
-        locations: &ProviderLocations,
-    ) -> Result<(), ConfigError> {
-        COUNT_VALIDATIONS.fetch_add(1, Ordering::SeqCst);
-        model_required_when_enabled("counting", settings, locations)
-    }
-
-    fn model_required_when_enabled(
-        id: &str,
-        settings: &ProviderSettings,
-        locations: &ProviderLocations,
-    ) -> Result<(), ConfigError> {
-        if settings.enabled && settings.model.is_empty() {
-            return Err(ConfigError::at(
-                locations.enabled.unwrap_or(Location::UNKNOWN),
-                format!("providers.{id}.model is required when the provider is enabled"),
-            ));
-        }
-        Ok(())
+        panic!("the probe descriptor is never built")
     }
 }
 
@@ -207,83 +127,16 @@ fn empty_file_gives_all_defaults() {
     let config = load_text("").expect("empty file loads");
     assert_eq!(config.port, DEFAULT_PORT);
     assert_eq!(config.port, 7567);
-    assert_eq!(config.default_provider, "claude");
     assert_eq!(config.total_timeout, Duration::from_secs(30));
-    assert!(config.fallback_order.is_empty());
     assert_eq!(config.prompts.system, None);
     assert_eq!(config.prompts.user, None);
     assert!(!config.debug_log.enabled);
-    assert_eq!(config.providers.len(), 7);
 
-    let claude = claude(&config);
-    assert!(claude.enabled);
-    assert_eq!(claude.binary, None);
-    assert_eq!(claude.model, "haiku");
-    assert_eq!(claude.timeout, Duration::from_secs(30));
-    assert!(claude.env.is_empty());
-    assert!(claude.options.is_empty());
-
-    let codex = codex(&config);
-    assert!(codex.enabled);
-    assert_eq!(codex.binary, None);
-    assert_eq!(codex.model, "gpt-6.1-sol");
-    assert_eq!(codex.timeout, Duration::from_secs(30));
-    assert!(codex.env.is_empty());
-    assert!(codex.options.is_empty());
-
-    // Antigravity is registered but dormant: off by default, with no model.
-    let antigravity = config
-        .providers
-        .get("antigravity")
-        .expect("antigravity is configured");
-    assert!(!antigravity.enabled);
-    assert!(antigravity.model.is_empty());
-    assert_eq!(antigravity.timeout, Duration::from_secs(30));
-    assert!(antigravity.env.is_empty());
-    assert!(antigravity.options.is_empty());
-
-    // OpenCode is registered but dormant: off by default, with no model.
-    let opencode = config
-        .providers
-        .get("opencode")
-        .expect("opencode is configured");
-    assert!(!opencode.enabled);
-    assert!(opencode.model.is_empty());
-    assert_eq!(opencode.timeout, Duration::from_secs(30));
-    assert!(opencode.env.is_empty());
-    assert!(opencode.options.is_empty());
-
-    // The generic loopback adapter is registered but off by default, with no
-    // model and no base URL.
-    let generic = config
-        .providers
-        .get("generic")
-        .expect("generic is configured");
-    assert!(!generic.enabled);
-    assert!(generic.model.is_empty());
-    assert_eq!(generic.timeout, Duration::from_secs(30));
-    assert!(generic.binary.is_none());
-    assert!(generic.env.is_empty());
-    assert!(generic.options.is_empty());
-
-    // Kimi is registered but off by default, with the cheapest verified
-    // model alias as its default.
-    let kimi = config.providers.get("kimi").expect("kimi is configured");
-    assert!(!kimi.enabled);
-    assert_eq!(kimi.model, "kimi-k2.7-code-highspeed");
-    assert_eq!(kimi.timeout, Duration::from_secs(30));
-    assert!(kimi.binary.is_none());
-    assert!(kimi.env.is_empty());
-    assert!(kimi.options.is_empty());
-
-    // Kiro is registered but dormant: off by default, with no model.
-    let kiro = config.providers.get("kiro").expect("kiro is configured");
-    assert!(!kiro.enabled);
-    assert!(kiro.model.is_empty());
-    assert_eq!(kiro.timeout, Duration::from_secs(30));
-    assert!(kiro.binary.is_none());
-    assert!(kiro.env.is_empty());
-    assert!(kiro.options.is_empty());
+    // Since 0.2 an empty file configures nothing: no providers, no default,
+    // no warning — every request returns the original text.
+    assert!(config.providers.is_empty());
+    assert_eq!(config.default, None);
+    assert!(config.default_warning.is_none());
 }
 
 #[test]
@@ -303,7 +156,7 @@ fn missing_default_config_gives_all_defaults() {
     assert_eq!(loaded.config.port, from_empty.port);
     assert_eq!(loaded.config.providers, from_empty.providers);
     assert_eq!(loaded.config.prompts, from_empty.prompts);
-    assert_eq!(loaded.config.fallback_order, from_empty.fallback_order);
+    assert_eq!(loaded.config.default, from_empty.default);
 }
 
 #[test]
@@ -315,7 +168,7 @@ fn comment_only_file_gives_all_defaults() {
 #[test]
 fn partial_nested_override_keeps_sibling_defaults() {
     let config = load_text(
-        "prompts:\n  system: Keep technical terms.\nproviders:\n  claude:\n    timeout_secs: 5\n",
+        "prompts:\n  system: Keep technical terms.\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    timeout_secs: 5\n",
     )
     .expect("partial override loads");
     assert_eq!(config.port, 7567);
@@ -336,21 +189,48 @@ fn null_sections_behave_like_absent_ones() {
     let config =
         load_text("providers: null\nprompts: null\ndebug_log: null\n").expect("null sections load");
     assert_eq!(config.port, 7567);
-    assert!(claude(&config).enabled);
+    assert!(config.providers.is_empty());
 
-    let config = load_text("providers:\n  claude:\n    env: null\n    options: null\n")
-        .expect("null provider sections load");
+    let config = load_text(
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    env: null\n    options: null\n",
+    )
+    .expect("null provider sections load");
     let claude = claude(&config);
     assert!(claude.env.is_empty());
     assert!(claude.options.is_empty());
 }
 
 #[test]
-fn empty_mappings_behave_like_absent_ones() {
-    let config = load_text("providers: {}\nfallback_order: []\n").expect("empty maps load");
-    assert_eq!(config.port, 7567);
-    assert!(claude(&config).enabled);
-    assert!(config.fallback_order.is_empty());
+fn mapping_form_of_providers_fails_with_a_removal_hint() {
+    // The pre-0.2 mapping form (empty or not) fails with the list form that
+    // replaced it, positioned at the mapping value.
+    let error = load_error("providers: {}\n");
+    assert!(
+        error.contains(
+            "the mapping form of \"providers\" was removed in 0.2; use an ordered list instead"
+        ),
+        "{error}"
+    );
+    assert!(
+        error.contains(":1:12:"),
+        "positioned at the value:\n{error}"
+    );
+
+    let error = load_error("providers:\n  claude:\n    enabled: true\n");
+    assert!(
+        error.contains(
+            "the mapping form of \"providers\" was removed in 0.2; use an ordered list instead"
+        ),
+        "{error}"
+    );
+    assert!(
+        error.contains(":2:3:"),
+        "positioned at the first entry key:\n{error}"
+    );
+    assert!(
+        error.contains(CONFIG_NAME),
+        "error names the file:\n{error}"
+    );
 }
 
 #[test]
@@ -375,10 +255,10 @@ fn crlf_line_endings_parse_and_positions_count_lines() {
 
     // Line numbers count CRLF files exactly like LF files.
     assert_error(
-        "port: 9001\r\nproviders:\r\n  claude:\r\n    timeout_secs: 0\r\n",
-        4,
+        "port: 9001\r\nproviders:\r\n  - id: claude\r\n    enabled: true\r\n    model: haiku\r\n    timeout_secs: 0\r\n",
+        6,
         19,
-        "providers.claude.timeout_secs must be greater than zero",
+        "providers entry \"claude\".timeout_secs must be greater than zero",
     );
 }
 
@@ -408,10 +288,10 @@ fn zero_timeouts_are_rejected_at_the_value() {
     );
     // Line 12 and column 19, matching the documented error shape.
     assert_error(
-        "# nine comment lines place the value on line 12\n# 2\n# 3\n# 4\n# 5\n# 6\n# 7\n# 8\n# 9\nproviders:\n  claude:\n    timeout_secs: 0\n",
+        "# seven comment lines place the value on line 12\n# 2\n# 3\n# 4\n# 5\n# 6\n# 7\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    timeout_secs: 0\n",
         12,
         19,
-        "providers.claude.timeout_secs must be greater than zero",
+        "providers entry \"claude\".timeout_secs must be greater than zero",
     );
 }
 
@@ -441,8 +321,8 @@ fn unknown_top_level_key_is_rejected_at_the_key() {
 #[test]
 fn unknown_nested_key_is_rejected_at_the_key() {
     assert_error(
-        "providers:\n  claude:\n    unknown_key: 1\n",
-        3,
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    unknown_key: 1\n",
+        5,
         5,
         "unknown setting `unknown_key`",
     );
@@ -458,8 +338,8 @@ fn unknown_nested_key_is_rejected_at_the_key() {
 fn duplicate_keys_are_rejected_at_the_second_key() {
     assert_error("port: 1\nport: 2\n", 2, 1, "duplicate key `port`");
     assert_error(
-        "providers:\n  claude:\n    timeout_secs: 1\n    timeout_secs: 2\n",
-        4,
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    timeout_secs: 1\n    timeout_secs: 2\n",
+        6,
         5,
         "duplicate key `timeout_secs`",
     );
@@ -476,86 +356,180 @@ fn multiple_documents_are_rejected() {
 }
 
 #[test]
-fn unknown_provider_is_rejected_at_its_key() {
+fn unknown_provider_is_rejected_at_its_id() {
     assert_error(
-        "providers:\n  bogus:\n    enabled: true\n",
+        "providers:\n  - id: bogus\n    enabled: true\n    model: haiku\n",
         2,
-        3,
-        "providers.bogus is not a known provider",
+        9,
+        "\"bogus\" is not a known provider",
     );
 }
 
 #[test]
-fn unknown_default_provider_is_rejected_at_the_value() {
+fn duplicate_provider_entries_are_rejected_at_the_second_id() {
     assert_error(
-        "default_provider: gemini\n",
-        1,
-        19,
-        "default_provider \"gemini\" is not a known provider",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n  - id: claude\n    enabled: false\n",
+        5,
+        9,
+        "duplicate provider \"claude\" in providers",
     );
 }
 
 #[test]
-fn disabled_default_provider_is_rejected() {
-    // Explicit default provider: the error points at its value.
+fn missing_enabled_is_rejected_at_the_id() {
     assert_error(
-        "default_provider: claude\nproviders:\n  claude:\n    enabled: false\n",
-        1,
-        19,
-        "default_provider \"claude\" is disabled",
+        "providers:\n  - id: claude\n    model: haiku\n",
+        2,
+        9,
+        "providers entry \"claude\" has no \"enabled\"; add \"enabled: true\" or \"enabled: false\"",
     );
-    // Implicit default provider: the error points at the `enabled` flag.
-    assert_error(
-        "providers:\n  claude:\n    enabled: false\n",
-        3,
-        14,
-        "the default provider \"claude\" is disabled",
+}
+
+#[test]
+fn default_provider_key_fails_with_a_removal_hint() {
+    let error = load_error("default_provider: gemini\n");
+    assert!(
+        error.contains("\"default_provider\" was removed in 0.2:"),
+        "{error}"
+    );
+    assert!(
+        error.contains("providers:\n  - id: claude\n    enabled: true\n    model: haiku"),
+        "{error}"
+    );
+    assert!(
+        error.contains(CONFIG_NAME),
+        "error names the file:\n{error}"
+    );
+}
+
+#[test]
+fn fallback_order_key_fails_with_a_removal_hint() {
+    let error = load_error("fallback_order:\n  - claude\n  - claude\n");
+    assert!(
+        error.contains("\"fallback_order\" was removed in 0.2:"),
+        "{error}"
+    );
+    assert!(
+        error.contains("providers:\n  - id: claude\n    enabled: true\n    model: haiku"),
+        "{error}"
+    );
+    assert!(
+        error.contains(CONFIG_NAME),
+        "error names the file:\n{error}"
+    );
+}
+
+#[test]
+fn default_resolves_case_insensitively_to_an_enabled_entry() {
+    let config = load_text(
+        "default: Claude\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n",
+    )
+    .expect("default loads");
+    assert_eq!(config.default.as_deref(), Some("claude"));
+    assert!(config.default_warning.is_none());
+}
+
+#[test]
+fn default_naming_a_disabled_provider_warns() {
+    // A disabled `default:` target is a warning, not an error: startup
+    // succeeds and model-less requests return the original text.
+    let config = load_text("default: claude\nproviders:\n  - id: claude\n    enabled: false\n")
+        .expect("a disabled default degrades to a warning");
+    assert_eq!(config.default, None);
+    let warning = config.default_warning.expect("the warning is kept");
+    assert_eq!(warning.id, "claude");
+    assert_eq!(warning.kind, DefaultWarningKind::Disabled);
+    assert_eq!(warning.location.line(), 1);
+    assert_eq!(
+        warning.line(),
+        "warning: default \"claude\" is disabled: requests without a model return the original text"
+    );
+}
+
+#[test]
+fn default_naming_an_unknown_unlisted_or_blank_provider_warns() {
+    // Unknown provider id.
+    let config = load_text("default: nope\n").expect("loads with a warning");
+    assert_eq!(config.default, None);
+    let warning = config.default_warning.expect("the warning is kept");
+    assert_eq!(warning.id, "nope");
+    assert_eq!(warning.kind, DefaultWarningKind::Unknown);
+    assert_eq!(
+        warning.line(),
+        "warning: default \"nope\" is not a known provider: requests without a model return the original text"
+    );
+
+    // Known, but not listed in `providers:`.
+    let config = load_text(
+        "default: codex\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n",
+    )
+    .expect("loads with a warning");
+    assert_eq!(config.default, None);
+    let warning = config.default_warning.expect("the warning is kept");
+    assert_eq!(warning.id, "codex");
+    assert_eq!(warning.kind, DefaultWarningKind::NotListed);
+    assert_eq!(
+        warning.line(),
+        "warning: default \"codex\" is not in the providers list: requests without a model return the original text"
+    );
+
+    // Blank value.
+    let config = load_text("default: \"\"\n").expect("loads with a warning");
+    assert_eq!(config.default, None);
+    let warning = config.default_warning.expect("the warning is kept");
+    assert_eq!(warning.kind, DefaultWarningKind::Empty);
+    assert_eq!(
+        warning.line(),
+        "warning: default is empty: requests without a model return the original text"
+    );
+
+    // Explicit null: empty, not absent — still a positioned warning.
+    let config = load_text("default:\n").expect("loads with a warning");
+    assert_eq!(config.default, None);
+    let warning = config.default_warning.expect("the warning is kept");
+    assert_eq!(warning.kind, DefaultWarningKind::Empty);
+    assert_eq!(warning.location.line(), 1);
+    assert_eq!(
+        warning.line(),
+        "warning: default is empty: requests without a model return the original text"
     );
 }
 
 #[test]
 fn empty_model_is_rejected_at_the_value() {
     assert_error(
-        "providers:\n  claude:\n    model: \"\"\n",
-        3,
+        "providers:\n  - id: claude\n    enabled: true\n    model: \"\"\n",
+        4,
         12,
-        "providers.claude.model must not be empty",
+        "providers entry \"claude\".model must not be empty",
     );
     assert_error(
-        "providers:\n  claude:\n    model: \"   \"\n",
-        3,
+        "providers:\n  - id: claude\n    enabled: true\n    model: \"   \"\n",
+        4,
         12,
-        "providers.claude.model must not be empty",
+        "providers entry \"claude\".model must not be empty",
     );
 }
 
 #[test]
-fn unknown_fallback_entry_is_rejected_at_the_entry() {
-    assert_error(
-        "fallback_order:\n  - gemini\n",
-        2,
-        5,
-        "unknown provider \"gemini\" in fallback_order",
-    );
-}
-
-#[test]
-fn duplicate_fallback_entries_are_rejected_at_the_second_entry() {
-    assert_error(
-        "fallback_order:\n  - claude\n  - claude\n",
-        3,
-        5,
-        "duplicate provider \"claude\" in fallback_order",
-    );
+fn empty_model_on_a_disabled_entry_is_allowed() {
+    // `model` is only required when the entry is enabled; a disabled entry
+    // may keep an empty one (this is the shape `pumice setup` will write
+    // for a provider the owner has not picked a model for yet).
+    let config = load_text("providers:\n  - id: claude\n    enabled: false\n    model: \"\"\n")
+        .expect("a disabled entry with an empty model loads");
+    let claude = config.provider("claude").expect("claude is configured");
+    assert!(!claude.enabled);
+    assert!(claude.model.is_empty());
 }
 
 #[test]
 fn disallowed_env_override_is_rejected_at_the_key() {
     assert_error(
-        "providers:\n  claude:\n    env:\n      FOO: bar\n",
-        4,
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    env:\n      FOO: bar\n",
+        6,
         7,
-        "providers.claude.env.FOO is not an allowed environment variable (allowed: ANTHROPIC_BASE_URL)",
+        "providers entry \"claude\".env.FOO is not an allowed environment variable (allowed: ANTHROPIC_BASE_URL)",
     );
 }
 
@@ -566,13 +540,15 @@ fn credential_looking_env_names_are_rejected_at_the_key() {
         "ANTHROPIC_AUTH_TOKEN",
         "CLAUDE_CODE_OAUTH_TOKEN",
     ] {
-        let text = format!("providers:\n  claude:\n    env:\n      {name}: value\n");
+        let text = format!(
+            "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    env:\n      {name}: value\n"
+        );
         assert_error(
             &text,
-            4,
+            6,
             7,
             &format!(
-                "providers.claude.env.{name} is not allowed: credential-like variable names are rejected"
+                "providers entry \"claude\".env.{name} is not allowed: credential-like variable names are rejected"
             ),
         );
     }
@@ -581,7 +557,7 @@ fn credential_looking_env_names_are_rejected_at_the_key() {
 #[test]
 fn allowed_env_override_is_kept() {
     let config = load_text(
-        "providers:\n  claude:\n    env:\n      ANTHROPIC_BASE_URL: \"http://127.0.0.1:9999\"\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    env:\n      ANTHROPIC_BASE_URL: \"http://127.0.0.1:9999\"\n",
     )
     .expect("allowed env override loads");
     assert_eq!(
@@ -596,8 +572,8 @@ fn allowed_env_override_is_kept() {
 #[test]
 fn claude_options_are_rejected_at_the_key() {
     assert_error(
-        "providers:\n  claude:\n    options:\n      foo: bar\n",
-        4,
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    options:\n      foo: bar\n",
+        6,
         7,
         "providers.claude.options.foo is not supported",
     );
@@ -606,7 +582,7 @@ fn claude_options_are_rejected_at_the_key() {
 #[test]
 fn codex_openai_base_url_option_is_kept() {
     let config = load_text(
-        "providers:\n  codex:\n    options:\n      openai_base_url: \"https://gw.example/v1\"\n",
+        "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    options:\n      openai_base_url: \"https://gw.example/v1\"\n",
     )
     .expect("allowed option loads");
     assert_eq!(
@@ -618,7 +594,7 @@ fn codex_openai_base_url_option_is_kept() {
     );
 
     let config = load_text(
-        "providers:\n  codex:\n    options:\n      openai_base_url: \"http://127.0.0.1:9999\"\n",
+        "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    options:\n      openai_base_url: \"http://127.0.0.1:9999\"\n",
     )
     .expect("http option loads");
     assert_eq!(
@@ -633,14 +609,14 @@ fn codex_openai_base_url_option_is_kept() {
 #[test]
 fn codex_rejects_invalid_openai_base_url_at_the_value() {
     assert_error(
-        "providers:\n  codex:\n    options:\n      openai_base_url: \"ftp://gw.example/v1\"\n",
-        4,
+        "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    options:\n      openai_base_url: \"ftp://gw.example/v1\"\n",
+        6,
         24,
         "providers.codex.options.openai_base_url must be an http:// or https:// URL with a valid host",
     );
     assert_error(
-        "providers:\n  codex:\n    options:\n      openai_base_url: \"http://exa mple\"\n",
-        4,
+        "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    options:\n      openai_base_url: \"http://exa mple\"\n",
+        6,
         24,
         "providers.codex.options.openai_base_url must be an http:// or https:// URL with a valid host",
     );
@@ -657,8 +633,10 @@ fn codex_rejects_hostless_or_malformed_base_urls() {
         "https://a..b",
     ] {
         assert_error(
-            &format!("providers:\n  codex:\n    options:\n      openai_base_url: \"{bad}\"\n"),
-            4,
+            &format!(
+                "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    options:\n      openai_base_url: \"{bad}\"\n"
+            ),
+            6,
             24,
             "providers.codex.options.openai_base_url must be an http:// or https:// URL with a valid host",
         );
@@ -674,7 +652,7 @@ fn codex_accepts_realistic_base_urls() {
         "https://10.0.0.2",
     ] {
         let config = load_text(&format!(
-            "providers:\n  codex:\n    options:\n      openai_base_url: \"{good}\"\n"
+            "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    options:\n      openai_base_url: \"{good}\"\n"
         ))
         .unwrap_or_else(|e| panic!("{good} should load: {e}"));
         assert_eq!(
@@ -690,8 +668,8 @@ fn codex_accepts_realistic_base_urls() {
 #[test]
 fn codex_unknown_options_are_rejected_at_the_key() {
     assert_error(
-        "providers:\n  codex:\n    options:\n      web_search: disabled\n",
-        4,
+        "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    options:\n      web_search: disabled\n",
+        6,
         7,
         "providers.codex.options.web_search is not supported",
     );
@@ -700,10 +678,10 @@ fn codex_unknown_options_are_rejected_at_the_key() {
 #[test]
 fn codex_env_overrides_are_rejected_at_the_key() {
     assert_error(
-        "providers:\n  codex:\n    env:\n      OPENAI_BASE_URL: http://gw.example\n",
-        4,
+        "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    env:\n      OPENAI_BASE_URL: http://gw.example\n",
+        6,
         7,
-        "providers.codex.env.OPENAI_BASE_URL is not an allowed environment variable (no environment overrides are allowed for this provider)",
+        "providers entry \"codex\".env.OPENAI_BASE_URL is not an allowed environment variable (no environment overrides are allowed for this provider)",
     );
 }
 
@@ -711,7 +689,11 @@ fn codex_env_overrides_are_rejected_at_the_key() {
 fn relative_binary_path_resolves_against_the_config_directory() {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join(CONFIG_NAME);
-    fs::write(&path, "providers:\n  claude:\n    binary: tools/claude\n").expect("write config");
+    fs::write(
+        &path,
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: tools/claude\n",
+    )
+    .expect("write config");
 
     let loaded = config::load_with_env(Some(&path), no_env).expect("config loads");
     assert_eq!(
@@ -722,20 +704,25 @@ fn relative_binary_path_resolves_against_the_config_directory() {
 
 #[test]
 fn bare_and_absolute_binary_paths_are_not_resolved() {
-    let config =
-        load_text("providers:\n  claude:\n    binary: myclaude\n").expect("bare name loads");
+    let config = load_text(
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: myclaude\n",
+    )
+    .expect("bare name loads");
     assert_eq!(claude(&config).binary, Some(PathBuf::from("myclaude")));
 
     // An absolute path on every OS (`/opt/claude` is relative on Windows).
     let absolute = std::env::temp_dir().join("claude");
     let yaml = format!(
-        "providers:\n  claude:\n    binary: '{}'\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n",
         absolute.display()
     );
     let config = load_text(&yaml).expect("absolute loads");
     assert_eq!(claude(&config).binary, Some(absolute));
 
-    let config = load_text("providers:\n  claude:\n    binary: null\n").expect("null loads");
+    let config = load_text(
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: null\n",
+    )
+    .expect("null loads");
     assert_eq!(claude(&config).binary, None);
 }
 
@@ -846,7 +833,10 @@ fn per_user_config_uses_appdata_on_windows() {
 
 #[test]
 fn registry_builds_enabled_providers_from_config() {
-    let config = load_text("").expect("empty file loads");
+    let config = load_text(
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n  - id: kimi\n    enabled: false\n",
+    )
+    .expect("config loads");
     let built = providers::build_from_config(&config, Arc::new(ProcessRunner::new()))
         .expect("providers build");
     let ids: Vec<&str> = built.iter().map(|provider| provider.id()).collect();
@@ -854,8 +844,7 @@ fn registry_builds_enabled_providers_from_config() {
 }
 
 /// Registry slice for the capability tests: a synthetic probe plus the real
-/// Claude descriptor, which stays enabled and remains the implicit default
-/// provider.
+/// Claude descriptor.
 fn probe_registry() -> [ProviderDescriptor; 2] {
     [
         capability_probe::PROBE,
@@ -869,49 +858,45 @@ fn load_with_descriptors(text: &str, descriptors: &[ProviderDescriptor]) -> Resu
 }
 
 #[test]
-fn disabled_by_default_provider_is_off_until_enabled() {
+fn unlisted_provider_is_absent_until_listed() {
     let descriptors = probe_registry();
     let config = load_with_descriptors("", &descriptors).expect("defaults load");
-    let probe = config.providers.get("probe").expect("probe is configured");
-    assert!(!probe.enabled);
     assert!(
-        claude(&config).enabled,
-        "claude is unaffected by the probe descriptor"
+        config.providers.is_empty(),
+        "nothing is configured without entries"
     );
 
     let config = load_with_descriptors(
-        "providers:\n  probe:\n    enabled: true\n    model: test/model\n",
+        "providers:\n  - id: probe\n    enabled: false\n",
+        &descriptors,
+    )
+    .expect("disabled entry loads");
+    let probe = config.provider("probe").expect("probe is configured");
+    assert!(!probe.enabled);
+    assert!(probe.model.is_empty());
+
+    let config = load_with_descriptors(
+        "providers:\n  - id: probe\n    enabled: true\n    model: test/model\n",
         &descriptors,
     )
     .expect("explicit enablement loads");
-    let probe = config.providers.get("probe").expect("probe is configured");
+    let probe = config.provider("probe").expect("probe is configured");
     assert!(probe.enabled);
     assert_eq!(probe.model, "test/model");
 }
 
 #[test]
-fn full_settings_validation_runs_without_a_yaml_entry() {
-    let descriptors = [
-        capability_probe::COUNTING,
-        *providers::descriptor("claude").expect("claude is registered"),
-    ];
-    capability_probe::COUNT_VALIDATIONS.store(0, Ordering::SeqCst);
-    let config = load_with_descriptors("", &descriptors).expect("defaults load");
-    assert!(!config.providers["counting"].enabled);
-    assert_eq!(
-        capability_probe::COUNT_VALIDATIONS.load(Ordering::SeqCst),
-        1,
-        "the validator ran for a provider with no YAML entry"
-    );
-}
-
-#[test]
-fn enabled_without_a_model_is_rejected_at_the_enabled_line() {
+fn enabled_without_a_model_is_rejected_at_the_id() {
     let descriptors = probe_registry();
-    let error = load_with_descriptors("providers:\n  probe:\n    enabled: true\n", &descriptors)
-        .expect_err("enabled without a model fails");
+    let error = load_with_descriptors(
+        "providers:\n  - id: probe\n    enabled: true\n",
+        &descriptors,
+    )
+    .expect_err("enabled without a model fails");
     assert!(
-        error.contains(":3:14: providers.probe.model is required when the provider is enabled"),
+        error.contains(
+            ":2:9: providers entry \"probe\" is enabled but has no model; add \"model: <name>\""
+        ),
         "{error}"
     );
     assert!(
@@ -921,23 +906,10 @@ fn enabled_without_a_model_is_rejected_at_the_enabled_line() {
 }
 
 #[test]
-fn missing_field_without_an_entry_reports_file_and_path_without_a_line() {
-    let descriptors = [
-        capability_probe::BARE,
-        *providers::descriptor("claude").expect("claude is registered"),
-    ];
-    let error = load_with_descriptors("", &descriptors).expect_err("no model fails");
-    assert_eq!(
-        error,
-        format!("{CONFIG_NAME}: providers.bare.model is required when the provider is enabled")
-    );
-}
-
-#[test]
 fn risk_warnings_render_only_for_enabled_providers() {
     let descriptors = probe_registry();
     let config = load_with_descriptors(
-        "providers:\n  probe:\n    enabled: true\n    model: test/model\n",
+        "providers:\n  - id: probe\n    enabled: true\n    model: test/model\n",
         &descriptors,
     )
     .expect("config loads");
@@ -949,14 +921,14 @@ fn risk_warnings_render_only_for_enabled_providers() {
     let config = load_with_descriptors("", &descriptors).expect("defaults load");
     assert!(
         providers::risk_warnings(&config, &descriptors).is_empty(),
-        "a disabled provider prints no warning"
+        "no entries means no warnings"
     );
 }
 
 #[test]
 fn debug_output_masks_private_content() {
     let config = load_text(
-        "prompts:\n  system: PROMPT-MARKER-SECRET\nproviders:\n  claude:\n    env:\n      ANTHROPIC_BASE_URL: ENV-MARKER-SECRET\n",
+        "prompts:\n  system: PROMPT-MARKER-SECRET\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    env:\n      ANTHROPIC_BASE_URL: ENV-MARKER-SECRET\n",
     )
     .expect("config loads");
     let debug = format!("{config:?}");
@@ -984,7 +956,11 @@ fn stderr(output: &Output) -> String {
 fn check_config_success_prints_summary() {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join(CONFIG_NAME);
-    fs::write(&path, "port: 8000\n").expect("write config");
+    fs::write(
+        &path,
+        "port: 8000\ndefault: claude\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n  - id: kimi\n    enabled: false\n",
+    )
+    .expect("write config");
 
     let output = run_pumice(&["check-config", "--config", path.to_str().unwrap()]);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
@@ -994,10 +970,59 @@ fn check_config_success_prints_summary() {
         "{stdout}"
     );
     assert!(stdout.contains("port: 8000"), "{stdout}");
-    assert!(stdout.contains("default provider: claude"), "{stdout}");
-    assert!(stdout.contains("enabled providers: claude"), "{stdout}");
-    assert!(stdout.contains("fallback order: (none)"), "{stdout}");
     assert!(stdout.contains("total timeout: 30s"), "{stdout}");
+    assert!(stdout.contains("default: claude"), "{stdout}");
+    assert!(stdout.contains("providers (in order):"), "{stdout}");
+    assert!(
+        stdout.contains("  claude: enabled, model haiku, timeout 30s"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("  kimi: disabled"), "{stdout}");
+}
+
+#[test]
+fn check_config_without_default_prints_not_set() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join(CONFIG_NAME);
+    fs::write(
+        &path,
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n",
+    )
+    .expect("write config");
+
+    let output = run_pumice(&["check-config", "--config", path.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let stdout = stdout(&output);
+    assert!(
+        stdout.contains("default: (not set; requests without a model return the original text)"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn check_config_prints_a_positioned_default_warning() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join(CONFIG_NAME);
+    fs::write(
+        &path,
+        "default: kimi\nproviders:\n  - id: kimi\n    enabled: false\n",
+    )
+    .expect("write config");
+
+    let output = run_pumice(&["check-config", "--config", path.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let stdout = stdout(&output);
+    assert!(
+        stdout.contains("default: (not usable; requests without a model return the original text)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "{}:1:10: warning: default \"kimi\" is disabled: requests without a model return the original text",
+            path.display()
+        )),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -1006,7 +1031,7 @@ fn check_config_success_never_prints_private_values() {
     let path = dir.path().join(CONFIG_NAME);
     fs::write(
         &path,
-        "prompts:\n  system: PROMPT-MARKER\nproviders:\n  claude:\n    env:\n      ANTHROPIC_BASE_URL: ENV-MARKER\n",
+        "prompts:\n  system: PROMPT-MARKER\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    env:\n      ANTHROPIC_BASE_URL: ENV-MARKER\n",
     )
     .expect("write config");
 
@@ -1021,15 +1046,19 @@ fn check_config_success_never_prints_private_values() {
 fn check_config_error_exits_2_with_the_exact_error() {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join(CONFIG_NAME);
-    fs::write(&path, "providers:\n  claude:\n    timeout_secs: 0\n").expect("write config");
+    fs::write(
+        &path,
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    timeout_secs: 0\n",
+    )
+    .expect("write config");
 
     let output = run_pumice(&["check-config", "--config", path.to_str().unwrap()]);
     assert_eq!(output.status.code(), Some(2));
     assert!(stdout(&output).is_empty());
     let stderr = stderr(&output);
-    assert!(stderr.contains(":3:19:"), "{stderr}");
+    assert!(stderr.contains(":5:19:"), "{stderr}");
     assert!(
-        stderr.contains("providers.claude.timeout_secs must be greater than zero"),
+        stderr.contains("providers entry \"claude\".timeout_secs must be greater than zero"),
         "{stderr}"
     );
 }
@@ -1072,13 +1101,17 @@ fn serve_rejects_bad_arguments() {
 fn serve_reports_config_errors_like_check_config() {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join(CONFIG_NAME);
-    fs::write(&path, "providers:\n  claude:\n    timeout_secs: 0\n").expect("write config");
+    fs::write(
+        &path,
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    timeout_secs: 0\n",
+    )
+    .expect("write config");
 
     let output = run_pumice(&["serve", "--config", path.to_str().unwrap()]);
     assert_eq!(output.status.code(), Some(2));
     let stderr = stderr(&output);
     assert!(
-        stderr.contains("providers.claude.timeout_secs must be greater than zero"),
+        stderr.contains("providers entry \"claude\".timeout_secs must be greater than zero"),
         "{stderr}"
     );
 }
@@ -1090,12 +1123,12 @@ fn configured_env_reaches_the_cli_invocation() {
     use pumice::providers::{FormatInput, UserPrompt};
 
     let config = load_text(
-        "providers:\n  claude:\n    env:\n      ANTHROPIC_BASE_URL: \"http://127.0.0.1:9999\"\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    env:\n      ANTHROPIC_BASE_URL: \"http://127.0.0.1:9999\"\n",
     )
     .expect("config loads");
     let built = providers::build_from_config(&config, Arc::new(ProcessRunner::new()))
         .expect("provider builds");
-    assert_eq!(built.len(), 2);
+    assert_eq!(built.len(), 1);
 
     // The adapter built from config forwards the override; its own
     // variables are still present.
@@ -1138,7 +1171,7 @@ fn configured_openai_base_url_reaches_the_codex_invocation() {
     use pumice::providers::{FormatInput, UserPrompt};
 
     let config = load_text(
-        "providers:\n  codex:\n    options:\n      openai_base_url: \"https://gw.example/v1\"\n",
+        "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    options:\n      openai_base_url: \"https://gw.example/v1\"\n",
     )
     .expect("config loads");
     let codex_settings = codex(&config);
@@ -1186,32 +1219,81 @@ fn example_path() -> PathBuf {
 }
 
 #[test]
-fn example_config_loads_with_all_defaults() {
+fn example_config_loads() {
     let example = example_path();
     let loaded = config::load_with_env(Some(&example), no_env).expect("example loads");
+    assert_eq!(loaded.source, ConfigSource::File(example.clone()));
 
-    let defaults = config::load_with_env(None, no_env)
-        .expect("built-in defaults load")
-        .config;
-    let mut expected = defaults.clone();
-    // Relative paths anchor at the configuration file's directory, so the
-    // example's default debug log path resolves beside the example file
-    // instead of staying relative.
-    expected.debug_log.path = example
-        .parent()
-        .expect("example lives in a directory")
-        .join("pumice-debug.jsonl");
+    let config = &loaded.config;
+    assert_eq!(config.port, 7567);
+    assert_eq!(config.total_timeout, Duration::from_secs(30));
+    // The example enables Claude and names it the default.
+    assert_eq!(config.default.as_deref(), Some("claude"));
+    assert!(config.default_warning.is_none());
+    assert!(!config.debug_log.enabled);
+    // Relative paths anchor at the configuration file's directory.
+    assert_eq!(
+        config.debug_log.path,
+        example
+            .parent()
+            .expect("example lives in a directory")
+            .join("pumice-debug.jsonl")
+    );
 
-    assert_eq!(loaded.source, ConfigSource::File(example));
-    assert_eq!(loaded.config, expected);
+    let ids: Vec<&str> = config
+        .providers
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "claude",
+            "codex",
+            "opencode",
+            "kiro",
+            "antigravity",
+            "generic",
+            "kimi"
+        ]
+    );
+
+    let claude = config.provider("claude").expect("claude is listed");
+    assert!(claude.enabled);
+    assert_eq!(claude.model, "haiku");
+    assert_eq!(claude.timeout, Duration::from_secs(30));
+    assert!(claude.binary.is_none());
+
+    // Every other entry ships disabled, with no model.
+    for id in [
+        "codex",
+        "opencode",
+        "kiro",
+        "antigravity",
+        "generic",
+        "kimi",
+    ] {
+        let settings = config
+            .provider(id)
+            .unwrap_or_else(|| panic!("{id} is listed"));
+        assert!(!settings.enabled, "{id} stays off in the example");
+        assert!(settings.model.is_empty(), "{id} ships without a model");
+    }
 }
 
-/// Replaces the last occurrence of `from` with `to`.
-fn replace_last(text: &str, from: &str, to: &str) -> String {
+/// Applies `edit` to the `providers:` entry starting at `marker`, up to the
+/// next blank line.
+fn edit_entry(text: &str, marker: &str, edit: impl Fn(&str) -> String) -> String {
     let start = text
-        .rfind(from)
-        .unwrap_or_else(|| panic!("{from:?} is present"));
-    format!("{}{}{}", &text[..start], to, &text[start + from.len()..])
+        .find(marker)
+        .unwrap_or_else(|| panic!("{marker:?} is present"));
+    let end = text[start..].find("\n\n").map_or(text.len(), |i| start + i);
+    format!(
+        "{}{}{}",
+        &text[..start],
+        edit(&text[start..end]),
+        &text[end..]
+    )
 }
 
 #[test]
@@ -1221,15 +1303,23 @@ fn example_documented_overrides_load() {
         .expect("read example")
         .replace("\r\n", "\n");
 
-    // Apply the documented examples: try Codex after Claude, route Codex
-    // through a gateway, and set both formatting prompts.
-    let uncommented = text.replace("fallback_order: []", "fallback_order: [codex]");
-    // Codex's `options: {}` is the last one in the file.
-    let uncommented = replace_last(
-        &uncommented,
-        "    options: {}",
-        "    options:\n      openai_base_url: \"https://your-existing-gateway.example/v1\"",
-    );
+    // Apply the documented examples: route Codex through a gateway, enable
+    // the generic loopback adapter, and set both formatting prompts.
+    let uncommented = edit_entry(&text, "  - id: codex", |block| {
+        block.replace(
+            "    # options:\n    #   openai_base_url: \"https://your-existing-gateway.example/v1\"\n    options: {}",
+            "    options:\n      openai_base_url: \"https://your-existing-gateway.example/v1\"",
+        )
+    });
+    let uncommented = edit_entry(&uncommented, "  - id: generic", |block| {
+        block
+            .replace("    enabled: false", "    enabled: true")
+            .replace("    # model: qwen2.5-7b", "    model: qwen2.5-7b")
+            .replace(
+                "    # options:\n    #   base_url: \"http://127.0.0.1:11434/v1\"",
+                "    options:\n      base_url: \"http://127.0.0.1:11434/v1\"",
+            )
+    });
     let uncommented = uncommented
         .replace(
             "  system: null",
@@ -1239,27 +1329,9 @@ fn example_documented_overrides_load() {
             "  user: null",
             "  user: |\n    Format spoken enumerations as Markdown lists.",
         );
-    // The generic adapter's documented block: uncomment only that block
-    // (OpenCode's commented block has identical lines).
-    let start = uncommented
-        .find("  # generic:\n")
-        .expect("the example documents the generic adapter");
-    let end = uncommented[start..]
-        .find("\n\n")
-        .map_or(uncommented.len(), |i| start + i);
-    let block = uncommented[start..end]
-        .replace("  # generic:", "  generic:")
-        .replace("  #   enabled: true", "    enabled: true")
-        .replace("  #   model: qwen2.5-7b", "    model: qwen2.5-7b")
-        .replace("  #   options:", "    options:")
-        .replace(
-            "  #     base_url: \"http://127.0.0.1:11434/v1\"",
-            "      base_url: \"http://127.0.0.1:11434/v1\"",
-        );
-    let uncommented = format!("{}{}{}", &uncommented[..start], block, &uncommented[end..]);
 
     let config = load_text(&uncommented).expect("documented overrides load");
-    assert_eq!(config.fallback_order, vec!["codex".to_owned()]);
+    assert_eq!(config.default.as_deref(), Some("claude"));
     assert_eq!(
         codex(&config)
             .options
@@ -1267,7 +1339,7 @@ fn example_documented_overrides_load() {
             .map(String::as_str),
         Some("https://your-existing-gateway.example/v1")
     );
-    let generic = config.providers.get("generic").expect("generic loads");
+    let generic = config.provider("generic").expect("generic loads");
     assert!(generic.enabled);
     assert_eq!(generic.model, "qwen2.5-7b");
     assert_eq!(
@@ -1297,7 +1369,7 @@ fn relative_config_path_still_anchors_relative_settings() {
     let relative_config = dir.path().join(CONFIG_NAME);
     fs::write(
         &relative_config,
-        "providers:\n  claude:\n    binary: tools/claude\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: tools/claude\n",
     )
     .expect("write config");
 

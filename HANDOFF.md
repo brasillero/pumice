@@ -74,6 +74,7 @@ Update this table in the PR that finishes each story. Order follows the plan in 
 | 19 | S5.1 follow-up: Codex inherits the user's config | Done | #48 | Owner-approved (2026-10-06), implementing the 2026-10-05 decision: `--ignore-user-config` is omitted, so the gateway in `~/.codex/config.toml` applies. Each `[mcp_servers]` name is disabled with `-c mcp_servers.<name>.enabled=false` (names only, never values); plugins, apps and `notify` are always off. The call fails closed to `--ignore-user-config` on an unreadable or odd config. Adds `toml` (parse only). Findings in `docs/research/S0.2-cli-matrix.md` |
 | 20 | S7.5 release 0.1.1 | Done | #49 | Owner approved a patch release (2026-10-06): version bump and `CHANGELOG.md` 0.1.1 section for #41 and #43–#48. GitHub release v0.1.1 published with the four verified archives and SHA256SUMS; npm publication pending the owner's 2FA |
 | 21 | S2.9 Kiro adapter | In review | #51 | Documentation-derived, off-by-default `kiro-cli` adapter; workspace-local no-tools agent leaves `~/.kiro` untouched; research note in `docs/research/S2.9-kiro-adapter.md` |
+| 22 | S6.5: explicit provider list | In review | #53 | Configuration format changed in 0.2: explicit ordered `providers:` list (`enabled` required, `model` required when enabled), optional `default:` key with a startup warning when unusable; `default_provider`/`fallback_order`/map-form `providers:` rejected as removed; no fallback — one provider per request, failure returns the original text; built-in default models and `disabled_by_default` removed |
 
 **Distribution review (2026-10-05):** the owner accepted the final review and authorized merging #36–#38. #36–#38 are merged; all 10 archive checks and all 16 npm checks passed, including Windows/Linux/macOS native installs and Linux pnpm/Bun. #38 also passed all 16 checks before merging. GitHub v0.1.0 is published; npm publication is pending account 2FA.
 
@@ -89,14 +90,14 @@ These change the spec's phasing. The spec itself is unchanged; product-doc updat
 
 - **Modular adapters:** a new CLI is a new module behind a common interface (S2.1), plus one registry entry.
 - **Two adapters in Phase 1:** Claude (S2.2) and **Codex (S2.3)**. Codex moved up from Phase 2. OpenCode, Antigravity, the generic adapter and auto-detection come later.
-- **Fallback chain (S4.2) is in Phase 1:** after the selected provider fails, try the next in `fallback_order`, then return raw text, all within the total timeout.
+- **Fallback chain (S4.2) is in Phase 1:** after the selected provider fails, try the next in `fallback_order`, then return raw text, all within the total timeout. (Superseded 2026-10-06: S6.5 (#53) removed the fallback chain — a request runs exactly one provider and any failure returns the original text.)
 - **Kimi is on standby:** its subscription terms allow interactive use only (S0.3). No Kimi adapter. (Superseded 2026-10-06: the adapter shipped in #52, off by default with the terms risk warning.)
 - **Default port: 7567** (S1.5). Handy points at `http://127.0.0.1:7567/v1`.
 - **Claude thinking off by default** (`MAX_THINKING_TOKENS=0`). Effort tuning and Handy's `reasoning_effort` field come later.
 - **Plan quota is intended:** Pumice runs on the user's subscription through the official CLIs.
 - **Later (Phase 3):** installer, auto-update and running as a Windows service.
 - **Codex residual tool risk accepted** (S5.1): "make it work first, refine its behavior later". Codex runs in its most restricted documented mode, and any run that shows tool activity is rejected.
-- **Default models confirmed:** Claude `haiku`, Codex `gpt-6.1-sol`.
+- **Default models confirmed:** Claude `haiku`, Codex `gpt-6.1-sol`. (Superseded 2026-10-06: S6.5 (#53) removed the built-in default models — every enabled entry sets its own `model`.)
 - **Unattended gate (2026-10-04):** the owner was away and asked to skip manual steps, so the gate below was verified by the orchestrator over HTTP with the real CLIs. The Handy GUI check is deferred to the owner.
 
 ### Phase 1 gate

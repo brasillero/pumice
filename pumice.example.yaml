@@ -1,14 +1,16 @@
 # Pumice configuration example.
 #
-# Every setting below is the built-in default, so the service works without
-# any file. Copy this to your own pumice.yaml and keep only what you change.
+# Pumice assumes nothing: no provider is enabled by default and no model is
+# built in. Copy this to your own pumice.yaml, list the providers you want,
+# and keep only what you change. Without a file (or with an empty one) the
+# service starts with no providers: every request returns the original text.
 #
 # Pumice reads exactly one configuration file:
-#   1. the path passed with --config (pumice serve --config my.yaml), else
+#   1. the path passed with --config (pumice --config my.yaml), else
 #   2. the per-user file: ~/.config/pumice/pumice.yaml on Linux and macOS
 #      ($XDG_CONFIG_HOME/pumice/pumice.yaml when XDG_CONFIG_HOME is set), and
 #      %APPDATA%\pumice\pumice.yaml on Windows,
-#   otherwise the defaults below apply.
+#   otherwise no file is used.
 #
 # Validate a file with: pumice check-config --config <path>
 #
@@ -20,25 +22,32 @@
 # TCP port the service binds to on 127.0.0.1.
 port: 7567
 
-# Provider used when a request does not select one.
-default_provider: claude
-
-# Total seconds budget for one dictation, fallback chain included.
+# Total seconds budget for one dictation.
 total_timeout_secs: 30
 
-# Providers to try, in order, after the selected one fails or times out,
-# all within total_timeout_secs. The raw dictation comes back when every
-# fallback fails too. Uncomment to try Codex after Claude:
-fallback_order: []
-# fallback_order: [codex]
+# Provider used when a request does not select a model. Optional: when it is
+# absent, or names a disabled, unknown or unlisted provider, startup succeeds
+# with a warning and requests without a model return the original text.
+default: claude
 
+# The explicit provider list. ORDER MATTERS only for the model list a client
+# such as Handy shows: `default` (when enabled) is listed first, then the
+# other enabled entries in this order. There is NO fallback: a request runs
+# exactly one provider — the one its model names, or `default` — and any
+# failure returns the original text unchanged.
+#
+# Every entry needs `id` and `enabled` (true or false, never defaulted).
+# `model` is required when enabled. `timeout_secs`, `binary`, `env` and
+# `options` are optional; `env` and `options` accept only what the provider
+# documents below.
 providers:
-  claude:
+  # Short working example: Claude Code, enabled.
+  - id: claude
     enabled: true
     # null looks up "claude" on PATH; a relative path resolves against this
     # file's directory, an absolute path is used as-is.
     binary: null
-    # Measured default from Phase 0.
+    # Any alias `claude --model` accepts; there is no built-in default.
     model: haiku
     # Per-call cap, also limited by the remaining total budget.
     timeout_secs: 30
@@ -50,89 +59,84 @@ providers:
     # Claude accepts no adapter options.
     options: {}
 
-  codex:
-    enabled: true
-    binary: null
-    model: gpt-6.1-sol
-    timeout_secs: 30
+  # Every other supported provider, off. A disabled entry is kept out of the
+  # model list and never runs; `model` may be omitted.
+  - id: codex
+    enabled: false
+    # model: gpt-6.1-sol
+    # timeout_secs: 30
     # Codex accepts no environment overrides; routing goes through `options`.
     env: {}
     # The only supported option routes Codex through an existing gateway (an
-    # http:// or https:// URL, never with credentials in it). Uncomment to
-    # use, replacing the empty map:
+    # http:// or https:// URL, never with credentials in it):
     # options:
     #   openai_base_url: "https://your-existing-gateway.example/v1"
     options: {}
 
-  # OpenCode is off by default. Enabling it requires an explicit
-  # provider/model: with no configured provider, OpenCode silently answers
-  # through a hosted default model. Upstream terms vary; startup
-  # customizations and CLI-owned transcript retention remain unverified.
-  # Uncomment to use, replacing the model with a provider/model you are
-  # authorized to use (for example opencode/<free-model>):
-  # opencode:
-  #   enabled: true
-  #   model: opencode/<free-model>
-  #   timeout_secs: 30
-  #   # OpenCode accepts no environment overrides; the adapter owns the
-  #   # child environment (an inline deny-all configuration).
-  #   env: {}
-  #   # The only supported option selects a provider-specific reasoning
-  #   # variant, for example variant: low.
-  #   options: {}
+  # OpenCode is off. Enabling it requires an explicit provider/model: with
+  # no configured provider, OpenCode silently answers through a hosted
+  # default model. Upstream terms vary; startup customizations and CLI-owned
+  # transcript retention remain unverified.
+  - id: opencode
+    enabled: false
+    # model: opencode/<free-model>
+    # timeout_secs: 30
+    # OpenCode accepts no environment overrides; the adapter owns the child
+    # environment (an inline deny-all configuration).
+    env: {}
+    # The only supported option selects a provider-specific reasoning
+    # variant, for example variant: low.
+    options: {}
 
-  # Kiro (AWS) is off by default and unverified in this version. Enabling it
-  # requires an explicit model and accepts no adapter options or env overrides.
-  # The adapter supplies a workspace-local no-tools agent; your own Kiro login
+  # Kiro (AWS) is off and unverified in this version. Enabling it requires an
+  # explicit model and accepts no adapter options or env overrides. The
+  # adapter supplies a workspace-local no-tools agent; your own Kiro login
   # and profile in ~/.kiro stay untouched.
-  # Uncomment to use, replacing the model with one you are authorized to use:
-  # kiro:
-  #   enabled: true
-  #   model: claude-sonnet-4.6
-  #   timeout_secs: 30
-  #   # Kiro accepts no environment overrides.
-  #   env: {}
-  #   options: {}
+  - id: kiro
+    enabled: false
+    # model: claude-sonnet-4.6
+    # timeout_secs: 30
+    env: {}
+    options: {}
 
-  # Antigravity (agy) is registered but cannot be enabled yet: no supported
-  # per-launch tool policy exists, and third-party integration may risk
-  # account access (docs/research/phase2-architecture.md §3.2). Writing
-  # `enabled: true` below is refused by `pumice check-config`.
-  # antigravity:
-  #   enabled: false
+  # Antigravity (agy) cannot be enabled yet: no supported per-launch tool
+  # policy exists, and third-party integration may risk account access
+  # (docs/research/phase2-architecture.md §3.2). Writing `enabled: true`
+  # below is refused by `pumice check-config`.
+  - id: antigravity
+    enabled: false
 
   # Generic OpenAI-compatible endpoint on this machine (Ollama, LM Studio).
-  # Disabled by default: it talks HTTP to an unauthenticated loopback server,
-  # which needs the owner's explicit approval (the AGENTS.md outbound-call
-  # exception is still pending; see docs/research/phase2-architecture.md §3.3).
-  # When enabled, `model` and `options.base_url` are both required, and the
-  # base URL must be exactly http://127.0.0.1:<port>/v1,
-  # http://localhost:<port>/v1 or http://[::1]:<port>/v1 (an explicit port,
-  # the /v1 path, nothing else). Pumice's own port is refused, so a dictation
-  # can never route back into this service. The endpoint needs no key; the
-  # local server controls inference routing and retention.
-  # generic:
-  #   enabled: true
-  #   model: qwen2.5-7b
-  #   options:
-  #     base_url: "http://127.0.0.1:11434/v1"
+  # It talks HTTP to an unauthenticated loopback server, which needs the
+  # owner's explicit approval (the AGENTS.md outbound-call exception; see
+  # docs/research/phase2-architecture.md §3.3). When enabled, `model` and
+  # `options.base_url` are both required, and the base URL must be exactly
+  # http://127.0.0.1:<port>/v1, http://localhost:<port>/v1 or
+  # http://[::1]:<port>/v1 (an explicit port, the /v1 path, nothing else).
+  # Pumice's own port is refused, so a dictation can never route back into
+  # this service. The endpoint needs no key; the local server controls
+  # inference routing and retention.
+  - id: generic
+    enabled: false
+    # model: qwen2.5-7b
+    # options:
+    #   base_url: "http://127.0.0.1:11434/v1"
 
-  # Kimi Code CLI (kimi) is off by default. Moonshot subscription terms rate
+  # Kimi Code CLI (kimi) is off. Moonshot subscription terms rate
   # non-interactive automation as risky (docs/research/S0.3-provider-terms.md),
   # and the dictation travels in the command line (size-capped), so enabling
   # this is the owner's call. When enabled, the adapter runs the CLI with a
   # no-tools agent file in a fresh empty workspace; user-configured hooks,
   # plugins and CLI-owned session retention have no per-launch off switch.
-  # The default model is the cheapest alias verified in the owner's account;
-  # any alias from `kimi provider list` works.
-  # kimi:
-  #   enabled: true
-  #   # model: kimi-k2.7-code-highspeed
-  #   timeout_secs: 30
-  #   # Kimi accepts no environment overrides; the adapter owns the child
-  #   # environment (no-tools agent file, skills off, telemetry off).
-  #   env: {}
-  #   options: {}
+  # Any alias from `kimi provider list` works.
+  - id: kimi
+    enabled: false
+    # model: kimi-k2.7-code-highspeed
+    # timeout_secs: 30
+    # Kimi accepts no environment overrides; the adapter owns the child
+    # environment (no-tools agent file, skills off, telemetry off).
+    env: {}
+    options: {}
 
 # Optional formatting instructions, added after Pumice's fixed instruction.
 # Both are off by default (null); a block scalar (|) keeps line breaks.

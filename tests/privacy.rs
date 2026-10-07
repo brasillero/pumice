@@ -30,8 +30,7 @@ use tokio::net::TcpStream;
 
 /// Minimal YAML configuring `claude` with its binary at the fake CLI and
 /// `codex` disabled. `{binary}` is replaced by the fake's path.
-const CLAUDE_AT_FAKE: &str =
-    "providers:\n  claude:\n    binary: '{binary}'\n  codex:\n    enabled: false\n";
+const CLAUDE_AT_FAKE: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n  - id: codex\n    enabled: false\n";
 
 /// Captured metadata lines, one per completion request.
 #[derive(Default)]
@@ -467,21 +466,29 @@ fn write_config(yaml: &str) -> (TempDir, PathBuf) {
     (dir, path)
 }
 
-/// YAML with every registered provider's binary at its own disposable fake,
-/// so spawned-`pumice` tests never look a real CLI up on PATH during startup
-/// detection. `debug_log` is appended verbatim. Returns the fakes — they
-/// must outlive the served process — and the YAML.
+/// YAML with the enable-able providers' binaries at their own disposable
+/// fakes, so spawned-`pumice` tests never look a real CLI up on PATH during
+/// startup detection; `antigravity` stays disabled (it refuses enablement).
+/// `debug_log` is appended verbatim. Returns the fakes — they must outlive
+/// the served process — and the YAML.
 fn hermetic_serve_yaml(port: u16, debug_log: &str) -> (Vec<FakeCli>, String) {
     let mut fakes: Vec<FakeCli> = Vec::new();
     let mut yaml = format!("port: {port}\nproviders:\n");
-    for id in ["claude", "codex", "opencode", "antigravity"] {
+    for (id, model) in [
+        ("claude", "haiku"),
+        ("codex", "gpt-6.1-sol"),
+        ("opencode", "opencode/big-pickle"),
+    ] {
         let fake = FakeCli::new(json!({}));
         yaml.push_str(&format!(
-            "  {id}:\n    binary: '{}'\n",
+            "  - id: {id}\n    enabled: true\n    model: {model}\n    binary: '{}'\n",
             fake.path().display()
         ));
         fakes.push(fake);
     }
+    // Antigravity refuses enablement entirely (no supported tool policy), so
+    // it stays disabled — startup then never probes a real CLI for it.
+    yaml.push_str("  - id: antigravity\n    enabled: false\n");
     yaml.push_str(debug_log);
     (fakes, yaml)
 }

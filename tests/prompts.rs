@@ -298,7 +298,7 @@ async fn configured_prompts_reach_the_cli_in_documented_order() {
     // A JSON string is a valid YAML double-quoted scalar, so the fake's path
     // survives Windows backslashes unchanged.
     let config = load_config(&format!(
-        "providers:\n  claude:\n    binary: {path}\nprompts:\n  system: |\n    Preserve technical terms.\n    Keep product names in English.\n  user: |\n    Format spoken enumerations as lists.\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: {path}\nprompts:\n  system: |\n    Preserve technical terms.\n    Keep product names in English.\n  user: |\n    Format spoken enumerations as lists.\n",
         path = serde_json::to_string(fake.path().to_str().expect("UTF-8 fake path"))
             .expect("serialize fake path"),
     ));
@@ -306,10 +306,7 @@ async fn configured_prompts_reach_the_cli_in_documented_order() {
     let user = config.prompts.user.as_deref().expect("user prompt set");
 
     let descriptor = providers::descriptor("claude").expect("claude is registered");
-    let settings = config
-        .providers
-        .get("claude")
-        .expect("claude is configured");
+    let settings = config.provider("claude").expect("claude is configured");
     let provider = (descriptor.build)(settings, Arc::new(ProcessRunner::new()))
         .expect("provider builds from the config");
 

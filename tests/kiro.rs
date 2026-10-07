@@ -264,12 +264,11 @@ fn provider_reports_its_id_without_running() {
 }
 
 #[test]
-fn descriptor_is_disabled_by_default_with_the_risk_warning() {
-    const { assert!(DESCRIPTOR.disabled_by_default) };
+fn descriptor_carries_the_risk_warning_and_disabled_defaults() {
     assert_eq!(DESCRIPTOR.risk_warning, Some(RISK_WARNING));
     assert!(DESCRIPTOR.allowed_env.is_empty());
     let settings = (DESCRIPTOR.defaults)();
-    assert!(settings.enabled);
+    assert!(!settings.enabled);
     assert_eq!(settings.model, "");
 }
 
@@ -300,17 +299,16 @@ fn assert_error(text: &str, line: u64, column: u64, message: &str) {
 }
 
 #[test]
-fn no_yaml_entry_loads_disabled() {
+fn no_yaml_entry_means_not_configured() {
     let config = load("").expect("empty file loads");
-    let kiro = config.providers.get(ID).expect("kiro is registered");
-    assert!(!kiro.enabled);
-    assert_eq!(kiro.model, "");
+    assert!(config.provider(ID).is_none(), "entries configure providers");
+    assert!(config.providers.is_empty());
 }
 
 #[test]
 fn enabled_without_a_model_reports_the_enabled_line() {
     assert_error(
-        "providers:\n  kiro:\n    enabled: true\n",
+        "providers:\n  - id: kiro\n    enabled: true\n",
         3,
         14,
         "providers.kiro.model is required when the provider is enabled",
@@ -320,7 +318,7 @@ fn enabled_without_a_model_reports_the_enabled_line() {
 #[test]
 fn malformed_model_reports_the_value() {
     assert_error(
-        "providers:\n  kiro:\n    enabled: true\n    model: bad model\n",
+        "providers:\n  - id: kiro\n    enabled: true\n    model: bad model\n",
         4,
         12,
         "providers.kiro.model must be a nonempty token without whitespace, control characters or a leading '-'",
@@ -329,9 +327,10 @@ fn malformed_model_reports_the_value() {
 
 #[test]
 fn enabled_with_an_explicit_model_loads() {
-    let config = load("providers:\n  kiro:\n    enabled: true\n    model: claude-sonnet-4.6\n")
-        .expect("explicit model loads");
-    let kiro = config.providers.get(ID).expect("kiro configured");
+    let config =
+        load("providers:\n  - id: kiro\n    enabled: true\n    model: claude-sonnet-4.6\n")
+            .expect("explicit model loads");
+    let kiro = config.provider(ID).expect("kiro configured");
     assert!(kiro.enabled);
     assert_eq!(kiro.model, "claude-sonnet-4.6");
 }
@@ -339,7 +338,7 @@ fn enabled_with_an_explicit_model_loads() {
 #[test]
 fn unknown_options_are_rejected_at_the_key() {
     assert_error(
-        "providers:\n  kiro:\n    enabled: true\n    model: m\n    options:\n      effort: low\n",
+        "providers:\n  - id: kiro\n    enabled: true\n    model: m\n    options:\n      effort: low\n",
         6,
         7,
         "providers.kiro.options.effort is not supported",
@@ -349,9 +348,9 @@ fn unknown_options_are_rejected_at_the_key() {
 #[test]
 fn env_overrides_are_rejected() {
     assert_error(
-        "providers:\n  kiro:\n    enabled: true\n    model: m\n    env:\n      KIRO_HOME: /tmp\n",
+        "providers:\n  - id: kiro\n    enabled: true\n    model: m\n    env:\n      KIRO_HOME: /tmp\n",
         6,
         7,
-        "providers.kiro.env.KIRO_HOME is not an allowed environment variable (no environment overrides are allowed for this provider)",
+        "providers entry \"kiro\".env.KIRO_HOME is not an allowed environment variable (no environment overrides are allowed for this provider)",
     );
 }
