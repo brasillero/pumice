@@ -60,12 +60,27 @@ impl ApiState {
         self.log
             .write_line(&log_entry::render(&entry, self.log.color()));
     }
+
+    /// Writes the log entry for a completion request that got no completion.
+    fn log_unanswered(
+        &self,
+        number: u64,
+        unanswered: log_entry::Unanswered<'_>,
+        elapsed: std::time::Duration,
+    ) {
+        self.log.write_line(&log_entry::render_unanswered(
+            number,
+            unanswered,
+            elapsed,
+            self.log.color(),
+        ));
+    }
 }
 
 /// Where the one-per-request log entry goes. Production writes to stderr;
 /// tests supply their own capturing implementation. An entry is one call to
-/// `write_line` and may span several lines (one per provider attempt after a
-/// fallback).
+/// `write_line` and may span two lines (the outcome, then the failed
+/// provider attempt).
 pub trait RequestLog: Send + Sync {
     fn write_line(&self, line: &str);
 
