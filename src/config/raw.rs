@@ -33,15 +33,18 @@ pub(crate) struct RawConfig {
     pub port: Option<Spanned<u16>>,
     /// Removed in 0.2; parsed only so the error can point at the key and
     /// show the list form that replaced it.
+    #[serde(default, deserialize_with = "removed_key")]
     pub default_provider: Option<Spanned<serde::de::IgnoredAny>>,
     /// Removed in 0.2 (owner decision 2026-10-07): the client's `model`
     /// field picks the provider and a request without a model returns the
     /// original text. Parsed only so the error can point at the key.
+    #[serde(default, deserialize_with = "removed_key")]
     pub default: Option<Spanned<serde::de::IgnoredAny>>,
     pub total_timeout_secs: Option<Spanned<u64>>,
     #[serde(default, deserialize_with = "provider_list")]
     pub providers: Vec<Spanned<RawProviderEntry>>,
     /// Removed in 0.2; parsed only so the error can point at the key.
+    #[serde(default, deserialize_with = "removed_key")]
     pub fallback_order: Option<Spanned<serde::de::IgnoredAny>>,
     pub prompts: Option<RawPrompts>,
     pub debug_log: Option<RawDebugLog>,
@@ -77,6 +80,15 @@ pub(crate) struct RawPrompts {
 pub(crate) struct RawDebugLog {
     pub enabled: Option<Spanned<bool>>,
     pub path: Option<Spanned<PathBuf>>,
+}
+
+/// Records that a removed key is present, whatever its value. A plain
+/// `Option` would read `default: null` as absent and silently accept it.
+fn removed_key<'de, D>(deserializer: D) -> Result<Option<Spanned<serde::de::IgnoredAny>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Spanned::<serde::de::IgnoredAny>::deserialize(deserializer).map(Some)
 }
 
 /// Deserializes the `providers:` sequence into located entries. The mapping

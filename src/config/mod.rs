@@ -347,6 +347,14 @@ fn provider_settings(
         ..providers::ProviderLocations::default()
     };
     if let Some(binary) = &raw.binary {
+        if binary.value.as_os_str().is_empty() {
+            return Err(ConfigError::at(
+                binary.referenced,
+                format!(
+                    "{base}.binary must not be empty; remove the key to use the command on PATH"
+                ),
+            ));
+        }
         locations.binary = Some(binary.referenced);
         settings.binary = Some(resolve_binary(&binary.value, config_dir));
     }
@@ -356,6 +364,15 @@ fn provider_settings(
             return Err(ConfigError::at(
                 model.referenced,
                 format!("{base}.model must not be empty"),
+            ));
+        }
+        // Every CLI receives the model as a command-line argument: a
+        // leading '-' would be read as a flag. The generic adapter sends it
+        // as a JSON string over HTTP instead.
+        if descriptor.id != providers::generic::ID && model.value.trim_start().starts_with('-') {
+            return Err(ConfigError::at(
+                model.referenced,
+                format!("{base}.model must not start with '-'"),
             ));
         }
         settings.model = model.value.clone();
@@ -490,7 +507,11 @@ fn per_user_config_path_for(
     windows: bool,
 ) -> Option<PathBuf> {
     let base = if windows {
-        get_env("APPDATA").map(PathBuf::from)
+        // An empty APPDATA would put the file under the current directory;
+        // treat it as unset.
+        get_env("APPDATA")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
     } else {
         match get_env("XDG_CONFIG_HOME") {
             // The XDG spec requires an absolute path; ignore relative values.

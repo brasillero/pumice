@@ -36,7 +36,16 @@ usage:
 const DOCTOR_USAGE: &str = "usage: pumice doctor [--config <path>] [--login-check --provider <id>]";
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `std::env::args` panics on an argument that is not valid Unicode.
+    let Some(args) = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.into_string().ok())
+        .collect::<Option<Vec<String>>>()
+    else {
+        eprintln!("error: arguments must be valid Unicode\n");
+        eprint!("{USAGE}");
+        return ExitCode::from(2);
+    };
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
         ["-h" | "--help"] => {

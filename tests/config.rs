@@ -1311,3 +1311,70 @@ fn relative_config_path_still_anchors_relative_settings() {
             .as_path()
     );
 }
+
+#[test]
+fn removed_keys_set_to_null_are_still_rejected() {
+    for (key, message) in [
+        ("default", "\"default\" was removed in 0.2"),
+        (
+            "default_provider",
+            "\"default_provider\" was removed in 0.2",
+        ),
+        ("fallback_order", "\"fallback_order\" was removed in 0.2"),
+    ] {
+        for value in ["null", "~"] {
+            let error = load_error(&format!("port: 7567\n{key}: {value}\n"));
+            assert!(error.contains(":2:"), "points at line 2:\n{error}");
+            assert!(error.contains(message), "{key}: {value}:\n{error}");
+        }
+    }
+}
+
+#[test]
+fn empty_binary_is_rejected_at_the_value() {
+    let error = load_error(
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: ''\n",
+    );
+    assert!(error.contains(":5:"), "{error}");
+    assert!(
+        error.contains("providers entry \"claude\".binary must not be empty"),
+        "{error}"
+    );
+}
+
+#[test]
+fn model_starting_with_a_dash_is_rejected_at_the_value() {
+    for provider in ["claude", "codex", "kimi"] {
+        let error = load_error(&format!(
+            "providers:\n  - id: {provider}\n    enabled: true\n    model: -haiku\n"
+        ));
+        assert!(error.contains(":4:"), "{error}");
+        assert!(
+            error.contains(&format!(
+                "providers entry \"{provider}\".model must not start with '-'"
+            )),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn duplicate_option_keys_are_rejected_at_the_second_key() {
+    let error = load_error(
+        "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    options:\n      openai_base_url: http://127.0.0.1:1/v1\n      openai_base_url: http://127.0.0.1:2/v1\n",
+    );
+    // The YAML parser rejects the duplicate itself, at the second key.
+    assert!(
+        error.contains(":7:7: duplicate key `openai_base_url`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn generic_model_may_start_with_a_dash() {
+    let config = load_text(
+        "providers:\n  - id: generic\n    enabled: true\n    model: -local-model\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
+    )
+    .expect("a generic model is sent over HTTP, not as an argument");
+    assert_eq!(config.provider("generic").unwrap().model, "-local-model");
+}

@@ -541,3 +541,27 @@ fn startup_with_no_enabled_providers_prints_one_clear_line() {
         "{line}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn non_unicode_argument_is_a_usage_error_not_a_panic() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = TempDir::new().expect("temp dir");
+    let output = Command::new(env!("CARGO_BIN_EXE_pumice"))
+        .arg("check-config")
+        .arg("--config")
+        .arg(OsStr::from_bytes(b"bad-\xff.yaml"))
+        .current_dir(dir.path())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run pumice");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("arguments must be valid Unicode"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
