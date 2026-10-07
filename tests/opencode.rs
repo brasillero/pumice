@@ -448,7 +448,6 @@ fn no_yaml_entry_means_not_configured() {
         "providers are only configured by list entries"
     );
     assert!(config.providers.is_empty());
-    assert_eq!(config.default, None);
 }
 
 #[test]

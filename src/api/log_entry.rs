@@ -143,10 +143,10 @@ fn provider_and_model(attempt: &Attempt) -> String {
 }
 
 /// The client's `model` field, shortened and with control characters
-/// escaped; a missing or blank value means the default provider.
+/// escaped; a missing or blank value is shown as `(none)`.
 fn requested(requested: Option<&str>) -> String {
     match requested.map(str::trim) {
-        None | Some("") => "default".to_owned(),
+        None | Some("") => "(none)".to_owned(),
         Some(model) => {
             let short: String = model.chars().take(MAX_REQUESTED_CHARS).collect();
             let escaped: String = short.escape_debug().collect();
@@ -169,9 +169,7 @@ fn raw_reason(reason: RawReason, requested_model: Option<&str>) -> String {
             "provider \"{}\" is disabled in the config",
             requested(requested_model)
         ),
-        RawReason::NoDefault => {
-            "no usable default: requests without a model return the original text".to_owned()
-        }
+        RawReason::NoModel => "the request named no provider".to_owned(),
         RawReason::Busy => "another dictation was still being formatted".to_owned(),
         RawReason::BudgetExhausted => "the total time budget ran out".to_owned(),
         RawReason::ProviderFailed(error) => provider_error(error),
@@ -278,7 +276,7 @@ mod tests {
         });
         assert_eq!(
             text,
-            "2026-10-06 14:04:01  #12   formatted    claude (haiku)  9.1s  9 chars  [requested: default]"
+            "2026-10-06 14:04:01  #12   formatted    claude (haiku)  9.1s  9 chars  [requested: (none)]"
         );
     }
 

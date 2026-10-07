@@ -8,7 +8,7 @@ use std::process::Output;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pumice::config::{self, Config, ConfigSource, DEFAULT_PORT, DefaultWarningKind};
+use pumice::config::{self, Config, ConfigSource, DEFAULT_PORT};
 use pumice::process::ProcessRunner;
 use pumice::providers::{self, ProviderDescriptor, ProviderSettings};
 use tempfile::TempDir;
@@ -132,11 +132,9 @@ fn empty_file_gives_all_defaults() {
     assert_eq!(config.prompts.user, None);
     assert!(!config.debug_log.enabled);
 
-    // Since 0.2 an empty file configures nothing: no providers, no default,
-    // no warning — every request returns the original text.
+    // Since 0.2 an empty file configures nothing: no providers — every
+    // request returns the original text.
     assert!(config.providers.is_empty());
-    assert_eq!(config.default, None);
-    assert!(config.default_warning.is_none());
 }
 
 #[test]
@@ -156,7 +154,6 @@ fn missing_default_config_gives_all_defaults() {
     assert_eq!(loaded.config.port, from_empty.port);
     assert_eq!(loaded.config.providers, from_empty.providers);
     assert_eq!(loaded.config.prompts, from_empty.prompts);
-    assert_eq!(loaded.config.default, from_empty.default);
 }
 
 #[test]
@@ -403,10 +400,15 @@ fn default_provider_key_fails_with_a_removal_hint() {
 }
 
 #[test]
-fn fallback_order_key_fails_with_a_removal_hint() {
-    let error = load_error("fallback_order:\n  - claude\n  - claude\n");
+fn default_key_fails_with_a_removal_hint() {
+    let error = load_error("default: claude\n");
+    assert!(error.contains("\"default\" was removed in 0.2:"), "{error}");
     assert!(
-        error.contains("\"fallback_order\" was removed in 0.2:"),
+        error.contains("the client's model field picks the provider"),
+        "{error}"
+    );
+    assert!(
+        error.contains("a request without a model returns the original text"),
         "{error}"
     );
     assert!(
@@ -420,78 +422,19 @@ fn fallback_order_key_fails_with_a_removal_hint() {
 }
 
 #[test]
-fn default_resolves_case_insensitively_to_an_enabled_entry() {
-    let config = load_text(
-        "default: Claude\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n",
-    )
-    .expect("default loads");
-    assert_eq!(config.default.as_deref(), Some("claude"));
-    assert!(config.default_warning.is_none());
-}
-
-#[test]
-fn default_naming_a_disabled_provider_warns() {
-    // A disabled `default:` target is a warning, not an error: startup
-    // succeeds and model-less requests return the original text.
-    let config = load_text("default: claude\nproviders:\n  - id: claude\n    enabled: false\n")
-        .expect("a disabled default degrades to a warning");
-    assert_eq!(config.default, None);
-    let warning = config.default_warning.expect("the warning is kept");
-    assert_eq!(warning.id, "claude");
-    assert_eq!(warning.kind, DefaultWarningKind::Disabled);
-    assert_eq!(warning.location.line(), 1);
-    assert_eq!(
-        warning.line(),
-        "warning: default \"claude\" is disabled: requests without a model return the original text"
+fn fallback_order_key_fails_with_a_removal_hint() {
+    let error = load_error("fallback_order:\n  - claude\n  - claude\n");
+    assert!(
+        error.contains("\"fallback_order\" was removed in 0.2:"),
+        "{error}"
     );
-}
-
-#[test]
-fn default_naming_an_unknown_unlisted_or_blank_provider_warns() {
-    // Unknown provider id.
-    let config = load_text("default: nope\n").expect("loads with a warning");
-    assert_eq!(config.default, None);
-    let warning = config.default_warning.expect("the warning is kept");
-    assert_eq!(warning.id, "nope");
-    assert_eq!(warning.kind, DefaultWarningKind::Unknown);
-    assert_eq!(
-        warning.line(),
-        "warning: default \"nope\" is not a known provider: requests without a model return the original text"
+    assert!(
+        error.contains("providers:\n  - id: claude\n    enabled: true\n    model: haiku"),
+        "{error}"
     );
-
-    // Known, but not listed in `providers:`.
-    let config = load_text(
-        "default: codex\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n",
-    )
-    .expect("loads with a warning");
-    assert_eq!(config.default, None);
-    let warning = config.default_warning.expect("the warning is kept");
-    assert_eq!(warning.id, "codex");
-    assert_eq!(warning.kind, DefaultWarningKind::NotListed);
-    assert_eq!(
-        warning.line(),
-        "warning: default \"codex\" is not in the providers list: requests without a model return the original text"
-    );
-
-    // Blank value.
-    let config = load_text("default: \"\"\n").expect("loads with a warning");
-    assert_eq!(config.default, None);
-    let warning = config.default_warning.expect("the warning is kept");
-    assert_eq!(warning.kind, DefaultWarningKind::Empty);
-    assert_eq!(
-        warning.line(),
-        "warning: default is empty: requests without a model return the original text"
-    );
-
-    // Explicit null: empty, not absent — still a positioned warning.
-    let config = load_text("default:\n").expect("loads with a warning");
-    assert_eq!(config.default, None);
-    let warning = config.default_warning.expect("the warning is kept");
-    assert_eq!(warning.kind, DefaultWarningKind::Empty);
-    assert_eq!(warning.location.line(), 1);
-    assert_eq!(
-        warning.line(),
-        "warning: default is empty: requests without a model return the original text"
+    assert!(
+        error.contains(CONFIG_NAME),
+        "error names the file:\n{error}"
     );
 }
 
@@ -958,7 +901,7 @@ fn check_config_success_prints_summary() {
     let path = dir.path().join(CONFIG_NAME);
     fs::write(
         &path,
-        "port: 8000\ndefault: claude\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n  - id: kimi\n    enabled: false\n",
+        "port: 8000\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n  - id: kimi\n    enabled: false\n",
     )
     .expect("write config");
 
@@ -971,7 +914,7 @@ fn check_config_success_prints_summary() {
     );
     assert!(stdout.contains("port: 8000"), "{stdout}");
     assert!(stdout.contains("total timeout: 30s"), "{stdout}");
-    assert!(stdout.contains("default: claude"), "{stdout}");
+    assert!(!stdout.contains("default"), "{stdout}");
     assert!(stdout.contains("providers (in order):"), "{stdout}");
     assert!(
         stdout.contains("  claude: enabled, model haiku, timeout 30s"),
@@ -981,47 +924,25 @@ fn check_config_success_prints_summary() {
 }
 
 #[test]
-fn check_config_without_default_prints_not_set() {
+fn check_config_rejects_the_removed_default_key_at_its_position() {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join(CONFIG_NAME);
     fs::write(
         &path,
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n",
+        "port: 8000\ndefault: kimi\nproviders:\n  - id: kimi\n    enabled: false\n",
     )
     .expect("write config");
 
     let output = run_pumice(&["check-config", "--config", path.to_str().unwrap()]);
-    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
-    let stdout = stdout(&output);
+    assert_eq!(output.status.code(), Some(2), "stdout: {}", stdout(&output));
+    let stderr = stderr(&output);
     assert!(
-        stdout.contains("default: (not set; requests without a model return the original text)"),
-        "{stdout}"
-    );
-}
-
-#[test]
-fn check_config_prints_a_positioned_default_warning() {
-    let dir = TempDir::new().expect("temp dir");
-    let path = dir.path().join(CONFIG_NAME);
-    fs::write(
-        &path,
-        "default: kimi\nproviders:\n  - id: kimi\n    enabled: false\n",
-    )
-    .expect("write config");
-
-    let output = run_pumice(&["check-config", "--config", path.to_str().unwrap()]);
-    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
-    let stdout = stdout(&output);
-    assert!(
-        stdout.contains("default: (not usable; requests without a model return the original text)"),
-        "{stdout}"
+        stderr.contains("\"default\" was removed in 0.2:"),
+        "{stderr}"
     );
     assert!(
-        stdout.contains(&format!(
-            "{}:1:10: warning: default \"kimi\" is disabled: requests without a model return the original text",
-            path.display()
-        )),
-        "{stdout}"
+        stderr.contains(&format!("{}:2:10", path.display())),
+        "the error points at the key's line:column:\n{stderr}"
     );
 }
 
@@ -1227,9 +1148,7 @@ fn example_config_loads() {
     let config = &loaded.config;
     assert_eq!(config.port, 7567);
     assert_eq!(config.total_timeout, Duration::from_secs(30));
-    // The example enables Claude and names it the default.
-    assert_eq!(config.default.as_deref(), Some("claude"));
-    assert!(config.default_warning.is_none());
+    // The example enables Claude.
     assert!(!config.debug_log.enabled);
     // Relative paths anchor at the configuration file's directory.
     assert_eq!(
@@ -1331,7 +1250,6 @@ fn example_documented_overrides_load() {
         );
 
     let config = load_text(&uncommented).expect("documented overrides load");
-    assert_eq!(config.default.as_deref(), Some("claude"));
     assert_eq!(
         codex(&config)
             .options

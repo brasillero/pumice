@@ -308,11 +308,7 @@ fn settings_at<A: ContractAdapter>(fake: &FakeCli) -> ProviderSettings {
 
 /// Builds a configuration directly (YAML validation knows only registered
 /// ids), like `tests/pipeline.rs` does for its selection tests.
-fn chain_config(
-    default: Option<&str>,
-    total_timeout: Duration,
-    entries: Vec<(&str, ProviderSettings)>,
-) -> Config {
+fn chain_config(total_timeout: Duration, entries: Vec<(&str, ProviderSettings)>) -> Config {
     Config {
         port: 7567,
         total_timeout,
@@ -321,8 +317,6 @@ fn chain_config(
             enabled: false,
             path: PathBuf::from("pumice-debug.jsonl"),
         },
-        default: default.map(str::to_owned),
-        default_warning: None,
         providers: entries
             .into_iter()
             .map(|(id, settings)| ProviderConfig {
@@ -546,7 +540,6 @@ pub async fn failure_is_terminal<A: ContractAdapter>() {
     let fake = FakeCli::new(json!({"stdout": stdout, "exit_code": exit_code}));
     let backup = TestProvider::new("backup", vec![Step::Ready("unused".to_owned())]);
     let config = chain_config(
-        Some(A::ID),
         Duration::from_secs(30),
         vec![
             (A::ID, settings_at::<A>(&fake)),
@@ -558,7 +551,7 @@ pub async fn failure_is_terminal<A: ContractAdapter>() {
     let pipeline = Pipeline::new(&config, providers);
 
     let outcome = pipeline
-        .format(&handy_request(None, "ola mundo"), Instant::now())
+        .format(&handy_request(Some(A::ID), "ola mundo"), Instant::now())
         .await;
     assert_eq!(
         outcome.kind,
@@ -574,7 +567,6 @@ pub async fn failure_is_terminal<A: ContractAdapter>() {
     let fake = FakeCli::new(json!({"stdout": stdout, "exit_code": exit_code}));
     let alpha = TestProvider::new("alpha", vec![Step::Fail(ProviderError::NotLoggedIn)]);
     let config = chain_config(
-        Some("alpha"),
         Duration::from_secs(30),
         vec![
             ("alpha", settings_at::<A>(&fake)),
@@ -586,7 +578,7 @@ pub async fn failure_is_terminal<A: ContractAdapter>() {
     let pipeline = Pipeline::new(&config, providers);
 
     let outcome = pipeline
-        .format(&handy_request(None, "ola mundo"), Instant::now())
+        .format(&handy_request(Some("alpha"), "ola mundo"), Instant::now())
         .await;
     assert_eq!(
         outcome.kind,

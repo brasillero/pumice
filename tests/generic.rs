@@ -875,13 +875,10 @@ async fn failure_returns_raw_text_and_never_runs_another_provider() {
     drop(dead);
     let generic_endpoint = parse_endpoint(&format!("http://{dead_addr}/v1")).expect("parses");
     let backup = TestProvider::new("backup", vec![Step::Ready("Olá de novo.".to_owned())]);
-    let config = chain_config(
-        Some("generic"),
-        vec![
-            ("generic", generic_settings(&generic_endpoint)),
-            ("backup", generic_settings(&generic_endpoint)),
-        ],
-    );
+    let config = chain_config(vec![
+        ("generic", generic_settings(&generic_endpoint)),
+        ("backup", generic_settings(&generic_endpoint)),
+    ]);
     let providers: Vec<Arc<dyn Provider>> = vec![
         build_provider(&generic_endpoint, CALL_TIMEOUT),
         backup.clone(),
@@ -889,7 +886,7 @@ async fn failure_returns_raw_text_and_never_runs_another_provider() {
     let pipeline = Pipeline::new(&config, providers);
 
     let outcome = pipeline
-        .format(&handy_request("ditado"), Instant::now())
+        .format(&handy_request("generic", "ditado"), Instant::now())
         .await;
     assert_eq!(
         outcome.kind,
@@ -908,13 +905,10 @@ async fn failure_returns_raw_text_and_never_runs_another_provider() {
     )))
     .await;
     let alpha = TestProvider::new("alpha", vec![Step::Fail(ProviderError::NotLoggedIn)]);
-    let config = chain_config(
-        Some("alpha"),
-        vec![
-            ("alpha", generic_settings(&server.endpoint())),
-            ("generic", generic_settings(&server.endpoint())),
-        ],
-    );
+    let config = chain_config(vec![
+        ("alpha", generic_settings(&server.endpoint())),
+        ("generic", generic_settings(&server.endpoint())),
+    ]);
     let providers: Vec<Arc<dyn Provider>> = vec![
         alpha.clone(),
         build_provider(&server.endpoint(), CALL_TIMEOUT),
@@ -922,7 +916,7 @@ async fn failure_returns_raw_text_and_never_runs_another_provider() {
     let pipeline = Pipeline::new(&config, providers);
 
     let outcome = pipeline
-        .format(&handy_request("ditado"), Instant::now())
+        .format(&handy_request("alpha", "ditado"), Instant::now())
         .await;
     assert_eq!(
         outcome.kind,
@@ -944,15 +938,10 @@ fn generic_settings(endpoint: &LoopbackEndpoint) -> pumice::providers::ProviderS
     settings
 }
 
-fn chain_config(
-    default: Option<&str>,
-    entries: Vec<(&str, pumice::providers::ProviderSettings)>,
-) -> Config {
+fn chain_config(entries: Vec<(&str, pumice::providers::ProviderSettings)>) -> Config {
     Config {
         port: 7567,
         total_timeout: Duration::from_secs(30),
-        default: default.map(str::to_owned),
-        default_warning: None,
         prompts: PromptSettings::default(),
         debug_log: DebugLogSettings {
             enabled: false,
@@ -968,9 +957,9 @@ fn chain_config(
     }
 }
 
-fn handy_request(text: &str) -> ExtractedRequest {
+fn handy_request(model: &str, text: &str) -> ExtractedRequest {
     extract_request(ChatCompletionRequest {
-        model: None,
+        model: Some(model.to_owned()),
         messages: vec![Message {
             role: "user".to_owned(),
             content: Content::Text(format!("<transcript>\n{text}\n</transcript>")),

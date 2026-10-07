@@ -496,12 +496,12 @@ fn startup_stderr_line(child: &mut Child, prefix: &str) -> String {
 }
 
 #[test]
-fn startup_prints_the_route_line_naming_default_and_enabled_providers() {
+fn startup_prints_the_route_line_naming_the_enabled_providers() {
     let port = grab_free_port();
     let claude = FakeCli::new(json!({}));
     let codex = FakeCli::new(json!({}));
     let (_dir, path) = write_config(&format!(
-        "port: {port}\ndefault: claude\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{}'\n",
+        "port: {port}\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{}'\n",
         claude.path().display(),
         codex.path().display()
     ));
@@ -512,10 +512,10 @@ fn startup_prints_the_route_line_naming_default_and_enabled_providers() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn pumice");
-    let line = startup_stderr_line(&mut child, "default:");
+    let line = startup_stderr_line(&mut child, "providers:");
     assert_eq!(
         line,
-        "default: claude (haiku); enabled: claude, codex; on failure: original text; total timeout 30s"
+        "providers: claude (haiku), codex (gpt-6.1-sol); on failure or no model: original text; total timeout 30s"
     );
 }
 

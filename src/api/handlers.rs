@@ -228,7 +228,8 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
     }
 }
 
-/// Lists the enabled provider IDs as models, default first — the same IDs
+/// Lists the enabled provider IDs as models, in configuration (list) order —
+/// the same IDs
 /// [`Pipeline::select`](crate::pipeline::Pipeline::select) resolves, so
 /// listing and selection cannot drift.
 pub async fn list_models(State(state): State<ApiState>) -> Json<ModelList> {

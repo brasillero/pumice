@@ -259,7 +259,6 @@ fn absent_entry_means_not_configured() {
         "providers are only configured by list entries"
     );
     assert!(loaded.config.providers.is_empty());
-    assert_eq!(loaded.config.default, None);
 }
 
 #[test]

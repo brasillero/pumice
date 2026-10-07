@@ -87,8 +87,7 @@ impl DualServer {
 }
 
 /// YAML configuring `claude` and `codex`, each at its own fake CLI.
-/// `{claude}` and `{codex}` are replaced by the fakes' paths. Tests that
-/// exercise model-less requests prepend a `default: <id>` line.
+/// `{claude}` and `{codex}` are replaced by the fakes' paths.
 const BOTH_AT_FAKES: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{claude}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex}'\n";
 
 /// Builds a pipeline from `yaml` with one fake per provider (`{claude}` and
@@ -753,33 +752,11 @@ async fn post_model(server_port: u16, model: &str) -> RawResponse {
 }
 
 #[tokio::test]
-async fn models_list_the_default_provider_first() {
-    let yaml = "default: claude\n".to_owned() + BOTH_AT_FAKES;
+async fn models_follow_the_list_order() {
+    // codex is listed before claude: the model list follows the file.
+    let yaml = "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex}'\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{claude}'\n";
     let server = start_dual_server(
-        &yaml,
-        success_scenario("unused"),
-        codex_success_scenario("unused"),
-    )
-    .await;
-    let response = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
-
-    assert_eq!(response.status, 200);
-    assert_eq!(
-        listed_model_ids(&response.body_json()),
-        ["claude", "codex", "passthrough", "inspect"],
-        "claude is the default, so it leads the list"
-    );
-    assert!(
-        !server.claude.report_path().exists() && !server.codex.report_path().exists(),
-        "listing never invokes a CLI"
-    );
-}
-
-#[tokio::test]
-async fn models_list_a_non_claude_default_first() {
-    let yaml = "default: codex\n".to_owned() + BOTH_AT_FAKES;
-    let server = start_dual_server(
-        &yaml,
+        yaml,
         success_scenario("unused"),
         codex_success_scenario("unused"),
     )
@@ -790,7 +767,29 @@ async fn models_list_a_non_claude_default_first() {
     assert_eq!(
         listed_model_ids(&response.body_json()),
         ["codex", "claude", "passthrough", "inspect"],
-        "the default provider leads even when it is not claude"
+        "the model list follows the providers list order"
+    );
+    assert!(
+        !server.claude.report_path().exists() && !server.codex.report_path().exists(),
+        "listing never invokes a CLI"
+    );
+}
+
+#[tokio::test]
+async fn models_list_the_enabled_providers_in_order() {
+    let server = start_dual_server(
+        BOTH_AT_FAKES,
+        success_scenario("unused"),
+        codex_success_scenario("unused"),
+    )
+    .await;
+    let response = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
+
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        listed_model_ids(&response.body_json()),
+        ["claude", "codex", "passthrough", "inspect"],
+        "enabled providers in list order, then the built-ins"
     );
 }
 
@@ -851,11 +850,10 @@ async fn model_matching_is_case_insensitive_and_trims_whitespace() {
 }
 
 #[tokio::test]
-async fn empty_and_missing_model_select_the_default_provider() {
-    let yaml = "default: claude\n".to_owned() + BOTH_AT_FAKES;
+async fn missing_and_blank_model_return_raw_text_and_run_no_provider() {
     let server = start_dual_server(
-        &yaml,
-        success_scenario("Texto do Claude."),
+        BOTH_AT_FAKES,
+        success_scenario("unused"),
         codex_success_scenario("unused"),
     )
     .await;
@@ -864,7 +862,8 @@ async fn empty_and_missing_model_select_the_default_provider() {
     assert_eq!(empty.status, 200, "body: {}", empty.body_text());
     assert_eq!(
         empty.body_json()["choices"][0]["message"]["content"],
-        "Texto do Claude."
+        FIXTURE_TRANSCRIPT,
+        "blank model: the original text comes back"
     );
 
     // The same fixture without a `model` key at all.
@@ -885,38 +884,20 @@ async fn empty_and_missing_model_select_the_default_provider() {
     assert_eq!(missing.status, 200, "body: {}", missing.body_text());
     assert_eq!(
         missing.body_json()["choices"][0]["message"]["content"],
-        "Texto do Claude."
+        FIXTURE_TRANSCRIPT,
+        "missing model: the original text comes back"
     );
     assert!(
-        server.claude.report_path().exists(),
-        "the default provider ran for both requests"
+        !server.claude.report_path().exists() && !server.codex.report_path().exists(),
+        "no provider runs for a model-less request"
     );
+    let lines = server.log_lines();
     assert!(
-        !server.codex.report_path().exists(),
-        "the codex fake must not run"
-    );
-}
-
-#[tokio::test]
-async fn empty_model_selects_a_non_claude_default() {
-    let yaml = "default: codex\n".to_owned() + BOTH_AT_FAKES;
-    let server = start_dual_server(
-        &yaml,
-        success_scenario("unused"),
-        codex_success_scenario("Texto do Codex."),
-    )
-    .await;
-
-    let response = post_model(server.port, "").await;
-
-    assert_eq!(response.status, 200, "body: {}", response.body_text());
-    let body = response.body_json();
-    assert_eq!(body["model"], "codex");
-    assert_eq!(body["choices"][0]["message"]["content"], "Texto do Codex.");
-    assert!(server.codex.report_path().exists(), "codex ran");
-    assert!(
-        !server.claude.report_path().exists(),
-        "the claude fake must not run"
+        lines
+            .iter()
+            .any(|line| line.contains(" RAW ") && line.contains("the request named no provider")),
+        "the raw outcome names the missing model: {:?}",
+        lines
     );
 }
 
@@ -1116,7 +1097,7 @@ async fn selecting_a_missing_provider_returns_raw_text_and_runs_no_other_provide
 }
 
 #[tokio::test]
-async fn model_less_request_without_a_usable_default_returns_raw_text_and_runs_nothing() {
+async fn model_less_request_returns_raw_text_and_runs_nothing() {
     let server =
         start_missing_selected_server("  - id: codex\n    enabled: false\n", json!({})).await;
 
@@ -1138,18 +1119,18 @@ async fn model_less_request_without_a_usable_default_returns_raw_text_and_runs_n
     let response_body = response.body_json();
     assert_eq!(
         response_body["choices"][0]["message"]["content"], FIXTURE_TRANSCRIPT,
-        "with no usable default the original text comes back"
+        "a request without a model gets the original text back"
     );
     assert!(
         !server.codex.report_path().exists(),
-        "no provider may run without a usable default"
+        "no provider may run for a model-less request"
     );
     let lines = server.log_lines();
     assert!(
         lines
             .iter()
-            .any(|line| line.contains(" RAW ") && line.contains("no usable default")),
-        "the raw outcome names the missing default: {:?}",
+            .any(|line| line.contains(" RAW ") && line.contains("the request named no provider")),
+        "the raw outcome names the missing model: {:?}",
         lines
     );
 }
