@@ -255,10 +255,12 @@ fn agent_config(system_prompt: &str, agent_name: &str) -> String {
 ///
 /// Success requires exit code 0, at least one `agent_message` or
 /// `agent_message_chunk` carrying text, and a final `state_update` with
-/// `state: idle` / `stopReason: end_turn`. Any `tool_call_update` or
+/// `state: idle` / `stopReason: end_turn` as the last state: text that
+/// arrives after it, or a later idle state with another reason, means the
+/// turn did not end cleanly. Any `tool_call_update` or
 /// `tool_call_content_chunk` is rejected as unexpected tool activity.
 pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = super::cli::stdout_text(output)?;
 
     let mut texts: Vec<String> = Vec::new();
     let mut text_indexes: HashMap<String, usize> = HashMap::new();
@@ -291,13 +293,19 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
 
         match session_update {
             "agent_message" => {
-                let Some(message_id) = update.get("messageId").and_then(Value::as_str) else {
-                    return Err(ProviderError::other(ProviderErrorCode::InvalidOutput));
-                };
+                saw_end_turn = false;
                 let text = text_from_content(update.get("content"))?;
-                upsert_text(message_id, text, &mut texts, &mut text_indexes);
+                // Like a chunk, a message without an id cannot be updated
+                // later and is kept once.
+                match update.get("messageId").and_then(Value::as_str) {
+                    Some(message_id) if !message_id.is_empty() => {
+                        upsert_text(message_id, text, &mut texts, &mut text_indexes);
+                    }
+                    _ => texts.push(text),
+                }
             }
             "agent_message_chunk" => {
+                saw_end_turn = false;
                 let message_id = update
                     .get("messageId")
                     .and_then(Value::as_str)
@@ -316,6 +324,8 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
             "state_update"
                 if update.get("state").and_then(Value::as_str) == Some("idle") =>
             {
+                // Only the last idle state counts as the turn's end.
+                saw_end_turn = false;
                 match update.get("stopReason").and_then(Value::as_str) {
                     Some("end_turn") => saw_end_turn = true,
                     Some("error") => {

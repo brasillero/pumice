@@ -490,3 +490,59 @@ fn env_overrides_are_rejected() {
         "providers entry \"kimi\".env.KIMI_CODE_HOME is not an allowed environment variable (no environment overrides are allowed for this provider)",
     );
 }
+
+const VERSION_LINE: &str = r#"{"role":"meta","type":"system.version","version":"2.1.1"}"#;
+
+#[tokio::test]
+async fn null_or_empty_tool_calls_are_not_tool_activity() {
+    for tool_calls in ["null", "[]"] {
+        let stream = format!(
+            "{VERSION_LINE}\n{{\"role\":\"assistant\",\"content\":\"Clean.\",\"tool_calls\":{tool_calls}}}\n"
+        );
+        let fake = fake_kimi(&stream, 0);
+        assert_eq!(
+            format(&fake, "text").await.unwrap(),
+            "Clean.",
+            "tool_calls: {tool_calls}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn null_content_with_tool_calls_is_tool_activity() {
+    let stream = format!(
+        "{VERSION_LINE}\n{{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{{\"id\":\"t\",\"type\":\"function\"}}]}}\n"
+    );
+    let fake = fake_kimi(&stream, 1);
+    assert_eq!(
+        format(&fake, "text").await.unwrap_err(),
+        ProviderError::other(ProviderErrorCode::UnexpectedToolActivity)
+    );
+}
+
+#[tokio::test]
+async fn a_later_login_failure_is_not_masked_by_an_earlier_retry() {
+    let stream = format!(
+        "{VERSION_LINE}\n{}\n{}\n",
+        r#"{"role":"meta","type":"turn.step.retrying","error_name":"APIConnectionError","error_message":"connection reset","status_code":502}"#,
+        r#"{"role":"meta","type":"turn.step.retrying","error_name":"UnauthorizedError","error_message":"missing authentication","status_code":401}"#,
+    );
+    let fake = fake_kimi(&stream, 1);
+    assert_eq!(
+        format(&fake, "text").await.unwrap_err(),
+        ProviderError::NotLoggedIn
+    );
+}
+
+#[tokio::test]
+async fn quota_reported_as_429_is_quota_exceeded() {
+    let stream = format!(
+        "{VERSION_LINE}\n{}\n",
+        r#"{"role":"meta","type":"turn.step.retrying","error_name":"RateLimitError","error_message":"monthly quota exhausted","status_code":429}"#,
+    );
+    let fake = fake_kimi(&stream, 1);
+    assert_eq!(
+        format(&fake, "text").await.unwrap_err(),
+        ProviderError::QuotaExceeded { retry_after: None }
+    );
+}

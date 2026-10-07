@@ -58,3 +58,37 @@ impl<A: CliAdapter> Provider for CliProvider<A> {
         })
     }
 }
+
+/// The CLI's stdout as text. Invalid UTF-8 is invalid output: a lossy
+/// decode would put U+FFFD into a "successful" result instead of returning
+/// the original text.
+pub(crate) fn stdout_text(output: &crate::process::ProcessOutput) -> Result<&str, ProviderError> {
+    std::str::from_utf8(&output.stdout)
+        .map_err(|_| ProviderError::other(super::ProviderErrorCode::InvalidOutput))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::ProviderErrorCode;
+
+    #[cfg(unix)]
+    fn output(stdout: &[u8]) -> crate::process::ProcessOutput {
+        use std::os::unix::process::ExitStatusExt;
+        crate::process::ProcessOutput {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: stdout.to_vec(),
+            stderr_tail: Vec::new(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stdout_text_rejects_invalid_utf8() {
+        assert_eq!(stdout_text(&output("olá".as_bytes())), Ok("olá"));
+        assert_eq!(
+            stdout_text(&output(b"ok \xff")),
+            Err(ProviderError::other(ProviderErrorCode::InvalidOutput))
+        );
+    }
+}
