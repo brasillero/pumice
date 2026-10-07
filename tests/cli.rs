@@ -8,7 +8,7 @@
 mod support;
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -467,5 +467,77 @@ fn occupied_port_exits_1_naming_the_port() {
     assert!(
         stderr.contains("already in use"),
         "message must explain the conflict: {stderr}"
+    );
+}
+
+/// Reads `child`'s stderr until a line starting with `prefix` arrives, then
+/// kills and reaps the child. Panics with what was read when the service
+/// exits early or the line never comes.
+fn startup_stderr_line(child: &mut Child, prefix: &str) -> String {
+    let mut stderr = std::io::BufReader::new(child.stderr.take().expect("piped stderr"));
+    let mut line = String::new();
+    let mut seen = String::new();
+    loop {
+        match stderr.read_line(&mut line) {
+            Ok(0) => panic!("service exited before printing '{prefix}'; stderr so far: {seen}"),
+            Ok(_) => {
+                seen.push_str(&line);
+                if line.starts_with(prefix) {
+                    let found = line.trim_end().to_owned();
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return found;
+                }
+                line.clear();
+            }
+            Err(error) => panic!("cannot read service stderr: {error}"),
+        }
+    }
+}
+
+#[test]
+fn startup_prints_the_route_line_naming_default_and_enabled_providers() {
+    let port = grab_free_port();
+    let claude = FakeCli::new(json!({}));
+    let codex = FakeCli::new(json!({}));
+    let (_dir, path) = write_config(&format!(
+        "port: {port}\ndefault: claude\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{}'\n",
+        claude.path().display(),
+        codex.path().display()
+    ));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pumice"))
+        .args(["--config", path.to_str().expect("UTF-8 path")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn pumice");
+    let line = startup_stderr_line(&mut child, "default:");
+    assert_eq!(
+        line,
+        "default: claude (haiku); enabled: claude, codex; on failure: original text; total timeout 30s"
+    );
+}
+
+#[test]
+fn startup_with_no_enabled_providers_prints_one_clear_line() {
+    let port = grab_free_port();
+    let (_dir, path) = write_config(&format!(
+        "port: {port}\nproviders:\n  - id: claude\n    enabled: false\n"
+    ));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pumice"))
+        .args(["--config", path.to_str().expect("UTF-8 path")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn pumice");
+    let line = startup_stderr_line(&mut child, "no providers enabled");
+    assert!(
+        line.contains(&format!(
+            "no providers enabled: every request returns the original text (add providers to {})",
+            path.display()
+        )),
+        "{line}"
     );
 }

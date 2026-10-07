@@ -36,8 +36,11 @@ pub(crate) struct RawConfig {
     pub default_provider: Option<Spanned<serde::de::IgnoredAny>>,
     /// The provider a model-less request runs. Optional: when absent, or
     /// when it does not resolve to an enabled provider, startup succeeds
-    /// with a warning and model-less requests return the original text.
-    pub default: Option<Spanned<String>>,
+    /// with a warning and model-less requests return the original text. The
+    /// inner option distinguishes an absent key (`None`) from an explicit
+    /// null (`default:`, inner `None`), which warns as empty.
+    #[serde(default, deserialize_with = "present_default_key")]
+    pub default: Option<Spanned<Option<String>>>,
     pub total_timeout_secs: Option<Spanned<u64>>,
     #[serde(default, deserialize_with = "provider_list")]
     pub providers: Vec<Spanned<RawProviderEntry>>,
@@ -77,6 +80,17 @@ pub(crate) struct RawPrompts {
 pub(crate) struct RawDebugLog {
     pub enabled: Option<Spanned<bool>>,
     pub path: Option<Spanned<PathBuf>>,
+}
+
+/// Deserializes the `default:` key so an explicit null (`default:`) stays
+/// distinguishable from an absent key: `deserialize_with` only runs when the
+/// key is present, so the outer `Option` is `Some` for both a value and a
+/// null, and the inner `Option` carries the null.
+fn present_default_key<'de, D>(deserializer: D) -> Result<Option<Spanned<Option<String>>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Some(Spanned::<Option<String>>::deserialize(deserializer)?))
 }
 
 /// Deserializes the `providers:` sequence into located entries. The mapping

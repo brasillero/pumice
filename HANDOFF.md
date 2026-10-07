@@ -90,14 +90,14 @@ These change the spec's phasing. The spec itself is unchanged; product-doc updat
 
 - **Modular adapters:** a new CLI is a new module behind a common interface (S2.1), plus one registry entry.
 - **Two adapters in Phase 1:** Claude (S2.2) and **Codex (S2.3)**. Codex moved up from Phase 2. OpenCode, Antigravity, the generic adapter and auto-detection come later.
-- **Fallback chain (S4.2) is in Phase 1:** after the selected provider fails, try the next in `fallback_order`, then return raw text, all within the total timeout.
+- **Fallback chain (S4.2) is in Phase 1:** after the selected provider fails, try the next in `fallback_order`, then return raw text, all within the total timeout. (Superseded 2026-10-06: S6.5 (#53) removed the fallback chain — a request runs exactly one provider and any failure returns the original text.)
 - **Kimi is on standby:** its subscription terms allow interactive use only (S0.3). No Kimi adapter. (Superseded 2026-10-06: the adapter shipped in #52, off by default with the terms risk warning.)
 - **Default port: 7567** (S1.5). Handy points at `http://127.0.0.1:7567/v1`.
 - **Claude thinking off by default** (`MAX_THINKING_TOKENS=0`). Effort tuning and Handy's `reasoning_effort` field come later.
 - **Plan quota is intended:** Pumice runs on the user's subscription through the official CLIs.
 - **Later (Phase 3):** installer, auto-update and running as a Windows service.
 - **Codex residual tool risk accepted** (S5.1): "make it work first, refine its behavior later". Codex runs in its most restricted documented mode, and any run that shows tool activity is rejected.
-- **Default models confirmed:** Claude `haiku`, Codex `gpt-6.1-sol`.
+- **Default models confirmed:** Claude `haiku`, Codex `gpt-6.1-sol`. (Superseded 2026-10-06: S6.5 (#53) removed the built-in default models — every enabled entry sets its own `model`.)
 - **Unattended gate (2026-10-04):** the owner was away and asked to skip manual steps, so the gate below was verified by the orchestrator over HTTP with the real CLIs. The Handy GUI check is deferred to the owner.
 
 ### Phase 1 gate

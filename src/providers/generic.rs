@@ -74,7 +74,7 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     // This adapter has no CLI: detection neither resolves nor spawns
     // anything for it (no PATH lookup, no probe). Its endpoint is a network
     // target whose availability is checked at call time, when
-    // `EndpointUnavailable` triggers the fallback chain.
+    // `EndpointUnavailable` then returns the original text.
     probe: ProbeSpec::NotApplicable,
     // No binary exists. The value stays empty on purpose and is never
     // resolved: `NotApplicable` detection skips resolution entirely.

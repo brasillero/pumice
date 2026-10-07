@@ -348,7 +348,7 @@ fn route_line(
     };
     let enabled = route
         .iter()
-        .map(|(id, model)| with_model(id, model))
+        .map(|(id, _)| id.to_string())
         .collect::<Vec<_>>()
         .join(", ");
     let default = match pipeline.default_provider() {

@@ -101,7 +101,7 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
     let id = format!("chatcmpl-pumice-{number}");
 
     // Built-in inspect diagnostic: echo the original request body verbatim,
-    // bypassing transcript extraction, the busy guard, the fallback chain and
+    // bypassing transcript extraction, the busy guard, provider selection and
     // every AI CLI call. This path still requires valid JSON and respects the
     // body size/time bounds above. `stream` follows the same rule as normal
     // requests: missing or null means false; a non-boolean value is rejected

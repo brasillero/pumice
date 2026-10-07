@@ -539,8 +539,7 @@ mod tests {
 
     #[test]
     fn settings_validation_requires_an_explicit_model() {
-        // Disabled is valid; the loader produces it from
-        // `disabled_by_default` when the file has no entry.
+        // Disabled is valid; an unlisted provider never reaches the loader.
         let disabled = ProviderSettings {
             enabled: false,
             ..defaults()

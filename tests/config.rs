@@ -203,23 +203,34 @@ fn null_sections_behave_like_absent_ones() {
 #[test]
 fn mapping_form_of_providers_fails_with_a_removal_hint() {
     // The pre-0.2 mapping form (empty or not) fails with the list form that
-    // replaced it.
-    for text in [
-        "providers: {}\n",
-        "providers:\n  claude:\n    enabled: true\n",
-    ] {
-        let error = load_error(text);
-        assert!(
-            error.contains(
-                "the mapping form of \"providers\" was removed in 0.2; use an ordered list instead"
-            ),
-            "{error}"
-        );
-        assert!(
-            error.contains(CONFIG_NAME),
-            "error names the file:\n{error}"
-        );
-    }
+    // replaced it, positioned at the mapping value.
+    let error = load_error("providers: {}\n");
+    assert!(
+        error.contains(
+            "the mapping form of \"providers\" was removed in 0.2; use an ordered list instead"
+        ),
+        "{error}"
+    );
+    assert!(
+        error.contains(":1:12:"),
+        "positioned at the value:\n{error}"
+    );
+
+    let error = load_error("providers:\n  claude:\n    enabled: true\n");
+    assert!(
+        error.contains(
+            "the mapping form of \"providers\" was removed in 0.2; use an ordered list instead"
+        ),
+        "{error}"
+    );
+    assert!(
+        error.contains(":2:3:"),
+        "positioned at the first entry key:\n{error}"
+    );
+    assert!(
+        error.contains(CONFIG_NAME),
+        "error names the file:\n{error}"
+    );
 }
 
 #[test]
@@ -471,6 +482,17 @@ fn default_naming_an_unknown_unlisted_or_blank_provider_warns() {
         warning.line(),
         "warning: default is empty: requests without a model return the original text"
     );
+
+    // Explicit null: empty, not absent — still a positioned warning.
+    let config = load_text("default:\n").expect("loads with a warning");
+    assert_eq!(config.default, None);
+    let warning = config.default_warning.expect("the warning is kept");
+    assert_eq!(warning.kind, DefaultWarningKind::Empty);
+    assert_eq!(warning.location.line(), 1);
+    assert_eq!(
+        warning.line(),
+        "warning: default is empty: requests without a model return the original text"
+    );
 }
 
 #[test]
@@ -487,6 +509,18 @@ fn empty_model_is_rejected_at_the_value() {
         12,
         "providers entry \"claude\".model must not be empty",
     );
+}
+
+#[test]
+fn empty_model_on_a_disabled_entry_is_allowed() {
+    // `model` is only required when the entry is enabled; a disabled entry
+    // may keep an empty one (this is the shape `pumice setup` will write
+    // for a provider the owner has not picked a model for yet).
+    let config = load_text("providers:\n  - id: claude\n    enabled: false\n    model: \"\"\n")
+        .expect("a disabled entry with an empty model loads");
+    let claude = config.provider("claude").expect("claude is configured");
+    assert!(!claude.enabled);
+    assert!(claude.model.is_empty());
 }
 
 #[test]

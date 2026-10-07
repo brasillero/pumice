@@ -426,7 +426,7 @@ fn enabled_without_a_model_reports_the_entry() {
         "providers:\n  - id: kimi\n    enabled: true\n",
         2,
         9,
-        "providers.kimi.model must be a nonempty model alias without whitespace, control characters or a leading '-'",
+        "providers.kimi.model is required when the provider is enabled",
     );
 }
 

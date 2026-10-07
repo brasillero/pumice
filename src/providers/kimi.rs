@@ -141,6 +141,12 @@ fn validate_settings(
     if !settings.enabled {
         return Ok(());
     }
+    if settings.model.is_empty() {
+        return Err(ConfigError::at(
+            locations.model.unwrap_or(serde_saphyr::Location::UNKNOWN),
+            format!("providers.{ID}.model is required when the provider is enabled"),
+        ));
+    }
     if !is_valid_model(&settings.model) {
         return Err(ConfigError::at(
             locations.model.unwrap_or(serde_saphyr::Location::UNKNOWN),

@@ -145,7 +145,7 @@ pub enum ProbeSpec {
     /// neither resolves nor spawns anything. The provider is reported
     /// available for listing purposes when enabled; its endpoint is a
     /// network target whose availability is only checked at call time
-    /// (`EndpointUnavailable` then triggers the fallback chain).
+    /// (`EndpointUnavailable` then returns the original text).
     NotApplicable,
 }
 

@@ -1116,6 +1116,45 @@ async fn selecting_a_missing_provider_returns_raw_text_and_runs_no_other_provide
 }
 
 #[tokio::test]
+async fn model_less_request_without_a_usable_default_returns_raw_text_and_runs_nothing() {
+    let server =
+        start_missing_selected_server("  - id: codex\n    enabled: false\n", json!({})).await;
+
+    let mut body: Value =
+        serde_json::from_str(&support::fixture("handy-request.json")).expect("fixture parses");
+    body.as_object_mut().expect("object").remove("model");
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &serde_json::to_vec(&body).expect("re-serializes"),
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    let response_body = response.body_json();
+    assert_eq!(
+        response_body["choices"][0]["message"]["content"], FIXTURE_TRANSCRIPT,
+        "with no usable default the original text comes back"
+    );
+    assert!(
+        !server.codex.report_path().exists(),
+        "no provider may run without a usable default"
+    );
+    let lines = server.log_lines();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains(" RAW ") && line.contains("no usable default")),
+        "the raw outcome names the missing default: {:?}",
+        lines
+    );
+}
+
+#[tokio::test]
 async fn authorization_header_is_ignored_and_never_logged() {
     let result = "Autorizado.";
     let server = start_server(CLAUDE_AT_FAKE, success_scenario(result)).await;

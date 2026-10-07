@@ -114,7 +114,11 @@ pub enum LoginCheckError {
     Refused(&'static str),
     /// The ID names no registered provider.
     UnknownProvider,
-    /// The provider is registered but disabled in the configuration.
+    /// The provider is registered but has no entry in the configuration's
+    /// providers list.
+    NotConfigured,
+    /// The provider is registered and listed but disabled in the
+    /// configuration.
     Disabled,
     /// Detection did not find the provider's executable.
     NotInstalled,
@@ -132,6 +136,10 @@ impl LoginCheckError {
             LoginCheckError::UnknownProvider => {
                 (format!("error: provider \"{id}\" is not registered"), 2)
             }
+            LoginCheckError::NotConfigured => (
+                format!("error: cannot check provider \"{id}\": it is not in the providers list"),
+                1,
+            ),
             LoginCheckError::Disabled => (
                 format!("error: cannot check provider \"{id}\": it is disabled"),
                 1,
@@ -170,9 +178,7 @@ pub async fn prepare_login_check(
         return Err(LoginCheckError::Refused(ANTIGRAVITY_REFUSAL));
     }
     let descriptor = providers::descriptor(id).ok_or(LoginCheckError::UnknownProvider)?;
-    let settings = config
-        .provider(id)
-        .ok_or(LoginCheckError::UnknownProvider)?;
+    let settings = config.provider(id).ok_or(LoginCheckError::NotConfigured)?;
     if !settings.enabled {
         return Err(LoginCheckError::Disabled);
     }
@@ -488,6 +494,10 @@ mod tests {
         let (line, code) = LoginCheckError::UnknownProvider.line_and_code("nope");
         assert_eq!(line, "error: provider \"nope\" is not registered");
         assert_eq!(code, 2);
+
+        let (line, code) = LoginCheckError::NotConfigured.line_and_code("codex");
+        assert!(line.contains("not in the providers list"));
+        assert_eq!(code, 1);
 
         let (line, code) = LoginCheckError::Disabled.line_and_code("claude");
         assert!(line.contains("disabled"));

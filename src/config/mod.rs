@@ -340,7 +340,8 @@ fn validate(
     let (default, default_warning) = match &raw.default {
         None => (None, None),
         Some(span) => {
-            let written = span.value.trim();
+            // An explicit `default:` (null) is empty, not absent.
+            let written = span.value.as_deref().map(str::trim).unwrap_or("");
             let resolved = configured
                 .iter()
                 .find(|entry| entry.id.eq_ignore_ascii_case(written));
