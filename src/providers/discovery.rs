@@ -105,7 +105,7 @@ pub async fn detect_with_timeout(
             found.push(Found::NotApplicable);
             continue;
         }
-        let program = probe_program(descriptor, config.providers.get(descriptor.id));
+        let program = probe_program(descriptor, config.provider(descriptor.id));
         let resolved = match resolve_program(&program) {
             Ok(resolved) => Found::Found(resolved.path),
             Err(ProviderError::Other {
@@ -144,7 +144,7 @@ pub async fn detect_with_timeout(
         .iter()
         .enumerate()
         .map(|(index, descriptor)| {
-            let settings = config.providers.get(descriptor.id);
+            let settings = config.provider(descriptor.id);
             let version = match (&found[index], descriptor.probe) {
                 (Found::Found(_), ProbeSpec::Version(_)) => {
                     probed.get(&index).cloned().unwrap_or(Version::Unavailable)

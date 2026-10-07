@@ -1,6 +1,11 @@
-//! The formatting pipeline: provider selection and the fallback chain,
-//! deadline enforcement, one active run at a time, and the raw-text
-//! fallback guarantee.
+//! The formatting pipeline: provider selection, deadline enforcement, one
+//! active run at a time, and the raw-text guarantee.
+//!
+//! There is no fallback (owner decision 2026-10-07): a request runs exactly
+//! one provider — the one its `model` names, or the `default:` provider
+//! when no model is sent. Everything that cannot format behaves exactly
+//! like passthrough: the dictation comes back exactly as extracted, with the
+//! reason in the log.
 //!
 //! Every outcome returns either formatted-and-cleaned text or the dictation
 //! exactly as extracted — never partially cleaned, never trimmed. Only
@@ -20,7 +25,7 @@ use crate::config::{Config, PromptSettings};
 use crate::prompts::compose_with_settings;
 use crate::providers::diagnostic::{self, Diagnostic};
 use crate::providers::discovery::{Found, ProviderStatus};
-use crate::providers::{self, FormatInput, Provider, ProviderError};
+use crate::providers::{FormatInput, Provider, ProviderError};
 use crate::request::ExtractedRequest;
 
 /// Part of the total budget reserved for killing the CLI and building the
@@ -46,9 +51,9 @@ struct ProviderEntry {
     model: String,
 }
 
-/// Selects a provider, runs it inside the request's budget and cleans the
-/// result; returns the raw dictation with the reason whenever formatting
-/// cannot deliver.
+/// Selects the single provider a request runs, runs it inside the request's
+/// budget and cleans the result; returns the raw dictation with the reason
+/// whenever formatting cannot deliver.
 ///
 /// One formatting run is active at a time: a concurrent request receives the
 /// raw dictation immediately ([`RawReason::Busy`]). The busy permit and the
@@ -61,18 +66,18 @@ pub struct Pipeline {
     /// outside this set are [`RawReason::UnknownProvider`]; configured ones
     /// missing from `providers` are [`RawReason::ProviderDisabled`].
     configured: BTreeSet<String>,
-    default_provider: String,
-    /// Providers to try after the selected one fails, in configuration
-    /// order.
-    fallback_order: Vec<String>,
+    /// Enabled provider IDs in configuration (list) order.
+    order: Vec<String>,
+    /// The provider a model-less request runs (the `default:` key when it
+    /// names an enabled provider).
+    default: Option<String>,
     total_timeout: Duration,
     prompt_settings: PromptSettings,
     /// Provider IDs startup detection confirmed installed. `None` when the
     /// pipeline was built without detection (the Phase 1 behavior): then
     /// every built provider counts as available. The generic loopback
     /// adapter has no executable to find and counts as available whenever it
-    /// is built. Selection and fallback ignore this; only model listing
-    /// filters by it.
+    /// is built. Selection ignores this; only model listing filters by it.
     available: Option<BTreeSet<String>>,
     busy: Semaphore,
 }
@@ -85,8 +90,8 @@ impl Pipeline {
     /// [`new`](Self::new) with startup detection cached in the pipeline:
     /// [`model_ids`](Self::model_ids) lists only built providers detection
     /// found. An enabled provider detection missed stays built and
-    /// selectable — it fails at runtime with `NotInstalled` and the fallback
-    /// chain runs, exactly as before detection existed.
+    /// selectable — it fails at runtime with `NotInstalled` and the raw
+    /// dictation comes back, exactly as before detection existed.
     pub fn with_detection(
         config: &Config,
         providers: Vec<Arc<dyn Provider>>,
@@ -109,7 +114,7 @@ impl Pipeline {
         for provider in providers {
             // A built provider with no configured entry (not possible through
             // `build_from_config`) would run under the total budget alone.
-            let settings = config.providers.get(provider.id());
+            let settings = config.provider(provider.id());
             let timeout = settings.map_or(config.total_timeout, |settings| settings.timeout);
             let model = settings.map_or_else(String::new, |settings| settings.model.clone());
             entries.insert(
@@ -123,9 +128,18 @@ impl Pipeline {
         }
         Pipeline {
             providers: entries,
-            configured: config.providers.keys().cloned().collect(),
-            default_provider: config.default_provider.clone(),
-            fallback_order: config.fallback_order.clone(),
+            configured: config
+                .providers
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect(),
+            order: config
+                .providers
+                .iter()
+                .filter(|entry| entry.settings.enabled)
+                .map(|entry| entry.id.clone())
+                .collect(),
+            default: config.default.clone(),
             total_timeout: config.total_timeout,
             prompt_settings: config.prompts.clone(),
             available,
@@ -133,24 +147,27 @@ impl Pipeline {
         }
     }
 
-    /// The provider IDs offered as models on `GET /v1/models`: the default
-    /// provider first, then the remaining enabled providers in registry
-    /// order, so a client that picks the first model gets the default. With
-    /// detection cached, only providers confirmed installed are listed.
+    /// The provider IDs offered as models on `GET /v1/models`: the
+    /// `default:` provider first when it is enabled, then the remaining
+    /// enabled providers in configuration (list) order, so a client that
+    /// picks the first model gets the provider a model-less request runs.
+    /// With detection cached, only providers confirmed installed are listed.
     /// The built-in `passthrough` and `inspect` models are always listed last.
     /// Never invokes a CLI.
     pub fn model_ids(&self) -> Vec<&str> {
-        let mut ids = Vec::with_capacity(self.providers.len());
-        let default = self.default_provider.as_str();
-        if self.providers.contains_key(default) && self.is_available(default) {
-            ids.push(default);
+        let mut ids = Vec::with_capacity(self.providers.len() + 2);
+        if let Some(default) = &self.default
+            && self.providers.contains_key(default)
+            && self.is_available(default)
+        {
+            ids.push(default.as_str());
         }
-        for descriptor in providers::PROVIDERS {
-            if descriptor.id != default
-                && self.providers.contains_key(descriptor.id)
-                && self.is_available(descriptor.id)
-            {
-                ids.push(descriptor.id);
+        for id in &self.order {
+            if self.default.as_ref().is_some_and(|default| default == id) {
+                continue;
+            }
+            if self.providers.contains_key(id) && self.is_available(id) {
+                ids.push(id.as_str());
             }
         }
         ids.push("passthrough");
@@ -169,14 +186,16 @@ impl Pipeline {
     /// Selection rule for the request's `model` field: the value is trimmed
     /// and matched case-insensitively against the configured provider IDs
     /// (Handy users type the field by hand), so `"Claude "` selects
-    /// `claude`. An absent or empty value selects the default provider.
+    /// `claude`. An absent or empty value selects the `default:` provider —
+    /// `None` when there is no usable default (key absent, or naming a
+    /// disabled, unknown or unlisted provider).
     /// `passthrough` selects the built-in unmodified transcript response.
     /// Returns the canonical configured ID — including a disabled one, which
     /// `format` reports as [`RawReason::ProviderDisabled`] — or `None` when
     /// the value names no configured provider.
     pub fn select(&self, requested: Option<&str>) -> Option<&str> {
         match requested.map(str::trim) {
-            None | Some("") => Some(self.default_provider.as_str()),
+            None | Some("") => self.default.as_deref(),
             Some(requested) if requested.eq_ignore_ascii_case("passthrough") => Some("passthrough"),
             Some(requested) if requested.eq_ignore_ascii_case("inspect") => Some("inspect"),
             Some(requested) => self
@@ -187,21 +206,34 @@ impl Pipeline {
         }
     }
 
+    /// The provider a request without a model runs: the `default:` provider
+    /// when it names an enabled provider, else `None`.
+    pub fn default_provider(&self) -> Option<&str> {
+        self.default.as_deref()
+    }
+
+    /// Every enabled provider in configuration (list) order, as
+    /// `(id, model)` pairs; shown once at startup.
+    pub fn enabled_route(&self) -> Vec<(&'static str, &str)> {
+        self.order
+            .iter()
+            .filter_map(|id| self.providers.get(id))
+            .map(|entry| (entry.provider.id(), entry.model.as_str()))
+            .collect()
+    }
+
     /// Formats one extracted request. `started` is when the HTTP request
     /// arrived; the total budget counts from it.
     ///
-    /// Outcome rule: the first candidate whose output cleans successfully
-    /// wins ([`OutcomeKind::Formatted`]; `attempts` counts the providers
-    /// tried, starting at 1). A provider error — including a timeout — or
-    /// a cleanup failure moves to the next candidate in `fallback_order`.
-    /// When no candidate is left, the raw dictation returns with the last
-    /// failure ([`RawReason::ProviderFailed`] or [`RawReason::CleanupFailed`]);
-    /// when the budget dies before the first candidate starts, the reason
-    /// is [`RawReason::BudgetExhausted`] instead. A budget stop later in
-    /// the chain keeps the last failure.
+    /// Outcome rule: exactly one provider runs — the selected one. On
+    /// success the cleaned text returns ([`OutcomeKind::Formatted`]);
+    /// a provider error — including a timeout — or a cleanup failure returns
+    /// the raw dictation with [`RawReason::ProviderFailed`] or
+    /// [`RawReason::CleanupFailed`]. When the budget dies before the attempt
+    /// starts, the reason is [`RawReason::BudgetExhausted`] instead.
     pub async fn format(&self, request: &ExtractedRequest, started: Instant) -> FormatOutcome {
         // Explicit passthrough preserves even whitespace-only transcripts and
-        // bypasses prompts, cleanup, the busy guard and the fallback chain.
+        // bypasses prompts, cleanup, the busy guard and provider selection.
         if self.select(request.model.as_deref()) == Some("passthrough") {
             return FormatOutcome::finished(
                 request.raw_text.clone(),
@@ -225,11 +257,15 @@ impl Pipeline {
         // mistake, not a transient failure: return raw text at once so the
         // user notices, never silently formatting through another provider.
         let Some(selected) = self.select(request.model.as_deref()) else {
-            return self.raw(request, RawReason::UnknownProvider, started, Vec::new());
+            let reason = match request.model.as_deref().map(str::trim) {
+                None | Some("") => RawReason::NoDefault,
+                Some(_) => RawReason::UnknownProvider,
+            };
+            return self.raw(request, reason, started, Vec::new());
         };
-        if !self.providers.contains_key(selected) {
+        let Some(candidate) = self.providers.get(selected) else {
             return self.raw(request, RawReason::ProviderDisabled, started, Vec::new());
-        }
+        };
 
         // Held for the whole run; dropping it (including on cancellation)
         // releases the permit.
@@ -248,96 +284,46 @@ impl Pipeline {
         }
 
         let prompts = compose_with_settings(request, &self.prompt_settings);
-        let candidates = self.candidates(selected);
-
-        let mut trail: Vec<Attempt> = Vec::with_capacity(candidates.len());
-        let mut last_failure = None;
-        for candidate in candidates.iter().copied() {
-            // The whole chain shares one budget: never start a CLI when
-            // only the startup slice is left.
-            if total_deadline.duration_since(Instant::now()) < MIN_STARTUP {
-                break;
-            }
-            let attempt_started = Instant::now();
-            let (run, diagnostic) = diagnostic::capture(run_within_budget(
-                candidate,
-                prompts.format_input(),
-                total_deadline,
-            ))
-            .await;
-            let result = match run {
-                Ok(output) => match cleanup(&output, &request.raw_text) {
-                    Ok(text) => Ok(text),
-                    Err(_) => Err(ChainFailure::Cleanup),
-                },
-                Err(kind) => Err(ChainFailure::Provider(kind)),
-            };
-            trail.push(Attempt {
-                provider: candidate.provider.id(),
-                model: candidate.model.clone(),
-                result: match &result {
-                    Ok(_) => AttemptResult::Formatted,
-                    Err(ChainFailure::Provider(kind)) => AttemptResult::Failed(*kind),
-                    Err(ChainFailure::Cleanup) => AttemptResult::CleanupRejected,
-                },
-                elapsed: attempt_started.elapsed(),
-                diagnostic,
-            });
-            match result {
-                Ok(text) => {
-                    return FormatOutcome::finished(
-                        text,
-                        OutcomeKind::Formatted,
-                        Some(candidate.provider.id()),
-                        trail,
-                        started,
-                    );
-                }
-                Err(failure) => last_failure = Some(failure),
-            }
-        }
-
-        let reason = match last_failure {
-            Some(ChainFailure::Provider(kind)) => RawReason::ProviderFailed(kind),
-            Some(ChainFailure::Cleanup) => RawReason::CleanupFailed,
-            // The budget died before the first candidate started; the
-            // pre-loop check normally returns earlier, so the trail is empty.
-            None => RawReason::BudgetExhausted,
+        let attempt_started = Instant::now();
+        let (run, diagnostic) = diagnostic::capture(run_within_budget(
+            candidate,
+            prompts.format_input(),
+            total_deadline,
+        ))
+        .await;
+        let result = match run {
+            Ok(output) => match cleanup(&output, &request.raw_text) {
+                Ok(text) => Ok(text),
+                Err(_) => Err(ChainFailure::Cleanup),
+            },
+            Err(kind) => Err(ChainFailure::Provider(kind)),
         };
-        self.raw(request, reason, started, trail)
-    }
-
-    /// The chain a request without a model runs: `(provider, model)` for the
-    /// default provider, then its fallbacks. Shown once at startup.
-    pub fn default_route(&self) -> Vec<(&'static str, &str)> {
-        self.candidates(&self.default_provider)
-            .into_iter()
-            .map(|entry| (entry.provider.id(), entry.model.as_str()))
-            .collect()
-    }
-
-    /// Builds the fallback chain for `selected`: the selected provider
-    /// first, then every `fallback_order` entry in order. A reappearing
-    /// selected provider, duplicates, and providers that are disabled or
-    /// were never built are skipped, so no provider runs twice.
-    fn candidates(&self, selected: &str) -> Vec<&ProviderEntry> {
-        let mut chain = Vec::with_capacity(self.fallback_order.len() + 1);
-        let mut seen: BTreeSet<&str> = BTreeSet::new();
-        if let Some(entry) = self.providers.get(selected) {
-            seen.insert(selected);
-            chain.push(entry);
-        }
-        for id in &self.fallback_order {
-            if !seen.insert(id) {
-                continue;
+        let trail = vec![Attempt {
+            provider: candidate.provider.id(),
+            model: candidate.model.clone(),
+            result: match &result {
+                Ok(_) => AttemptResult::Formatted,
+                Err(ChainFailure::Provider(kind)) => AttemptResult::Failed(*kind),
+                Err(ChainFailure::Cleanup) => AttemptResult::CleanupRejected,
+            },
+            elapsed: attempt_started.elapsed(),
+            diagnostic,
+        }];
+        match result {
+            Ok(text) => FormatOutcome::finished(
+                text,
+                OutcomeKind::Formatted,
+                Some(candidate.provider.id()),
+                trail,
+                started,
+            ),
+            Err(ChainFailure::Provider(kind)) => {
+                self.raw(request, RawReason::ProviderFailed(kind), started, trail)
             }
-            // A configured provider missing from `providers` is disabled;
-            // `fallback_order` validation already rejects unknown ids.
-            if let Some(entry) = self.providers.get(id) {
-                chain.push(entry);
+            Err(ChainFailure::Cleanup) => {
+                self.raw(request, RawReason::CleanupFailed, started, trail)
             }
         }
-        chain
     }
 
     /// The raw fallback: the dictation exactly as extracted, never cleaned
@@ -359,14 +345,14 @@ impl Pipeline {
     }
 }
 
-/// The last failure while walking the fallback chain; decides the raw
-/// outcome when no candidate formatted successfully.
+/// A formatting attempt that did not produce usable text; decides the raw
+/// outcome.
 enum ChainFailure {
     Provider(ProviderErrorKind),
     Cleanup,
 }
 
-/// Runs one candidate: its own timeout capped by the total deadline, plus a
+/// Runs one provider: its own timeout capped by the total deadline, plus a
 /// hard stop shortly after that deadline in case the provider ignores it.
 async fn run_within_budget(
     entry: &ProviderEntry,
@@ -392,18 +378,16 @@ pub struct FormatOutcome {
     /// The provider that produced `text`; `None` for an empty transcript
     /// and every raw outcome.
     pub provider: Option<&'static str>,
-    /// Providers tried for this request: 1 when the first succeeds, more
-    /// after fallbacks, 0 when no CLI was started (selection errors, busy,
-    /// an exhausted budget).
+    /// 1 when the provider ran, 0 when no CLI was started (selection
+    /// errors, busy, an exhausted budget, nothing enabled).
     pub attempts: u8,
-    /// Every provider started for this request, in order; empty when no
-    /// CLI was started.
+    /// The provider started for this request; empty when no CLI was started.
     pub trail: Vec<Attempt>,
     /// Time since the HTTP request arrived.
     pub elapsed: Duration,
 }
 
-/// One provider run inside a request. Safe to log except
+/// The single provider run inside a request. Safe to log except
 /// `diagnostic.detail`, which belongs in the debug log only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Attempt {
@@ -417,7 +401,7 @@ pub struct Attempt {
     pub diagnostic: Option<Diagnostic>,
 }
 
-/// How one [`Attempt`] ended.
+/// How the single [`Attempt`] ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttemptResult {
     Formatted,
@@ -483,12 +467,15 @@ pub enum RawReason {
     UnknownProvider,
     /// The requested provider is configured but disabled.
     ProviderDisabled,
+    /// No usable `default:` provider (key absent, or naming a disabled,
+    /// unknown or unlisted provider): a model-less request returns the
+    /// original text.
+    NoDefault,
     /// Another formatting run is active.
     Busy,
     /// The request's total budget is (nearly) spent before starting.
     BudgetExhausted,
-    /// Every candidate failed, timed out or returned unusable output;
-    /// carries the last failure.
+    /// The selected provider failed, timed out or returned unusable output.
     ProviderFailed(ProviderErrorKind),
     /// Output cleanup refused the provider's text.
     CleanupFailed,

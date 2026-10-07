@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **Configuration format changed in 0.2.** Pumice assumes nothing anymore: no provider is enabled by default, no model is built in, and there is no fallback chain — a request runs exactly one provider and any failure returns the original text. `providers:` is now an explicit ordered list, and the optional `default:` key names the provider used when a request sends no model:
+  ```yaml
+  # before
+  default_provider: claude
+  fallback_order: [codex]
+  providers:
+    claude:
+      enabled: true
+      model: haiku
+
+  # after
+  default: claude
+  providers:
+    - id: claude
+      enabled: true
+      model: haiku
+    - id: codex
+      enabled: false
+  ```
+  The removed `default_provider` and `fallback_order` keys, and the old mapping form of `providers:`, are rejected with a migration error that points at the offending line. `enabled` is required on every entry and `model` on every enabled entry; startup and `check-config` warn (without failing) when `default:` names a disabled, unknown or unlisted provider.
+
 ## [0.1.1] — 2026-10-06
 
 Claude and Codex now use the credentials and gateway already configured for them, and the request log says which provider and model answered, whether a fallback happened, and why an attempt failed.

@@ -32,8 +32,7 @@ use tokio::net::TcpStream;
 /// Minimal YAML configuring `claude` with its binary at the fake CLI and
 /// `codex` disabled, so the enabled model list is exactly `claude`.
 /// `{binary}` is replaced by the fake's path.
-const CLAUDE_AT_FAKE: &str =
-    "providers:\n  claude:\n    binary: '{binary}'\n  codex:\n    enabled: false\n";
+const CLAUDE_AT_FAKE: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n  - id: codex\n    enabled: false\n";
 
 /// The recorded Handy transcript, for raw-fallback assertions.
 const FIXTURE_TRANSCRIPT: &str = "Reunião com a equipe às nove horas, não esquecer de enviar o relatório para o João e revisar o orçamento.";
@@ -88,9 +87,9 @@ impl DualServer {
 }
 
 /// YAML configuring `claude` and `codex`, each at its own fake CLI.
-/// `{claude}` and `{codex}` are replaced by the fakes' paths.
-const BOTH_AT_FAKES: &str =
-    "providers:\n  claude:\n    binary: '{claude}'\n  codex:\n    binary: '{codex}'\n";
+/// `{claude}` and `{codex}` are replaced by the fakes' paths. Tests that
+/// exercise model-less requests prepend a `default: <id>` line.
+const BOTH_AT_FAKES: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{claude}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex}'\n";
 
 /// Builds a pipeline from `yaml` with one fake per provider (`{claude}` and
 /// `{codex}` replaced by the fakes' paths), serves it on an ephemeral
@@ -700,8 +699,9 @@ async fn models_lists_enabled_providers() {
 async fn models_list_generic_only_when_enabled() {
     // Enabled: listed even though nothing listens at the endpoint. Detection
     // deliberately does no reachability probe for the generic adapter; the
-    // call-time check (`EndpointUnavailable`) is what triggers fallback.
-    let yaml = "providers:\n  claude:\n    binary: '{binary}'\n  codex:\n    enabled: false\n  generic:\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n";
+    // call-time check (`EndpointUnavailable`) is what fails the run and
+    // returns the original text.
+    let yaml = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n  - id: codex\n    enabled: false\n  - id: generic\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n";
     let server = start_server(yaml, success_scenario("unused")).await;
     let response = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
 
@@ -709,14 +709,14 @@ async fn models_list_generic_only_when_enabled() {
     assert_eq!(
         listed_model_ids(&response.body_json()),
         ["claude", "generic", "passthrough", "inspect"],
-        "the default provider leads, then registry order"
+        "list order: claude first, then generic"
     );
     assert!(
         !server.fake.report_path().exists(),
         "listing never invokes a CLI"
     );
 
-    // Disabled (the default config): absent from the list.
+    // No `generic` entry at all: absent from the list.
     let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
     let response = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
 
@@ -724,7 +724,7 @@ async fn models_list_generic_only_when_enabled() {
     assert_eq!(
         listed_model_ids(&response.body_json()),
         ["claude", "passthrough", "inspect"],
-        "a disabled generic is not listed"
+        "an unlisted generic is not offered"
     );
 }
 
@@ -754,8 +754,9 @@ async fn post_model(server_port: u16, model: &str) -> RawResponse {
 
 #[tokio::test]
 async fn models_list_the_default_provider_first() {
+    let yaml = "default: claude\n".to_owned() + BOTH_AT_FAKES;
     let server = start_dual_server(
-        BOTH_AT_FAKES,
+        &yaml,
         success_scenario("unused"),
         codex_success_scenario("unused"),
     )
@@ -776,7 +777,7 @@ async fn models_list_the_default_provider_first() {
 
 #[tokio::test]
 async fn models_list_a_non_claude_default_first() {
-    let yaml = "default_provider: codex\n".to_owned() + BOTH_AT_FAKES;
+    let yaml = "default: codex\n".to_owned() + BOTH_AT_FAKES;
     let server = start_dual_server(
         &yaml,
         success_scenario("unused"),
@@ -851,8 +852,9 @@ async fn model_matching_is_case_insensitive_and_trims_whitespace() {
 
 #[tokio::test]
 async fn empty_and_missing_model_select_the_default_provider() {
+    let yaml = "default: claude\n".to_owned() + BOTH_AT_FAKES;
     let server = start_dual_server(
-        BOTH_AT_FAKES,
+        &yaml,
         success_scenario("Texto do Claude."),
         codex_success_scenario("unused"),
     )
@@ -897,7 +899,7 @@ async fn empty_and_missing_model_select_the_default_provider() {
 
 #[tokio::test]
 async fn empty_model_selects_a_non_claude_default() {
-    let yaml = "default_provider: codex\n".to_owned() + BOTH_AT_FAKES;
+    let yaml = "default: codex\n".to_owned() + BOTH_AT_FAKES;
     let server = start_dual_server(
         &yaml,
         success_scenario("unused"),
@@ -944,7 +946,7 @@ async fn unknown_model_returns_raw_text_and_runs_no_provider() {
 
 #[tokio::test]
 async fn disabled_provider_is_not_listed_and_keeps_dictation_raw() {
-    let yaml = "providers:\n  claude:\n    binary: '{claude}'\n  codex:\n    enabled: false\n";
+    let yaml = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{claude}'\n  - id: codex\n    enabled: false\n";
     let server = start_dual_server(
         yaml,
         success_scenario("unused"),
@@ -998,9 +1000,9 @@ impl MissingSelectedServer {
 }
 
 /// Starts a detected pipeline where `claude`'s binary does not exist (inside
-/// a real temporary directory, so the path is absolute) and the other
-/// providers run at their own fakes. `yaml_tail` is appended after the
-/// `providers:` section; `{codex}` is replaced by the codex fake's path.
+/// a real temporary directory, so the path is absolute) and every other
+/// entry is disabled. `yaml_tail` is appended after those entries as further
+/// list items; `{codex}` is replaced by the codex fake's path.
 async fn start_missing_selected_server(
     yaml_tail: &str,
     codex_scenario: Value,
@@ -1011,7 +1013,7 @@ async fn start_missing_selected_server(
     let missing_dir = TempDir::new().expect("temp dir");
     let missing_binary = missing_dir.path().join("claude");
     let yaml = format!(
-        "providers:\n  claude:\n    binary: '{}'\n  opencode:\n    binary: '{}'\n  antigravity:\n    binary: '{}'\n{yaml_tail}",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: opencode\n    enabled: false\n    binary: '{}'\n  - id: antigravity\n    enabled: false\n    binary: '{}'\n{yaml_tail}",
         missing_binary.display(),
         opencode.path().display(),
         antigravity.path().display(),
@@ -1056,7 +1058,7 @@ async fn start_missing_selected_server(
 #[tokio::test]
 async fn models_omit_an_enabled_provider_whose_binary_is_missing() {
     let server = start_missing_selected_server(
-        "  codex:\n    binary: '{codex}'\n",
+        "  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex}'\n",
         codex_success_scenario("unused"),
     )
     .await;
@@ -1072,10 +1074,10 @@ async fn models_omit_an_enabled_provider_whose_binary_is_missing() {
 }
 
 #[tokio::test]
-async fn selecting_a_missing_provider_still_falls_back_through_the_chain() {
+async fn selecting_a_missing_provider_returns_raw_text_and_runs_no_other_provider() {
     let server = start_missing_selected_server(
-        "  codex:\n    binary: '{codex}'\nfallback_order: [codex]\n",
-        codex_success_scenario("Texto do Codex."),
+        "  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex}'\n",
+        codex_success_scenario("unused"),
     )
     .await;
 
@@ -1083,24 +1085,33 @@ async fn selecting_a_missing_provider_still_falls_back_through_the_chain() {
 
     assert_eq!(response.status, 200, "body: {}", response.body_text());
     let body = response.body_json();
-    assert_eq!(body["model"], "codex", "the fallback provider answers");
+    assert_eq!(body["model"], "claude", "the selected provider is named");
     assert_eq!(
-        body["choices"][0]["message"]["content"], "Texto do Codex.",
-        "the dictation is formatted by the next provider's fake"
+        body["choices"][0]["message"]["content"], FIXTURE_TRANSCRIPT,
+        "the dictation comes back byte for byte: there is no fallback chain"
     );
-    assert!(
-        server.codex.report_path().exists(),
-        "codex ran after claude failed as NotInstalled"
+    // The fake only ever answers a startup detection probe (`--version`);
+    // a formatting call would arrive as `codex exec ...`.
+    let report = server.codex.report();
+    assert_eq!(
+        report["argv"],
+        json!(["--version"]),
+        "codex must not run after claude failed as NotInstalled: {report}"
     );
+    let lines = server.log_lines();
     assert!(
-        server
-            .log_lines()
+        lines
             .iter()
-            .any(|line| line.contains(" formatted ")
-                && line.contains(" codex")
-                && line.contains("fallback")),
-        "a formatted outcome through the fallback: {:?}",
-        server.log_lines()
+            .any(|line| line.contains(" RAW ") && line.contains("not installed")),
+        "a raw outcome naming the failure: {:?}",
+        lines
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("✗ claude") && line.contains("not installed")),
+        "the single attempt line carries the failure: {:?}",
+        lines
     );
 }
 
@@ -1148,15 +1159,17 @@ async fn authorization_header_is_ignored_and_never_logged() {
 /// and the YAML.
 fn hermetic_serve_yaml(port: u16, claude_scenario: Value) -> (FakeCli, Vec<FakeCli>, String) {
     let claude = FakeCli::new(claude_scenario);
-    let mut fakes: Vec<FakeCli> = Vec::new();
+    let codex = FakeCli::new(json!({}));
+    let mut fakes: Vec<FakeCli> = vec![codex];
+    let codex_path = fakes[0].path().display().to_string();
     let mut yaml = format!(
-        "port: {port}\nproviders:\n  claude:\n    binary: '{}'\n",
-        claude.path().display()
+        "port: {port}\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex_path}'\n",
+        claude.path().display(),
     );
-    for id in ["codex", "opencode", "antigravity"] {
+    for id in ["opencode", "antigravity"] {
         let fake = FakeCli::new(json!({}));
         yaml.push_str(&format!(
-            "  {id}:\n    binary: '{}'\n",
+            "  - id: {id}\n    enabled: false\n    binary: '{}'\n",
             fake.path().display()
         ));
         fakes.push(fake);
@@ -1797,7 +1810,8 @@ async fn normal_model_rejects_absent_messages_and_unsupported_content_shapes() {
 
 #[tokio::test]
 async fn inspect_works_with_no_available_providers_and_no_fallback() {
-    let server = start_missing_selected_server("  codex:\n    enabled: false\n", json!({})).await;
+    let server =
+        start_missing_selected_server("  - id: codex\n    enabled: false\n", json!({})).await;
 
     let models = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
     assert_eq!(models.status, 200);

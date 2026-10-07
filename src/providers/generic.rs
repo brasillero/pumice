@@ -69,7 +69,6 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     allowed_env: ALLOWED_ENV,
     validate_options,
     build,
-    disabled_by_default: true,
     risk_warning: Some(RISK_WARNING),
     validate_settings,
     // This adapter has no CLI: detection neither resolves nor spawns
@@ -89,7 +88,9 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
 
 fn defaults() -> ProviderSettings {
     ProviderSettings {
-        enabled: true, // the loader replaces this per `disabled_by_default`
+        // Nothing is enabled unless the configuration entry says so; the
+        // loader replaces this with the entry's explicit value.
+        enabled: false,
         binary: None,
         // No default model: enablement requires an explicit one.
         model: String::new(),

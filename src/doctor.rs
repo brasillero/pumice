@@ -44,8 +44,7 @@ pub fn render(config: &Config, source: &ConfigSource, statuses: &[ProviderStatus
         out.push_str(&provider_line(status));
         out.push('\n');
         if config
-            .providers
-            .get(status.id)
+            .provider(status.id)
             .is_some_and(|settings| settings.enabled)
             && let Some(warning) =
                 providers::descriptor(status.id).and_then(|descriptor| descriptor.risk_warning)
@@ -54,6 +53,9 @@ pub fn render(config: &Config, source: &ConfigSource, statuses: &[ProviderStatus
         }
     }
     let (ready, total) = enabled_ready(statuses);
+    if total == 0 {
+        out.push_str("no providers enabled: every request returns the original text\n");
+    }
     out.push_str(&format!("{ready} of {total} enabled providers ready\n"));
     out
 }
@@ -169,8 +171,7 @@ pub async fn prepare_login_check(
     }
     let descriptor = providers::descriptor(id).ok_or(LoginCheckError::UnknownProvider)?;
     let settings = config
-        .providers
-        .get(id)
+        .provider(id)
         .ok_or(LoginCheckError::UnknownProvider)?;
     if !settings.enabled {
         return Err(LoginCheckError::Disabled);
@@ -391,7 +392,7 @@ mod tests {
     #[test]
     fn render_warns_below_enabled_providers_with_a_risk_warning() {
         let config = crate::config::validate_text_with_descriptors(
-            "providers:\n  opencode:\n    enabled: true\n    model: anthropic/claude-haiku\n",
+            "providers:\n  - id: opencode\n    enabled: true\n    model: anthropic/claude-haiku\n",
             Path::new("pumice.yaml"),
             providers::PROVIDERS,
         )
@@ -417,7 +418,7 @@ mod tests {
     #[test]
     fn render_reports_an_enabled_generic_as_a_local_endpoint() {
         let config = crate::config::validate_text_with_descriptors(
-            "providers:\n  generic:\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
+            "providers:\n  - id: generic\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
             Path::new("pumice.yaml"),
             providers::PROVIDERS,
         )

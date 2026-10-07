@@ -68,13 +68,12 @@ pub struct RawOption<'a> {
 
 /// Source locations of one provider's configuration entries.
 ///
-/// The loader fills this from the provider's `providers:` entry; a field
-/// stays `None` when the file has no entry for the provider (or no value for
-/// that setting), so a validator can point at the right line or fall back to
-/// a file-level error.
+/// The loader fills this from the provider's list entry; a field stays
+/// `None` when the entry has no value for that setting, so a validator can
+/// point at the right line or fall back to a file-level error.
 #[derive(Clone, Debug, Default)]
 pub struct ProviderLocations {
-    /// The provider's key in `providers:`.
+    /// The provider's `id` in its `providers:` entry.
     pub provider: Option<Location>,
     pub enabled: Option<Location>,
     pub model: Option<Location>,
@@ -92,12 +91,14 @@ pub struct ProviderLocations {
 /// What the registry knows about one provider.
 ///
 /// The descriptor owns the provider's defaults and the validation of its
-/// option map, so a new provider brings its own rules with it.
+/// option map, so a new provider brings its own rules with it. Enablement is
+/// never the descriptor's business: the configuration file decides, and
+/// nothing is enabled unless an entry says `enabled: true`.
 #[derive(Clone, Copy)]
 pub struct ProviderDescriptor {
     pub id: &'static str,
-    /// Built-in settings. The loader replaces `enabled` with
-    /// `!disabled_by_default` before applying the file's overrides.
+    /// Built-in settings (command, timeout, empty model). The loader
+    /// replaces `enabled` with the entry's explicit value.
     pub defaults: fn() -> ProviderSettings,
     /// Non-secret routing environment variables the configuration may set
     /// for this provider. Anything else is rejected by the configuration
@@ -109,16 +110,13 @@ pub struct ProviderDescriptor {
     pub validate_options: fn(&[RawOption<'_>]) -> Result<(), ConfigError>,
     /// Builds a runnable provider from validated settings.
     pub build: BuildFn,
-    /// Effective default for `enabled` when the configuration file does not
-    /// set it. Providers that need explicit opt-in start disabled.
-    pub disabled_by_default: bool,
     /// Fixed notice `check-config` and startup print while the provider is
     /// enabled. Never sent to a CLI and never part of formatted dictation.
     pub risk_warning: Option<&'static str>,
-    /// Validates the provider's fully defaulted settings after overrides,
-    /// even when the file has no entry for the provider, so it can relate
-    /// fields `validate_options` sees separately (such as rejecting an
-    /// enabled provider without a `model`). Errors should point at the most
+    /// Validates the provider's fully defaulted settings after overrides.
+    /// Runs for every listed entry, enabled or not, so it can relate fields
+    /// `validate_options` sees separately (such as rejecting an enabled
+    /// provider without a `model`). Errors should point at the most
     /// specific [`ProviderLocations`] entry available.
     pub validate_settings: ValidateSettingsFn,
     /// How startup detection checks this provider's presence (S2.8).
@@ -186,37 +184,40 @@ pub fn validate_settings_noop(
 }
 
 /// `warning: <id>: <text>` lines for every enabled provider that carries a
-/// risk warning, in descriptor order. Shared by `check-config` and startup.
+/// risk warning, in configuration (list) order. Shared by `check-config`
+/// and startup.
 pub fn risk_warnings(config: &Config, descriptors: &[ProviderDescriptor]) -> Vec<String> {
-    descriptors
+    config
+        .providers
         .iter()
-        .filter_map(|descriptor| {
-            let warning = descriptor.risk_warning?;
-            config
-                .providers
-                .get(descriptor.id)?
-                .enabled
-                .then(|| format!("warning: {}: {warning}", descriptor.id))
+        .filter(|entry| entry.settings.enabled)
+        .filter_map(|entry| {
+            let warning = descriptors
+                .iter()
+                .find(|descriptor| descriptor.id == entry.id)?
+                .risk_warning?;
+            Some(format!("warning: {}: {warning}", entry.id))
         })
         .collect()
 }
 
-/// Builds every enabled provider in `config`, in deterministic ID order.
+/// Builds every enabled provider in `config`, in configuration (list) order.
 pub fn build_from_config(
     config: &Config,
     runner: Arc<ProcessRunner>,
 ) -> Result<Vec<Arc<dyn Provider>>, ConfigError> {
     let mut built = Vec::new();
-    for (id, settings) in &config.providers {
-        if !settings.enabled {
+    for entry in &config.providers {
+        if !entry.settings.enabled {
             continue;
         }
-        let Some(descriptor) = descriptor(id) else {
+        let Some(descriptor) = descriptor(&entry.id) else {
             return Err(ConfigError::general(format!(
-                "provider \"{id}\" is not registered"
+                "provider \"{}\" is not registered",
+                entry.id
             )));
         };
-        built.push((descriptor.build)(settings, Arc::clone(&runner))?);
+        built.push((descriptor.build)(&entry.settings, Arc::clone(&runner))?);
     }
     Ok(built)
 }
@@ -237,25 +238,31 @@ mod tests {
 
     #[test]
     fn built_provider_reports_its_id() {
+        // Built-in settings carry no model anymore: the configuration file
+        // sets one on every enabled entry.
         let d = descriptor("claude").expect("claude is registered");
         let settings = (d.defaults)();
-        assert!(settings.enabled);
+        assert_eq!(settings.model, "");
         assert_eq!(settings.binary, None);
-        assert_eq!(settings.model, "haiku");
         assert_eq!(settings.timeout, Duration::from_secs(30));
+        let mut settings = settings;
+        settings.enabled = true;
+        settings.model = "haiku".to_owned();
         let provider = (d.build)(&settings, Arc::new(ProcessRunner::new()))
-            .expect("claude builds from its defaults");
+            .expect("claude builds with an explicit model");
         assert_eq!(provider.id(), "claude");
 
         let d = descriptor("codex").expect("codex is registered");
         let settings = (d.defaults)();
-        assert!(settings.enabled);
+        assert_eq!(settings.model, "");
         assert_eq!(settings.binary, None);
-        assert_eq!(settings.model, "gpt-6.1-sol");
         assert_eq!(settings.timeout, Duration::from_secs(30));
         assert!(d.allowed_env.is_empty());
+        let mut settings = settings;
+        settings.enabled = true;
+        settings.model = "gpt-6.1-sol".to_owned();
         let provider = (d.build)(&settings, Arc::new(ProcessRunner::new()))
-            .expect("codex builds from its defaults");
+            .expect("codex builds with an explicit model");
         assert_eq!(provider.id(), "codex");
     }
 
@@ -263,9 +270,10 @@ mod tests {
     fn claude_and_codex_have_no_new_capabilities() {
         for id in ["claude", "codex"] {
             let d = descriptor(id).expect("registered");
-            assert!(!d.disabled_by_default, "{id} stays enabled by default");
             assert_eq!(d.risk_warning, None, "{id} carries no risk warning");
-            let settings = (d.defaults)();
+            let mut settings = (d.defaults)();
+            settings.enabled = true;
+            settings.model = "any".to_owned();
             assert!(
                 (d.validate_settings)(&settings, &ProviderLocations::default()).is_ok(),
                 "{id} full-settings validation is a no-op"

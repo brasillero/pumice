@@ -1,8 +1,10 @@
 //! Validated configuration with built-in defaults.
 //!
 //! One YAML file controls everything ([`load`]); when it is missing or empty
-//! every setting falls back to a built-in default. Validation rejects
-//! problems with a `file:line:column` position and the setting path.
+//! every setting falls back to a built-in default — which since 0.2 includes
+//! no providers at all: providers are an explicit, ordered list and nothing
+//! is enabled unless the file says so. Validation rejects problems with a
+//! `file:line:column` position and the setting path.
 
 mod error;
 mod raw;
@@ -22,9 +24,6 @@ use crate::providers::{self, ProviderSettings, RawOption};
 /// Port the service binds to when the configuration does not say otherwise.
 pub const DEFAULT_PORT: u16 = 7567;
 
-/// Provider used when a request does not select one.
-pub const DEFAULT_PROVIDER: &str = "claude";
-
 const DEFAULT_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_DEBUG_LOG_FILE: &str = "pumice-debug.jsonl";
 const PER_USER_FILE: &str = "pumice.yaml";
@@ -36,25 +35,91 @@ const PER_USER_FILE: &str = "pumice.yaml";
 #[derive(Clone, PartialEq, Eq)]
 pub struct Config {
     pub port: u16,
-    pub default_provider: String,
     pub total_timeout: Duration,
-    /// Providers to try after the selected one fails, in order.
-    pub fallback_order: Vec<String>,
     pub prompts: PromptSettings,
     pub debug_log: DebugLogSettings,
-    /// Every registered provider, with `enabled` marking the active ones.
-    pub providers: BTreeMap<String, ProviderSettings>,
+    /// The provider a model-less request runs: the `default:` key's value
+    /// when it names an enabled provider, else `None` (see
+    /// [`Config::default_warning`]).
+    pub default: Option<String>,
+    /// A `default:` key that does not resolve to an enabled provider. Kept
+    /// (with its location) so startup and `check-config` can print the
+    /// warning instead of failing.
+    pub default_warning: Option<DefaultWarning>,
+    /// Every provider entry in file (list) order, enabled or not.
+    pub providers: Vec<ProviderConfig>,
+}
+
+impl Config {
+    /// The settings of one configured provider, if the list contains it.
+    pub fn provider(&self, id: &str) -> Option<&ProviderSettings> {
+        self.providers
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| &entry.settings)
+    }
+}
+
+/// A `default:` key that does not name an enabled provider. Startup and
+/// `check-config` print [`DefaultWarning::line`] and keep running; requests
+/// without a model return the original text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DefaultWarning {
+    /// The value as written (empty when the key was blank).
+    pub id: String,
+    /// The `default:` key's position.
+    pub location: serde_saphyr::Location,
+    pub kind: DefaultWarningKind,
+}
+
+/// Why a `default:` key cannot produce formatted text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DefaultWarningKind {
+    /// The key was empty.
+    Empty,
+    /// The named provider is in the list but disabled.
+    Disabled,
+    /// The named provider is known but not in the list.
+    NotListed,
+    /// The named provider is not a known provider id.
+    Unknown,
+}
+
+impl DefaultWarning {
+    /// The fixed warning text, without the position (the caller has the
+    /// file and attaches it).
+    pub fn line(&self) -> String {
+        let detail = match self.kind {
+            DefaultWarningKind::Empty => "default is empty".to_owned(),
+            DefaultWarningKind::Disabled => format!("default \"{}\" is disabled", self.id),
+            DefaultWarningKind::NotListed => {
+                format!("default \"{}\" is not in the providers list", self.id)
+            }
+            DefaultWarningKind::Unknown => {
+                format!("default \"{}\" is not a known provider", self.id)
+            }
+        };
+        format!("warning: {detail}: requests without a model return the original text")
+    }
+}
+
+/// One entry of the configuration's `providers:` list: the provider id and
+/// its validated, fully defaulted settings.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ProviderConfig {
+    pub id: String,
+    pub settings: ProviderSettings,
 }
 
 impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
             .field("port", &self.port)
-            .field("default_provider", &self.default_provider)
             .field("total_timeout", &self.total_timeout)
-            .field("fallback_order", &self.fallback_order)
             .field("prompts", &self.prompts)
             .field("debug_log", &self.debug_log)
+            .field("default", &self.default)
+            .field("default_warning", &self.default_warning)
             .field("providers", &self.providers)
             .finish()
     }
@@ -188,14 +253,25 @@ fn validate(
 ) -> Result<Config, ConfigError> {
     let raw = raw.unwrap_or_default();
 
-    // Unknown provider ids first, at the key's own position.
-    for (key, _) in &raw.providers {
-        if !descriptors.iter().any(|d| d.id == key.value) {
-            return Err(ConfigError::at(
-                key.referenced,
-                format!("providers.{} is not a known provider", key.value),
-            ));
-        }
+    // Removed settings are parsed only to fail at their own position with
+    // the form that replaced them.
+    if let Some(span) = &raw.default_provider {
+        return Err(ConfigError::at(
+            span.referenced,
+            format!(
+                "\"default_provider\" was removed in 0.2: providers are an explicit ordered list now, and the optional \"default\" key names the provider used when a request sends no model. Use e.g.:\n{}",
+                raw::PROVIDERS_LIST_FORM
+            ),
+        ));
+    }
+    if let Some(span) = &raw.fallback_order {
+        return Err(ConfigError::at(
+            span.referenced,
+            format!(
+                "\"fallback_order\" was removed in 0.2: there is no fallback anymore — on failure the original text comes back unchanged. List every provider you want offered under \"providers:\" in order, e.g.:\n{}",
+                raw::PROVIDERS_LIST_FORM
+            ),
+        ));
     }
 
     let port = match &raw.port {
@@ -209,16 +285,42 @@ fn validate(
         None => DEFAULT_PORT,
     };
 
-    let mut configured = BTreeMap::new();
-    for descriptor in descriptors {
-        let entry = raw
-            .providers
-            .iter()
-            .find(|(key, _)| key.value == descriptor.id);
-        configured.insert(
-            descriptor.id.to_owned(),
-            provider_settings(descriptor, entry, config_dir, port)?,
-        );
+    let mut configured: Vec<ProviderConfig> = Vec::new();
+    for entry in &raw.providers {
+        let entry_location = entry.referenced;
+        let entry = &entry.value;
+        let Some(id) = &entry.id else {
+            return Err(ConfigError::at(
+                entry_location,
+                "a providers entry has no \"id\"; every entry starts with \"- id: <provider>\"",
+            ));
+        };
+        let Some(descriptor) = descriptors.iter().find(|d| d.id == id.value) else {
+            return Err(ConfigError::at(
+                id.referenced,
+                format!("\"{}\" is not a known provider", id.value),
+            ));
+        };
+        if configured.iter().any(|existing| existing.id == id.value) {
+            return Err(ConfigError::at(
+                id.referenced,
+                format!("duplicate provider \"{}\" in providers", id.value),
+            ));
+        }
+        let Some(enabled) = &entry.enabled else {
+            return Err(ConfigError::at(
+                id.referenced,
+                format!(
+                    "providers entry \"{}\" has no \"enabled\"; add \"enabled: true\" or \"enabled: false\"",
+                    id.value
+                ),
+            ));
+        };
+        let settings = provider_settings(descriptor, id, entry, enabled, config_dir, port)?;
+        configured.push(ProviderConfig {
+            id: id.value.clone(),
+            settings,
+        });
     }
 
     let total_timeout = match &raw.total_timeout_secs {
@@ -232,61 +334,58 @@ fn validate(
         None => DEFAULT_TOTAL_TIMEOUT,
     };
 
-    let default_provider = match &raw.default_provider {
-        Some(span) => match configured.get(&span.value) {
-            None => {
-                return Err(ConfigError::at(
-                    span.referenced,
-                    format!(
-                        "default_provider \"{}\" is not a known provider",
-                        span.value
-                    ),
-                ));
-            }
-            Some(settings) if !settings.enabled => {
-                return Err(ConfigError::at(
-                    span.referenced,
-                    format!("default_provider \"{}\" is disabled", span.value),
-                ));
-            }
-            Some(_) => span.value.clone(),
-        },
-        None => match configured.get(DEFAULT_PROVIDER) {
-            Some(settings) if settings.enabled => DEFAULT_PROVIDER.to_owned(),
-            _ => {
-                let location = raw
-                    .providers
+    // `default:` never fails validation: a value that does not resolve to an
+    // enabled provider degrades to the warning, and model-less requests
+    // behave like passthrough.
+    let (default, default_warning) = match &raw.default {
+        None => (None, None),
+        Some(span) => {
+            let written = span.value.trim();
+            let resolved = configured
+                .iter()
+                .find(|entry| entry.id.eq_ignore_ascii_case(written));
+            match resolved {
+                Some(entry) if entry.settings.enabled => (Some(entry.id.clone()), None),
+                Some(entry) => (
+                    None,
+                    Some(DefaultWarning {
+                        id: entry.id.clone(),
+                        location: span.referenced,
+                        kind: DefaultWarningKind::Disabled,
+                    }),
+                ),
+                None if written.is_empty() => (
+                    None,
+                    Some(DefaultWarning {
+                        id: String::new(),
+                        location: span.referenced,
+                        kind: DefaultWarningKind::Empty,
+                    }),
+                ),
+                None if descriptors
                     .iter()
-                    .find(|(key, _)| key.value == DEFAULT_PROVIDER)
-                    .and_then(|(_, settings)| settings.enabled.as_ref())
-                    .map(|enabled| enabled.referenced);
-                let message = format!("the default provider \"{DEFAULT_PROVIDER}\" is disabled");
-                match location {
-                    Some(location) => return Err(ConfigError::at(location, message)),
-                    None => return Err(ConfigError::general(message)),
+                    .any(|descriptor| descriptor.id.eq_ignore_ascii_case(written)) =>
+                {
+                    (
+                        None,
+                        Some(DefaultWarning {
+                            id: written.to_owned(),
+                            location: span.referenced,
+                            kind: DefaultWarningKind::NotListed,
+                        }),
+                    )
                 }
+                None => (
+                    None,
+                    Some(DefaultWarning {
+                        id: written.to_owned(),
+                        location: span.referenced,
+                        kind: DefaultWarningKind::Unknown,
+                    }),
+                ),
             }
-        },
-    };
-
-    let mut fallback_order = Vec::new();
-    if let Some(entries) = &raw.fallback_order {
-        for entry in entries {
-            if !descriptors.iter().any(|d| d.id == entry.value) {
-                return Err(ConfigError::at(
-                    entry.referenced,
-                    format!("unknown provider \"{}\" in fallback_order", entry.value),
-                ));
-            }
-            if fallback_order.contains(&entry.value) {
-                return Err(ConfigError::at(
-                    entry.referenced,
-                    format!("duplicate provider \"{}\" in fallback_order", entry.value),
-                ));
-            }
-            fallback_order.push(entry.value.clone());
         }
-    }
+    };
 
     let prompts = PromptSettings {
         system: raw
@@ -317,75 +416,84 @@ fn validate(
 
     Ok(Config {
         port,
-        default_provider,
         total_timeout,
-        fallback_order,
         prompts,
         debug_log,
+        default,
+        default_warning,
         providers: configured,
     })
 }
 
-/// Applies one provider's defaults and overrides, then runs its
-/// full-settings validator (even without a `providers:` entry, so a
-/// descriptor can reject its own defaults).
+/// Applies one provider's defaults and the entry's overrides, then runs its
+/// full-settings validator. The entry's `enabled` is authoritative: nothing
+/// is enabled unless the file says so.
 fn provider_settings(
     descriptor: &providers::ProviderDescriptor,
-    entry: Option<&(Spanned<String>, raw::RawProviderSettings)>,
+    id: &Spanned<String>,
+    raw: &raw::RawProviderEntry,
+    enabled: &Spanned<bool>,
     config_dir: Option<&Path>,
     port: u16,
 ) -> Result<ProviderSettings, ConfigError> {
+    let base = format!("providers entry \"{}\"", id.value);
     let mut settings = (descriptor.defaults)();
-    // `defaults` leaves every provider on; `disabled_by_default` is the
-    // registry's switch for providers that need explicit opt-in.
-    settings.enabled = !descriptor.disabled_by_default;
+    settings.enabled = enabled.value;
     let mut locations = providers::ProviderLocations {
         port,
+        provider: Some(id.referenced),
+        enabled: Some(enabled.referenced),
         ..providers::ProviderLocations::default()
     };
-    if let Some((key, raw)) = entry {
-        let base = format!("providers.{}", key.value);
-        locations.provider = Some(key.referenced);
-        if let Some(enabled) = &raw.enabled {
-            locations.enabled = Some(enabled.referenced);
-            settings.enabled = enabled.value;
-        }
-        if let Some(binary) = &raw.binary {
-            locations.binary = Some(binary.referenced);
-            settings.binary = Some(resolve_binary(&binary.value, config_dir));
-        }
-        if let Some(model) = &raw.model {
-            locations.model = Some(model.referenced);
-            if model.value.trim().is_empty() {
-                return Err(ConfigError::at(
-                    model.referenced,
-                    format!("{base}.model must not be empty"),
-                ));
-            }
-            settings.model = model.value.clone();
-        }
-        if let Some(timeout) = &raw.timeout_secs {
-            if timeout.value == 0 {
-                return Err(ConfigError::at(
-                    timeout.referenced,
-                    format!("{base}.timeout_secs must be greater than zero"),
-                ));
-            }
-            settings.timeout = Duration::from_secs(timeout.value);
-        }
-
-        settings.env = validate_env(descriptor, &base, &raw.env)?;
-        validate_options(descriptor, &raw.options)?;
-        for (key, value) in &raw.options {
-            locations
-                .options
-                .insert(key.value.clone(), value.referenced);
-            settings
-                .options
-                .insert(key.value.clone(), value.value.clone());
-        }
+    if let Some(binary) = &raw.binary {
+        locations.binary = Some(binary.referenced);
+        settings.binary = Some(resolve_binary(&binary.value, config_dir));
     }
+    if let Some(model) = &raw.model {
+        locations.model = Some(model.referenced);
+        if model.value.trim().is_empty() && enabled.value {
+            return Err(ConfigError::at(
+                model.referenced,
+                format!("{base}.model must not be empty"),
+            ));
+        }
+        settings.model = model.value.clone();
+    } else {
+        // Missing-model complaints point at the entry's id.
+        locations.model = Some(id.referenced);
+    }
+    if let Some(timeout) = &raw.timeout_secs {
+        if timeout.value == 0 {
+            return Err(ConfigError::at(
+                timeout.referenced,
+                format!("{base}.timeout_secs must be greater than zero"),
+            ));
+        }
+        settings.timeout = Duration::from_secs(timeout.value);
+    }
+
+    settings.env = validate_env(descriptor, &base, &raw.env)?;
+    validate_options(descriptor, &raw.options)?;
+    for (key, value) in &raw.options {
+        locations
+            .options
+            .insert(key.value.clone(), value.referenced);
+        settings
+            .options
+            .insert(key.value.clone(), value.value.clone());
+    }
+    // The descriptor runs first: its refusal (Antigravity) and its own
+    // requirements (an explicit provider/model, a plausible alias) keep
+    // their established messages and positions.
     (descriptor.validate_settings)(&settings, &locations)?;
+    // Loader backstop for descriptors without requirements of their own:
+    // an enabled entry always needs a usable model.
+    if settings.enabled && settings.model.trim().is_empty() {
+        return Err(ConfigError::at(
+            id.referenced,
+            format!("{base} is enabled but has no model; add \"model: <name>\""),
+        ));
+    }
     Ok(settings)
 }
 

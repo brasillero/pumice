@@ -22,8 +22,9 @@
 //! | tool_activity            | `tool_calls_and_function_call_rejected`                |
 //! | privacy                  | `errors_are_text_free`                                 |
 //! | cleanup (sockets/tasks)  | `cancellation_drops_the_socket`                        |
-//! | fallback_participation   | `fallback_chain_advances_and_accepts`                  |
-//! | disabled behavior        | `disabled_by_default` (zero connections)               |
+//! | no fallback              | `failure_returns_raw_text_and_never_runs_another_`     |
+//! |                          | `provider`                                             |
+//! | disabled behavior        | `nothing_is_enabled_without_an_entry` (zero connections)|
 //! | config protection        | `config_validation_*`, `recursion_*`                   |
 //!
 //! The HTTP-specific contract additions from the design (redirect with a
@@ -40,7 +41,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pumice::config::{self, Config, DebugLogSettings, PromptSettings};
-use pumice::pipeline::{OutcomeKind, Pipeline};
+use pumice::pipeline::{OutcomeKind, Pipeline, RawReason};
 use pumice::providers::generic::{
     DESCRIPTOR, EndpointError, GenericProvider, LoopbackEndpoint, parse_endpoint,
 };
@@ -862,21 +863,20 @@ async fn wait_until(mut condition: impl FnMut() -> bool) {
 }
 
 // ---------------------------------------------------------------------------
-// Fallback participation
+// No fallback: a failure returns the original text, never another provider
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn fallback_chain_advances_and_accepts() {
-    // Selected generic fails (connection refused): the chain advances to the
-    // double.
+async fn failure_returns_raw_text_and_never_runs_another_provider() {
+    // Selected generic fails (connection refused): raw text, the double
+    // never runs.
     let dead = FakeHttp::spawn(Behavior::Stall).await;
     let dead_addr = dead.addr();
     drop(dead);
     let generic_endpoint = parse_endpoint(&format!("http://{dead_addr}/v1")).expect("parses");
     let backup = TestProvider::new("backup", vec![Step::Ready("Olá de novo.".to_owned())]);
     let config = chain_config(
-        "generic",
-        &["backup"],
+        Some("generic"),
         vec![
             ("generic", generic_settings(&generic_endpoint)),
             ("backup", generic_settings(&generic_endpoint)),
@@ -891,13 +891,17 @@ async fn fallback_chain_advances_and_accepts() {
     let outcome = pipeline
         .format(&handy_request("ditado"), Instant::now())
         .await;
-    assert_eq!(outcome.kind, OutcomeKind::Formatted);
-    assert_eq!(outcome.provider, Some("backup"));
-    assert_eq!(outcome.attempts, 2);
-    assert_eq!(outcome.text, "Olá de novo.");
-    assert_eq!(backup.calls(), 1);
+    assert_eq!(
+        outcome.kind,
+        OutcomeKind::Raw(RawReason::ProviderFailed(ProviderError::other(
+            ProviderErrorCode::EndpointUnavailable
+        )))
+    );
+    assert_eq!(outcome.attempts, 1);
+    assert_eq!(outcome.text, "ditado");
+    assert_eq!(backup.calls(), 0, "a failure never tries another provider");
 
-    // Selected double fails: the generic adapter formats as the fallback.
+    // Selected double fails: the generic adapter never runs.
     let server = FakeHttp::spawn(Behavior::Reply(Reply::json(
         200,
         success_body("Texto formatado."),
@@ -905,8 +909,7 @@ async fn fallback_chain_advances_and_accepts() {
     .await;
     let alpha = TestProvider::new("alpha", vec![Step::Fail(ProviderError::NotLoggedIn)]);
     let config = chain_config(
-        "alpha",
-        &["generic"],
+        Some("alpha"),
         vec![
             ("alpha", generic_settings(&server.endpoint())),
             ("generic", generic_settings(&server.endpoint())),
@@ -921,16 +924,19 @@ async fn fallback_chain_advances_and_accepts() {
     let outcome = pipeline
         .format(&handy_request("ditado"), Instant::now())
         .await;
-    assert_eq!(outcome.kind, OutcomeKind::Formatted);
-    assert_eq!(outcome.provider, Some("generic"));
-    assert_eq!(outcome.attempts, 2);
-    assert_eq!(outcome.text, "Texto formatado.");
+    assert_eq!(
+        outcome.kind,
+        OutcomeKind::Raw(RawReason::ProviderFailed(ProviderError::NotLoggedIn))
+    );
+    assert_eq!(outcome.attempts, 1);
+    assert_eq!(outcome.text, "ditado");
     assert_eq!(alpha.calls(), 1);
 }
 
 fn generic_settings(endpoint: &LoopbackEndpoint) -> pumice::providers::ProviderSettings {
     let mut settings = (DESCRIPTOR.defaults)();
     settings.enabled = true;
+    settings.model = MODEL.to_owned();
     settings.options.insert(
         "base_url".to_owned(),
         format!("http://{}/v1", endpoint.addr),
@@ -939,15 +945,14 @@ fn generic_settings(endpoint: &LoopbackEndpoint) -> pumice::providers::ProviderS
 }
 
 fn chain_config(
-    default_provider: &str,
-    fallback_order: &[&str],
+    default: Option<&str>,
     entries: Vec<(&str, pumice::providers::ProviderSettings)>,
 ) -> Config {
     Config {
         port: 7567,
-        default_provider: default_provider.to_owned(),
         total_timeout: Duration::from_secs(30),
-        fallback_order: fallback_order.iter().map(|id| id.to_string()).collect(),
+        default: default.map(str::to_owned),
+        default_warning: None,
         prompts: PromptSettings::default(),
         debug_log: DebugLogSettings {
             enabled: false,
@@ -955,7 +960,10 @@ fn chain_config(
         },
         providers: entries
             .into_iter()
-            .map(|(id, settings)| (id.to_owned(), settings))
+            .map(|(id, settings)| pumice::config::ProviderConfig {
+                id: id.to_owned(),
+                settings,
+            })
             .collect(),
     }
 }
@@ -977,37 +985,25 @@ fn handy_request(text: &str) -> ExtractedRequest {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn disabled_by_default() {
+fn nothing_is_enabled_without_an_entry() {
     let loaded = config::load_with_env(None, |_| None).expect("defaults load");
-    let generic = loaded
-        .config
-        .providers
-        .get("generic")
-        .expect("generic is configured");
     assert!(
-        !generic.enabled,
-        "generic stays off without explicit opt-in"
+        loaded.config.provider("generic").is_none(),
+        "providers are only configured by list entries"
     );
-    assert!(generic.model.is_empty());
-    assert!(generic.binary.is_none());
-    assert!(generic.env.is_empty());
-    assert!(generic.options.is_empty());
+    assert!(loaded.config.providers.is_empty());
 
-    // Building the default configuration yields no generic provider, so a
+    // Building the default configuration yields no provider at all, so a
     // default-config service makes zero connections.
     let built = pumice::providers::build_from_config(
         &loaded.config,
         Arc::new(pumice::process::ProcessRunner::new()),
     )
     .expect("defaults build");
-    assert!(
-        built.iter().all(|provider| provider.id() != "generic"),
-        "a disabled provider is never built"
-    );
+    assert!(built.is_empty(), "without entries nothing is built or run");
 
-    // The descriptor carries the opt-in switch and the risk warning.
+    // The descriptor still carries the risk warning for when it is enabled.
     let descriptor = pumice::providers::descriptor("generic").expect("registered");
-    assert!(descriptor.disabled_by_default);
     assert_eq!(
         descriptor.risk_warning,
         Some(pumice::providers::generic::RISK_WARNING)
@@ -1050,7 +1046,7 @@ fn assert_config_error(text: &str, line: u64, column: u64, message: &str) {
 #[test]
 fn config_validation_requires_model_at_enabled_line() {
     assert_config_error(
-        "providers:\n  generic:\n    enabled: true\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
+        "providers:\n  - id: generic\n    enabled: true\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
         3,
         14,
         "providers.generic.model is required when the provider is enabled",
@@ -1060,7 +1056,7 @@ fn config_validation_requires_model_at_enabled_line() {
 #[test]
 fn config_validation_requires_base_url_at_enabled_line() {
     assert_config_error(
-        "providers:\n  generic:\n    enabled: true\n    model: qwen2\n",
+        "providers:\n  - id: generic\n    enabled: true\n    model: qwen2\n",
         3,
         14,
         "providers.generic.options.base_url is required when the provider is enabled",
@@ -1070,7 +1066,7 @@ fn config_validation_requires_base_url_at_enabled_line() {
 #[test]
 fn config_validation_rejects_bad_base_url_at_the_value() {
     assert_config_error(
-        "providers:\n  generic:\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"https://example.com/v1\"\n",
+        "providers:\n  - id: generic\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"https://example.com/v1\"\n",
         6,
         17,
         "providers.generic.options.base_url must be an http:// URL (https is not supported)",
@@ -1080,7 +1076,7 @@ fn config_validation_rejects_bad_base_url_at_the_value() {
 #[test]
 fn config_validation_rejects_unknown_options_at_the_key() {
     assert_config_error(
-        "providers:\n  generic:\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n      api_key: \"sk-nope\"\n",
+        "providers:\n  - id: generic\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n      api_key: \"sk-nope\"\n",
         7,
         7,
         "providers.generic.options.api_key is not supported",
@@ -1090,26 +1086,26 @@ fn config_validation_rejects_unknown_options_at_the_key() {
 #[test]
 fn config_validation_rejects_binary_and_env() {
     assert_config_error(
-        "providers:\n  generic:\n    enabled: true\n    model: qwen2\n    binary: /usr/bin/curl\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
+        "providers:\n  - id: generic\n    enabled: true\n    model: qwen2\n    binary: /usr/bin/curl\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
         5,
         13,
         "providers.generic spawns no CLI; binary must not be set",
     );
     assert_config_error(
-        "providers:\n  generic:\n    enabled: true\n    model: qwen2\n    env:\n      NOPE: \"1\"\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
+        "providers:\n  - id: generic\n    enabled: true\n    model: qwen2\n    env:\n      NOPE: \"1\"\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
         6,
         7,
-        "providers.generic.env.NOPE is not an allowed environment variable (no environment overrides are allowed for this provider)",
+        "providers entry \"generic\".env.NOPE is not an allowed environment variable (no environment overrides are allowed for this provider)",
     );
 }
 
 #[test]
 fn config_validation_accepts_a_valid_enabled_block() {
     let config = load_text(
-        "providers:\n  generic:\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
+        "providers:\n  - id: generic\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
     )
     .expect("valid block loads");
-    let generic = config.providers.get("generic").expect("configured");
+    let generic = config.provider("generic").expect("configured");
     assert!(generic.enabled);
     assert_eq!(generic.model, "qwen2");
     assert_eq!(
@@ -1123,20 +1119,20 @@ fn recursion_rejects_pumices_own_port() {
     // The IPv4 loopback spellings naming Pumice's port are refused at the
     // base_url value...
     assert_config_error(
-        "port: 7567\nproviders:\n  generic:\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"http://127.0.0.1:7567/v1\"\n",
+        "port: 7567\nproviders:\n  - id: generic\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"http://127.0.0.1:7567/v1\"\n",
         7,
         17,
         "providers.generic.options.base_url points at Pumice's own port (7567), which would route requests back into this service",
     );
     assert_config_error(
-        "port: 7567\nproviders:\n  generic:\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"http://localhost:7567/v1\"\n",
+        "port: 7567\nproviders:\n  - id: generic\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"http://localhost:7567/v1\"\n",
         7,
         17,
         "providers.generic.options.base_url points at Pumice's own port (7567), which would route requests back into this service",
     );
     // ...including when the port is the built-in default (no explicit line).
     assert_config_error(
-        "providers:\n  generic:\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"http://127.0.0.1:7567/v1\"\n",
+        "providers:\n  - id: generic\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"http://127.0.0.1:7567/v1\"\n",
         6,
         17,
         "providers.generic.options.base_url points at Pumice's own port (7567), which would route requests back into this service",
@@ -1147,12 +1143,12 @@ fn recursion_rejects_pumices_own_port() {
 fn recursion_allows_other_ports_and_ipv6_loopback() {
     // A different IPv4 port is fine.
     load_text(
-        "providers:\n  generic:\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"http://127.0.0.1:7568/v1\"\n",
+        "providers:\n  - id: generic\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"http://127.0.0.1:7568/v1\"\n",
     )
     .expect("another port loads");
     // Pumice binds 127.0.0.1 only, so its own port on [::1] cannot recurse.
     load_text(
-        "port: 7567\nproviders:\n  generic:\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"http://[::1]:7567/v1\"\n",
+        "port: 7567\nproviders:\n  - id: generic\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"http://[::1]:7567/v1\"\n",
     )
     .expect("IPv6 loopback on Pumice's port loads");
 }

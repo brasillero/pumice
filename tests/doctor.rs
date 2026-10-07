@@ -1,7 +1,7 @@
 //! Tests for `pumice doctor` (S2.8 part 2): the default detection report
 //! (found/missing states, install hints, warnings and
 //! the exit-code contract) and the single quota-bearing `--login-check` path
-//! (one fixed call through the selected provider, never the fallback chain,
+//! (one fixed call through the selected provider, never any other provider,
 //! text-free results). Every spawned `pumice` runs with a hermetic config:
 //! provider binaries point at the portable fake CLI or a nonexistent path;
 //! no test looks a real CLI up on PATH.
@@ -48,25 +48,27 @@ fn combined(output: &Output) -> String {
     text
 }
 
-/// A config with one fake CLI per registered provider (plus
-/// `fallback_order`), so detection is fully hermetic. Returns the fakes —
-/// they must outlive the spawned process — and the YAML.
+/// A config with one fake CLI per registered provider, so detection is
+/// fully hermetic. `claude` and `codex` are enabled (and therefore carry a
+/// model); the rest are listed but disabled. Returns the fakes — they must
+/// outlive the spawned process — and the YAML.
 fn full_fake_yaml() -> (Vec<FakeCli>, String) {
     let mut fakes = Vec::new();
     let mut yaml = String::from("providers:\n");
-    for (id, stdout) in [
-        ("claude", "2.1.288 (Claude Code)\n"),
-        ("codex", "codex-cli 0.160.0\n"),
-        ("opencode", ""),
-        ("antigravity", ""),
-        ("kimi", "2.1.1\n"),
-        ("kiro", ""),
+    for (id, model, stdout) in [
+        ("claude", Some("haiku"), "2.1.288 (Claude Code)\n"),
+        ("codex", Some("gpt-6.1-sol"), "codex-cli 0.160.0\n"),
+        ("opencode", None, ""),
+        ("antigravity", None, ""),
+        ("kimi", None, "2.1.1\n"),
+        ("kiro", None, ""),
     ] {
         let fake = FakeCli::new(json!({"stdout": stdout, "exit_code": 0}));
-        yaml.push_str(&format!(
-            "  {id}:\n    binary: '{}'\n",
-            fake.path().display()
-        ));
+        yaml.push_str(&format!("  - id: {id}\n    enabled: {}\n", model.is_some()));
+        if let Some(model) = model {
+            yaml.push_str(&format!("    model: {model}\n"));
+        }
+        yaml.push_str(&format!("    binary: '{}'\n", fake.path().display()));
         fakes.push(fake);
     }
     (fakes, yaml)
@@ -130,7 +132,7 @@ fn missing_enabled_codex_exits_1_with_the_install_hint() {
     let missing_dir = TempDir::new().expect("temp dir");
     let missing = missing_dir.path().join("no-such-codex");
     let (_dir, config_path) = write_config(&format!(
-        "providers:\n  claude:\n    binary: '{}'\n  codex:\n    binary: '{}'\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{}'\n",
         claude.path().display(),
         missing.display()
     ));
@@ -155,7 +157,7 @@ fn antigravity_is_detected_but_never_spawned() {
     let claude = FakeCli::new(json!({"stdout": "2.1.288\n", "exit_code": 0}));
     let codex = FakeCli::new(json!({"stdout": "0.160.0\n", "exit_code": 0}));
     let (_dir, config_path) = write_config(&format!(
-        "providers:\n  claude:\n    binary: '{}'\n  codex:\n    binary: '{}'\n  antigravity:\n    binary: '{}'\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{}'\n  - id: antigravity\n    enabled: false\n    binary: '{}'\n",
         claude.path().display(),
         codex.path().display(),
         antigravity.path().display()
@@ -177,11 +179,11 @@ fn antigravity_is_detected_but_never_spawned() {
 
 #[test]
 fn generic_enabled_reports_the_endpoint_line_and_counts_ready() {
-    // The other providers are disabled and the default moves to generic, so
-    // the report is exactly one enabled provider and it is ready: there is
-    // no executable to miss, only the endpoint checked at call time.
+    // The other providers are disabled, so the report is exactly one enabled
+    // provider and it is ready: there is no executable to miss, only the
+    // endpoint checked at call time.
     let (_dir, config_path) = write_config(
-        "default_provider: generic\nproviders:\n  claude:\n    enabled: false\n  codex:\n    enabled: false\n  generic:\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
+        "providers:\n  - id: claude\n    enabled: false\n  - id: codex\n    enabled: false\n  - id: generic\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
     );
 
     let output = run_doctor(&config_path, &[]);
@@ -206,8 +208,28 @@ fn generic_enabled_reports_the_endpoint_line_and_counts_ready() {
 }
 
 #[test]
+fn no_enabled_providers_prints_the_original_text_note_and_exits_0() {
+    let (_dir, config_path) = write_config(
+        "providers:\n  - id: claude\n    enabled: false\n  - id: codex\n    enabled: false\n",
+    );
+
+    let output = run_doctor(&config_path, &[]);
+    let text = combined(&output);
+
+    assert_eq!(output.status.code(), Some(0), "output: {text}");
+    assert!(
+        text.contains("no providers enabled: every request returns the original text\n"),
+        "output: {text}"
+    );
+    assert!(
+        text.contains("0 of 0 enabled providers ready\n"),
+        "output: {text}"
+    );
+}
+
+#[test]
 fn config_errors_exit_2() {
-    let (_dir, config_path) = write_config("providers:\n  nope:\n    enabled: true\n");
+    let (_dir, config_path) = write_config("providers:\n  - id: nope\n    enabled: true\n");
 
     let output = run_doctor(&config_path, &[]);
     let text = combined(&output);
@@ -223,7 +245,7 @@ fn login_check_ok_against_the_success_fixture() {
         "exit_code": 0,
     }));
     let (_dir, config_path) = write_config(&format!(
-        "providers:\n  claude:\n    binary: '{}'\n  codex:\n    enabled: false\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: codex\n    enabled: false\n",
         claude.path().display()
     ));
 
@@ -251,7 +273,7 @@ fn login_check_not_logged_in_reports_the_category_and_exits_1() {
         "exit_code": 0,
     }));
     let (_dir, config_path) = write_config(&format!(
-        "providers:\n  claude:\n    binary: '{}'\n  codex:\n    enabled: false\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: codex\n    enabled: false\n",
         claude.path().display()
     ));
 
@@ -301,7 +323,7 @@ fn login_check_refuses_antigravity_without_spawning() {
     let antigravity = FakeCli::new(json!({}));
     let claude = FakeCli::new(json!({"stdout": "2.1.288\n", "exit_code": 0}));
     let (_dir, config_path) = write_config(&format!(
-        "providers:\n  claude:\n    binary: '{}'\n  antigravity:\n    binary: '{}'\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: antigravity\n    enabled: false\n    binary: '{}'\n",
         claude.path().display(),
         antigravity.path().display()
     ));
@@ -332,7 +354,7 @@ fn login_check_runs_kimi_through_the_fake() {
         "exit_code": 0,
     }));
     let (_dir, config_path) = write_config(&format!(
-        "providers:\n  kimi:\n    enabled: true\n    binary: '{}'\n",
+        "providers:\n  - id: kimi\n    enabled: true\n    model: kimi-k2.7-code-highspeed\n    binary: '{}'\n",
         fake.path().display()
     ));
 
@@ -361,14 +383,16 @@ fn login_check_unknown_provider_is_a_usage_error() {
 }
 
 #[test]
-fn login_check_never_uses_the_fallback_chain() {
+fn login_check_failure_never_runs_other_providers() {
+    // There is no fallback chain: a failing login check on the selected
+    // provider never touches the other enabled providers.
     let claude = FakeCli::new(json!({
         "stdout": support::fixture("claude/not-logged-in.json"),
         "exit_code": 0,
     }));
     let codex = FakeCli::new(json!({"stdout": "0.160.0\n", "exit_code": 0}));
     let (_dir, config_path) = write_config(&format!(
-        "providers:\n  claude:\n    binary: '{}'\n  codex:\n    binary: '{}'\nfallback_order: [codex]\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{}'\n",
         claude.path().display(),
         codex.path().display()
     ));
@@ -381,7 +405,7 @@ fn login_check_never_uses_the_fallback_chain() {
     assert!(claude.report_path().exists(), "the selected provider ran");
     assert!(
         !codex.report_path().exists(),
-        "the fallback chain must never run during a login check"
+        "no other provider may run during a login check"
     );
 }
 
@@ -395,7 +419,7 @@ async fn login_check_generic_ok_against_the_fake_http_server() {
     )))
     .await;
     let (_dir, config_path) = write_config(&format!(
-        "providers:\n  generic:\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"{}\"\n",
+        "providers:\n  - id: generic\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"{}\"\n",
         server.base_url()
     ));
 
@@ -423,7 +447,7 @@ async fn login_check_generic_without_a_server_reports_endpoint_unavailable_and_e
     let port = probe.local_addr().expect("probe address").port();
     drop(probe);
     let (_dir, config_path) = write_config(&format!(
-        "providers:\n  generic:\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"http://127.0.0.1:{port}/v1\"\n",
+        "providers:\n  - id: generic\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"http://127.0.0.1:{port}/v1\"\n",
     ));
 
     let output = run_doctor(&config_path, &["--login-check", "--provider", "generic"]);

@@ -25,15 +25,16 @@ const FIXTURE_TRANSCRIPT: &str = "Reunião com a equipe às nove horas, não esq
 
 /// YAML pointing every binary-probing provider (enabled or not — startup
 /// detection probes the whole registry) at its own disposable fake, so no
-/// test ever looks a real CLI up on PATH. Returns the fakes — they must
-/// outlive the served process — and the YAML.
+/// test ever looks a real CLI up on PATH. Every provider stays disabled:
+/// these tests exercise the service and `passthrough`, never formatting.
+/// Returns the fakes — they must outlive the served process — and the YAML.
 fn hermetic_yaml(port: u16) -> (Vec<FakeCli>, String) {
     let mut fakes: Vec<FakeCli> = Vec::new();
     let mut yaml = format!("port: {port}\nproviders:\n");
     for id in ["claude", "codex", "opencode", "antigravity"] {
         let fake = FakeCli::new(json!({}));
         yaml.push_str(&format!(
-            "  {id}:\n    binary: '{}'\n",
+            "  - id: {id}\n    enabled: false\n    binary: '{}'\n",
             fake.path().display()
         ));
         fakes.push(fake);

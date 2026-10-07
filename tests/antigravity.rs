@@ -252,22 +252,25 @@ fn no_env(_: &str) -> Option<OsString> {
 }
 
 #[test]
-fn absent_entry_stays_disabled() {
+fn absent_entry_means_not_configured() {
     let loaded = config::load_with_env(None, no_env).expect("defaults load");
-    let antigravity = loaded
-        .config
-        .providers
-        .get("antigravity")
-        .expect("antigravity is registered");
-    assert!(!antigravity.enabled);
-    assert!(antigravity.model.is_empty());
+    assert!(
+        loaded.config.provider("antigravity").is_none(),
+        "providers are only configured by list entries"
+    );
+    assert!(loaded.config.providers.is_empty());
+    assert_eq!(loaded.config.default, None);
 }
 
 #[test]
 fn enabled_true_is_refused_at_the_enabled_line() {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join("pumice.yaml");
-    fs::write(&path, "providers:\n  antigravity:\n    enabled: true\n").expect("write config");
+    fs::write(
+        &path,
+        "providers:\n  - id: antigravity\n    enabled: true\n",
+    )
+    .expect("write config");
 
     let error = config::load_with_env(Some(&path), no_env)
         .expect_err("enablement is refused")
@@ -286,7 +289,7 @@ fn options_are_rejected() {
     let path = dir.path().join("pumice.yaml");
     fs::write(
         &path,
-        "providers:\n  antigravity:\n    options:\n      effort: high\n",
+        "providers:\n  - id: antigravity\n    enabled: false\n    options:\n      effort: high\n",
     )
     .expect("write config");
 
@@ -294,7 +297,7 @@ fn options_are_rejected() {
         .expect_err("options are refused")
         .to_string();
     assert!(
-        error.contains(":4:7: providers.antigravity.options.effort is not supported"),
+        error.contains(":5:7: providers.antigravity.options.effort is not supported"),
         "{error}"
     );
 }
@@ -305,7 +308,7 @@ fn env_overrides_are_rejected() {
     let path = dir.path().join("pumice.yaml");
     fs::write(
         &path,
-        "providers:\n  antigravity:\n    env:\n      AGY_HOME: /tmp\n",
+        "providers:\n  - id: antigravity\n    enabled: false\n    env:\n      AGY_HOME: /tmp\n",
     )
     .expect("write config");
 
@@ -314,7 +317,7 @@ fn env_overrides_are_rejected() {
         .to_string();
     assert!(
         error.contains(
-            "providers.antigravity.env.AGY_HOME is not an allowed environment variable (no environment overrides are allowed for this provider)"
+            "providers entry \"antigravity\".env.AGY_HOME is not an allowed environment variable (no environment overrides are allowed for this provider)"
         ),
         "{error}"
     );
@@ -345,7 +348,7 @@ fn models_listing_never_includes_antigravity() {
     let pipeline = Pipeline::new(&loaded.config, providers);
     let ids = pipeline.model_ids();
     assert!(!ids.contains(&"antigravity"), "{ids:?}");
-    assert_eq!(ids, ["claude", "codex", "passthrough", "inspect"]);
+    assert_eq!(ids, ["passthrough", "inspect"]);
 }
 
 #[tokio::test]

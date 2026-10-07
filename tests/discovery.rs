@@ -35,10 +35,11 @@ fn load(yaml: &str) -> Config {
         .config
 }
 
-/// A config with `claude`'s binary at `path` (every other setting default).
+/// A config with `claude` enabled, its model and binary at `path` (every
+/// other setting default).
 fn claude_at(path: &Path) -> Config {
     load(&format!(
-        "providers:\n  claude:\n    binary: '{}'\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n",
         path.display()
     ))
 }
@@ -129,7 +130,7 @@ async fn a_slow_probe_dies_with_its_deadline() {
 async fn antigravity_is_resolved_but_never_spawned() {
     let fake = FakeCli::new(json!({"stdout": "1.2.14", "exit_code": 0}));
     let config = load(&format!(
-        "providers:\n  antigravity:\n    binary: '{}'\n",
+        "providers:\n  - id: antigravity\n    enabled: false\n    binary: '{}'\n",
         fake.path().display()
     ));
     let statuses =
@@ -157,7 +158,7 @@ async fn generic_is_never_resolved_or_spawned() {
     // NotApplicable skip keeps the status free of any resolved path.
     let fake = FakeCli::new(json!({}));
     let config = load(&format!(
-        "providers:\n  generic:\n    binary: '{}'\n",
+        "providers:\n  - id: generic\n    enabled: false\n    binary: '{}'\n",
         fake.path().display()
     ));
     let statuses =
@@ -185,7 +186,7 @@ async fn detection_covers_every_registered_provider_enabled_or_not() {
     let antigravity = FakeCli::new(json!({}));
     let kiro = FakeCli::new(json!({"stdout": "2.24.1"}));
     let config = load(&format!(
-        "providers:\n  claude:\n    binary: '{0}'\n  codex:\n    binary: '{1}'\n  opencode:\n    binary: '{2}'\n  antigravity:\n    binary: '{3}'\n  kiro:\n    binary: '{4}'\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{0}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{1}'\n  - id: opencode\n    enabled: false\n    binary: '{2}'\n  - id: antigravity\n    enabled: false\n    binary: '{3}'\n  - id: kiro\n    enabled: false\n    binary: '{4}'\n",
         claude.path().display(),
         codex.path().display(),
         opencode.path().display(),
@@ -220,7 +221,7 @@ async fn detection_covers_every_registered_provider_enabled_or_not() {
     // NotApplicable: no CLI to resolve or probe, whatever the config says.
     assert_eq!(status("generic").found, Found::NotApplicable);
     assert_eq!(status("generic").version, Version::Skipped);
-    // Kiro is disabled by default but still probed.
+    // Kiro is listed but disabled, and still probed.
     assert!(!status("kiro").enabled);
     assert_eq!(status("kiro").version, Version::Parsed("2.24.1".into()));
 }

@@ -99,7 +99,6 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     allowed_env: ALLOWED_ENV,
     validate_options,
     build,
-    disabled_by_default: true,
     risk_warning: Some(RISK_WARNING),
     validate_settings,
     probe: ProbeSpec::Version(&["--version"]),
@@ -110,7 +109,7 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
 
 fn defaults() -> ProviderSettings {
     ProviderSettings {
-        enabled: true,
+        enabled: false,
         binary: None,
         model: String::new(),
         timeout: DEFAULT_TIMEOUT,
