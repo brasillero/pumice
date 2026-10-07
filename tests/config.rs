@@ -416,6 +416,10 @@ fn default_key_fails_with_a_removal_hint() {
         "{error}"
     );
     assert!(
+        error.contains(&format!("{CONFIG_NAME}:1:10")),
+        "the error points at the key's line:column:\n{error}"
+    );
+    assert!(
         error.contains(CONFIG_NAME),
         "error names the file:\n{error}"
     );
