@@ -72,6 +72,10 @@ struct Scenario {
     /// reports every regular file inside it, keyed by its relative path.
     #[serde(default)]
     report_files: Vec<String>,
+    /// Paths (relative to the working directory) whose Unix permission mode
+    /// should be reported. Always reports null on non-Unix targets.
+    #[serde(default)]
+    report_modes: Vec<String>,
     /// Read stdin to EOF before doing anything else. When false, stdin is never
     /// read (a CLI that ignores its input).
     #[serde(default = "default_true")]
@@ -117,6 +121,8 @@ struct Report {
     config_files: BTreeMap<String, Option<ArgFile>>,
     /// Contents of arbitrary files requested by `report_files`.
     report_files: BTreeMap<String, Option<ArgFile>>,
+    /// Unix permission modes requested by `report_modes`.
+    modes: BTreeMap<String, Option<u32>>,
     pid: u32,
     grandchild_pid: Option<u32>,
 }
@@ -323,6 +329,15 @@ fn build_report(
         }
     }
 
+    let modes = scenario
+        .report_modes
+        .iter()
+        .map(|path| {
+            let resolved = cwd.join(path);
+            (path.clone(), unix_mode(&resolved))
+        })
+        .collect();
+
     Report {
         argv,
         stdin,
@@ -332,6 +347,7 @@ fn build_report(
         arg_files,
         config_files,
         report_files,
+        modes,
         pid: process::id(),
         grandchild_pid,
     }
@@ -436,6 +452,23 @@ fn write_report(path: &Path, report: &Report) {
                 &format!("cannot write report {}: {e}", path.display()),
             )
         });
+}
+
+/// Returns the Unix permission bits of `path`, or `None` on non-Unix targets
+/// or if the metadata cannot be read.
+fn unix_mode(path: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .ok()
+            .map(|m| m.permissions().mode() & 0o7777)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
 }
 
 /// Converts a canonicalized path to a comparable form. On Windows

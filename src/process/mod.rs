@@ -9,6 +9,7 @@
 //! ```
 
 mod invocation;
+mod private_temp;
 mod resolve;
 mod tree;
 
@@ -72,10 +73,7 @@ impl ProcessRunner {
             return Err(ProviderError::Timeout);
         }
         let program = resolve_program(&invocation.program)?;
-        let root = tempfile::Builder::new()
-            .prefix("pumice-")
-            .tempdir()
-            .map_err(io_error)?;
+        let root = private_temp::tempdir().map_err(io_error)?;
         let result = run_in(root.path(), &program, invocation, deadline).await;
         remove_root(root).await;
         result
@@ -90,8 +88,8 @@ async fn run_in(
 ) -> Result<ProcessOutput, ProviderError> {
     let workspace = root.join(WORKSPACE_DIR);
     let control = root.join(CONTROL_DIR);
-    std::fs::create_dir(&workspace).map_err(io_error)?;
-    std::fs::create_dir(&control).map_err(io_error)?;
+    private_temp::create_dir(&workspace).map_err(io_error)?;
+    private_temp::create_dir(&control).map_err(io_error)?;
     write_files(&workspace, &invocation.workspace_files)?;
     let control_paths = write_files(&control, &invocation.control_files)?;
     let args = invocation
@@ -189,9 +187,9 @@ fn write_files(dir: &Path, files: &[ControlFile]) -> Result<Vec<PathBuf>, Provid
             }
             let path = dir.join(name);
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(io_error)?;
+                private_temp::create_dir_all(parent).map_err(io_error)?;
             }
-            std::fs::write(&path, &file.contents).map_err(io_error)?;
+            private_temp::write(&path, &file.contents).map_err(io_error)?;
             Ok(path)
         })
         .collect()
