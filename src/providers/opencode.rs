@@ -364,7 +364,8 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
             last_message = Some(message.to_owned());
         }
         match event_type {
-            "step_start" => {}
+            // A new step reopens the run: it must finish too.
+            "step_start" => last_finish = None,
             "step_finish" => {
                 // Verified reason vocabulary: stop, length, tool-calls,
                 // content-filter, other (providers may add more).

@@ -580,3 +580,19 @@ async fn an_error_the_run_recovered_from_is_not_a_failure() {
     let fake = fake_opencode(&stream, 0);
     assert_eq!(format(&fake, "text").await.unwrap(), "Recovered.");
 }
+
+#[tokio::test]
+async fn an_unfinished_later_step_of_the_same_message_is_invalid_output() {
+    for later_text in [None, Some("Partial")] {
+        let stream = opencode_step("m1", Some("First."), Some("stop"))
+            + &opencode_step("m1", later_text, None)
+                .replace("m1-start", "m1-start2")
+                .replace("m1-text", "m1-text2");
+        let fake = fake_opencode(&stream, 0);
+        assert_eq!(
+            format(&fake, "text").await.unwrap_err(),
+            ProviderError::other(ProviderErrorCode::InvalidOutput),
+            "later text {later_text:?}"
+        );
+    }
+}
