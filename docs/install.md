@@ -107,17 +107,18 @@ and list the providers you want:
   (or `$XDG_CONFIG_HOME/pumice/pumice.yaml`)
 
 ```yaml
-default: claude            # used when the client sends no model (optional)
-
-providers:                 # there is no fallback: a failure returns the raw text
-  - id: claude
-    enabled: true          # required on every entry
+providers:                 # the client's model picks the entry; there is no
+  - id: claude             # fallback: a failure, or no model, returns the
+    enabled: true          # original text
     model: haiku           # required when enabled
   - id: codex
     enabled: false         # kept in the file, not offered, never run
 ```
 
-Every entry needs `id` and `enabled`; `model` is required on enabled
+The client picks the provider: Handy sends the `model` the user chose, and
+Pumice runs exactly that provider. A request without a model returns the
+original text. Every entry needs `id` and `enabled`; `model` is required on
+enabled
 entries; `timeout_secs`, `binary`, `env` and `options` are optional and
 documented in [`pumice.example.yaml`](../pumice.example.yaml), which shows
 every supported provider. Validate the file with `pumice check-config`. The
