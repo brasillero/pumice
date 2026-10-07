@@ -332,7 +332,10 @@ async fn write_stdin(pipe: Option<ChildStdin>, data: Vec<u8>) -> bool {
     let Some(mut pipe) = pipe else {
         return data.is_empty();
     };
-    if pipe.write_all(&data).await.is_err() {
+    // On Windows `write_all` can return once the data is buffered: the
+    // flush waits for the pipe to take it, so a CLI that never reads is
+    // caught here too.
+    if pipe.write_all(&data).await.is_err() || pipe.flush().await.is_err() {
         return false;
     }
     let _ = pipe.shutdown().await;

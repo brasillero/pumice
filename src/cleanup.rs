@@ -91,13 +91,13 @@ pub fn cleanup(output: &str, raw_text: &str) -> Result<String, CleanupError> {
     //    model punctuated as "Formatted text:").
     let start = work.trim_start();
     let line = first_line(start);
-    let rest = start.split_once('\n').map_or("", |(_, rest)| rest);
-    let dictated_heading =
-        preamble_words(line) == preamble_words(first_line(raw_text.trim_start()));
-    // When the heading follows anyway, the first line is a preamble on top.
-    let repeated = preamble_words(line) == preamble_words(first_line(rest));
-    if is_preamble(line) && (!dictated_heading || repeated) {
-        work = rest;
+    // Strip it only when the output opens with more copies of those words
+    // than the dictation does: an extra copy is the model's preamble.
+    if is_preamble(line) {
+        let words = preamble_words(line);
+        if leading_copies(start, &words) > leading_copies(raw_text, &words) {
+            work = start.split_once('\n').map_or("", |(_, rest)| rest);
+        }
     }
 
     // 3. One code fence pair enclosing the whole remaining output.
@@ -175,29 +175,39 @@ fn is_preamble(line: &str) -> bool {
     PREAMBLES.iter().any(|p| p.to_lowercase() == line)
 }
 
-/// True when `text` is one quotation: it starts and ends with quote marks
-/// (of any style) and holds no other double or angle quote marks inside.
-/// Apostrophes inside are fine; `“a” and “b”` is two quotations, not one.
+/// True when `text` is one quotation: it starts and ends with the same
+/// quote pair, and that pair's marks do not appear inside. Other quote
+/// styles may nest inside (`"say «hello»"`), and an apostrophe between two
+/// letters is not a quote mark (`'don't'`); `“a” and “b”` is two
+/// quotations, not one.
 fn is_one_quotation(text: &str) -> bool {
-    let Some(open) = QUOTE_PAIRS
-        .iter()
-        .map(|&(open, _)| open)
-        .find(|open| text.starts_with(open))
-    else {
-        return false;
-    };
-    let Some(close) = QUOTE_PAIRS
-        .iter()
-        .map(|&(_, close)| close)
-        .find(|close| text.ends_with(close))
-    else {
-        return false;
-    };
-    if text.len() < open.len() + close.len() {
-        return false;
-    }
-    let inner = &text[open.len()..text.len() - close.len()];
-    !inner.contains(['"', '“', '”', '«', '»'])
+    QUOTE_PAIRS.iter().any(|&(open, close)| {
+        if text.len() < open.len() + close.len()
+            || !text.starts_with(open)
+            || !text.ends_with(close)
+        {
+            return false;
+        }
+        let inner = &text[open.len()..text.len() - close.len()];
+        let chars: Vec<char> = inner.chars().collect();
+        !chars.iter().enumerate().any(|(i, &c)| {
+            let is_mark = open.starts_with(c) || close.starts_with(c);
+            let apostrophe = c == '\''
+                && i > 0
+                && i + 1 < chars.len()
+                && chars[i - 1].is_alphanumeric()
+                && chars[i + 1].is_alphanumeric();
+            is_mark && !apostrophe
+        })
+    })
+}
+
+/// How many of `text`'s first nonblank lines, in a row, say `words`.
+fn leading_copies(text: &str, words: &str) -> usize {
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .take_while(|line| preamble_words(line) == words)
+        .count()
 }
 
 /// The words of a line for preamble comparison: lowercased, without

@@ -414,3 +414,46 @@ fn strips_a_preamble_on_top_of_the_dictated_heading() {
         "Formatted text:\nHello."
     );
 }
+
+#[test]
+fn keeps_a_dictated_quotation_with_nested_quotes_of_another_style() {
+    assert_eq!(
+        ok("\"Say «hello».\"", "\"say «hello»\""),
+        "\"Say «hello».\""
+    );
+}
+
+#[test]
+fn separate_single_quoted_phrases_are_not_one_quotation() {
+    assert_eq!(
+        ok("\"'Hello' and 'goodbye'\"", "'hello' and 'goodbye'"),
+        "'Hello' and 'goodbye'"
+    );
+}
+
+#[test]
+fn keeps_a_single_quoted_dictation_with_an_apostrophe() {
+    assert_eq!(ok("'Don't stop.'", "'don't stop'"), "'Don't stop.'");
+}
+
+#[test]
+fn keeps_headings_the_dictation_repeats() {
+    assert_eq!(
+        ok(
+            "Formatted text:\nFormatted text:\nHello.",
+            "formatted text\nformatted text\nhello"
+        ),
+        "Formatted text:\nFormatted text:\nHello."
+    );
+}
+
+#[test]
+fn strips_an_added_preamble_separated_by_a_blank_line() {
+    assert_eq!(
+        ok(
+            "Formatted text:\n\nFormatted text:\nHello.",
+            "formatted text\nhello"
+        ),
+        "Formatted text:\nHello."
+    );
+}
