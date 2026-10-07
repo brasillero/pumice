@@ -229,7 +229,7 @@ pub fn extract_request(request: ChatCompletionRequest) -> Result<ExtractedReques
             // before the closing tag; all other whitespace is transcript.
             // The stripped newlines stay in before/after so the message
             // still reconstructs byte for byte.
-            let text_start = if user_text[open_end..].starts_with('\n') {
+            let mut text_start = if user_text[open_end..].starts_with('\n') {
                 open_end + 1
             } else {
                 open_end
@@ -239,6 +239,13 @@ pub fn extract_request(request: ChatCompletionRequest) -> Result<ExtractedReques
             } else {
                 close
             };
+            // When the only content between the tags is a single '\n', both
+            // framing strips point at the same character. Clamp so the slice
+            // is empty instead of crossing, then the usual empty-transcript
+            // path returns the raw text unchanged.
+            if text_start > text_end {
+                text_start = text_end;
+            }
             let transcript = user_text[text_start..text_end].to_owned();
             Ok(ExtractedRequest {
                 model,
@@ -311,6 +318,54 @@ mod tests {
         let extracted = extract("<transcript>\n primeiro\n\n segundo \n</transcript>");
         assert_eq!(extracted.raw_text, " primeiro\n\n segundo ");
         assert!(!extracted.is_empty());
+    }
+
+    #[test]
+    fn empty_envelope_with_single_framing_newline_is_empty() {
+        let content = "<transcript>\n</transcript>";
+        let extracted = extract(content);
+        assert_eq!(extracted.text, "");
+        assert_eq!(extracted.raw_text, "");
+        assert!(extracted.is_empty());
+        assert_eq!(
+            format!(
+                "{}{}{}",
+                extracted.before_text, extracted.text, extracted.after_text
+            ),
+            content
+        );
+    }
+
+    #[test]
+    fn empty_envelope_without_framing_newlines_is_empty() {
+        let content = "<transcript></transcript>";
+        let extracted = extract(content);
+        assert_eq!(extracted.text, "");
+        assert_eq!(extracted.raw_text, "");
+        assert!(extracted.is_empty());
+        assert_eq!(
+            format!(
+                "{}{}{}",
+                extracted.before_text, extracted.text, extracted.after_text
+            ),
+            content
+        );
+    }
+
+    #[test]
+    fn empty_envelope_with_double_framing_newline_is_empty() {
+        let content = "<transcript>\n\n</transcript>";
+        let extracted = extract(content);
+        assert_eq!(extracted.text, "");
+        assert_eq!(extracted.raw_text, "");
+        assert!(extracted.is_empty());
+        assert_eq!(
+            format!(
+                "{}{}{}",
+                extracted.before_text, extracted.text, extracted.after_text
+            ),
+            content
+        );
     }
 
     fn extract(content: &str) -> ExtractedRequest {

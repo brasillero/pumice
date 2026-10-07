@@ -177,9 +177,13 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
     // included — only when `debug_log.enabled` turns it on; the metadata
     // line below stays text-free either way.
     if let Some(headers) = &debug_headers {
-        // The body already parsed as a request, so it parses as JSON too;
-        // unknown client fields are preserved by the `Value` round trip.
-        let body = serde_json::from_slice(&bytes).expect("request body already parsed once");
+        // The body already parsed as a request, but a field skipped by the
+        // typed deserializer can contain an escape that does not decode into a
+        // JSON value (for example a lone surrogate). Keep that error controlled
+        // and text-free: record the exchange without the raw body value.
+        let body = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+            serde_json::Value::String("request body could not be re-parsed".to_owned())
+        });
         state.debug_log.record(&DebugRecord::new(
             &id,
             body,
