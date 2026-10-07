@@ -110,9 +110,6 @@ pub struct ProviderDescriptor {
     pub validate_options: fn(&[RawOption<'_>]) -> Result<(), ConfigError>,
     /// Builds a runnable provider from validated settings.
     pub build: BuildFn,
-    /// Fixed notice `check-config` and startup print while the provider is
-    /// enabled. Never sent to a CLI and never part of formatted dictation.
-    pub risk_warning: Option<&'static str>,
     /// Validates the provider's fully defaulted settings after overrides.
     /// Runs for every listed entry, enabled or not, so it can relate fields
     /// `validate_options` sees separately (such as rejecting an enabled
@@ -181,24 +178,6 @@ pub fn validate_settings_noop(
     _locations: &ProviderLocations,
 ) -> Result<(), ConfigError> {
     Ok(())
-}
-
-/// `warning: <id>: <text>` lines for every enabled provider that carries a
-/// risk warning, in configuration (list) order. Shared by `check-config`
-/// and startup.
-pub fn risk_warnings(config: &Config, descriptors: &[ProviderDescriptor]) -> Vec<String> {
-    config
-        .providers
-        .iter()
-        .filter(|entry| entry.settings.enabled)
-        .filter_map(|entry| {
-            let warning = descriptors
-                .iter()
-                .find(|descriptor| descriptor.id == entry.id)?
-                .risk_warning?;
-            Some(format!("warning: {}: {warning}", entry.id))
-        })
-        .collect()
 }
 
 /// Builds every enabled provider in `config`, in configuration (list) order.
@@ -270,7 +249,6 @@ mod tests {
     fn claude_and_codex_have_no_new_capabilities() {
         for id in ["claude", "codex"] {
             let d = descriptor(id).expect("registered");
-            assert_eq!(d.risk_warning, None, "{id} carries no risk warning");
             let mut settings = (d.defaults)();
             settings.enabled = true;
             settings.model = "any".to_owned();

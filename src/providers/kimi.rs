@@ -59,9 +59,11 @@ pub const DEFAULT_BINARY: &str = "kimi";
 /// Provider default timeout (verified with a real call, S2.4).
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Fixed notice shown by `check-config` and startup while enabled; cites
-/// the S0.3 subscription-terms rating and the residual unverifiables.
-pub const RISK_WARNING: &str = "Disabled by default: Moonshot subscription terms rate non-interactive automation as risky (docs/research/S0.3-provider-terms.md). Dictation travels in argv (size-capped); user-configured hooks, plugins and CLI-owned session retention have no per-launch off switch.";
+// Residual risk (recorded here; not printed, owner decision 2026-10-07):
+// Moonshot subscription terms rate non-interactive automation as risky
+// (docs/research/S0.3-provider-terms.md). Dictation travels in argv (size-
+// capped); user-configured hooks, plugins and CLI-owned session retention
+// have no per-launch off switch.
 
 /// Adapter-owned child environment (2.1.1 bundled source; the background
 /// mode, the skills switches and the telemetry call were also verified in
@@ -90,6 +92,13 @@ const REMOVE_ENV_VARS: [&str; 1] = ["KIMI_CODE_TRUST_WORKSPACE"];
 /// with a clean `InputTooLarge` instead of a platform spawn error.
 pub const MAX_USER_MESSAGE_BYTES: usize = 24 * 1024;
 
+/// Maximum length of the message once quoted for a Windows command line,
+/// in UTF-16 units. Quoting escapes every `"` and may double backslashes,
+/// so a message under the byte cap can still overflow the 32,767-unit
+/// command line; this leaves room for the program, agent-file path and
+/// model. Checked on every platform so the limit does not depend on the OS.
+pub const MAX_QUOTED_MESSAGE_UNITS: usize = 28 * 1024;
+
 /// Agent file name inside the per-call control directory.
 const AGENT_FILE_NAME: &str = "pumice-agent.md";
 
@@ -99,7 +108,6 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     allowed_env: &[],
     validate_options,
     build,
-    risk_warning: Some(RISK_WARNING),
     validate_settings,
     probe: ProbeSpec::Version(&["--version"]),
     default_binary: DEFAULT_BINARY,
@@ -211,7 +219,9 @@ impl CliAdapter for KimiAdapter {
 
         let user = input.user_prompt;
         let message = [user.before_text, input.text, user.after_text].concat();
-        if message.len() > MAX_USER_MESSAGE_BYTES {
+        if message.len() > MAX_USER_MESSAGE_BYTES
+            || quoted_units(&message) > MAX_QUOTED_MESSAGE_UNITS
+        {
             return Err(ProviderError::other(ProviderErrorCode::InputTooLarge));
         }
 
@@ -279,6 +289,17 @@ fn agent_file(system_prompt: &str) -> String {
     file.push_str(system_prompt);
     file.push('\n');
     file
+}
+
+/// Upper bound on `message`'s length as one quoted Windows command-line
+/// argument, in UTF-16 units: the surrounding quotes, plus one escape for
+/// every `"` and, at worst, a doubled backslash for every `\\`.
+fn quoted_units(message: &str) -> usize {
+    let escapes = message
+        .chars()
+        .filter(|&character| character == '"' || character == '\\')
+        .count();
+    message.encode_utf16().count() + escapes + 2
 }
 
 /// Parses Kimi's `--output-format stream-json` JSONL stream (one message
@@ -403,6 +424,30 @@ mod tests {
             key_at: serde_saphyr::Location::UNKNOWN,
             value_at: serde_saphyr::Location::UNKNOWN,
         }
+    }
+
+    #[test]
+    fn quoted_length_counts_escapes() {
+        assert_eq!(quoted_units("abc"), 5);
+        assert_eq!(quoted_units("a\"b"), 6);
+        assert_eq!(quoted_units("a\\b"), 6);
+        assert_eq!(quoted_units("é"), 3);
+    }
+
+    #[test]
+    fn quote_heavy_message_under_the_byte_cap_is_too_large() {
+        let adapter = KimiAdapter::new(PathBuf::from("kimi"), "kimi-k2.7-code".to_owned());
+        let text = "\"".repeat(20_000);
+        assert!(text.len() < MAX_USER_MESSAGE_BYTES);
+        let input = FormatInput {
+            system_prompt: "system",
+            user_prompt: Default::default(),
+            text: &text,
+        };
+        assert_eq!(
+            adapter.invocation(input).unwrap_err(),
+            ProviderError::other(ProviderErrorCode::InputTooLarge)
+        );
     }
 
     #[test]

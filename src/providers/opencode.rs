@@ -43,9 +43,9 @@ pub const ID: &str = "opencode";
 pub const DEFAULT_BINARY: &str = "opencode";
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Fixed notice shown by `check-config` and startup while enabled; also the
-/// reason the adapter ships disabled.
-pub const RISK_WARNING: &str = "Disabled by default. Configure an explicit provider/model. Upstream terms vary; startup customizations and CLI-owned transcript retention remain unverified.";
+// Residual risk (recorded here; not printed, owner decision 2026-10-07):
+// Configure an explicit provider/model. Upstream terms vary; startup
+// customizations and CLI-owned transcript retention remain unverified.
 
 /// OpenCode accepts no environment overrides: routing belongs in the
 /// explicit `model` (and upstream `opencode` auth/config), and the adapter
@@ -80,7 +80,6 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     allowed_env: ALLOWED_ENV,
     validate_options,
     build,
-    risk_warning: Some(RISK_WARNING),
     validate_settings,
     probe: ProbeSpec::Version(&["--version"]),
     default_binary: DEFAULT_BINARY,

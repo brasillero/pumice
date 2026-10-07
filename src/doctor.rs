@@ -33,8 +33,9 @@ pub const ANTIGRAVITY_REFUSAL: &str =
 
 /// Renders the full doctor report: the config source, one line per registered
 /// provider and the readiness summary. Pure over the config and the detection
-/// statuses; never prints dictated text or probe output.
-pub fn render(config: &Config, source: &ConfigSource, statuses: &[ProviderStatus]) -> String {
+/// statuses; never prints dictated text or probe output. Every enabled
+/// provider is shown the same way: no provider-specific warnings.
+pub fn render(source: &ConfigSource, statuses: &[ProviderStatus]) -> String {
     let mut out = String::new();
     match source {
         ConfigSource::File(path) => out.push_str(&format!("config: {}\n", path.display())),
@@ -43,14 +44,6 @@ pub fn render(config: &Config, source: &ConfigSource, statuses: &[ProviderStatus
     for status in statuses {
         out.push_str(&provider_line(status));
         out.push('\n');
-        if config
-            .provider(status.id)
-            .is_some_and(|settings| settings.enabled)
-            && let Some(warning) =
-                providers::descriptor(status.id).and_then(|descriptor| descriptor.risk_warning)
-        {
-            out.push_str(&format!("  warning: {}: {warning}\n", status.id));
-        }
     }
     let (ready, total) = enabled_ready(statuses);
     if total == 0 {
@@ -254,17 +247,7 @@ pub fn error_category(error: ProviderError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::{Path, PathBuf};
-
-    /// The default configuration (empty file, built-in registry).
-    fn default_config() -> Config {
-        crate::config::validate_text_with_descriptors(
-            "",
-            Path::new("pumice.yaml"),
-            providers::PROVIDERS,
-        )
-        .expect("empty config validates")
-    }
+    use std::path::PathBuf;
 
     fn status(id: &'static str, enabled: bool, found: Found, version: Version) -> ProviderStatus {
         ProviderStatus {
@@ -304,11 +287,7 @@ mod tests {
 
     #[test]
     fn render_lists_every_provider_and_the_summary() {
-        let report = render(
-            &default_config(),
-            &ConfigSource::BuiltInDefaults,
-            &full_scan(),
-        );
+        let report = render(&ConfigSource::BuiltInDefaults, &full_scan());
 
         assert!(report.contains("config: built-in defaults\n"), "{report}");
         assert!(
@@ -353,11 +332,7 @@ mod tests {
     fn render_marks_missing_enabled_providers_and_counts_them_unready() {
         let mut statuses = full_scan();
         statuses[1] = status("codex", true, Found::Missing, Version::Unavailable);
-        let report = render(
-            &default_config(),
-            &ConfigSource::File(PathBuf::from("pumice.yaml")),
-            &statuses,
-        );
+        let report = render(&ConfigSource::File(PathBuf::from("pumice.yaml")), &statuses);
 
         assert!(
             report.contains("codex: enabled, missing (install: npm install -g @openai/codex)\n"),
@@ -375,7 +350,7 @@ mod tests {
         let mut statuses = full_scan();
         statuses[0] = status("claude", true, found(), Version::Unavailable);
         statuses[1] = status("codex", true, Found::UnsupportedShim, Version::Unavailable);
-        let report = render(&default_config(), &ConfigSource::BuiltInDefaults, &statuses);
+        let report = render(&ConfigSource::BuiltInDefaults, &statuses);
 
         assert!(
             report.contains("claude: enabled, found (version unavailable)\n"),
@@ -396,54 +371,30 @@ mod tests {
     }
 
     #[test]
-    fn render_warns_below_enabled_providers_with_a_risk_warning() {
-        let config = crate::config::validate_text_with_descriptors(
-            "providers:\n  - id: opencode\n    enabled: true\n    model: anthropic/claude-haiku\n",
-            Path::new("pumice.yaml"),
-            providers::PROVIDERS,
-        )
-        .expect("config validates");
+    fn render_shows_an_enabled_provider_without_warnings() {
         let mut statuses = full_scan();
         statuses[2] = status("opencode", true, found(), Version::Unavailable);
-        let report = render(&config, &ConfigSource::BuiltInDefaults, &statuses);
+        let report = render(&ConfigSource::BuiltInDefaults, &statuses);
 
         assert!(
             report.contains("opencode: enabled, found (version unavailable)\n"),
             "{report}"
         );
-        assert!(
-            report.contains(&format!(
-                "  warning: opencode: {}\n",
-                providers::opencode::RISK_WARNING
-            )),
-            "{report}"
-        );
+        assert!(!report.contains("warning"), "{report}");
         assert_eq!(enabled_ready(&statuses), (3, 3));
     }
 
     #[test]
     fn render_reports_an_enabled_generic_as_a_local_endpoint() {
-        let config = crate::config::validate_text_with_descriptors(
-            "providers:\n  - id: generic\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
-            Path::new("pumice.yaml"),
-            providers::PROVIDERS,
-        )
-        .expect("config validates");
         let mut statuses = full_scan();
         statuses[4] = status("generic", true, Found::NotApplicable, Version::Skipped);
-        let report = render(&config, &ConfigSource::BuiltInDefaults, &statuses);
+        let report = render(&ConfigSource::BuiltInDefaults, &statuses);
 
         assert!(
             report.contains("generic: enabled, local endpoint (checked at call time)\n"),
             "{report}"
         );
-        assert!(
-            report.contains(&format!(
-                "  warning: generic: {}\n",
-                providers::generic::RISK_WARNING
-            )),
-            "{report}"
-        );
+        assert!(!report.contains("warning"), "{report}");
         // An enabled generic has no executable to miss, so it is ready.
         assert_eq!(enabled_ready(&statuses), (3, 3));
     }

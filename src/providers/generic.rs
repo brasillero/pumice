@@ -48,9 +48,9 @@ const BASE_URL_KEY: &str = "base_url";
 /// on the environment of a server Pumice does not spawn.
 const ALLOWED_ENV: &[&str] = &[];
 
-/// Fixed notice `check-config` and startup print while the provider is
-/// enabled. Never sent to the endpoint and never part of formatted dictation.
-pub const RISK_WARNING: &str = "Disabled by default. Connects only to an unauthenticated loopback HTTP endpoint. The local server controls inference routing and retention.";
+// Residual risk (recorded here; not printed, owner decision 2026-10-07):
+// Connects only to an unauthenticated loopback HTTP endpoint. The local
+// server controls inference routing and retention.
 
 /// Serialized request cap: a dictation near this size cannot be formatted in
 /// the time budget anyway, and this keeps memory bounded.
@@ -69,7 +69,6 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     allowed_env: ALLOWED_ENV,
     validate_options,
     build,
-    risk_warning: Some(RISK_WARNING),
     validate_settings,
     // This adapter has no CLI: detection neither resolves nor spawns
     // anything for it (no PATH lookup, no probe). Its endpoint is a network

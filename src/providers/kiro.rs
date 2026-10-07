@@ -87,9 +87,9 @@ fn unique_agent_name() -> String {
     format!("pumice-{:016x}", hasher.finish())
 }
 
-/// Fixed notice shown by `check-config` and startup while the adapter is
-/// enabled. It explains why the adapter ships disabled.
-pub const RISK_WARNING: &str = "Disabled by default and unverified. Enabling requires an explicit model; the invocation, output parser and tool-lockdown recipe are derived from documentation only.";
+// Residual risk (recorded here; not printed, owner decision 2026-10-07):
+// Enabling requires an explicit model; the invocation, output parser and
+// tool-lockdown recipe are derived from documentation only.
 
 const ALLOWED_ENV: &[&str] = &[];
 
@@ -99,7 +99,6 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     allowed_env: ALLOWED_ENV,
     validate_options,
     build,
-    risk_warning: Some(RISK_WARNING),
     validate_settings,
     probe: ProbeSpec::Version(&["--version"]),
     default_binary: DEFAULT_BINARY,
