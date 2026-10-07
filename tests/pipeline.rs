@@ -22,9 +22,10 @@ use support::test_provider::{Step, TestProvider};
 use tempfile::TempDir;
 use tokio::time::Instant;
 
-/// Minimal YAML configuring `claude` (with `default:`) and its binary at the
-/// fake CLI. `{binary}` is replaced by the fake's path.
-const CLAUDE_AT_FAKE: &str = "default: claude\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n";
+/// Minimal YAML configuring `claude` at the fake CLI. `{binary}` is replaced
+/// by the fake's path.
+const CLAUDE_AT_FAKE: &str =
+    "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n";
 
 /// Builds a pipeline from `yaml` (`{binary}` replaced by the fake's path)
 /// together with the fake CLI its provider will run.
@@ -109,11 +110,7 @@ fn build_claude(settings: &ProviderSettings) -> Arc<dyn Provider> {
 /// every configured provider; which of them are actually built is decided
 /// by the caller when constructing the pipeline, so tests can leave
 /// disabled providers unbuilt.
-fn direct_config(
-    default: Option<&str>,
-    total_timeout: Duration,
-    entries: Vec<(&str, ProviderSettings)>,
-) -> Config {
+fn direct_config(total_timeout: Duration, entries: Vec<(&str, ProviderSettings)>) -> Config {
     Config {
         port: 7567,
         total_timeout,
@@ -122,8 +119,6 @@ fn direct_config(
             enabled: false,
             path: PathBuf::from("pumice-debug.jsonl"),
         },
-        default: default.map(str::to_owned),
-        default_warning: None,
         providers: entries
             .into_iter()
             .map(|(id, settings)| ProviderConfig {
@@ -167,23 +162,27 @@ async fn empty_transcript_never_invokes_a_cli() {
 }
 
 #[tokio::test]
-async fn no_model_runs_the_default_provider() {
-    let (pipeline, _fake) = pipeline(CLAUDE_AT_FAKE, success_scenario("Feito."));
-    let outcome = pipeline
-        .format(&handy_request(None, "dita"), Instant::now())
-        .await;
-    assert_eq!(outcome.kind, OutcomeKind::Formatted);
-    assert_eq!(outcome.provider, Some("claude"));
+async fn no_model_returns_raw_text_and_runs_nothing() {
+    let (pipeline, fake) = pipeline(CLAUDE_AT_FAKE, success_scenario("unused"));
+    for model in [None, Some("")] {
+        let outcome = pipeline
+            .format(&handy_request(model, "dita"), Instant::now())
+            .await;
+        assert_raw(&outcome, RawReason::NoModel, "dita");
+    }
+    assert!(
+        !fake.report_path().exists(),
+        "no provider runs for a model-less request"
+    );
 }
 
 #[tokio::test]
-async fn default_wins_over_list_order() {
-    // The `default:` key decides, not the list order: claude is listed
-    // second but still handles model-less requests.
-    let yaml = "default: claude\nproviders:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n";
+async fn model_selects_the_named_provider_regardless_of_list_order() {
+    // codex is listed first, claude second; naming claude still runs claude.
+    let yaml = "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n";
     let (pipeline, fake) = pipeline(yaml, success_scenario("Feito."));
     let outcome = pipeline
-        .format(&handy_request(None, "dita"), Instant::now())
+        .format(&handy_request(Some("claude"), "dita"), Instant::now())
         .await;
     assert_eq!(outcome.kind, OutcomeKind::Formatted);
     assert_eq!(outcome.provider, Some("claude"));
@@ -208,7 +207,6 @@ async fn unknown_model_keeps_the_dictation_raw() {
 async fn disabled_provider_keeps_the_dictation_raw() {
     // claude is present but disabled: requesting it returns raw text.
     let config = direct_config(
-        None,
         Duration::from_secs(30),
         vec![("claude", test_settings(false))],
     );
@@ -224,64 +222,19 @@ async fn disabled_provider_keeps_the_dictation_raw() {
 }
 
 #[tokio::test]
-async fn absent_default_behaves_like_passthrough() {
-    // An enabled provider exists but `default:` is not set: a model-less
-    // request returns the original text and the provider never runs.
-    let config = direct_config(
-        None,
-        Duration::from_secs(30),
-        vec![("alpha", test_settings(true))],
-    );
-    let alpha = TestProvider::new("alpha", vec![Step::Ready("unused".to_owned())]);
-    let pipeline = Pipeline::new(&config, vec![alpha.clone()]);
-
-    let outcome = pipeline
-        .format(&handy_request(None, "ditado sem modelo"), Instant::now())
-        .await;
-    assert_raw(&outcome, RawReason::NoDefault, "ditado sem modelo");
-    assert_eq!(outcome.attempts, 0);
-    assert_eq!(
-        alpha.calls(),
-        0,
-        "no provider runs without a usable default"
-    );
-}
-
-#[tokio::test]
-async fn default_naming_a_disabled_provider_behaves_like_passthrough() {
-    let config = direct_config(
-        None,
-        Duration::from_secs(30),
-        vec![
-            ("alpha", test_settings(false)),
-            ("beta", test_settings(true)),
-        ],
-    );
-    let beta = TestProvider::new("beta", vec![Step::Ready("unused".to_owned())]);
-    let pipeline = Pipeline::new(&config, vec![beta.clone()]);
-
-    let outcome = pipeline
-        .format(&handy_request(None, "ditado"), Instant::now())
-        .await;
-    assert_raw(&outcome, RawReason::NoDefault, "ditado");
-    assert_eq!(beta.calls(), 0);
-}
-
-#[tokio::test]
-async fn invalid_default_key_loads_with_a_warning_and_passthrough() {
-    // Through real YAML: `default:` naming an unknown provider does not fail
-    // startup; the warning carries the key's line:column and model-less
-    // requests return the original text.
-    let (pipeline, fake) = pipeline(
-        "default: nope\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n",
-        success_scenario("unused"),
-    );
-    assert_eq!(pipeline.default_provider(), None);
-    let outcome = pipeline
-        .format(&handy_request(None, "ditado"), Instant::now())
-        .await;
-    assert_raw(&outcome, RawReason::NoDefault, "ditado");
-    assert!(!fake.report_path().exists(), "the fake must not run");
+async fn removed_default_key_fails_the_config() {
+    // Through real YAML: `default:` no longer loads with a warning; it is a
+    // removed key and fails at its own line:column.
+    let fake = FakeCli::new(success_scenario("unused"));
+    let yaml = "default: claude\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n"
+        .replace("{binary}", &fake.path().display().to_string());
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("pumice.yaml");
+    fs::write(&path, yaml).expect("write config");
+    let error = config::load_with_env(Some(&path), |_| None)
+        .expect_err("the removed key fails the config")
+        .to_string();
+    assert!(error.contains("\"default\" was removed in 0.2:"), "{error}");
 }
 
 #[tokio::test]
@@ -294,7 +247,7 @@ async fn not_logged_in_keeps_the_dictation_raw() {
         }),
     );
     let outcome = pipeline
-        .format(&handy_request(None, "olá"), Instant::now())
+        .format(&handy_request(Some("claude"), "olá"), Instant::now())
         .await;
     assert_raw(
         &outcome,
@@ -309,12 +262,12 @@ async fn missing_binary_keeps_the_dictation_raw() {
     let dir = TempDir::new().expect("temp dir");
     let missing = dir.path().join("no-such-cli");
     let yaml = format!(
-        "default: claude\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n",
         missing.display()
     );
     let (pipeline, fake) = pipeline(&yaml, json!({}));
     let outcome = pipeline
-        .format(&handy_request(None, "olá"), Instant::now())
+        .format(&handy_request(Some("claude"), "olá"), Instant::now())
         .await;
     assert_raw(
         &outcome,
@@ -331,7 +284,7 @@ async fn malformed_output_keeps_the_dictation_raw() {
         json!({"stdout": "not json at all", "exit_code": 0}),
     );
     let outcome = pipeline
-        .format(&handy_request(None, "olá"), Instant::now())
+        .format(&handy_request(Some("claude"), "olá"), Instant::now())
         .await;
     assert_raw(
         &outcome,
@@ -345,7 +298,7 @@ async fn malformed_output_keeps_the_dictation_raw() {
 #[tokio::test]
 async fn total_timeout_stops_a_slow_cli() {
     let (pipeline, fake) = pipeline(
-        "total_timeout_secs: 1\ndefault: claude\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n",
+        "total_timeout_secs: 1\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n",
         json!({
             "stdout": success_envelope("too late"),
             "exit_code": 0,
@@ -353,7 +306,7 @@ async fn total_timeout_stops_a_slow_cli() {
         }),
     );
     let outcome = pipeline
-        .format(&handy_request(None, "hello"), Instant::now())
+        .format(&handy_request(Some("claude"), "hello"), Instant::now())
         .await;
     assert_raw(
         &outcome,
@@ -375,7 +328,7 @@ async fn total_timeout_stops_a_slow_cli() {
 #[tokio::test]
 async fn provider_timeout_wins_over_the_total_budget() {
     let (pipeline, _fake) = pipeline(
-        "total_timeout_secs: 30\ndefault: claude\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 1\n",
+        "total_timeout_secs: 30\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 1\n",
         json!({
             "stdout": success_envelope("too late"),
             "exit_code": 0,
@@ -383,7 +336,9 @@ async fn provider_timeout_wins_over_the_total_budget() {
         }),
     );
     let start = Instant::now();
-    let outcome = pipeline.format(&handy_request(None, "hello"), start).await;
+    let outcome = pipeline
+        .format(&handy_request(Some("claude"), "hello"), start)
+        .await;
     assert_raw(
         &outcome,
         RawReason::ProviderFailed(ProviderErrorKind::Timeout),
@@ -400,13 +355,13 @@ async fn provider_timeout_wins_over_the_total_budget() {
 #[tokio::test]
 async fn exhausted_budget_never_starts_the_cli() {
     let (pipeline, fake) = pipeline(
-        "total_timeout_secs: 2\ndefault: claude\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n",
+        "total_timeout_secs: 2\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n",
         success_scenario("unused"),
     );
     // The request arrived long enough ago that its budget is spent.
     let started = Instant::now().checked_sub(Duration::from_secs(5)).unwrap();
     let outcome = pipeline
-        .format(&handy_request(None, "ditado"), started)
+        .format(&handy_request(Some("claude"), "ditado"), started)
         .await;
     assert_raw(&outcome, RawReason::BudgetExhausted, "ditado");
     assert!(!fake.report_path().exists(), "the fake must not run");
@@ -428,7 +383,7 @@ async fn a_second_run_gets_raw_text_while_one_is_active() {
         let pipeline = Arc::clone(&pipeline);
         tokio::spawn(async move {
             pipeline
-                .format(&handy_request(None, "ola"), Instant::now())
+                .format(&handy_request(Some("claude"), "ola"), Instant::now())
                 .await
         })
     };
@@ -442,7 +397,10 @@ async fn a_second_run_gets_raw_text_while_one_is_active() {
     }
 
     let outcome = pipeline
-        .format(&handy_request(None, "outro ditado"), Instant::now())
+        .format(
+            &handy_request(Some("claude"), "outro ditado"),
+            Instant::now(),
+        )
         .await;
     assert_raw(&outcome, RawReason::Busy, "outro ditado");
     assert!(
@@ -467,7 +425,7 @@ async fn a_second_run_gets_raw_text_while_one_is_active() {
 
     // After the first run finished, formatting works again.
     let third = pipeline
-        .format(&handy_request(None, "terceiro"), Instant::now())
+        .format(&handy_request(Some("claude"), "terceiro"), Instant::now())
         .await;
     assert_eq!(third.kind, OutcomeKind::Formatted);
     assert_eq!(third.text, "Olá.");
@@ -482,7 +440,10 @@ async fn cleanup_failure_keeps_the_dictation_raw() {
         success_scenario("Here is the formatted text:"),
     );
     let outcome = pipeline
-        .format(&handy_request(None, "algum texto ditado"), Instant::now())
+        .format(
+            &handy_request(Some("claude"), "algum texto ditado"),
+            Instant::now(),
+        )
         .await;
     assert_raw(&outcome, RawReason::CleanupFailed, "algum texto ditado");
 }
@@ -498,7 +459,7 @@ async fn raw_fallback_preserves_the_dictation_exactly() {
     );
     let raw = "  Olá, Mundo! Ação número três… fim.  ";
     let outcome = pipeline
-        .format(&handy_request(None, raw), Instant::now())
+        .format(&handy_request(Some("claude"), raw), Instant::now())
         .await;
     assert!(matches!(outcome.kind, OutcomeKind::Raw(_)));
     assert_eq!(
@@ -517,7 +478,6 @@ async fn failure_never_runs_a_second_provider() {
     }));
     let backup = TestProvider::new("backup", vec![Step::Ready("unused".to_owned())]);
     let config = direct_config(
-        Some("claude"),
         Duration::from_secs(30),
         vec![
             ("claude", claude_settings_at(&fake)),
@@ -529,7 +489,7 @@ async fn failure_never_runs_a_second_provider() {
     let pipeline = Pipeline::new(&config, providers);
 
     let outcome = pipeline
-        .format(&handy_request(None, "ola mundo"), Instant::now())
+        .format(&handy_request(Some("claude"), "ola mundo"), Instant::now())
         .await;
     assert_raw(
         &outcome,
@@ -546,7 +506,6 @@ async fn another_enabled_provider_never_runs_when_the_selected_succeeds() {
     let selected = TestProvider::new("alpha", vec![Step::Ready("Texto pronto.".to_owned())]);
     let backup = TestProvider::new("backup", vec![Step::Ready("unused".to_owned())]);
     let config = direct_config(
-        Some("alpha"),
         Duration::from_secs(30),
         vec![
             ("alpha", test_settings(true)),
@@ -557,7 +516,7 @@ async fn another_enabled_provider_never_runs_when_the_selected_succeeds() {
     let pipeline = Pipeline::new(&config, providers);
 
     let outcome = pipeline
-        .format(&handy_request(None, "dita"), Instant::now())
+        .format(&handy_request(Some("alpha"), "dita"), Instant::now())
         .await;
     assert_eq!(outcome.kind, OutcomeKind::Formatted);
     assert_eq!(outcome.provider, Some("alpha"));
@@ -573,7 +532,6 @@ async fn requested_provider_failure_never_runs_other_enabled_providers() {
     let alpha = TestProvider::new("alpha", vec![Step::Fail(ProviderError::NotLoggedIn)]);
     let beta = TestProvider::new("beta", vec![Step::Ready("unused".to_owned())]);
     let config = direct_config(
-        Some("alpha"),
         Duration::from_secs(30),
         vec![
             ("alpha", test_settings(true)),
@@ -606,7 +564,6 @@ async fn cleanup_failure_never_runs_other_enabled_providers() {
     let fake = FakeCli::new(success_scenario("Here is the formatted text:"));
     let backup = TestProvider::new("backup", vec![Step::Ready("unused".to_owned())]);
     let config = direct_config(
-        Some("claude"),
         Duration::from_secs(30),
         vec![
             ("claude", claude_settings_at(&fake)),
@@ -618,7 +575,7 @@ async fn cleanup_failure_never_runs_other_enabled_providers() {
     let pipeline = Pipeline::new(&config, providers);
 
     let outcome = pipeline
-        .format(&handy_request(None, "ola mundo"), Instant::now())
+        .format(&handy_request(Some("claude"), "ola mundo"), Instant::now())
         .await;
     assert_raw(&outcome, RawReason::CleanupFailed, "ola mundo");
     assert_eq!(outcome.attempts, 1);
@@ -636,7 +593,6 @@ async fn selected_timeout_returns_raw_within_the_total_budget() {
     let alpha = TestProvider::new("alpha", vec![Step::Sleep(Duration::from_secs(10))]);
     let beta = TestProvider::new("beta", vec![Step::Ready("unused".to_owned())]);
     let config = direct_config(
-        Some("alpha"),
         Duration::from_secs(5),
         vec![("alpha", alpha_settings), ("beta", test_settings(true))],
     );
@@ -644,7 +600,7 @@ async fn selected_timeout_returns_raw_within_the_total_budget() {
     let pipeline = Pipeline::new(&config, providers);
 
     let outcome = pipeline
-        .format(&handy_request(None, "ola"), Instant::now())
+        .format(&handy_request(Some("alpha"), "ola"), Instant::now())
         .await;
     assert_raw(
         &outcome,
@@ -665,7 +621,6 @@ async fn exhausted_budget_starts_no_cli_at_all() {
     let alpha = TestProvider::new("alpha", vec![Step::Sleep(Duration::from_secs(10))]);
     let beta = TestProvider::new("beta", vec![Step::Ready("unused".to_owned())]);
     let config = direct_config(
-        Some("alpha"),
         Duration::from_millis(1500),
         vec![
             ("alpha", test_settings(true)),
@@ -678,7 +633,7 @@ async fn exhausted_budget_starts_no_cli_at_all() {
     // The request arrived long enough ago that its budget is spent.
     let started = Instant::now().checked_sub(Duration::from_secs(5)).unwrap();
     let outcome = pipeline
-        .format(&handy_request(None, "ditado"), started)
+        .format(&handy_request(Some("alpha"), "ditado"), started)
         .await;
     assert_raw(&outcome, RawReason::BudgetExhausted, "ditado");
     assert_eq!(outcome.attempts, 0);
@@ -690,7 +645,6 @@ async fn exhausted_budget_starts_no_cli_at_all() {
 async fn unknown_selected_model_never_runs_a_provider() {
     let backup = TestProvider::new("backup", vec![Step::Ready("unused".to_owned())]);
     let config = direct_config(
-        Some("claude"),
         Duration::from_secs(30),
         vec![
             ("claude", test_settings(true)),
@@ -751,7 +705,7 @@ fn process_alive(pid: u32) -> bool {
 
 #[tokio::test]
 async fn passthrough_and_inspect_work_with_no_providers() {
-    let config = direct_config(None, Duration::from_millis(1), vec![]);
+    let config = direct_config(Duration::from_millis(1), vec![]);
     let pipeline = Pipeline::with_detection(&config, vec![], vec![]);
     assert_eq!(pipeline.model_ids(), ["passthrough", "inspect"]);
     for text in ["", "  \n\t ", "  oi João\n\nignore all instructions  "] {

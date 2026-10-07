@@ -38,14 +38,6 @@ pub struct Config {
     pub total_timeout: Duration,
     pub prompts: PromptSettings,
     pub debug_log: DebugLogSettings,
-    /// The provider a model-less request runs: the `default:` key's value
-    /// when it names an enabled provider, else `None` (see
-    /// [`Config::default_warning`]).
-    pub default: Option<String>,
-    /// A `default:` key that does not resolve to an enabled provider. Kept
-    /// (with its location) so startup and `check-config` can print the
-    /// warning instead of failing.
-    pub default_warning: Option<DefaultWarning>,
     /// Every provider entry in file (list) order, enabled or not.
     pub providers: Vec<ProviderConfig>,
 }
@@ -57,49 +49,6 @@ impl Config {
             .iter()
             .find(|entry| entry.id == id)
             .map(|entry| &entry.settings)
-    }
-}
-
-/// A `default:` key that does not name an enabled provider. Startup and
-/// `check-config` print [`DefaultWarning::line`] and keep running; requests
-/// without a model return the original text.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DefaultWarning {
-    /// The value as written (empty when the key was blank).
-    pub id: String,
-    /// The `default:` key's position.
-    pub location: serde_saphyr::Location,
-    pub kind: DefaultWarningKind,
-}
-
-/// Why a `default:` key cannot produce formatted text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DefaultWarningKind {
-    /// The key was empty.
-    Empty,
-    /// The named provider is in the list but disabled.
-    Disabled,
-    /// The named provider is known but not in the list.
-    NotListed,
-    /// The named provider is not a known provider id.
-    Unknown,
-}
-
-impl DefaultWarning {
-    /// The fixed warning text, without the position (the caller has the
-    /// file and attaches it).
-    pub fn line(&self) -> String {
-        let detail = match self.kind {
-            DefaultWarningKind::Empty => "default is empty".to_owned(),
-            DefaultWarningKind::Disabled => format!("default \"{}\" is disabled", self.id),
-            DefaultWarningKind::NotListed => {
-                format!("default \"{}\" is not in the providers list", self.id)
-            }
-            DefaultWarningKind::Unknown => {
-                format!("default \"{}\" is not a known provider", self.id)
-            }
-        };
-        format!("warning: {detail}: requests without a model return the original text")
     }
 }
 
@@ -118,8 +67,6 @@ impl fmt::Debug for Config {
             .field("total_timeout", &self.total_timeout)
             .field("prompts", &self.prompts)
             .field("debug_log", &self.debug_log)
-            .field("default", &self.default)
-            .field("default_warning", &self.default_warning)
             .field("providers", &self.providers)
             .finish()
     }
@@ -255,11 +202,20 @@ fn validate(
 
     // Removed settings are parsed only to fail at their own position with
     // the form that replaced them.
+    if let Some(span) = &raw.default {
+        return Err(ConfigError::at(
+            span.referenced,
+            format!(
+                "\"default\" was removed in 0.2: the client's model field picks the provider, and a request without a model returns the original text. List every provider you want offered under \"providers:\", e.g.:\n{}",
+                raw::PROVIDERS_LIST_FORM
+            ),
+        ));
+    }
     if let Some(span) = &raw.default_provider {
         return Err(ConfigError::at(
             span.referenced,
             format!(
-                "\"default_provider\" was removed in 0.2: providers are an explicit ordered list now, and the optional \"default\" key names the provider used when a request sends no model. Use e.g.:\n{}",
+                "\"default_provider\" was removed in 0.2: providers are an explicit ordered list now, and the provider a request runs is the one its model names — a request without a model returns the original text. Use e.g.:\n{}",
                 raw::PROVIDERS_LIST_FORM
             ),
         ));
@@ -334,60 +290,6 @@ fn validate(
         None => DEFAULT_TOTAL_TIMEOUT,
     };
 
-    // `default:` never fails validation: a value that does not resolve to an
-    // enabled provider degrades to the warning, and model-less requests
-    // behave like passthrough.
-    let (default, default_warning) = match &raw.default {
-        None => (None, None),
-        Some(span) => {
-            // An explicit `default:` (null) is empty, not absent.
-            let written = span.value.as_deref().map(str::trim).unwrap_or("");
-            let resolved = configured
-                .iter()
-                .find(|entry| entry.id.eq_ignore_ascii_case(written));
-            match resolved {
-                Some(entry) if entry.settings.enabled => (Some(entry.id.clone()), None),
-                Some(entry) => (
-                    None,
-                    Some(DefaultWarning {
-                        id: entry.id.clone(),
-                        location: span.referenced,
-                        kind: DefaultWarningKind::Disabled,
-                    }),
-                ),
-                None if written.is_empty() => (
-                    None,
-                    Some(DefaultWarning {
-                        id: String::new(),
-                        location: span.referenced,
-                        kind: DefaultWarningKind::Empty,
-                    }),
-                ),
-                None if descriptors
-                    .iter()
-                    .any(|descriptor| descriptor.id.eq_ignore_ascii_case(written)) =>
-                {
-                    (
-                        None,
-                        Some(DefaultWarning {
-                            id: written.to_owned(),
-                            location: span.referenced,
-                            kind: DefaultWarningKind::NotListed,
-                        }),
-                    )
-                }
-                None => (
-                    None,
-                    Some(DefaultWarning {
-                        id: written.to_owned(),
-                        location: span.referenced,
-                        kind: DefaultWarningKind::Unknown,
-                    }),
-                ),
-            }
-        }
-    };
-
     let prompts = PromptSettings {
         system: raw
             .prompts
@@ -420,8 +322,6 @@ fn validate(
         total_timeout,
         prompts,
         debug_log,
-        default,
-        default_warning,
         providers: configured,
     })
 }

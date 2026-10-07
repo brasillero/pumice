@@ -9,7 +9,7 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pumice::config::{self, Config, DefaultWarningKind};
+use pumice::config::{self, Config};
 use pumice::process::ProcessRunner;
 use pumice::providers::cli::CliProvider;
 use pumice::providers::kimi::{DESCRIPTOR, ID, KimiAdapter, RISK_WARNING};
@@ -405,8 +405,6 @@ fn assert_error(text: &str, line: u64, column: u64, message: &str) {
 fn no_yaml_entry_loads_zero_providers() {
     let config = load("").expect("empty file loads");
     assert!(config.providers.is_empty());
-    assert_eq!(config.default, None);
-    assert!(config.default_warning.is_none());
 }
 
 #[test]
@@ -449,25 +447,9 @@ fn duplicate_id_is_rejected() {
 }
 
 #[test]
-fn default_naming_an_enabled_provider_resolves() {
-    let config = load("default: kimi\nproviders:\n  - id: kimi\n    enabled: true\n    model: kimi-k2.7-code-highspeed\n")
-        .expect("default loads");
-    assert_eq!(config.default.as_deref(), Some(ID));
-    assert!(config.default_warning.is_none());
-}
-
-#[test]
-fn default_naming_a_disabled_provider_warns() {
-    let config = load("default: kimi\nproviders:\n  - id: kimi\n    enabled: false\n")
-        .expect("warning does not fail the load");
-    assert_eq!(config.default, None);
-    let warning = config.default_warning.expect("warning recorded");
-    assert_eq!(warning.id, ID);
-    assert_eq!(warning.kind, DefaultWarningKind::Disabled);
-    assert_eq!(
-        warning.line(),
-        "warning: default \"kimi\" is disabled: requests without a model return the original text"
-    );
+fn removed_default_key_fails_with_a_removal_hint() {
+    let error = load_error("default: kimi\n");
+    assert!(error.contains("\"default\" was removed in 0.2:"), "{error}");
 }
 
 #[test]

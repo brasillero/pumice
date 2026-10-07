@@ -5,6 +5,11 @@
 # and keep only what you change. Without a file (or with an empty one) the
 # service starts with no providers: every request returns the original text.
 #
+# The client picks the provider: Handy sends the `model` the user chose, and
+# Pumice runs exactly that provider. A request without a model, an unknown or
+# disabled model, or any failure returns the original text unchanged, and
+# every request is logged with what happened and why.
+#
 # Pumice reads exactly one configuration file:
 #   1. the path passed with --config (pumice --config my.yaml), else
 #   2. the per-user file: ~/.config/pumice/pumice.yaml on Linux and macOS
@@ -25,16 +30,15 @@ port: 7567
 # Total seconds budget for one dictation.
 total_timeout_secs: 30
 
-# Provider used when a request does not select a model. Optional: when it is
-# absent, or names a disabled, unknown or unlisted provider, startup succeeds
-# with a warning and requests without a model return the original text.
-default: claude
-
-# The explicit provider list. ORDER MATTERS only for the model list a client
-# such as Handy shows: `default` (when enabled) is listed first, then the
-# other enabled entries in this order. There is NO fallback: a request runs
-# exactly one provider — the one its model names, or `default` — and any
-# failure returns the original text unchanged.
+# The explicit provider list. ORDER MATTERS for the model list a client such
+# as Handy shows: the enabled entries are listed in this order. There is NO
+# fallback: a request runs exactly one provider — the one its model names —
+# and any failure, or a request without a model, returns the original text
+# unchanged.
+#
+# The removed `default:` key (the provider for model-less requests) is
+# rejected with a migration error: the client's model field picks the
+# provider, and a request without a model returns the original text.
 #
 # Every entry needs `id` and `enabled` (true or false, never defaulted).
 # `model` is required when enabled. `timeout_secs`, `binary`, `env` and

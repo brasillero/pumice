@@ -2,10 +2,9 @@
 //! active run at a time, and the raw-text guarantee.
 //!
 //! There is no fallback (owner decision 2026-10-07): a request runs exactly
-//! one provider — the one its `model` names, or the `default:` provider
-//! when no model is sent. Everything that cannot format behaves exactly
-//! like passthrough: the dictation comes back exactly as extracted, with the
-//! reason in the log.
+//! one provider — the one its `model` names. A request without a model, like
+//! every failure, behaves exactly like passthrough: the dictation comes back
+//! exactly as extracted, with the reason in the log.
 //!
 //! Every outcome returns either formatted-and-cleaned text or the dictation
 //! exactly as extracted — never partially cleaned, never trimmed. Only
@@ -68,9 +67,6 @@ pub struct Pipeline {
     configured: BTreeSet<String>,
     /// Enabled provider IDs in configuration (list) order.
     order: Vec<String>,
-    /// The provider a model-less request runs (the `default:` key when it
-    /// names an enabled provider).
-    default: Option<String>,
     total_timeout: Duration,
     prompt_settings: PromptSettings,
     /// Provider IDs startup detection confirmed installed. `None` when the
@@ -139,7 +135,6 @@ impl Pipeline {
                 .filter(|entry| entry.settings.enabled)
                 .map(|entry| entry.id.clone())
                 .collect(),
-            default: config.default.clone(),
             total_timeout: config.total_timeout,
             prompt_settings: config.prompts.clone(),
             available,
@@ -147,25 +142,13 @@ impl Pipeline {
         }
     }
 
-    /// The provider IDs offered as models on `GET /v1/models`: the
-    /// `default:` provider first when it is enabled, then the remaining
-    /// enabled providers in configuration (list) order, so a client that
-    /// picks the first model gets the provider a model-less request runs.
-    /// With detection cached, only providers confirmed installed are listed.
-    /// The built-in `passthrough` and `inspect` models are always listed last.
-    /// Never invokes a CLI.
+    /// The provider IDs offered as models on `GET /v1/models`: the enabled
+    /// providers in configuration (list) order. With detection cached, only
+    /// providers confirmed installed are listed. The built-in `passthrough`
+    /// and `inspect` models are always listed last. Never invokes a CLI.
     pub fn model_ids(&self) -> Vec<&str> {
         let mut ids = Vec::with_capacity(self.providers.len() + 2);
-        if let Some(default) = &self.default
-            && self.providers.contains_key(default)
-            && self.is_available(default)
-        {
-            ids.push(default.as_str());
-        }
         for id in &self.order {
-            if self.default.as_ref().is_some_and(|default| default == id) {
-                continue;
-            }
             if self.providers.contains_key(id) && self.is_available(id) {
                 ids.push(id.as_str());
             }
@@ -186,16 +169,15 @@ impl Pipeline {
     /// Selection rule for the request's `model` field: the value is trimmed
     /// and matched case-insensitively against the configured provider IDs
     /// (Handy users type the field by hand), so `"Claude "` selects
-    /// `claude`. An absent or empty value selects the `default:` provider —
-    /// `None` when there is no usable default (key absent, or naming a
-    /// disabled, unknown or unlisted provider).
+    /// `claude`. A missing or blank value selects nothing — the request
+    /// returns the original text with [`RawReason::NoModel`].
     /// `passthrough` selects the built-in unmodified transcript response.
     /// Returns the canonical configured ID — including a disabled one, which
     /// `format` reports as [`RawReason::ProviderDisabled`] — or `None` when
-    /// the value names no configured provider.
+    /// the value names no configured provider (or names none at all).
     pub fn select(&self, requested: Option<&str>) -> Option<&str> {
         match requested.map(str::trim) {
-            None | Some("") => self.default.as_deref(),
+            None | Some("") => None,
             Some(requested) if requested.eq_ignore_ascii_case("passthrough") => Some("passthrough"),
             Some(requested) if requested.eq_ignore_ascii_case("inspect") => Some("inspect"),
             Some(requested) => self
@@ -204,12 +186,6 @@ impl Pipeline {
                 .find(|id| id.eq_ignore_ascii_case(requested))
                 .map(String::as_str),
         }
-    }
-
-    /// The provider a request without a model runs: the `default:` provider
-    /// when it names an enabled provider, else `None`.
-    pub fn default_provider(&self) -> Option<&str> {
-        self.default.as_deref()
     }
 
     /// Every enabled provider in configuration (list) order, as
@@ -258,7 +234,7 @@ impl Pipeline {
         // user notices, never silently formatting through another provider.
         let Some(selected) = self.select(request.model.as_deref()) else {
             let reason = match request.model.as_deref().map(str::trim) {
-                None | Some("") => RawReason::NoDefault,
+                None | Some("") => RawReason::NoModel,
                 Some(_) => RawReason::UnknownProvider,
             };
             return self.raw(request, reason, started, Vec::new());
@@ -467,10 +443,9 @@ pub enum RawReason {
     UnknownProvider,
     /// The requested provider is configured but disabled.
     ProviderDisabled,
-    /// No usable `default:` provider (key absent, or naming a disabled,
-    /// unknown or unlisted provider): a model-less request returns the
-    /// original text.
-    NoDefault,
+    /// The request named no provider: the `model` field was missing or
+    /// blank, so the original text returns.
+    NoModel,
     /// Another formatting run is active.
     Busy,
     /// The request's total budget is (nearly) spent before starting.

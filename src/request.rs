@@ -20,7 +20,8 @@ const CLOSE_TAG: &str = "</transcript>";
 /// are ignored.
 #[derive(Deserialize)]
 pub struct ChatCompletionRequest {
-    /// Requested model or provider ID. Absent or empty selects the default.
+    /// Requested model or provider ID. Absent or empty returns the original
+    /// text ([`RawReason::NoModel`](crate::pipeline::RawReason::NoModel)).
     pub model: Option<String>,
     pub messages: Vec<Message>,
     pub stream: Option<bool>,
