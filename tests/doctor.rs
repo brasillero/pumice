@@ -142,7 +142,9 @@ fn no_enabled_providers_prints_the_original_text_note_and_exits_0() {
 
     assert_eq!(output.status.code(), Some(0), "output: {text}");
     assert!(
-        text.contains("no providers enabled: every request returns the original text\n"),
+        text.contains(
+            "no providers enabled: every request gets an error and the app keeps its own text\n"
+        ),
         "output: {text}"
     );
     assert!(

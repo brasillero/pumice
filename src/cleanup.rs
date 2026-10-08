@@ -11,7 +11,7 @@
 //! 2. Whitespace around the text is trimmed.
 //! 3. An empty result for a nonempty dictation is rejected.
 //!
-//! A rejection makes the caller return the original text, and the log names
+//! A rejection makes the request fail with an HTTP error, and the log names
 //! the reason.
 
 use std::fmt;
