@@ -22,6 +22,8 @@ pub enum Step {
     /// Sleep this long before succeeding; the test expects the pipeline's
     /// deadline to fire first.
     Sleep(Duration),
+    /// Wait at this barrier, then succeed: proves calls run at the same time.
+    Gate(Arc<tokio::sync::Barrier>),
 }
 
 /// A scripted [`Provider`] for pipeline tests.
@@ -65,6 +67,10 @@ impl Provider for TestProvider {
                 Step::Sleep(duration) => {
                     tokio::time::sleep(duration).await;
                     Ok("woke up after the deadline".to_owned())
+                }
+                Step::Gate(barrier) => {
+                    barrier.wait().await;
+                    Ok("passed the gate".to_owned())
                 }
             }
         })

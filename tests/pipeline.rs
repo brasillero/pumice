@@ -382,8 +382,18 @@ async fn exhausted_budget_never_starts_the_cli() {
     assert!(!fake.report_path().exists(), "the fake must not run");
 }
 
-#[tokio::test]
+/// Yields until `provider` has been called `n` times (paused-clock tests).
+async fn until_called(provider: &TestProvider, n: usize) {
+    while provider.calls() < n {
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_second_run_gets_raw_text_when_its_budget_runs_out_waiting() {
+    // The paused clock makes the deadlines exact: the first run holds the
+    // only slot past the second request's budget, so the second waits in
+    // line until its deadline and gets Busy.
     let alpha = TestProvider::new("alpha", vec![Step::Sleep(Duration::from_secs(10))]);
     let config = direct_config(Duration::from_secs(2), vec![("alpha", test_settings(true))]);
     let pipeline = Arc::new(Pipeline::new(&config, vec![alpha.clone()]));
@@ -396,26 +406,17 @@ async fn a_second_run_gets_raw_text_when_its_budget_runs_out_waiting() {
                 .await
         })
     };
+    until_called(&alpha, 1).await;
 
-    // Once the provider is called, the first request holds the only slot.
-    let started_by = std::time::Instant::now() + Duration::from_secs(5);
-    while alpha.calls() == 0 {
-        assert!(
-            std::time::Instant::now() < started_by,
-            "first run never started"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-
-    // Back-dated so this request's budget ends about a second before the
-    // first run can release its slot (at its own 2 s deadline).
-    let started = Instant::now() - Duration::from_secs(1);
     let outcome = pipeline
-        .format(&handy_request(Some("alpha"), "outro ditado"), started)
+        .format(
+            &handy_request(Some("alpha"), "outro ditado"),
+            Instant::now(),
+        )
         .await;
     assert_raw(&outcome, RawReason::Busy, "outro ditado");
     assert!(
-        outcome.elapsed < Duration::from_secs(3),
+        outcome.elapsed <= Duration::from_secs(2),
         "waiting for a slot took {:?}",
         outcome.elapsed
     );
@@ -490,8 +491,12 @@ async fn queued_request_runs_after_the_slot_frees() {
 
 #[tokio::test]
 async fn parallel_runs_overlap() {
-    let alpha = TestProvider::new("alpha", vec![Step::Sleep(Duration::from_secs(1))]);
-    let beta = TestProvider::new("beta", vec![Step::Sleep(Duration::from_secs(1))]);
+    // Each run waits at a shared two-party barrier: both succeed only if
+    // they run at the same time. One at a time, the first would wait until
+    // its deadline and time out.
+    let gate = Arc::new(tokio::sync::Barrier::new(2));
+    let alpha = TestProvider::new("alpha", vec![Step::Gate(Arc::clone(&gate))]);
+    let beta = TestProvider::new("beta", vec![Step::Gate(gate)]);
     let mut config = direct_config(
         Duration::from_secs(10),
         vec![
@@ -502,20 +507,94 @@ async fn parallel_runs_overlap() {
     config.max_parallel = 2;
     let pipeline = Pipeline::new(&config, vec![alpha.clone(), beta.clone()]);
 
-    let start = Instant::now();
     let first_request = handy_request(Some("alpha"), "first");
     let second_request = handy_request(Some("beta"), "second");
-    let first = pipeline.format(&first_request, start);
-    let second = pipeline.format(&second_request, start);
-    let (first, second) = tokio::join!(first, second);
+    let (first, second) = tokio::join!(
+        pipeline.format(&first_request, Instant::now()),
+        pipeline.format(&second_request, Instant::now()),
+    );
 
     assert_eq!(first.kind, OutcomeKind::Formatted);
     assert_eq!(second.kind, OutcomeKind::Formatted);
-    assert!(
-        start.elapsed() < Duration::from_millis(1_800),
-        "two one-second runs finished sequentially would take at least 2s, took {:?}",
-        start.elapsed()
+    assert_eq!(first.text, "passed the gate");
+    assert_eq!(second.text, "passed the gate");
+}
+
+#[tokio::test(start_paused = true)]
+async fn queued_requests_run_in_arrival_order() {
+    // One slot: the first run holds it for a second while two more requests
+    // queue. The provider hands out its scripted replies in call order, so
+    // each reply shows which request got the slot first.
+    let alpha = TestProvider::new(
+        "alpha",
+        vec![
+            Step::Sleep(Duration::from_secs(1)),
+            Step::Ready("second".to_owned()),
+            Step::Ready("third".to_owned()),
+        ],
     );
+    let config = direct_config(
+        Duration::from_secs(10),
+        vec![("alpha", test_settings(true))],
+    );
+    let pipeline = Arc::new(Pipeline::new(&config, vec![alpha.clone()]));
+    let spawn = |text: &'static str| {
+        let pipeline = Arc::clone(&pipeline);
+        tokio::spawn(async move {
+            pipeline
+                .format(&handy_request(Some("alpha"), text), Instant::now())
+                .await
+        })
+    };
+
+    let first = spawn("first");
+    until_called(&alpha, 1).await;
+    let second = spawn("second");
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let third = spawn("third");
+
+    assert_eq!(first.await.expect("first").kind, OutcomeKind::Formatted);
+    assert_eq!(second.await.expect("second").text, "second");
+    assert_eq!(third.await.expect("third").text, "third");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cancelled_queued_request_frees_its_place() {
+    // A request dropped while waiting in line (client gone) must not keep a
+    // slot: the next request still runs once the first finishes.
+    let alpha = TestProvider::new(
+        "alpha",
+        vec![
+            Step::Sleep(Duration::from_secs(1)),
+            Step::Ready("after".to_owned()),
+        ],
+    );
+    let config = direct_config(
+        Duration::from_secs(10),
+        vec![("alpha", test_settings(true))],
+    );
+    let pipeline = Arc::new(Pipeline::new(&config, vec![alpha.clone()]));
+    let spawn = |text: &'static str| {
+        let pipeline = Arc::clone(&pipeline);
+        tokio::spawn(async move {
+            pipeline
+                .format(&handy_request(Some("alpha"), text), Instant::now())
+                .await
+        })
+    };
+
+    let first = spawn("first");
+    until_called(&alpha, 1).await;
+    let cancelled = spawn("cancelled");
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    cancelled.abort();
+    let after = spawn("after");
+
+    assert_eq!(first.await.expect("first").kind, OutcomeKind::Formatted);
+    let after = after.await.expect("after");
+    assert_eq!(after.kind, OutcomeKind::Formatted);
+    assert_eq!(after.text, "after");
+    assert_eq!(alpha.calls(), 2, "the cancelled request never ran");
 }
 
 #[tokio::test]

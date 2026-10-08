@@ -1,5 +1,5 @@
-//! The formatting pipeline: provider selection, deadline enforcement, one
-//! active run at a time, and the raw-text guarantee.
+//! The formatting pipeline: provider selection, deadline enforcement, up to
+//! `max_parallel` runs at once with a FIFO queue, and the raw-text guarantee.
 //!
 //! There is no fallback (owner decision 2026-10-07): a request runs exactly
 //! one provider — the one its `model` names. A request without a model, like
@@ -262,8 +262,10 @@ impl Pipeline {
             Ok(Ok(permit)) => permit,
             Ok(Err(_)) | Err(_) => return self.raw(request, RawReason::Busy, started, Vec::new()),
         };
+        // The budget was enough before waiting, so any shortfall now (even a
+        // slot that freed just past the deadline) is the queue's: busy.
         if total_deadline.duration_since(Instant::now()) < MIN_STARTUP {
-            return self.raw(request, RawReason::BudgetExhausted, started, Vec::new());
+            return self.raw(request, RawReason::Busy, started, Vec::new());
         }
 
         let prompts = compose_prompts(request);
@@ -453,7 +455,8 @@ pub enum RawReason {
     /// The request named no provider: the `model` field was missing or
     /// blank, so the original text returns.
     NoModel,
-    /// Every slot was taken and the request waited until its budget ran out.
+    /// Every slot was taken and the request waited until its budget ran out
+    /// (or until too little was left to start).
     Busy,
     /// The request's total budget is (nearly) spent before starting.
     BudgetExhausted,
