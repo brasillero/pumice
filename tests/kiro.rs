@@ -265,7 +265,6 @@ fn provider_reports_its_id_without_running() {
 
 #[test]
 fn descriptor_ships_disabled_defaults() {
-    assert!(DESCRIPTOR.allowed_env.is_empty());
     let settings = (DESCRIPTOR.defaults)();
     assert!(!settings.enabled);
     assert_eq!(settings.model, "");
@@ -337,22 +336,22 @@ fn enabled_with_an_explicit_model_loads() {
 }
 
 #[test]
-fn unknown_options_are_rejected_at_the_key() {
+fn options_key_is_rejected_as_removed() {
     assert_error(
         "providers:\n  - id: kiro\n    enabled: true\n    model: m\n    options:\n      effort: low\n",
         6,
         7,
-        "providers.kiro.options.effort is not supported",
+        "providers entry \"kiro\".options was removed",
     );
 }
 
 #[test]
-fn env_overrides_are_rejected() {
+fn env_key_is_rejected_as_removed() {
     assert_error(
         "providers:\n  - id: kiro\n    enabled: true\n    model: m\n    env:\n      KIRO_HOME: /tmp\n",
         6,
         7,
-        "providers entry \"kiro\".env.KIRO_HOME is not an allowed environment variable (no environment overrides are allowed for this provider)",
+        "providers entry \"kiro\".env was removed",
     );
 }
 

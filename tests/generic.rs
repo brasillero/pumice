@@ -45,9 +45,7 @@ use pumice::pipeline::{OutcomeKind, Pipeline, RawReason};
 use pumice::providers::generic::{
     DESCRIPTOR, EndpointError, GenericProvider, LoopbackEndpoint, parse_endpoint,
 };
-use pumice::providers::{
-    FormatInput, Provider, ProviderError, ProviderErrorCode, ProviderLocations, UserPrompt,
-};
+use pumice::providers::{FormatInput, Provider, ProviderError, ProviderErrorCode, UserPrompt};
 use pumice::request::{ChatCompletionRequest, Content, ExtractedRequest, Message, extract_request};
 use serde_json::{Value, json};
 use support::adapter_contract::{AFTER, BEFORE, HOSTILE_TEXT, SYSTEM_PROMPT, UNICODE_TEXT};
@@ -935,14 +933,12 @@ async fn failure_returns_raw_text_and_never_runs_another_provider() {
     assert_eq!(alpha.calls(), 1);
 }
 
-fn generic_settings(endpoint: &LoopbackEndpoint) -> pumice::providers::ProviderSettings {
+/// Pipeline-level settings for a generic provider built directly with
+/// [`GenericProvider::new`]; the endpoint lives in the provider itself.
+fn generic_settings(_endpoint: &LoopbackEndpoint) -> pumice::providers::ProviderSettings {
     let mut settings = (DESCRIPTOR.defaults)();
     settings.enabled = true;
     settings.model = MODEL.to_owned();
-    settings.options.insert(
-        "base_url".to_owned(),
-        format!("http://{}/v1", endpoint.addr),
-    );
     settings
 }
 
@@ -999,190 +995,6 @@ fn nothing_is_enabled_without_an_entry() {
     assert!(built.is_empty(), "without entries nothing is built or run");
 }
 
-const CONFIG_NAME: &str = "pumice.yaml";
-
-/// Validates `text` against the generic descriptor alone: the adapter is
-/// archived (not registered), but its own validation rules stay tested.
-fn load_text(text: &str) -> Result<Config, String> {
-    config::validate_text_with_descriptors(
-        text,
-        std::path::Path::new(CONFIG_NAME),
-        &[pumice::providers::generic::DESCRIPTOR],
-    )
-    .map_err(|error| error.to_string())
-}
-
-fn load_error(text: &str) -> String {
-    match load_text(text) {
-        Ok(_) => panic!("expected a configuration error for:\n{text}"),
-        Err(error) => error,
-    }
-}
-
-/// Asserts the rendered error ends with `":line:column: message"` and names
-/// the configuration file.
-fn assert_config_error(text: &str, line: u64, column: u64, message: &str) {
-    let error = load_error(text);
-    assert!(
-        error.contains(&format!(":{line}:{column}: {message}")),
-        "expected ':{line}:{column}: {message}' in:\n{error}"
-    );
-    assert!(
-        error.contains(CONFIG_NAME),
-        "error names the file:\n{error}"
-    );
-}
-
-/// A minimal valid enabled block; tests mutate one piece and assert the error.
-#[test]
-fn config_validation_requires_model_at_enabled_line() {
-    assert_config_error(
-        "providers:\n  - id: generic\n    enabled: true\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
-        3,
-        14,
-        "providers.generic.model is required when the provider is enabled",
-    );
-}
-
-#[test]
-fn config_validation_requires_base_url_at_enabled_line() {
-    assert_config_error(
-        "providers:\n  - id: generic\n    enabled: true\n    model: qwen2\n",
-        3,
-        14,
-        "providers.generic.options.base_url is required when the provider is enabled",
-    );
-}
-
-#[test]
-fn config_validation_rejects_bad_base_url_at_the_value() {
-    assert_config_error(
-        "providers:\n  - id: generic\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"https://example.com/v1\"\n",
-        6,
-        17,
-        "providers.generic.options.base_url must be an http:// URL (https is not supported)",
-    );
-}
-
-#[test]
-fn config_validation_rejects_unknown_options_at_the_key() {
-    assert_config_error(
-        "providers:\n  - id: generic\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n      api_key: \"sk-nope\"\n",
-        7,
-        7,
-        "providers.generic.options.api_key is not supported",
-    );
-}
-
-#[test]
-fn config_validation_rejects_binary_and_env() {
-    assert_config_error(
-        "providers:\n  - id: generic\n    enabled: true\n    model: qwen2\n    binary: /usr/bin/curl\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
-        5,
-        13,
-        "providers.generic spawns no CLI; binary must not be set",
-    );
-    assert_config_error(
-        "providers:\n  - id: generic\n    enabled: true\n    model: qwen2\n    env:\n      NOPE: \"1\"\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
-        6,
-        7,
-        "providers entry \"generic\".env.NOPE is not an allowed environment variable (no environment overrides are allowed for this provider)",
-    );
-}
-
-#[test]
-fn config_validation_accepts_a_valid_enabled_block() {
-    let config = load_text(
-        "providers:\n  - id: generic\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
-    )
-    .expect("valid block loads");
-    let generic = config.provider("generic").expect("configured");
-    assert!(generic.enabled);
-    assert_eq!(generic.model, "qwen2");
-    assert_eq!(
-        generic.options.get("base_url").map(String::as_str),
-        Some("http://127.0.0.1:11434/v1")
-    );
-}
-
-#[test]
-fn recursion_rejects_pumices_own_port() {
-    // The IPv4 loopback spellings naming Pumice's port are refused at the
-    // base_url value...
-    assert_config_error(
-        "port: 7567\nproviders:\n  - id: generic\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"http://127.0.0.1:7567/v1\"\n",
-        7,
-        17,
-        "providers.generic.options.base_url points at Pumice's own port (7567), which would route requests back into this service",
-    );
-    assert_config_error(
-        "port: 7567\nproviders:\n  - id: generic\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"http://localhost:7567/v1\"\n",
-        7,
-        17,
-        "providers.generic.options.base_url points at Pumice's own port (7567), which would route requests back into this service",
-    );
-    // ...including when the port is the built-in default (no explicit line).
-    assert_config_error(
-        "providers:\n  - id: generic\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"http://127.0.0.1:7567/v1\"\n",
-        6,
-        17,
-        "providers.generic.options.base_url points at Pumice's own port (7567), which would route requests back into this service",
-    );
-}
-
-#[test]
-fn recursion_allows_other_ports_and_ipv6_loopback() {
-    // A different IPv4 port is fine.
-    load_text(
-        "providers:\n  - id: generic\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"http://127.0.0.1:7568/v1\"\n",
-    )
-    .expect("another port loads");
-    // Pumice binds 127.0.0.1 only, so its own port on [::1] cannot recurse.
-    load_text(
-        "port: 7567\nproviders:\n  - id: generic\n    enabled: true\n    model: qwen2\n    options:\n      base_url: \"http://[::1]:7567/v1\"\n",
-    )
-    .expect("IPv6 loopback on Pumice's port loads");
-}
-
-#[test]
-fn full_settings_validation_rejects_direct_construction() {
-    // Defense in depth for library callers that bypass the loader: the
-    // descriptor's validator sees binary and env, which the loader would
-    // already have rejected.
-    let mut settings = (DESCRIPTOR.defaults)();
-    settings.enabled = true;
-    settings.model = "qwen2".to_owned();
-    settings.binary = Some(std::path::PathBuf::from("/bin/true"));
-    settings.options.insert(
-        "base_url".to_owned(),
-        "http://127.0.0.1:11434/v1".to_owned(),
-    );
-    let locations = ProviderLocations::default();
-    let error = (DESCRIPTOR.validate_settings)(&settings, &locations)
-        .expect_err("a binary on an HTTP-only provider is refused")
-        .to_string();
-    assert!(
-        error.contains("binary must not be set"),
-        "unexpected error: {error}"
-    );
-
-    let mut settings = (DESCRIPTOR.defaults)();
-    settings.enabled = true;
-    settings.model = "qwen2".to_owned();
-    settings.env.insert("NOPE".to_owned(), "1".to_owned());
-    settings.options.insert(
-        "base_url".to_owned(),
-        "http://127.0.0.1:11434/v1".to_owned(),
-    );
-    let error = (DESCRIPTOR.validate_settings)(&settings, &locations)
-        .expect_err("env overrides are refused")
-        .to_string();
-    assert!(
-        error.contains("accepts no environment overrides"),
-        "unexpected error: {error}"
-    );
-}
-
 #[tokio::test]
 async fn error_status_with_a_stalled_body_keeps_its_status() {
     // The headers promise a body that never arrives.
@@ -1195,4 +1007,19 @@ async fn error_status_with_a_stalled_body_keeps_its_status() {
         .await
         .unwrap_err();
     assert_eq!(err, ProviderError::RateLimited { retry_after: None });
+}
+
+#[test]
+fn the_archived_descriptor_refuses_enablement_and_never_builds() {
+    let mut settings = (DESCRIPTOR.defaults)();
+    settings.enabled = true;
+    settings.model = MODEL.to_owned();
+    let error = (DESCRIPTOR.validate_settings)(&settings, &Default::default())
+        .expect_err("enablement is refused");
+    assert!(
+        error.to_string().contains("providers.generic is archived"),
+        "{error}"
+    );
+    let built = (DESCRIPTOR.build)(&settings, Arc::new(pumice::process::ProcessRunner::new()));
+    assert!(built.is_err(), "the archived descriptor never builds");
 }

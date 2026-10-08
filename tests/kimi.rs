@@ -364,7 +364,6 @@ fn provider_reports_its_id_without_running() {
 
 #[test]
 fn descriptor_defaults_ship_disabled_with_an_empty_model() {
-    assert!(DESCRIPTOR.allowed_env.is_empty());
     let settings = (DESCRIPTOR.defaults)();
     // Enablement is the configuration file's decision; the descriptor ships
     // off with no model, and the loader requires a model on enabled entries.
@@ -472,22 +471,22 @@ fn malformed_model_reports_the_value() {
 }
 
 #[test]
-fn unknown_options_are_rejected_at_the_key() {
+fn options_key_is_rejected_as_removed() {
     assert_error(
         "providers:\n  - id: kimi\n    enabled: true\n    model: kimi-k2.7-code-highspeed\n    options:\n      effort: low\n",
         6,
         7,
-        "providers.kimi.options.effort is not supported",
+        "providers entry \"kimi\".options was removed",
     );
 }
 
 #[test]
-fn env_overrides_are_rejected() {
+fn env_key_is_rejected_as_removed() {
     assert_error(
         "providers:\n  - id: kimi\n    enabled: true\n    model: kimi-k2.7-code-highspeed\n    env:\n      KIMI_CODE_HOME: /tmp\n",
         6,
         7,
-        "providers entry \"kimi\".env.KIMI_CODE_HOME is not an allowed environment variable (no environment overrides are allowed for this provider)",
+        "providers entry \"kimi\".env was removed",
     );
 }
 

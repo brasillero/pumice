@@ -50,8 +50,7 @@ use serde_json::Value;
 use super::cli::{CliAdapter, CliProvider};
 use super::{
     FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode,
-    ProviderLocations, ProviderSettings, RawOption,
-};
+    ProviderLocations, ProviderSettings, };
 use crate::config::ConfigError;
 use crate::process::{Argument, CliInvocation, ControlFile, ProcessOutput, ProcessRunner, ProgramSpec};
 
@@ -111,8 +110,6 @@ const AGENT_FILE_NAME: &str = "pumice-agent.md";
 pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: ID,
     defaults,
-    allowed_env: &[],
-    validate_options,
     build,
     validate_settings,
     probe: ProbeSpec::Version(&["--version"]),
@@ -129,21 +126,9 @@ fn defaults() -> ProviderSettings {
         // nothing is built in.
         model: String::new(),
         timeout: DEFAULT_TIMEOUT,
-        env: BTreeMap::new(),
-        options: BTreeMap::new(),
     }
 }
 
-/// Kimi accepts no adapter options in this version.
-fn validate_options(options: &[RawOption<'_>]) -> Result<(), ConfigError> {
-    if let Some(option) = options.first() {
-        return Err(ConfigError::at(
-            option.key_at,
-            format!("providers.{ID}.options.{} is not supported", option.key),
-        ));
-    }
-    Ok(())
-}
 
 /// When enabled, the model must be a plausible alias: nonempty, not
 /// flag-like, and free of whitespace and control characters (it lands in
@@ -455,14 +440,6 @@ mod tests {
 
     use super::*;
 
-    fn option(key: &'static str, value: &'static str) -> RawOption<'static> {
-        RawOption {
-            key,
-            value,
-            key_at: serde_saphyr::Location::UNKNOWN,
-            value_at: serde_saphyr::Location::UNKNOWN,
-        }
-    }
 
     #[test]
     fn quoted_length_counts_escapes() {
@@ -488,11 +465,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn accepts_no_options() {
-        assert!(validate_options(&[]).is_ok());
-        assert!(validate_options(&[option("effort", "low")]).is_err());
-    }
 
     #[test]
     fn validates_models() {

@@ -15,7 +15,6 @@
 //! each call opens one socket, drives the Hyper connection future inside the
 //! provider call, and lets cancellation drop the socket.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -33,20 +32,13 @@ use tokio::time::Instant;
 
 use super::{
     FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode,
-    ProviderFuture, ProviderLocations, ProviderSettings, RawOption,
+    ProviderFuture, ProviderLocations, ProviderSettings,
 };
 use crate::config::ConfigError;
 use crate::process::ProcessRunner;
 
 pub const ID: &str = "generic";
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// The only supported option: the validated loopback base URL.
-const BASE_URL_KEY: &str = "base_url";
-
-/// The generic adapter accepts no environment overrides: nothing safe rides
-/// on the environment of a server Pumice does not spawn.
-const ALLOWED_ENV: &[&str] = &[];
 
 // Residual risk (recorded here; not printed, owner decision 2026-10-07):
 // Connects only to an unauthenticated loopback HTTP endpoint. The local
@@ -63,8 +55,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: ID,
     defaults,
-    allowed_env: ALLOWED_ENV,
-    validate_options,
     build,
     validate_settings,
     // This adapter has no CLI: detection neither resolves nor spawns
@@ -91,119 +81,35 @@ fn defaults() -> ProviderSettings {
         // No default model: enablement requires an explicit one.
         model: String::new(),
         timeout: DEFAULT_TIMEOUT,
-        env: BTreeMap::new(),
-        options: BTreeMap::new(),
     }
 }
 
-/// Only `base_url` is allowed, and it must parse as a loopback endpoint.
-fn validate_options(options: &[RawOption<'_>]) -> Result<(), ConfigError> {
-    for option in options {
-        if option.key != BASE_URL_KEY {
-            return Err(ConfigError::at(
-                option.key_at,
-                format!("providers.{ID}.options.{} is not supported", option.key),
-            ));
-        }
-        if let Err(error) = parse_endpoint(option.value) {
-            return Err(ConfigError::at(
-                option.value_at,
-                format!("providers.{ID}.options.{BASE_URL_KEY} {error}"),
-            ));
-        }
-    }
-    Ok(())
-}
+/// Archived (owner decision 2026-10-08): the provider's only setting was
+/// `options.base_url`, and provider options were removed. Its configuration
+/// shape is redesigned when it comes back; until then the descriptor
+/// refuses enablement and never builds. The HTTP adapter itself stays and is
+/// tested through [`GenericProvider::new`].
+const ARCHIVED: &str =
+    "providers.generic is archived: its configuration will be redesigned before it returns";
 
-/// Full-settings validation: an enabled provider needs an explicit `model` and
-/// a validated loopback `base_url`, spawns no CLI (`binary` must be unset) and
-/// accepts no environment overrides. Missing fields point at the `enabled:`
-/// line; malformed values point at their own value. A base URL naming Pumice's
-/// own listening port is refused, so a dictation can never route back into
-/// this service.
 fn validate_settings(
     settings: &ProviderSettings,
     locations: &ProviderLocations,
 ) -> Result<(), ConfigError> {
-    if !settings.enabled {
-        return Ok(());
-    }
-    let enabled_at = locations.enabled.unwrap_or(Location::UNKNOWN);
-    if settings.model.is_empty() {
+    if settings.enabled {
         return Err(ConfigError::at(
-            enabled_at,
-            format!("providers.{ID}.model is required when the provider is enabled"),
-        ));
-    }
-    if settings.binary.is_some() {
-        return Err(ConfigError::at(
-            locations.binary.unwrap_or(enabled_at),
-            format!("providers.{ID} spawns no CLI; binary must not be set"),
-        ));
-    }
-    if !settings.env.is_empty() {
-        return Err(ConfigError::at(
-            enabled_at,
-            format!("providers.{ID} accepts no environment overrides"),
-        ));
-    }
-    let Some(base_url) = settings.options.get(BASE_URL_KEY) else {
-        return Err(ConfigError::at(
-            enabled_at,
-            format!(
-                "providers.{ID}.options.{BASE_URL_KEY} is required when the provider is enabled"
-            ),
-        ));
-    };
-    let endpoint = parse_endpoint(base_url).map_err(|error| {
-        ConfigError::at(
-            base_url_at(locations),
-            format!("providers.{ID}.options.{BASE_URL_KEY} {error}"),
-        )
-    })?;
-    if endpoint.addr.is_ipv4()
-        && endpoint.addr.ip().is_loopback()
-        && endpoint.port() == locations.port
-    {
-        return Err(ConfigError::at(
-            base_url_at(locations),
-            format!(
-                "providers.{ID}.options.{BASE_URL_KEY} points at Pumice's own port ({}), which would route requests back into this service",
-                locations.port
-            ),
+            locations.enabled.unwrap_or(Location::UNKNOWN),
+            ARCHIVED,
         ));
     }
     Ok(())
 }
 
-fn base_url_at(locations: &ProviderLocations) -> Location {
-    locations
-        .options
-        .get(BASE_URL_KEY)
-        .copied()
-        .unwrap_or(Location::UNKNOWN)
-}
-
-/// Validates again (direct library callers may skip the loader's checks) and
-/// builds the provider; the process runner is unused because nothing spawns.
 fn build(
-    settings: &ProviderSettings,
+    _settings: &ProviderSettings,
     _runner: Arc<ProcessRunner>,
 ) -> Result<Arc<dyn Provider>, ConfigError> {
-    validate_settings(settings, &ProviderLocations::default())?;
-    let Some(base_url) = settings.options.get(BASE_URL_KEY) else {
-        return Err(ConfigError::general(format!(
-            "providers.{ID}.options.{BASE_URL_KEY} is required when the provider is enabled"
-        )));
-    };
-    let endpoint = parse_endpoint(base_url).map_err(|error| {
-        ConfigError::general(format!("providers.{ID}.options.{BASE_URL_KEY} {error}"))
-    })?;
-    Ok(Arc::new(GenericProvider::new(
-        endpoint,
-        settings.model.clone(),
-        settings.timeout,
-    )))
+    Err(ConfigError::general(ARCHIVED))
 }
 
 /// A validated loopback endpoint: where to connect, the authority to send as
@@ -213,12 +119,6 @@ pub struct LoopbackEndpoint {
     pub addr: SocketAddr,
     pub authority: String,
     pub chat_path: &'static str,
-}
-
-impl LoopbackEndpoint {
-    fn port(&self) -> u16 {
-        self.addr.port()
-    }
 }
 
 /// Why an endpoint string was rejected. `Display` strings are fixed so an

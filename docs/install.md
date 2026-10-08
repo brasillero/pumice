@@ -118,10 +118,10 @@ providers:                 # the client's model picks the entry; there is no
 The client picks the provider: Handy sends the `model` the user chose, and
 Pumice runs exactly that provider. A request without a model returns the
 original text. Every entry needs `id` and `enabled`; `model` is required
-on enabled entries; `timeout_secs`, `binary`, `env` and `options` are
-optional and
+on enabled entries; `timeout_secs` and `binary` are optional and
 documented in [`pumice.example.yaml`](../pumice.example.yaml), which shows
-every supported provider. Validate the file with `pumice check-config`. The
+every supported provider. Gateways, routing and logins are configured in
+each CLI itself; Pumice inherits them. Validate the file with `pumice check-config`. The
 config lives outside the install folder, so upgrading never touches it.
 A `pumice setup` wizard that writes this file is planned next.
 

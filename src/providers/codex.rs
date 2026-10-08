@@ -14,8 +14,8 @@
 //! read or parsed, or names a server that cannot be addressed safely, the
 //! call falls back to `--ignore-user-config` (fail closed).
 //!
-//! `options.openai_base_url` stays available as an explicit, non-secret
-//! override forwarded as `-c openai_base_url="<url>"`.
+//! Routing (for example a gateway's `openai_base_url`) comes only from the
+//! user's own Codex configuration; Pumice adds none.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -27,12 +27,11 @@ use serde_json::Value;
 use super::cli::{CliAdapter, CliProvider};
 use super::{
     FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode,
-    ProviderSettings, RawOption, validate_settings_noop,
+    ProviderSettings, validate_settings_noop,
 };
 use crate::config::ConfigError;
 use crate::process::{
     Argument, CliInvocation, ControlFile, ProcessOutput, ProcessRunner, ProgramSpec,
-    toml_basic_string,
 };
 
 pub const ID: &str = "codex";
@@ -40,11 +39,7 @@ pub const DEFAULT_BINARY: &str = "codex";
 /// Provider default timeout, measured in Phase 0.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Codex accepts no environment overrides: routing belongs in the user's
-/// own Codex config or `options.openai_base_url`.
-const ALLOWED_ENV: &[&str] = &[];
 
-const OPENAI_BASE_URL_KEY: &str = "openai_base_url";
 
 /// npm package entrypoint the Windows `.cmd` shim translates to (layout from
 /// npm; verify on a real Windows install (owner check)).
@@ -53,8 +48,6 @@ const NPM_ENTRYPOINT: &str = "@openai/codex/bin/codex.js";
 pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: ID,
     defaults,
-    allowed_env: ALLOWED_ENV,
-    validate_options,
     build,
     validate_settings: validate_settings_noop,
     probe: ProbeSpec::Version(&["--version"]),
@@ -71,81 +64,10 @@ fn defaults() -> ProviderSettings {
         // nothing is built in.
         model: String::new(),
         timeout: DEFAULT_TIMEOUT,
-        env: BTreeMap::new(),
-        options: BTreeMap::new(),
     }
 }
 
-/// Only `openai_base_url` is allowed; it must be an `http://` or `https://`
-/// URL without whitespace. The value lands inside a TOML string in a `-c`
-/// argument, so the invocation encodes it (see [`toml_basic_string`]).
-fn validate_options(options: &[RawOption<'_>]) -> Result<(), ConfigError> {
-    for option in options {
-        if option.key != OPENAI_BASE_URL_KEY {
-            return Err(ConfigError::at(
-                option.key_at,
-                format!("providers.{ID}.options.{} is not supported", option.key),
-            ));
-        }
-        if !is_valid_base_url(option.value) {
-            return Err(ConfigError::at(
-                option.value_at,
-                format!(
-                    "providers.{ID}.options.{OPENAI_BASE_URL_KEY} must be an http:// or https:// URL with a valid host"
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
 
-/// An `http://` or `https://` URL with a real host: `scheme://host[:port][/path]`.
-/// No whitespace, userinfo, query or fragment; the host is a DNS name, an IPv4
-/// address or a bracketed IPv6 address, and the port (if any) is numeric.
-fn is_valid_base_url(url: &str) -> bool {
-    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return false;
-    }
-    let Some(rest) = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))
-    else {
-        return false;
-    };
-    if rest.contains(['?', '#', '@']) {
-        return false;
-    }
-    let authority = rest.split('/').next().unwrap_or_default();
-    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
-        let Some((inside, after)) = bracketed.split_once(']') else {
-            return false;
-        };
-        // A bracketed host must be a real IPv6 address (`[::1]`), not just
-        // hex digits (`[deadbeef]`).
-        if inside.parse::<std::net::Ipv6Addr>().is_err() {
-            return false;
-        }
-        match after {
-            "" => (inside, None),
-            _ => match after.strip_prefix(':') {
-                Some(port) => (inside, Some(port)),
-                None => return false,
-            },
-        }
-    } else {
-        match authority.split_once(':') {
-            Some((host, port)) => (host, Some(port)),
-            None => (authority, None),
-        }
-    };
-    let host_ok = !host.is_empty()
-        && (authority.starts_with('[')
-            || host
-                .split('.')
-                .all(|label| !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')));
-    let port_ok = port.is_none_or(|p| !p.is_empty() && p.len() <= 5 && p.chars().all(|c| c.is_ascii_digit()) && p.parse::<u16>().is_ok_and(|n| n > 0));
-    host_ok && port_ok
-}
 
 fn build(
     settings: &ProviderSettings,
@@ -155,8 +77,7 @@ fn build(
         .binary
         .clone()
         .unwrap_or_else(|| PathBuf::from(DEFAULT_BINARY));
-    let base_url = settings.options.get(OPENAI_BASE_URL_KEY).cloned();
-    let adapter = CodexAdapter::new(binary, settings.model.clone(), base_url);
+    let adapter = CodexAdapter::new(binary, settings.model.clone());
     let adapter = match codex_home() {
         Some(home) => adapter.with_codex_home(home),
         None => adapter,
@@ -173,9 +94,6 @@ fn build(
 pub struct CodexAdapter {
     binary: PathBuf,
     model: String,
-    /// Non-secret routing override, forwarded as a `-c openai_base_url=…`
-    /// argument when set.
-    base_url: Option<String>,
     /// Codex's home directory, whose `config.toml` the call inherits. `None`
     /// keeps `--ignore-user-config`.
     codex_home: Option<PathBuf>,
@@ -184,11 +102,10 @@ pub struct CodexAdapter {
 impl CodexAdapter {
     /// `binary` is a command name looked up on PATH (normally `codex`) or a
     /// path to the official CLI.
-    pub fn new(binary: PathBuf, model: String, base_url: Option<String>) -> CodexAdapter {
+    pub fn new(binary: PathBuf, model: String) -> CodexAdapter {
         CodexAdapter {
             binary,
             model,
-            base_url,
             codex_home: None,
         }
     }
@@ -290,16 +207,6 @@ impl CliAdapter for CodexAdapter {
         .into_iter()
         .map(Argument::literal),
         );
-
-        // The routing override sits after --json, matching the invocation
-        // verified in S0.2. The URL is TOML-encoded inside the value.
-        if let Some(base_url) = &self.base_url {
-            args.push(Argument::literal("-c"));
-            args.push(Argument::literal(format!(
-                "{OPENAI_BASE_URL_KEY}={}",
-                toml_basic_string(base_url)
-            )));
-        }
 
         args.push(Argument::literal("-m"));
         args.push(Argument::literal(&self.model));
@@ -485,7 +392,6 @@ fn classify_failure(messages: &[impl AsRef<str>]) -> ProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_saphyr::Location;
 
     fn literal_args(adapter: &CodexAdapter) -> Vec<String> {
         let input = FormatInput {
@@ -510,7 +416,7 @@ mod tests {
         if let Some(config) = config {
             std::fs::write(home.path().join("config.toml"), config).expect("config written");
         }
-        let adapter = CodexAdapter::new(PathBuf::from("codex"), "gpt-6.1-sol".to_owned(), None)
+        let adapter = CodexAdapter::new(PathBuf::from("codex"), "gpt-6.1-sol".to_owned())
             .with_codex_home(home.path().to_path_buf());
         (home, adapter)
     }
@@ -565,46 +471,12 @@ mod tests {
 
     #[test]
     fn without_a_codex_home_the_user_config_is_ignored() {
-        let adapter = CodexAdapter::new(PathBuf::from("codex"), "gpt-6.1-sol".to_owned(), None);
+        let adapter = CodexAdapter::new(PathBuf::from("codex"), "gpt-6.1-sol".to_owned());
         assert!(literal_args(&adapter).contains(&"--ignore-user-config".to_owned()));
     }
 
-    fn option(key: &'static str, value: &'static str) -> RawOption<'static> {
-        RawOption {
-            key,
-            value,
-            key_at: Location::UNKNOWN,
-            value_at: Location::UNKNOWN,
-        }
-    }
 
-    #[test]
-    fn accepts_only_openai_base_url() {
-        assert!(validate_options(&[]).is_ok());
-        assert!(validate_options(&[option("openai_base_url", "https://gw.example/v1")]).is_ok());
-        assert!(validate_options(&[option("openai_base_url", "http://127.0.0.1:9999")]).is_ok());
-        assert!(validate_options(&[option("openai_base_url", "http://[::1]:8317/v1")]).is_ok());
-        assert!(validate_options(&[option("openai_base_url", "http://[deadbeef]/v1")]).is_err());
-        assert!(validate_options(&[option("web_search", "disabled")]).is_err());
-        assert!(validate_options(&[option("model", "gpt-6.1-sol")]).is_err());
-    }
 
-    #[test]
-    fn rejects_invalid_base_urls() {
-        for value in [
-            "ftp://gw.example/v1",
-            "gw.example/v1",
-            "http://",
-            "https://",
-            "http://exa mple/v1",
-            "https://gw.example/v1\n",
-        ] {
-            assert!(
-                validate_options(&[option("openai_base_url", value)]).is_err(),
-                "value: {value:?}"
-            );
-        }
-    }
 
     #[test]
     fn classifies_failure_messages() {

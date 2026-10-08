@@ -25,7 +25,7 @@ use serde_saphyr::Location;
 use super::cli::CliAdapter;
 use super::{
     FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode,
-    ProviderLocations, ProviderSettings, RawOption,
+    ProviderLocations, ProviderSettings,
 };
 use crate::config::ConfigError;
 use crate::process::{Argument, CliInvocation, ProcessOutput, ProcessRunner, ProgramSpec};
@@ -33,10 +33,6 @@ use crate::process::{Argument, CliInvocation, ProcessOutput, ProcessRunner, Prog
 pub const ID: &str = "antigravity";
 pub const DEFAULT_BINARY: &str = "agy";
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Antigravity accepts no environment overrides: there is no documented
-/// per-launch mechanism a safe routing variable could ride on.
-const ALLOWED_ENV: &[&str] = &[];
 
 // Residual risk (recorded here; not printed, owner decision 2026-10-07):
 // Third-party integration may risk account access. Tool/startup isolation
@@ -48,8 +44,6 @@ const ENABLEMENT_REFUSAL: &str = "providers.antigravity cannot be enabled yet: n
 pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: ID,
     defaults,
-    allowed_env: ALLOWED_ENV,
-    validate_options,
     build,
     validate_settings,
     // PATH-only: `agy` is never spawned, not even for `--version`
@@ -69,21 +63,7 @@ fn defaults() -> ProviderSettings {
         // No default model: enablement is refused, so `model` stays optional.
         model: String::new(),
         timeout: DEFAULT_TIMEOUT,
-        env: BTreeMap::new(),
-        options: BTreeMap::new(),
     }
-}
-
-/// No options are supported: with no per-launch policy mechanism there is
-/// nothing safe to configure.
-fn validate_options(options: &[RawOption<'_>]) -> Result<(), ConfigError> {
-    if let Some(option) = options.first() {
-        return Err(ConfigError::at(
-            option.key_at,
-            format!("providers.{ID}.options.{} is not supported", option.key),
-        ));
-    }
-    Ok(())
 }
 
 /// The safety preflight: turning the provider on is refused with a fixed
@@ -318,7 +298,6 @@ fn auth_required(results: &[TerminalResult], stderr_tail: &str) -> bool {
 mod tests {
     use super::*;
     use crate::providers::UserPrompt;
-    use serde_saphyr::Location;
 
     const OK: &str = concat!(
         r#"{"event":"init","model":"gemini-test"}"#,
@@ -328,25 +307,6 @@ mod tests {
         r#"{"event":"result","status":"SUCCESS","result":{"response":"Olá mundo."}}"#,
         "\n",
     );
-
-    fn option(key: &'static str, value: &'static str) -> RawOption<'static> {
-        RawOption {
-            key,
-            value,
-            key_at: Location::UNKNOWN,
-            value_at: Location::UNKNOWN,
-        }
-    }
-
-    #[test]
-    fn accepts_no_options() {
-        assert!(validate_options(&[]).is_ok());
-        let error = validate_options(&[option("effort", "high")]).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "providers.antigravity.options.effort is not supported"
-        );
-    }
 
     #[test]
     fn validate_settings_refuses_only_enablement() {
