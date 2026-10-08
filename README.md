@@ -5,19 +5,19 @@ Polish your dictation with the AI subscriptions you already have.
 Pumice is a small local service that sits between a dictation app and the AI coding CLIs you already pay for. It receives the raw text transcribed by Whisper, lightly corrects it (transcription mistakes, punctuation, lists), and returns it ready to paste. No separately billed API keys required.
 
 ```
-Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude / Codex / OpenCode CLI
+Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude / Codex / Kimi CLI
                                   ◀──polished text──
 ```
 
 - **Works with [Handy](https://github.com/cjpais/Handy)** through its Custom post-processing provider, and with any app that talks to an OpenAI-compatible endpoint.
-- **Uses the official CLIs** of your subscriptions (Claude, Codex, Kimi, OpenCode, Kiro; Antigravity dormant), or a local OpenAI-compatible service such as Ollama or LM Studio.
+- **Uses the official CLIs** of your subscriptions (Claude, Codex, Kimi; Kiro and Antigravity on hold), or a local OpenAI-compatible service such as Ollama or LM Studio.
 - **Never loses a dictation:** if the selected provider fails or times out, you get the raw text back.
 - **Local and private:** listens on localhost only, no telemetry.
 - **Single executable** for Windows, Linux and macOS, with nothing else to install.
 
 ## Status
 
-Pumice works end to end through Claude, Codex and Kimi; OpenCode, Kiro and a local OpenAI-compatible service are implemented but not yet tested with real calls. You choose the providers in an explicit list in the YAML config — nothing is enabled by default, and there is no fallback: a failure returns the raw dictation. Run `pumice doctor` to see which CLIs it found.
+Pumice works end to end through Claude, Codex and Kimi. Kiro, Antigravity and the local OpenAI-compatible adapter are on hold. You choose the providers in an explicit list in the YAML config — nothing is enabled by default, and there is no fallback: a failure returns the raw dictation. Run `pumice doctor` to see which CLIs it found.
 
 Pumice supports standalone downloads and the npm package `@brasillero/pumice` (installable with npm, pnpm, Bun or npx; the installed command is `pumice`). Check [GitHub Releases](https://github.com/brasillero/pumice/releases) and the [npm registry](https://www.npmjs.com/package/@brasillero/pumice) for published versions. See the [installation guide](docs/install.md) for installation, startup and Handy setup; building from source is also supported below.
 
@@ -45,7 +45,8 @@ In Handy: **Settings → Advanced → Experimental Features → Post Processing*
 | Stage | Status |
 | --- | --- |
 | Local formatting service (Claude, Codex, explicit provider list) | Implemented |
-| Kimi, OpenCode, Kiro, generic loopback adapter, auto-detection | Implemented (OpenCode and Kiro untested with real calls) |
+| Kimi adapter, auto-detection | Implemented |
+| Kiro, Antigravity, generic loopback adapter | On hold; OpenCode support removed |
 | Antigravity execution | Deferred |
 | Distribution: GitHub release archives + npm package | Released (v0.1.1); 0.2.0 after local testing |
 | `pumice setup` configuration wizard | Next |

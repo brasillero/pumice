@@ -132,8 +132,7 @@ example config shows how). Then set the model in Handy to the provider's
 id to pick it.
 
 - **Claude**, **Codex** and **Kimi** — implemented and tested with real calls.
-- **OpenCode** and **Kiro** — implemented, but not yet tested against the
-  real CLI.
+- **Kiro** — on hold. OpenCode support was removed.
 - **Local models (Ollama, LM Studio)** — a generic adapter for
   OpenAI-compatible services listening on `127.0.0.1`.
 - **Antigravity** — dormant (protocol implemented, enabling it is refused

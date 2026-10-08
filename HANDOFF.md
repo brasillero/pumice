@@ -85,6 +85,7 @@ Update this table in the PR that finishes each story. Order follows the plan in 
 | 30 | S3.5: process hardening | Done | #62 | Audit B20/B23/B24: debug log chmod 0600 on open, clean exit without full stdin fails, temp root removed by a guard (inline, then a retry thread) |
 | 31 | S3.6: minimal cleanup | Done | #63 | Owner decision: only `<think>` removal, trim and empty-reply rejection remain; the cleanup cause is logged |
 | 32 | Backlog | Done | #64 | `BACKLOG.md` tracks items to discuss, deferred work and known limitations |
+| 33 | S2.12: remove OpenCode | In review | — | Owner decision (2026-10-08): OpenCode support deprecated and deleted; a config entry `id: opencode` fails with a removal message |
 
 **Distribution review (2026-10-05):** the owner accepted the final review and authorized merging #36–#38. #36–#38 are merged; all 10 archive checks and all 16 npm checks passed, including Windows/Linux/macOS native installs and Linux pnpm/Bun. #38 also passed all 16 checks before merging. GitHub v0.1.0 is published; npm publication is pending account 2FA.
 

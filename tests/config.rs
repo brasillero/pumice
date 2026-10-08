@@ -74,8 +74,7 @@ mod capability_probe {
         validate_settings_noop,
     };
 
-    /// The OpenCode shape: a risk warning, and off until the file says
-    /// `enabled: true`.
+    /// A minimal provider: off until the file says `enabled: true`.
     pub const PROBE: ProviderDescriptor = ProviderDescriptor {
         id: "probe",
         defaults: probe_defaults,
@@ -1148,15 +1147,7 @@ fn example_config_loads() {
         .collect();
     assert_eq!(
         ids,
-        [
-            "claude",
-            "codex",
-            "opencode",
-            "kiro",
-            "antigravity",
-            "generic",
-            "kimi"
-        ]
+        ["claude", "codex", "kiro", "antigravity", "generic", "kimi"]
     );
 
     let claude = config.provider("claude").expect("claude is listed");
@@ -1166,14 +1157,7 @@ fn example_config_loads() {
     assert!(claude.binary.is_none());
 
     // Every other entry ships disabled, with no model.
-    for id in [
-        "codex",
-        "opencode",
-        "kiro",
-        "antigravity",
-        "generic",
-        "kimi",
-    ] {
+    for id in ["codex", "kiro", "antigravity", "generic", "kimi"] {
         let settings = config
             .provider(id)
             .unwrap_or_else(|| panic!("{id} is listed"));
@@ -1355,4 +1339,14 @@ fn generic_model_may_start_with_a_dash() {
     )
     .expect("a generic model is sent over HTTP, not as an argument");
     assert_eq!(config.provider("generic").unwrap().model, "-local-model");
+}
+
+#[test]
+fn removed_opencode_entry_says_so() {
+    let error = load_error("providers:\n  - id: opencode\n    enabled: false\n");
+    assert!(error.contains(":2:"), "{error}");
+    assert!(
+        error.contains("\"opencode\" support was removed; delete this entry"),
+        "{error}"
+    );
 }

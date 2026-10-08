@@ -1252,14 +1252,14 @@ async fn start_missing_selected_server(
     codex_scenario: Value,
 ) -> MissingSelectedServer {
     let codex = FakeCli::new(codex_scenario);
-    let opencode = FakeCli::new(json!({}));
+    let kiro = FakeCli::new(json!({}));
     let antigravity = FakeCli::new(json!({}));
     let missing_dir = TempDir::new().expect("temp dir");
     let missing_binary = missing_dir.path().join("claude");
     let yaml = format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: opencode\n    enabled: false\n    binary: '{}'\n  - id: antigravity\n    enabled: false\n    binary: '{}'\n{yaml_tail}",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: kiro\n    enabled: false\n    binary: '{}'\n  - id: antigravity\n    enabled: false\n    binary: '{}'\n{yaml_tail}",
         missing_binary.display(),
-        opencode.path().display(),
+        kiro.path().display(),
         antigravity.path().display(),
     )
     .replace("{codex}", &codex.path().display().to_string());
@@ -1449,7 +1449,7 @@ fn hermetic_serve_yaml(port: u16, claude_scenario: Value) -> (FakeCli, Vec<FakeC
         "port: {port}\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex_path}'\n",
         claude.path().display(),
     );
-    for id in ["opencode", "antigravity"] {
+    for id in ["kiro", "antigravity"] {
         let fake = FakeCli::new(json!({}));
         yaml.push_str(&format!(
             "  - id: {id}\n    enabled: false\n    binary: '{}'\n",
@@ -1692,7 +1692,7 @@ fn serve_prints_one_status_line_per_enabled_provider() {
         );
     }
     // Disabled providers were detected but get no line.
-    for id in ["opencode", "antigravity"] {
+    for id in ["kiro", "antigravity"] {
         assert!(
             !lines
                 .iter()

@@ -58,7 +58,6 @@ fn full_fake_yaml() -> (Vec<FakeCli>, String) {
     for (id, model, stdout) in [
         ("claude", Some("haiku"), "2.1.288 (Claude Code)\n"),
         ("codex", Some("gpt-6.1-sol"), "codex-cli 0.160.0\n"),
-        ("opencode", None, ""),
         ("antigravity", None, ""),
         ("kimi", None, "2.1.1\n"),
         ("kiro", None, ""),
@@ -101,7 +100,7 @@ fn all_enabled_found_lists_every_provider_and_the_summary() {
         "stdout: {stdout}"
     );
     assert!(
-        stdout.contains("opencode: disabled, found (version unavailable)\n"),
+        stdout.contains("kiro: disabled, found (version unavailable)\n"),
         "stdout: {stdout}"
     );
     assert!(
