@@ -2157,7 +2157,7 @@ async fn every_failure_kind_is_one_http_error_without_dictation() {
         (
             "cleanup rejection",
             CLAUDE_AT_FAKE.to_owned(),
-            success_scenario("<think>never closed"),
+            success_scenario("<think>only reasoning</think>"),
             502,
             "server_error",
         ),

@@ -2,14 +2,17 @@
 
 Things we decided to revisit, defer or keep an eye on. Each item says where it came from. When an item becomes work, it gets a story ID, a branch and a PR, and moves out of here. The owner decides priorities.
 
-Last updated: 2026-10-07.
+Last updated: 2026-10-08.
 
 ## To discuss (owner decision needed)
 
 | Item | Context | Source |
 | --- | --- | --- |
-| **Cleanup: is any left?** | Cleanup is now minimal (#63): drop a leading `<think>` block, trim, reject an empty reply. Discuss whether even these stay. Note: translation use (dictating in Portuguese, getting English) is why heading and quote heuristics were removed. Spec S3.4 still describes preamble and code-fence stripping; this is a recorded deviation. | Owner, 2026-10-07 |
-| **B3: literal transcript tags** | Since S4.4 failures are HTTP errors, Pumice no longer extracts the transcript to answer a failure; extraction only serves the built-in `passthrough` and log character counts. Dictation containing literal `<transcript>…</transcript>` tags can still make `passthrough` return only the inner words. | Audit 2026-10-07 |
+| **Cleanup: is any left?** | Cleanup is now minimal (#63, S3.9): drop closed `<think>`/`<thinking>` blocks at the start, trim, reject an empty reply. It looks only at the reply; an unclosed tag is kept as text. Still open: whether to strip only one exact `<think>` block, and whether even these rules stay. Note: translation use (dictating in Portuguese, getting English) is why heading and quote heuristics were removed. Spec S3.4 still describes preamble and code-fence stripping; this is a recorded deviation. | Owner, 2026-10-07 |
+| **B3: literal transcript tags** | Since S4.4 failures are HTTP errors, Pumice no longer extracts the transcript to answer a failure. Dictation containing literal `<transcript>…</transcript>` tags can make `passthrough` return only the inner words, and can affect normal requests (see the row above). | Audit 2026-10-07 |
+| **Plugin contract standard** | Write down what every plugin may receive and must return, independent of its internals, so anyone can build a plugin against it and swap parts freely. Today the shared types are `FormatInput` in and `Result<String, ProviderError>` out (`src/providers/interface.rs`). | Owner, 2026-10-08 |
+| **Decouple plugins from the Handy format** | Pumice splits Handy's user message around `<transcript>` into `before_text`/`text`/`after_text`, and each plugin (Claude, Codex, Kimi) glues the three back together. Plugins should receive just the system prompt and the whole user message, with no knowledge of transcript tags. Fine while Handy is the only client; revisit when Pumice goes generic. | Owner, 2026-10-08 |
+| **Transcript tags in normal requests** | The `<transcript>` extraction still drives normal requests, not only `passthrough`: an empty envelope returns an empty answer without calling the CLI, and a malformed one returns 400. Fine while Handy is the only client; make generic later (also covers B3). | Architecture review 2026-10-08 |
 | **AGENTS.md exceptions** | Two documented deviations need an owner edit to AGENTS.md: the generic adapter's loopback HTTP call (outbound-call rule) and the Kiro agent file Pumice writes into the call's temporary directory (empty-directory rule). | Audit 2026-10-07 |
 
 ## Deferred work

@@ -269,7 +269,7 @@ impl Pipeline {
         ))
         .await;
         let result = match run {
-            Ok(output) => match cleanup(&output, &request.raw_text) {
+            Ok(output) => match cleanup(&output) {
                 Ok(text) => Ok(text),
                 Err(error) => Err(ChainFailure::Cleanup(error)),
             },
