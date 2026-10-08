@@ -38,8 +38,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Every completion request writes exactly one log entry: HTTP errors are logged as `REJECTED` with the fixed error message, and a client that disconnects mid-request as `DROPPED`.
 - Config validation: removed keys set to `null` (`default: null`, `default_provider: ~`, `fallback_order: null`) are rejected like any other value; an empty `binary`, and a `model` starting with `-` for a CLI provider, are rejected at their line; an empty `APPDATA` no longer resolves the config path relative to the current directory.
 - A command-line argument that is not valid Unicode is a usage error (exit 2) instead of a crash.
-### Fixed
-
 - Kimi: a dictation full of quotes or backslashes that fits the byte cap but would overflow the Windows command line after escaping is refused as too large, instead of failing to start.
 - Adapters reject a CLI reply that is not valid UTF-8 (Codex, Kimi, Kiro, OpenCode, Antigravity) instead of returning text with `�` in it.
 - Quota errors reported with HTTP 429 are logged as quota exhausted, not rate limited (Codex, Kimi, OpenCode); Codex also recognizes OpenAI's "exceeded your current quota" wording.
@@ -47,8 +45,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - OpenCode: the result is the final message's text only, every step must finish and the last one with `stop`, and an error the CLI recovered from no longer fails the run.
 - Kiro: text after the end of the turn, or a later idle state without `end_turn`, is rejected; an `agent_message` without `messageId` is accepted.
 - Generic: a malformed `tool_calls` value or a non-string `finish_reason` is rejected, and an error status with a stalled body keeps its classification instead of becoming a timeout.
-
-- Kimi: a dictation full of quotes or backslashes that fits the byte cap but would overflow the Windows command line after escaping is refused as too large, instead of failing to start.
 - Cleanup keeps a dictated heading that the model only punctuated like a preamble (`Formatted text` → `Formatted text:`), and keeps quotes the user dictated around the whole text even when the model changed their style.
 - A CLI that exits successfully without reading its whole prompt is treated as a failure (the original text comes back) instead of answering a truncated prompt.
 - A cancelled call's temporary directory is still removed, in the background, with the usual retries; a directory that cannot be removed is reported on stderr.
