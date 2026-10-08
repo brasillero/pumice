@@ -1292,7 +1292,11 @@ fn removed_opencode_entry_says_so() {
 #[test]
 fn prompts_section_is_rejected_as_removed() {
     // The error points at the value: the next line for a block mapping.
-    for (value, line) in [("\n  system: Keep technical terms.\n", 3), (" null\n", 2)] {
+    for (value, line) in [
+        ("\n  system: Keep technical terms.\n", 3),
+        (" null\n", 2),
+        (" Keep technical terms.\n", 2),
+    ] {
         let error = load_error(&format!("port: 7567\nprompts:{value}"));
         assert!(error.contains(&format!(":{line}:")), "{error}");
         assert!(error.contains("\"prompts\" was removed"), "{error}");

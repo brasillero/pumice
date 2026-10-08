@@ -49,8 +49,7 @@ impl ComposedPrompts {
 /// The user message sent to a provider: `before_text + text + after_text`.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct UserPromptOwned {
-    /// The optional Pumice user prompt, then the incoming message up to the
-    /// transcript.
+    /// The incoming message up to the transcript.
     pub before_text: String,
     /// The transcript as sent to formatting (tags escaped when Pumice
     /// generated the envelope).
