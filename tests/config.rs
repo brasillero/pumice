@@ -706,8 +706,7 @@ fn explicit_missing_file_is_an_error_naming_the_path() {
     assert_eq!(
         error.to_string(),
         format!(
-            "{}: configuration file {} does not exist",
-            missing.display(),
+            "{}: the configuration file does not exist",
             missing.display()
         )
     );

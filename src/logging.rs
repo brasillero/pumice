@@ -171,8 +171,9 @@ impl<'a> DebugRecord<'a> {
 /// Merges the body as received with the only two headers ever recorded.
 /// `Authorization`, `Cookie` and any other credential-bearing header are
 /// dropped here — the single point where headers enter the log — never to be
-/// written at all. A body field named `headers` would be overwritten, so the
-/// recorded headers move to `http_headers` in that case.
+/// written at all. Body fields are never overwritten: the headers go under
+/// `headers`, or the first of `http_headers`, `_http_headers`, `__http_headers`, …
+/// that the body does not use.
 fn redacted_request(mut body: Value, headers: &HeaderMap) -> Value {
     let Some(object) = body.as_object_mut() else {
         return body;
@@ -183,12 +184,14 @@ fn redacted_request(mut body: Value, headers: &HeaderMap) -> Value {
             recorded.insert(name.to_owned(), Value::String(value.to_owned()));
         }
     }
-    let key = if object.contains_key("headers") {
-        "http_headers"
-    } else {
-        "headers"
-    };
-    object.insert(key.to_owned(), Value::Object(recorded));
+    let mut key = "headers".to_owned();
+    if object.contains_key(&key) {
+        key = "http_headers".to_owned();
+        while object.contains_key(&key) {
+            key.insert(0, '_');
+        }
+    }
+    object.insert(key, Value::Object(recorded));
     body
 }
 
@@ -385,6 +388,17 @@ mod tests {
         let merged = redacted_request(body, &headers);
         assert_eq!(merged["headers"]["note"], "client field");
         assert_eq!(merged["http_headers"]["user-agent"], "agent");
+    }
+
+    #[test]
+    fn header_key_never_overwrites_a_body_field() {
+        let mut headers = HeaderMap::new();
+        headers.insert("user-agent", "agent".parse().unwrap());
+        let body = serde_json::json!({"headers": 1, "http_headers": 2});
+        let merged = redacted_request(body, &headers);
+        assert_eq!(merged["headers"], 1);
+        assert_eq!(merged["http_headers"], 2);
+        assert_eq!(merged["_http_headers"]["user-agent"], "agent");
     }
 
     #[cfg(unix)]

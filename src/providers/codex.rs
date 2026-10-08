@@ -120,7 +120,9 @@ fn is_valid_base_url(url: &str) -> bool {
         let Some((inside, after)) = bracketed.split_once(']') else {
             return false;
         };
-        if inside.is_empty() || !inside.chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.') {
+        // A bracketed host must be a real IPv6 address (`[::1]`), not just
+        // hex digits (`[deadbeef]`).
+        if inside.parse::<std::net::Ipv6Addr>().is_err() {
             return false;
         }
         match after {
@@ -581,6 +583,8 @@ mod tests {
         assert!(validate_options(&[]).is_ok());
         assert!(validate_options(&[option("openai_base_url", "https://gw.example/v1")]).is_ok());
         assert!(validate_options(&[option("openai_base_url", "http://127.0.0.1:9999")]).is_ok());
+        assert!(validate_options(&[option("openai_base_url", "http://[::1]:8317/v1")]).is_ok());
+        assert!(validate_options(&[option("openai_base_url", "http://[deadbeef]/v1")]).is_err());
         assert!(validate_options(&[option("web_search", "disabled")]).is_err());
         assert!(validate_options(&[option("model", "gpt-6.1-sol")]).is_err());
     }

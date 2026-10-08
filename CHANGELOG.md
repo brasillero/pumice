@@ -49,6 +49,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A CLI that exits successfully without reading its whole prompt is treated as a failure (the original text comes back) instead of answering a truncated prompt.
 - A cancelled call's temporary directory is still removed, in the background, with the usual retries; a directory that cannot be removed is reported on stderr.
 - An existing debug log file is made private (0600) when Pumice opens it, not only when it creates it.
+- A missing `--config` file is reported once (`<path>: the configuration file does not exist`) instead of repeating the path.
+- `doctor` rejects a flag given twice (for example two `--provider`) instead of silently using the last one.
+- Codex `openai_base_url` accepts a bracketed host only when it is a real IPv6 address.
+- The debug log never overwrites a request body field with the recorded HTTP headers.
+- "Unsupported launcher" wording is used everywhere for an unsupported CLI shim.
 
 ## [0.1.1] — 2026-10-06
 
