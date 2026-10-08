@@ -51,7 +51,7 @@ use serde_json::Value;
 use super::cli::{CliAdapter, CliProvider};
 use super::{
     FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode,
-    ProviderLocations, ProviderSettings, RawOption,
+    ProviderLocations, ProviderSettings,
 };
 use crate::config::ConfigError;
 use crate::process::{
@@ -93,13 +93,9 @@ fn unique_agent_name() -> String {
 // Enabling requires an explicit model; the invocation, output parser and
 // tool-lockdown recipe are derived from documentation only.
 
-const ALLOWED_ENV: &[&str] = &[];
-
 pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: ID,
     defaults,
-    allowed_env: ALLOWED_ENV,
-    validate_options,
     build,
     validate_settings,
     probe: ProbeSpec::Version(&["--version"]),
@@ -114,19 +110,7 @@ fn defaults() -> ProviderSettings {
         binary: None,
         model: String::new(),
         timeout: DEFAULT_TIMEOUT,
-        env: BTreeMap::new(),
-        options: BTreeMap::new(),
     }
-}
-
-fn validate_options(options: &[RawOption<'_>]) -> Result<(), ConfigError> {
-    if let Some(option) = options.first() {
-        return Err(ConfigError::at(
-            option.key_at,
-            format!("providers.{ID}.options.{} is not supported", option.key),
-        ));
-    }
-    Ok(())
 }
 
 fn validate_settings(
@@ -453,21 +437,6 @@ fn is_auth_error(error: Option<&Value>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn option(key: &'static str, value: &'static str) -> RawOption<'static> {
-        RawOption {
-            key,
-            value,
-            key_at: serde_saphyr::Location::UNKNOWN,
-            value_at: serde_saphyr::Location::UNKNOWN,
-        }
-    }
-
-    #[test]
-    fn rejects_all_options() {
-        assert!(validate_options(&[]).is_ok());
-        assert!(validate_options(&[option("effort", "low")]).is_err());
-    }
 
     #[test]
     fn validates_models() {

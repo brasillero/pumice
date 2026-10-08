@@ -1,6 +1,5 @@
 //! Tests for YAML configuration loading, validation and error positions.
 
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -51,10 +50,6 @@ fn claude(config: &Config) -> &ProviderSettings {
     config.provider("claude").expect("claude is configured")
 }
 
-fn codex(config: &Config) -> &ProviderSettings {
-    config.provider("codex").expect("codex is configured")
-}
-
 fn no_env(_: &str) -> Option<OsString> {
     None
 }
@@ -63,23 +58,19 @@ fn no_env(_: &str) -> Option<OsString> {
 /// enablement, risk warnings) against `config::validate_text_with_descriptors`,
 /// leaving the built-in registry untouched.
 mod capability_probe {
-    use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::time::Duration;
 
     use pumice::config::ConfigError;
     use pumice::process::ProcessRunner;
     use pumice::providers::{
-        ProbeSpec, Provider, ProviderDescriptor, ProviderSettings, RawOption,
-        validate_settings_noop,
+        ProbeSpec, Provider, ProviderDescriptor, ProviderSettings, validate_settings_noop,
     };
 
     /// A minimal provider: off until the file says `enabled: true`.
     pub const PROBE: ProviderDescriptor = ProviderDescriptor {
         id: "probe",
         defaults: probe_defaults,
-        allowed_env: &[],
-        validate_options: probe_validate_options,
         build: probe_build,
         validate_settings: validate_settings_noop,
         probe: ProbeSpec::PathOnly,
@@ -94,22 +85,7 @@ mod capability_probe {
             binary: None,
             model: String::new(),
             timeout: Duration::from_secs(30),
-            env: BTreeMap::new(),
-            options: BTreeMap::new(),
         }
-    }
-
-    fn probe_validate_options(options: &[RawOption<'_>]) -> Result<(), ConfigError> {
-        if let Some(option) = options.first() {
-            return Err(ConfigError::at(
-                option.key_at,
-                format!(
-                    "option {} is not supported by the test provider",
-                    option.key
-                ),
-            ));
-        }
-        Ok(())
     }
 
     fn probe_build(
@@ -183,14 +159,6 @@ fn null_sections_behave_like_absent_ones() {
     let config = load_text("providers: null\ndebug_log: null\n").expect("null sections load");
     assert_eq!(config.port, 7567);
     assert!(config.providers.is_empty());
-
-    let config = load_text(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    env: null\n    options: null\n",
-    )
-    .expect("null provider sections load");
-    let claude = claude(&config);
-    assert!(claude.env.is_empty());
-    assert!(claude.options.is_empty());
 }
 
 #[test]
@@ -455,168 +423,6 @@ fn empty_model_on_a_disabled_entry_is_allowed() {
 }
 
 #[test]
-fn disallowed_env_override_is_rejected_at_the_key() {
-    assert_error(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    env:\n      FOO: bar\n",
-        6,
-        7,
-        "providers entry \"claude\".env.FOO is not an allowed environment variable (allowed: ANTHROPIC_BASE_URL)",
-    );
-}
-
-#[test]
-fn credential_looking_env_names_are_rejected_at_the_key() {
-    for name in [
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-    ] {
-        let text = format!(
-            "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    env:\n      {name}: value\n"
-        );
-        assert_error(
-            &text,
-            6,
-            7,
-            &format!(
-                "providers entry \"claude\".env.{name} is not allowed: credential-like variable names are rejected"
-            ),
-        );
-    }
-}
-
-#[test]
-fn allowed_env_override_is_kept() {
-    let config = load_text(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    env:\n      ANTHROPIC_BASE_URL: \"http://127.0.0.1:9999\"\n",
-    )
-    .expect("allowed env override loads");
-    assert_eq!(
-        claude(&config)
-            .env
-            .get("ANTHROPIC_BASE_URL")
-            .map(String::as_str),
-        Some("http://127.0.0.1:9999")
-    );
-}
-
-#[test]
-fn claude_options_are_rejected_at_the_key() {
-    assert_error(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    options:\n      foo: bar\n",
-        6,
-        7,
-        "providers.claude.options.foo is not supported",
-    );
-}
-
-#[test]
-fn codex_openai_base_url_option_is_kept() {
-    let config = load_text(
-        "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    options:\n      openai_base_url: \"https://gw.example/v1\"\n",
-    )
-    .expect("allowed option loads");
-    assert_eq!(
-        codex(&config)
-            .options
-            .get("openai_base_url")
-            .map(String::as_str),
-        Some("https://gw.example/v1")
-    );
-
-    let config = load_text(
-        "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    options:\n      openai_base_url: \"http://127.0.0.1:9999\"\n",
-    )
-    .expect("http option loads");
-    assert_eq!(
-        codex(&config)
-            .options
-            .get("openai_base_url")
-            .map(String::as_str),
-        Some("http://127.0.0.1:9999")
-    );
-}
-
-#[test]
-fn codex_rejects_invalid_openai_base_url_at_the_value() {
-    assert_error(
-        "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    options:\n      openai_base_url: \"ftp://gw.example/v1\"\n",
-        6,
-        24,
-        "providers.codex.options.openai_base_url must be an http:// or https:// URL with a valid host",
-    );
-    assert_error(
-        "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    options:\n      openai_base_url: \"http://exa mple\"\n",
-        6,
-        24,
-        "providers.codex.options.openai_base_url must be an http:// or https:// URL with a valid host",
-    );
-}
-
-#[test]
-fn codex_rejects_hostless_or_malformed_base_urls() {
-    for bad in [
-        "https://?",
-        "http:///",
-        "https://[invalid",
-        "http://host:99999",
-        "https://user@host",
-        "https://a..b",
-    ] {
-        assert_error(
-            &format!(
-                "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    options:\n      openai_base_url: \"{bad}\"\n"
-            ),
-            6,
-            24,
-            "providers.codex.options.openai_base_url must be an http:// or https:// URL with a valid host",
-        );
-    }
-}
-
-#[test]
-fn codex_accepts_realistic_base_urls() {
-    for good in [
-        "http://localhost:8317/v1",
-        "https://gw.example.ts.net/v1",
-        "http://[::1]:8080",
-        "https://10.0.0.2",
-    ] {
-        let config = load_text(&format!(
-            "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    options:\n      openai_base_url: \"{good}\"\n"
-        ))
-        .unwrap_or_else(|e| panic!("{good} should load: {e}"));
-        assert_eq!(
-            codex(&config)
-                .options
-                .get("openai_base_url")
-                .map(String::as_str),
-            Some(good)
-        );
-    }
-}
-
-#[test]
-fn codex_unknown_options_are_rejected_at_the_key() {
-    assert_error(
-        "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    options:\n      web_search: disabled\n",
-        6,
-        7,
-        "providers.codex.options.web_search is not supported",
-    );
-}
-
-#[test]
-fn codex_env_overrides_are_rejected_at_the_key() {
-    assert_error(
-        "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    env:\n      OPENAI_BASE_URL: http://gw.example\n",
-        6,
-        7,
-        "providers entry \"codex\".env.OPENAI_BASE_URL is not an allowed environment variable (no environment overrides are allowed for this provider)",
-    );
-}
-
-#[test]
 fn relative_binary_path_resolves_against_the_config_directory() {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join(CONFIG_NAME);
@@ -835,16 +641,6 @@ fn enabled_without_a_model_is_rejected_at_the_id() {
     );
 }
 
-#[test]
-fn debug_output_masks_private_content() {
-    let config = load_text(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    env:\n      ANTHROPIC_BASE_URL: ENV-MARKER-SECRET\n",
-    )
-    .expect("config loads");
-    let debug = format!("{config:?}");
-    assert!(!debug.contains("ENV-MARKER-SECRET"), "{debug}");
-}
-
 /// Runs the real `pumice` binary with `args`.
 fn run_pumice(args: &[&str]) -> Output {
     std::process::Command::new(env!("CARGO_BIN_EXE_pumice"))
@@ -910,22 +706,6 @@ fn check_config_rejects_the_removed_default_key_at_its_position() {
         stderr.contains(&format!("{}:2:10", path.display())),
         "the error points at the key's line:column:\n{stderr}"
     );
-}
-
-#[test]
-fn check_config_success_never_prints_private_values() {
-    let dir = TempDir::new().expect("temp dir");
-    let path = dir.path().join(CONFIG_NAME);
-    fs::write(
-        &path,
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    env:\n      ANTHROPIC_BASE_URL: ENV-MARKER\n",
-    )
-    .expect("write config");
-
-    let output = run_pumice(&["check-config", "--config", path.to_str().unwrap()]);
-    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
-    let combined = format!("{}{}", stdout(&output), stderr(&output));
-    assert!(!combined.contains("ENV-MARKER"), "{combined}");
 }
 
 #[test]
@@ -1002,103 +782,6 @@ fn serve_reports_config_errors_like_check_config() {
     );
 }
 
-#[test]
-fn configured_env_reaches_the_cli_invocation() {
-    use pumice::providers::claude::ClaudeAdapter;
-    use pumice::providers::cli::CliAdapter;
-    use pumice::providers::{FormatInput, UserPrompt};
-
-    let config = load_text(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    env:\n      ANTHROPIC_BASE_URL: \"http://127.0.0.1:9999\"\n",
-    )
-    .expect("config loads");
-    let built = providers::build_from_config(&config, Arc::new(ProcessRunner::new()))
-        .expect("provider builds");
-    assert_eq!(built.len(), 1);
-
-    // The adapter built from config forwards the override; its own
-    // variables are still present.
-    let adapter = ClaudeAdapter::new(
-        PathBuf::from("claude"),
-        "haiku".to_owned(),
-        claude(&config).env.clone(),
-    );
-    let invocation = adapter
-        .invocation(FormatInput {
-            system_prompt: "system",
-            user_prompt: UserPrompt::default(),
-            text: "text",
-        })
-        .expect("invocation builds");
-    let env: BTreeMap<_, _> = invocation
-        .env
-        .iter()
-        .map(|(k, v)| {
-            (
-                k.to_string_lossy().into_owned(),
-                v.to_string_lossy().into_owned(),
-            )
-        })
-        .collect();
-    assert_eq!(
-        env.get("ANTHROPIC_BASE_URL").map(String::as_str),
-        Some("http://127.0.0.1:9999")
-    );
-    assert_eq!(
-        env.get("MAX_THINKING_TOKENS").map(String::as_str),
-        Some("0")
-    );
-}
-
-#[test]
-fn configured_openai_base_url_reaches_the_codex_invocation() {
-    use pumice::providers::cli::CliAdapter;
-    use pumice::providers::codex::CodexAdapter;
-    use pumice::providers::{FormatInput, UserPrompt};
-
-    let config = load_text(
-        "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    options:\n      openai_base_url: \"https://gw.example/v1\"\n",
-    )
-    .expect("config loads");
-    let codex_settings = codex(&config);
-    assert_eq!(
-        codex_settings
-            .options
-            .get("openai_base_url")
-            .map(String::as_str),
-        Some("https://gw.example/v1")
-    );
-
-    let adapter = CodexAdapter::new(
-        PathBuf::from("codex"),
-        codex_settings.model.clone(),
-        codex_settings.options.get("openai_base_url").cloned(),
-    );
-    let invocation = adapter
-        .invocation(FormatInput {
-            system_prompt: "system",
-            user_prompt: UserPrompt::default(),
-            text: "text",
-        })
-        .expect("invocation builds");
-    let args: Vec<String> = invocation
-        .args
-        .iter()
-        .map(|a| match a {
-            pumice::process::Argument::Literal(value) => value.to_string_lossy().into_owned(),
-            // Path-bearing variants are materialized by the runner; the key
-            // is enough to recognize them here.
-            pumice::process::Argument::ControlPath { .. } => String::new(),
-            pumice::process::Argument::ConfigControlPath { key, .. } => (*key).to_owned(),
-        })
-        .collect();
-    let position = args
-        .iter()
-        .position(|a| a == "openai_base_url=\"https://gw.example/v1\"")
-        .expect("encoded base URL argument is present");
-    assert_eq!(args[position - 1], "-c");
-}
-
 /// Path to the shipped `pumice.example.yaml` at the repository root.
 fn example_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("pumice.example.yaml")
@@ -1145,46 +828,6 @@ fn example_config_loads() {
         assert!(!settings.enabled, "{id} stays off in the example");
         assert!(settings.model.is_empty(), "{id} ships without a model");
     }
-}
-
-/// Applies `edit` to the `providers:` entry starting at `marker`, up to the
-/// next blank line.
-fn edit_entry(text: &str, marker: &str, edit: impl Fn(&str) -> String) -> String {
-    let start = text
-        .find(marker)
-        .unwrap_or_else(|| panic!("{marker:?} is present"));
-    let end = text[start..].find("\n\n").map_or(text.len(), |i| start + i);
-    format!(
-        "{}{}{}",
-        &text[..start],
-        edit(&text[start..end]),
-        &text[end..]
-    )
-}
-
-#[test]
-fn example_documented_overrides_load() {
-    // Windows checkouts may use CRLF; the edits below match `\n`.
-    let text = fs::read_to_string(example_path())
-        .expect("read example")
-        .replace("\r\n", "\n");
-
-    // Apply the documented example: route Codex through a gateway.
-    let uncommented = edit_entry(&text, "  - id: codex", |block| {
-        block.replace(
-            "    # options:\n    #   openai_base_url: \"https://your-existing-gateway.example/v1\"\n    options: {}",
-            "    options:\n      openai_base_url: \"https://your-existing-gateway.example/v1\"",
-        )
-    });
-
-    let config = load_text(&uncommented).expect("documented overrides load");
-    assert_eq!(
-        codex(&config)
-            .options
-            .get("openai_base_url")
-            .map(String::as_str),
-        Some("https://your-existing-gateway.example/v1")
-    );
 }
 
 #[test]
@@ -1268,15 +911,18 @@ fn model_starting_with_a_dash_is_rejected_at_the_value() {
 }
 
 #[test]
-fn duplicate_option_keys_are_rejected_at_the_second_key() {
-    let error = load_error(
-        "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    options:\n      openai_base_url: http://127.0.0.1:1/v1\n      openai_base_url: http://127.0.0.1:2/v1\n",
-    );
-    // The YAML parser rejects the duplicate itself, at the second key.
-    assert!(
-        error.contains(":7:7: duplicate key `openai_base_url`"),
-        "{error}"
-    );
+fn env_and_options_are_rejected_as_removed() {
+    for key in ["env", "options"] {
+        for value in ["\n      A: b\n", " null\n", " {}\n"] {
+            let error = load_error(&format!(
+                "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    {key}:{value}"
+            ));
+            assert!(
+                error.contains(&format!("providers entry \"codex\".{key} was removed")),
+                "{key}:{value:?}\n{error}"
+            );
+        }
+    }
 }
 
 #[test]

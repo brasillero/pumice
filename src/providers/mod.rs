@@ -9,8 +9,6 @@ pub mod diagnostic;
 pub mod discovery;
 mod interface;
 
-use std::collections::BTreeMap;
-use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,10 +23,7 @@ use crate::config::{Config, ConfigError};
 use crate::process::ProcessRunner;
 
 /// Validated, fully defaulted settings of one provider.
-///
-/// `Debug` is implemented by hand: environment and option values may be
-/// private, so only their keys are shown.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderSettings {
     pub enabled: bool,
     /// Overrides the provider's command. `None` uses the provider's command
@@ -38,32 +33,6 @@ pub struct ProviderSettings {
     pub binary: Option<PathBuf>,
     pub model: String,
     pub timeout: Duration,
-    /// Non-secret routing overrides the adapter forwards to the CLI.
-    pub env: BTreeMap<String, String>,
-    /// Provider-specific options, validated by the provider's descriptor.
-    pub options: BTreeMap<String, String>,
-}
-
-impl fmt::Debug for ProviderSettings {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ProviderSettings")
-            .field("enabled", &self.enabled)
-            .field("binary", &self.binary)
-            .field("model", &self.model)
-            .field("timeout", &self.timeout)
-            .field("env_keys", &self.env.keys().collect::<Vec<_>>())
-            .field("option_keys", &self.options.keys().collect::<Vec<_>>())
-            .finish()
-    }
-}
-
-/// One provider option as written in the configuration file, with the
-/// locations the descriptor needs for precise errors.
-pub struct RawOption<'a> {
-    pub key: &'a str,
-    pub value: &'a str,
-    pub key_at: Location,
-    pub value_at: Location,
 }
 
 /// Source locations of one provider's configuration entries.
@@ -78,20 +47,12 @@ pub struct ProviderLocations {
     pub enabled: Option<Location>,
     pub model: Option<Location>,
     pub binary: Option<Location>,
-    /// Each option value's location, keyed by option name.
-    pub options: BTreeMap<String, Location>,
-    /// The port Pumice itself listens on. Adapters that call out (the generic
-    /// loopback adapter) must reject endpoints pointing back at it, to prevent
-    /// recursive requests. `Default` is 0, which no validated endpoint port
-    /// (1–65535) can equal, so direct construction without the loader stays
-    /// safe.
-    pub port: u16,
 }
 
 /// What the registry knows about one provider.
 ///
 /// The descriptor owns the provider's defaults and the validation of its
-/// option map, so a new provider brings its own rules with it. Enablement is
+/// settings, so a new provider brings its own rules with it. Enablement is
 /// never the descriptor's business: the configuration file decides, and
 /// nothing is enabled unless an entry says `enabled: true`.
 #[derive(Clone, Copy)]
@@ -100,20 +61,11 @@ pub struct ProviderDescriptor {
     /// Built-in settings (command, timeout, empty model). The loader
     /// replaces `enabled` with the entry's explicit value.
     pub defaults: fn() -> ProviderSettings,
-    /// Non-secret routing environment variables the configuration may set
-    /// for this provider. Anything else is rejected by the configuration
-    /// loader, as are credential-looking names.
-    pub allowed_env: &'static [&'static str],
-    /// Validates the provider's `options:` entries. The provider composes
-    /// its own fully pathed messages (it knows which keys it accepts); the
-    /// configuration loader attaches the file.
-    pub validate_options: fn(&[RawOption<'_>]) -> Result<(), ConfigError>,
     /// Builds a runnable provider from validated settings.
     pub build: BuildFn,
     /// Validates the provider's fully defaulted settings after overrides.
     /// Runs for every listed entry, enabled or not, so it can relate fields
-    /// `validate_options` sees separately (such as rejecting an enabled
-    /// provider without a `model`). Errors should point at the most
+    /// (such as rejecting an enabled provider without a `model`). Errors should point at the most
     /// specific [`ProviderLocations`] entry available.
     pub validate_settings: ValidateSettingsFn,
     /// How startup detection checks this provider's presence (S2.8).
@@ -262,7 +214,6 @@ mod tests {
         assert_eq!(settings.model, "");
         assert_eq!(settings.binary, None);
         assert_eq!(settings.timeout, Duration::from_secs(30));
-        assert!(d.allowed_env.is_empty());
         let mut settings = settings;
         settings.enabled = true;
         settings.model = "gpt-6.1-sol".to_owned();

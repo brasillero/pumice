@@ -6,7 +6,6 @@
 
 mod support;
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -210,7 +209,7 @@ impl ContractAdapter for ClaudeContract {
 
     fn provider(fake: &Path, timeout: Duration) -> Arc<dyn Provider> {
         Arc::new(CliProvider::new(
-            ClaudeAdapter::new(fake.to_path_buf(), "haiku".to_owned(), BTreeMap::new()),
+            ClaudeAdapter::new(fake.to_path_buf(), "haiku".to_owned()),
             Arc::new(ProcessRunner::new()),
             timeout,
         ))
@@ -321,7 +320,7 @@ impl ContractAdapter for CodexContract {
 
     fn provider(fake: &Path, timeout: Duration) -> Arc<dyn Provider> {
         Arc::new(CliProvider::new(
-            CodexAdapter::new(fake.to_path_buf(), "gpt-6.1-sol".to_owned(), None),
+            CodexAdapter::new(fake.to_path_buf(), "gpt-6.1-sol".to_owned()),
             Arc::new(ProcessRunner::new()),
             timeout,
         ))

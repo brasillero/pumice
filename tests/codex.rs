@@ -68,27 +68,15 @@ fn fake_codex(stdout: &str, exit_code: i32) -> FakeCli {
     }))
 }
 
-fn provider(fake: &FakeCli, base_url: Option<&str>) -> CliProvider<CodexAdapter> {
+fn provider(fake: &FakeCli) -> CliProvider<CodexAdapter> {
     CliProvider::new(
-        CodexAdapter::new(
-            fake.path().to_path_buf(),
-            MODEL.to_owned(),
-            base_url.map(str::to_owned),
-        ),
+        CodexAdapter::new(fake.path().to_path_buf(), MODEL.to_owned()),
         Arc::new(ProcessRunner::new()),
         Duration::from_secs(30),
     )
 }
 
 async fn format(fake: &FakeCli, text: &str) -> Result<String, ProviderError> {
-    format_with(fake, None, text).await
-}
-
-async fn format_with(
-    fake: &FakeCli,
-    base_url: Option<&str>,
-    text: &str,
-) -> Result<String, ProviderError> {
     let input = FormatInput {
         system_prompt: SYSTEM_PROMPT,
         user_prompt: UserPrompt {
@@ -97,7 +85,7 @@ async fn format_with(
         },
         text,
     };
-    provider(fake, base_url)
+    provider(fake)
         .format(input, Instant::now() + Duration::from_secs(30))
         .await
 }
@@ -191,36 +179,6 @@ async fn passes_the_restricted_invocation() {
         ["-c", r#"model_reasoning_effort="low""#, "-"].map(String::from)
     );
     assert_eq!(report["cwd_entries"], json!([]));
-}
-
-#[tokio::test]
-async fn openai_base_url_adds_one_encoded_config_argument() {
-    let fake = fake_codex(&fixture("codex/success.jsonl"), 0);
-    format_with(&fake, Some("https://gateway.example/v1"), "text")
-        .await
-        .expect("success");
-    let report = fake.report();
-    let argv = argv(&report);
-
-    // Sits after --json and before -m, exactly as verified in S0.2.
-    let mut expected: Vec<String> = FIXED_ARGS.iter().map(|s| s.to_string()).collect();
-    expected.push("-c".to_owned());
-    expected.push("openai_base_url=\"https://gateway.example/v1\"".to_owned());
-    expected.extend(["-m", MODEL].map(str::to_owned));
-    let (head, tail) = argv.split_at(expected.len());
-    assert_eq!(head, &expected[..]);
-
-    let rest = &tail[CONFIG_ARGS.len()..];
-    assert_eq!(rest[0], "-c");
-    let instructions = &rest[1];
-    assert!(
-        instructions.starts_with("model_instructions_file=\"") && instructions.ends_with('"'),
-        "unexpected argument: {instructions}"
-    );
-    assert_eq!(
-        rest[2..],
-        ["-c", r#"model_reasoning_effort="low""#, "-"].map(String::from)
-    );
 }
 
 #[tokio::test]
@@ -462,7 +420,7 @@ async fn errors_never_contain_captured_output() {
 #[test]
 fn provider_reports_its_id_without_running() {
     let fake = fake_codex("", 0);
-    assert_eq!(provider(&fake, None).id(), "codex");
+    assert_eq!(provider(&fake).id(), "codex");
     assert!(!fake.report_path().exists());
 }
 

@@ -1,17 +1,15 @@
 //! YAML structures retaining source positions for precise validation errors.
 //!
 //! Every value that can fail semantic validation is wrapped in
-//! [`Spanned`], and environment and option *keys* go through
-//! [`spanned_string_map`], a small map visitor: serde-saphyr does not
-//! deserialize mappings into `Vec<(K, V)>`, and `flatten` or untagged
-//! buffering would discard spans. `providers` is a sequence, parsed by
+//! [`Spanned`]. Removed keys are parsed through [`removed_key`] so even an
+//! explicit `null` reaches validation and fails at its line. `providers` is
+//! a sequence, parsed by
 //! [`provider_list`], so the removed mapping form can fail with a migration
 //! message instead of a generic type error. Keeping spans through to
 //! semantic validation is what lets an error point at the exact value or key
 //! that was rejected.
 
 use std::fmt;
-use std::marker::PhantomData;
 use std::path::PathBuf;
 
 use serde::de::{MapAccess, SeqAccess, Visitor};
@@ -66,10 +64,13 @@ pub(crate) struct RawProviderEntry {
     pub binary: Option<Spanned<PathBuf>>,
     pub model: Option<Spanned<String>>,
     pub timeout_secs: Option<Spanned<u64>>,
-    #[serde(default, deserialize_with = "spanned_string_map")]
-    pub env: Vec<(Spanned<String>, Spanned<String>)>,
-    #[serde(default, deserialize_with = "spanned_string_map")]
-    pub options: Vec<(Spanned<String>, Spanned<String>)>,
+    /// Removed (owner decision 2026-10-08): each CLI keeps its own
+    /// configuration. Parsed only so the error can point at the key.
+    #[serde(default, deserialize_with = "removed_key")]
+    pub env: Option<Spanned<serde::de::IgnoredAny>>,
+    /// Removed (owner decision 2026-10-08), like `env`.
+    #[serde(default, deserialize_with = "removed_key")]
+    pub options: Option<Spanned<serde::de::IgnoredAny>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -127,38 +128,4 @@ where
     }
 
     deserializer.deserialize_any(List)
-}
-
-/// Deserializes a YAML mapping into located `(key, value)` pairs, keeping
-/// each key's own position so unknown or rejected keys can be reported at
-/// the key rather than at the value. An explicit `null` (or an omitted
-/// field, through `default`) yields an empty list.
-fn spanned_string_map<'de, D, V>(deserializer: D) -> Result<Vec<(Spanned<String>, V)>, D::Error>
-where
-    D: Deserializer<'de>,
-    V: Deserialize<'de>,
-{
-    struct Pairs<V>(PhantomData<V>);
-
-    impl<'de, V: Deserialize<'de>> Visitor<'de> for Pairs<V> {
-        type Value = Vec<(Spanned<String>, V)>;
-
-        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            f.write_str("a mapping with string keys")
-        }
-
-        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-            let mut pairs = Vec::new();
-            while let Some(key) = map.next_key::<Spanned<String>>()? {
-                pairs.push((key, map.next_value::<V>()?));
-            }
-            Ok(pairs)
-        }
-
-        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-            Ok(Vec::new())
-        }
-    }
-
-    deserializer.deserialize_map(Pairs(PhantomData))
 }

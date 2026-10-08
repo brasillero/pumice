@@ -1,14 +1,21 @@
 # Pumice configuration example.
 #
+# Pumice is a local proxy: a dictation app (Handy, OpenWhispr, …) sends its
+# own prompt and the transcript to Pumice's OpenAI-compatible endpoint, and
+# Pumice hands the request to the official CLI of a subscription you are
+# logged into. Each CLI keeps its own configuration (login, gateway,
+# routing); Pumice inherits it and adds none of its own.
+#
 # Pumice assumes nothing: no provider is enabled by default and no model is
 # built in. Copy this to your own pumice.yaml, list the providers you want,
 # and keep only what you change. Without a file (or with an empty one) the
 # service starts with no providers: every request returns the original text.
 #
-# The client picks the provider: Handy sends the `model` the user chose, and
-# Pumice runs exactly that provider. A request without a model, an unknown or
-# disabled model, or any failure returns the original text unchanged, and
-# every request is logged with what happened and why.
+# The client picks the provider: the app sends the `model` the user chose
+# (a provider id such as `claude`), and Pumice runs exactly that provider. A
+# request without a model, an unknown or disabled model, or any failure
+# returns the original text unchanged, and every request is logged with what
+# happened and why.
 #
 # Pumice reads exactly one configuration file:
 #   1. the path passed with --config (pumice --config my.yaml), else
@@ -19,10 +26,8 @@
 #
 # Validate a file with: pumice check-config --config <path>
 #
-# Never put credentials in this file: Pumice runs on the logins of the
-# official CLIs and rejects credential-looking settings.
-#
-# Point Handy's Custom provider at: http://127.0.0.1:7567/v1
+# Point the app's custom OpenAI-compatible provider at:
+#   http://127.0.0.1:7567/v1
 
 # TCP port the service binds to on 127.0.0.1.
 port: 7567
@@ -30,72 +35,42 @@ port: 7567
 # Total seconds budget for one dictation.
 total_timeout_secs: 30
 
-# The explicit provider list. ORDER MATTERS for the model list a client such
-# as Handy shows: the enabled entries are listed in this order. There is NO
-# fallback: a request runs exactly one provider — the one its model names —
-# and any failure, or a request without a model, returns the original text
-# unchanged.
-#
-# The removed `default:` key (the provider for model-less requests) is
-# rejected with a migration error: the client's model field picks the
-# provider, and a request without a model returns the original text.
+# The explicit provider list. ORDER MATTERS for the model list a client
+# shows: the enabled entries are listed in this order. There is NO fallback:
+# a request runs exactly one provider — the one its model names.
 #
 # Every entry needs `id` and `enabled` (true or false, never defaulted).
-# `model` is required when enabled. `timeout_secs`, `binary`, `env` and
-# `options` are optional; `env` and `options` accept only what the provider
-# documents below.
+# `model` is required when enabled. `timeout_secs` and `binary` are
+# optional. The removed keys `default`, `prompts`, `env` and `options` are
+# rejected with a message saying what replaced them.
 providers:
-  # Short working example: Claude Code, enabled.
+  # Claude Code, enabled.
   - id: claude
     enabled: true
-    # null looks up "claude" on PATH, and so does any bare command name
-    # (no slash); a relative path with a slash resolves against this file's
-    # directory, an absolute path is used as-is.
-    binary: null
     # Any alias `claude --model` accepts; there is no built-in default.
     model: haiku
     # Per-call cap, also limited by the remaining total budget.
     timeout_secs: 30
-    # Only non-secret routing variables may be set here, and Claude allows
-    # just the one below. Uncomment to use, replacing the empty map:
-    # env:
-    #   ANTHROPIC_BASE_URL: "http://127.0.0.1:9999"
-    env: {}
-    # Claude accepts no adapter options.
-    options: {}
+    # null looks up "claude" on PATH, and so does any bare command name
+    # (no slash); a relative path with a slash resolves against this file's
+    # directory, an absolute path is used as-is.
+    binary: null
 
-  # Every other supported provider, off. A disabled entry is kept out of the
-  # model list and never runs; `model` may be omitted.
+  # Codex CLI, off. A disabled entry is kept out of the model list and
+  # never runs; `model` may be omitted.
   - id: codex
     enabled: false
     # model: gpt-6.1-sol
-    # timeout_secs: 30
-    # Codex accepts no environment overrides; routing goes through `options`.
-    env: {}
-    # The only supported option routes Codex through an existing gateway (an
-    # http:// or https:// URL, never with credentials in it):
-    # options:
-    #   openai_base_url: "https://your-existing-gateway.example/v1"
-    options: {}
 
-  # Kiro, Antigravity and the generic local-server adapter are archived for
-  # now, and OpenCode support was removed: listing any of them is an error.
-
-  # Kimi Code CLI (kimi) is off. Moonshot subscription terms rate
-  # non-interactive automation as risky (docs/research/S0.3-provider-terms.md),
-  # and the dictation travels in the command line (size-capped), so enabling
-  # this is the owner's call. When enabled, the adapter runs the CLI with a
-  # no-tools agent file in a fresh empty workspace; user-configured hooks,
-  # plugins and CLI-owned session retention have no per-launch off switch.
-  # Any alias from `kimi provider list` works.
+  # Kimi Code CLI, off. The dictation travels in the command line, so very
+  # long dictations are refused (the original text comes back). Any alias
+  # from `kimi provider list` works.
   - id: kimi
     enabled: false
     # model: kimi-k2.7-code-highspeed
-    # timeout_secs: 30
-    # Kimi accepts no environment overrides; the adapter owns the child
-    # environment (no-tools agent file, skills off, telemetry off).
-    env: {}
-    options: {}
+
+  # Kiro, Antigravity and the generic local-server adapter are archived for
+  # now, and OpenCode support was removed: listing any of them is an error.
 
 # Dictated text is written to a log only when debug logging is enabled.
 debug_log:

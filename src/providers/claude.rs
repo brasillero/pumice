@@ -16,7 +16,7 @@ use serde_json::Value;
 use super::cli::{CliAdapter, CliProvider};
 use super::{
     FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode,
-    ProviderSettings, RawOption, validate_settings_noop,
+    ProviderSettings, validate_settings_noop,
 };
 use crate::config::ConfigError;
 use crate::process::{Argument, CliInvocation, ControlFile, ProcessOutput, ProcessRunner, ProgramSpec};
@@ -30,8 +30,6 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// `Not logged in · Please run /login`; only its stable start is matched.
 const NOT_LOGGED_IN_PREFIX: &str = "Not logged in";
 
-/// Non-secret routing variables the configuration may set for this provider.
-const ALLOWED_ENV: &[&str] = &["ANTHROPIC_BASE_URL"];
 
 /// npm package entrypoint the Windows `.cmd` shim translates to (layout from
 /// npm; verify on a real Windows install (owner check)).
@@ -40,8 +38,6 @@ const NPM_ENTRYPOINT: &str = "@anthropic-ai/claude-code/cli.js";
 pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: ID,
     defaults,
-    allowed_env: ALLOWED_ENV,
-    validate_options,
     build,
     validate_settings: validate_settings_noop,
     probe: ProbeSpec::Version(&["--version"]),
@@ -58,21 +54,9 @@ fn defaults() -> ProviderSettings {
         // nothing is built in.
         model: String::new(),
         timeout: DEFAULT_TIMEOUT,
-        env: BTreeMap::new(),
-        options: BTreeMap::new(),
     }
 }
 
-/// Claude accepts no adapter options in Phase 1.
-fn validate_options(options: &[RawOption<'_>]) -> Result<(), ConfigError> {
-    if let Some(option) = options.first() {
-        return Err(ConfigError::at(
-            option.key_at,
-            format!("providers.{ID}.options.{} is not supported", option.key),
-        ));
-    }
-    Ok(())
-}
 
 fn build(
     settings: &ProviderSettings,
@@ -83,7 +67,7 @@ fn build(
         .clone()
         .unwrap_or_else(|| PathBuf::from(DEFAULT_BINARY));
     Ok(Arc::new(CliProvider::new(
-        ClaudeAdapter::new(binary, settings.model.clone(), settings.env.clone()),
+        ClaudeAdapter::new(binary, settings.model.clone()),
         runner,
         settings.timeout,
     )))
@@ -94,15 +78,13 @@ fn build(
 pub struct ClaudeAdapter {
     binary: PathBuf,
     model: String,
-    /// Non-secret routing overrides forwarded to the CLI.
-    env: BTreeMap<String, String>,
 }
 
 impl ClaudeAdapter {
     /// `binary` is a command name looked up on PATH (normally `claude`) or a
     /// path to the official CLI.
-    pub fn new(binary: PathBuf, model: String, env: BTreeMap<String, String>) -> ClaudeAdapter {
-        ClaudeAdapter { binary, model, env }
+    pub fn new(binary: PathBuf, model: String) -> ClaudeAdapter {
+        ClaudeAdapter { binary, model }
     }
 }
 
@@ -145,15 +127,13 @@ impl CliAdapter for ClaudeAdapter {
         let user = input.user_prompt;
         let stdin = [user.before_text, input.text, user.after_text].concat();
 
-        // Configured routing overrides first; adapter-owned variables (such
-        // as thinking-off) always win.
-        let mut env: BTreeMap<OsString, OsString> = self
-            .env
-            .iter()
-            .map(|(key, value)| (OsString::from(key.as_str()), OsString::from(value.as_str())))
-            .collect();
-        // Thinking off: it dominated latency in S0.2 (owner decision).
-        env.insert(OsString::from("MAX_THINKING_TOKENS"), OsString::from("0"));
+        // Thinking off: the cheapest setting, and it dominated latency in
+        // S0.2 (owner decision). Everything else the CLI inherits from the
+        // user's own configuration.
+        let env = BTreeMap::from([(
+            OsString::from("MAX_THINKING_TOKENS"),
+            OsString::from("0"),
+        )]);
 
         Ok(CliInvocation {
             program: ProgramSpec {

@@ -9,7 +9,6 @@
 mod error;
 mod raw;
 
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -19,7 +18,7 @@ use serde_saphyr::Spanned;
 
 pub use error::ConfigError;
 
-use crate::providers::{self, ProviderSettings, RawOption};
+use crate::providers::{self, ProviderSettings};
 
 /// Port the service binds to when the configuration does not say otherwise.
 pub const DEFAULT_PORT: u16 = 7567;
@@ -264,7 +263,7 @@ fn validate(
                 ),
             ));
         };
-        let settings = provider_settings(descriptor, id, entry, enabled, config_dir, port)?;
+        let settings = provider_settings(descriptor, id, entry, enabled, config_dir)?;
         configured.push(ProviderConfig {
             id: id.value.clone(),
             settings,
@@ -313,13 +312,11 @@ fn provider_settings(
     raw: &raw::RawProviderEntry,
     enabled: &Spanned<bool>,
     config_dir: Option<&Path>,
-    port: u16,
 ) -> Result<ProviderSettings, ConfigError> {
     let base = format!("providers entry \"{}\"", id.value);
     let mut settings = (descriptor.defaults)();
     settings.enabled = enabled.value;
     let mut locations = providers::ProviderLocations {
-        port,
         provider: Some(id.referenced),
         enabled: Some(enabled.referenced),
         ..providers::ProviderLocations::default()
@@ -367,15 +364,17 @@ fn provider_settings(
         settings.timeout = Duration::from_secs(timeout.value);
     }
 
-    settings.env = validate_env(descriptor, &base, &raw.env)?;
-    validate_options(descriptor, &raw.options)?;
-    for (key, value) in &raw.options {
-        locations
-            .options
-            .insert(key.value.clone(), value.referenced);
-        settings
-            .options
-            .insert(key.value.clone(), value.value.clone());
+    // Each CLI keeps its own configuration (gateway, routing, login); Pumice
+    // inherits it and does not duplicate it here.
+    for (key, span) in [("env", &raw.env), ("options", &raw.options)] {
+        if let Some(span) = span {
+            return Err(ConfigError::at(
+                span.referenced,
+                format!(
+                    "{base}.{key} was removed: Pumice uses each CLI's own configuration (gateway, routing, login). Delete this key and configure the CLI itself instead."
+                ),
+            ));
+        }
     }
     // The descriptor runs first: its refusal (Antigravity) and its own
     // requirements (an explicit provider/model, a plausible alias) keep
@@ -390,67 +389,6 @@ fn provider_settings(
         ));
     }
     Ok(settings)
-}
-
-/// Only explicitly allow-listed, non-secret routing variables may be passed
-/// to a CLI; credential-looking names are rejected even if a future provider
-/// lists them.
-fn validate_env(
-    descriptor: &providers::ProviderDescriptor,
-    base: &str,
-    entries: &[(Spanned<String>, Spanned<String>)],
-) -> Result<BTreeMap<String, String>, ConfigError> {
-    let mut env = BTreeMap::new();
-    for (key, value) in entries {
-        let upper = key.value.to_ascii_uppercase();
-        let credential_like = upper.ends_with("_TOKEN")
-            || upper.ends_with("_KEY")
-            || upper.ends_with("_SECRET")
-            || upper.contains("AUTH");
-        if credential_like {
-            return Err(ConfigError::at(
-                key.referenced,
-                format!(
-                    "{base}.env.{} is not allowed: credential-like variable names are rejected",
-                    key.value
-                ),
-            ));
-        }
-        if !descriptor.allowed_env.contains(&key.value.as_str()) {
-            let allowed = if descriptor.allowed_env.is_empty() {
-                "no environment overrides are allowed for this provider".to_owned()
-            } else {
-                format!("allowed: {}", descriptor.allowed_env.join(", "))
-            };
-            return Err(ConfigError::at(
-                key.referenced,
-                format!(
-                    "{base}.env.{} is not an allowed environment variable ({allowed})",
-                    key.value
-                ),
-            ));
-        }
-        env.insert(key.value.clone(), value.value.clone());
-    }
-    Ok(env)
-}
-
-/// Option validation belongs to the provider: the descriptor knows which
-/// keys it accepts and composes its own (fully pathed) messages.
-fn validate_options(
-    descriptor: &providers::ProviderDescriptor,
-    entries: &[(Spanned<String>, Spanned<String>)],
-) -> Result<(), ConfigError> {
-    let located: Vec<RawOption<'_>> = entries
-        .iter()
-        .map(|(key, value)| RawOption {
-            key: &key.value,
-            value: &value.value,
-            key_at: key.referenced,
-            value_at: value.referenced,
-        })
-        .collect();
-    (descriptor.validate_options)(&located)
 }
 
 /// A bare command name stays a PATH lookup; anything with a path separator
