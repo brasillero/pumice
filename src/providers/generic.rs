@@ -57,9 +57,6 @@ const ALLOWED_ENV: &[&str] = &[];
 const MAX_REQUEST_BYTES: usize = 10 * 1024 * 1024;
 /// Successful response cap, counted as bytes actually received.
 const MAX_SUCCESS_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
-/// Error responses are classified by status alone; the body is only drained
-/// up to this bound.
-const MAX_ERROR_RESPONSE_BYTES: usize = 64 * 1024;
 /// Connect cap, inside the call deadline.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -447,9 +444,9 @@ impl GenericProvider {
 
         let status = response.status();
         if status != StatusCode::OK {
-            // Classification is by status alone; the body is drained only to
-            // that bound and never inspected or copied.
-            let _ = read_body(response.into_body(), MAX_ERROR_RESPONSE_BYTES, &mut connection).await;
+            // Classification is by status alone; the body is never read, so
+            // a stalled error body cannot turn the status into a timeout.
+            // Dropping the response closes the one-shot connection.
             return Err(status_error(status));
         }
         reject_unsupported_encoding(response.headers())?;
@@ -676,15 +673,17 @@ fn parse_success_body(bytes: &[u8]) -> Result<String, ProviderError> {
     let choice = &choices[0];
     let message = choice.get("message").ok_or_else(invalid)?;
 
-    if message
-        .get("tool_calls")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|calls| !calls.is_empty())
-        {
+    // `null` or `[]` means no tool call; anything else, including a
+    // malformed non-array value, is treated as one (fail closed).
+    match message.get("tool_calls") {
+        None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::Array(calls)) if calls.is_empty() => {}
+        Some(_) => {
             return Err(ProviderError::other(
                 ProviderErrorCode::UnexpectedToolActivity,
             ));
         }
+    }
     if message
         .get("function_call")
         .is_some_and(|call| !call.is_null())
@@ -693,13 +692,12 @@ fn parse_success_body(bytes: &[u8]) -> Result<String, ProviderError> {
             ProviderErrorCode::UnexpectedToolActivity,
         ));
     }
-    match choice
-        .get("finish_reason")
-        .and_then(serde_json::Value::as_str)
-    {
-        // Absent is tolerated: `stop` is the only successful completion, and
-        // anything else (truncation, content filters, tool calls) is refused.
-        None | Some("stop") => {}
+    match choice.get("finish_reason") {
+        // Absent or null is tolerated: `stop` is the only successful
+        // completion, and anything else (truncation, content filters, tool
+        // calls, a non-string value) is refused.
+        None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::String(reason)) if reason == "stop" => {}
         Some(_) => return Err(invalid()),
     }
     message

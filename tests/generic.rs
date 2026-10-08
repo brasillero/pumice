@@ -696,6 +696,10 @@ async fn malformed_responses_fail() {
             "content filtered",
             r#"{"choices":[{"message":{"content":""},"finish_reason":"content_filter"}]}"#,
         ),
+        (
+            "non-string finish reason",
+            r#"{"choices":[{"message":{"content":"ok"},"finish_reason":1}]}"#,
+        ),
     ] {
         let server = FakeHttp::spawn(Behavior::Reply(Reply {
             status: 200,
@@ -730,6 +734,10 @@ async fn tool_calls_and_function_call_rejected() {
         (
             "function_call",
             json!({"role": "assistant", "content": "", "function_call": {"name": "shell", "arguments": "{}"}}),
+        ),
+        (
+            "malformed tool_calls",
+            json!({"role": "assistant", "content": "ok", "tool_calls": {"id": "call_1"}}),
         ),
         (
             "finish_reason tool_calls",
@@ -1172,4 +1180,18 @@ fn full_settings_validation_rejects_direct_construction() {
         error.contains("accepts no environment overrides"),
         "unexpected error: {error}"
     );
+}
+
+#[tokio::test]
+async fn error_status_with_a_stalled_body_keeps_its_status() {
+    // The headers promise a body that never arrives.
+    let head = "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{";
+    let server = FakeHttp::spawn(Behavior::RawThenStall(head.as_bytes().to_vec())).await;
+    // A short budget: the status must win without waiting for the body.
+    let budget = Duration::from_millis(300);
+    let provider = build_provider(&server.endpoint(), budget);
+    let err = format_with(&provider, "ditado", Instant::now() + budget)
+        .await
+        .unwrap_err();
+    assert_eq!(err, ProviderError::RateLimited { retry_after: None });
 }

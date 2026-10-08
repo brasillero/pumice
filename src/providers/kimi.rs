@@ -325,7 +325,7 @@ fn quoted_units(message: &str) -> usize {
 /// Anything outside this vocabulary, or an
 /// assistant `content` that is not a string, is invalid output.
 pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = super::cli::stdout_text(output)?;
 
     let mut texts: Vec<String> = Vec::new();
     let mut saw_version = false;
@@ -346,24 +346,37 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
                     continue;
                 }
                 // The retrying message is the protocol's structured failure
-                // evidence; only its fields are read, never its text.
-                if message.get("type").and_then(Value::as_str) == Some("turn.step.retrying")
-                    && failure.is_none()
-                {
-                    failure = Some(classify_retry(&message));
+                // evidence; only its fields are read, never its text. A run
+                // can retry several times: keep the most specific cause, so
+                // an early transient error does not hide a later login or
+                // quota failure.
+                if message.get("type").and_then(Value::as_str) == Some("turn.step.retrying") {
+                    let retry = classify_retry(&message);
+                    if failure
+                        .as_ref()
+                        .is_none_or(|kept| specificity(&retry) >= specificity(kept))
+                    {
+                        failure = Some(retry);
+                    }
                 }
                 // session.resume_hint and future meta messages carry no
                 // result text.
             }
             Some("assistant") => {
-                if let Some(content) = message.get("content") {
-                    let Some(text) = content.as_str() else {
+                // `content: null` accompanies a tool call; it carries no
+                // text and is not malformed.
+                match message.get("content") {
+                    None | Some(Value::Null) => {}
+                    Some(Value::String(text)) => texts.push(text.clone()),
+                    Some(_) => {
                         return Err(ProviderError::other(ProviderErrorCode::InvalidOutput));
-                    };
-                    texts.push(text.to_owned());
+                    }
                 }
-                if message.get("tool_calls").is_some() {
-                    tool_activity = true;
+                // `tool_calls: null` or `[]` means no tool call.
+                match message.get("tool_calls") {
+                    None | Some(Value::Null) => {}
+                    Some(Value::Array(calls)) if calls.is_empty() => {}
+                    Some(_) => tool_activity = true,
                 }
             }
             Some("tool") => tool_activity = true,
@@ -404,9 +417,10 @@ fn classify_retry(message: &Value) -> ProviderError {
     match status {
         Some(401) => return ProviderError::NotLoggedIn,
         Some(403) => return ProviderError::other(ProviderErrorCode::AuthenticationRejected),
-        Some(429) => return ProviderError::RateLimited { retry_after: None },
         _ => {}
     }
+    // Quota exhaustion often arrives as HTTP 429 too: the name decides
+    // before the status does.
     let named = [message.get("error_name"), message.get("error_message")]
         .into_iter()
         .flatten()
@@ -415,7 +429,24 @@ fn classify_retry(message: &Value) -> ProviderError {
     if named {
         return ProviderError::QuotaExceeded { retry_after: None };
     }
+    if status == Some(429) {
+        return ProviderError::RateLimited { retry_after: None };
+    }
     ProviderError::other(ProviderErrorCode::NonzeroExit)
+}
+
+/// How much a retry classification says about the failure: login problems
+/// first, then quota, then rate limits, then anything else.
+fn specificity(error: &ProviderError) -> u8 {
+    match error {
+        ProviderError::NotLoggedIn
+        | ProviderError::Other {
+            code: ProviderErrorCode::AuthenticationRejected,
+        } => 3,
+        ProviderError::QuotaExceeded { .. } => 2,
+        ProviderError::RateLimited { .. } => 1,
+        _ => 0,
+    }
 }
 
 #[cfg(test)]

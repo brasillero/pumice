@@ -54,6 +54,9 @@ pub enum Behavior {
     /// Record the request, write these raw bytes (possibly malformed HTTP)
     /// and close.
     Raw(Vec<u8>),
+    /// Record the request, write these raw bytes, then keep the connection
+    /// open without sending anything more.
+    RawThenStall(Vec<u8>),
     /// Record the request, then read until the client closes the connection
     /// (used to prove cancellation drops the socket).
     HangUp,
@@ -209,6 +212,10 @@ async fn handle(
         Behavior::Raw(bytes) => {
             let _ = socket.write_all(&bytes).await;
             let _ = socket.shutdown().await;
+        }
+        Behavior::RawThenStall(bytes) => {
+            let _ = socket.write_all(&bytes).await;
+            tokio::time::sleep(Duration::from_secs(300)).await;
         }
         Behavior::HangUp => {
             // Wait until the client closes the connection (cancellation must

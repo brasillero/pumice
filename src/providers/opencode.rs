@@ -313,23 +313,31 @@ fn json_string_with_escaped_braces(value: &str) -> String {
 /// Parses OpenCode's `--format json` JSONL event stream (one event per
 /// line).
 ///
-/// Success requires exit code 0, at least one completed `text` part and a
-/// final `step_finish`, with no `error` event and no tool event or tool
-/// part; the result is the text parts' text concatenated in order,
-/// de-duplicated by part id (a repeated id is an updated part: its latest
-/// text wins). Completed tool calls print as `tool_use` events, and a
-/// `step_finish` part whose finish `reason` is `tool-calls` or `length`
-/// means the model tried to use tools or the text was truncated — both are
-/// rejected. Reasoning parts, token usage and progress never carry result
-/// text and are ignored. Error events are CLI diagnostics (never dictation),
-/// so only their structured fields are classified.
+/// Success requires exit code 0 and a final `step_finish` whose `reason` is
+/// `stop` and belongs to the last message the stream names, with no tool
+/// event or tool part. The result is the text parts of that final step's
+/// message, concatenated in order and de-duplicated by
+/// part id (a repeated id is an updated part: its latest text wins); text
+/// from other messages is never mixed in. Completed tool calls print as
+/// `tool_use` events, and any `step_finish` with reason `tool-calls` means
+/// the model tried to use tools; both are rejected. A final reason other
+/// than `stop` (`length`, `content-filter`, `other`, …) means the text is
+/// incomplete or withheld and is invalid output. An `error` event fails the
+/// run unless a later step finished with `stop` (the CLI recovered).
+/// Reasoning parts, token usage and progress never carry result text and
+/// are ignored. Error events are CLI diagnostics (never dictation), so only
+/// their structured fields are classified.
 pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = super::cli::stdout_text(output)?;
 
-    let mut texts: Vec<String> = Vec::new();
+    // Each text part with the message it belongs to.
+    let mut texts: Vec<(Option<String>, String)> = Vec::new();
     let mut text_indexes: HashMap<String, usize> = HashMap::new();
-    let mut saw_step_finish = false;
-    let mut rejected_finish: Option<ProviderError> = None;
+    // The last step_finish: its message and its reason.
+    let mut last_finish: Option<(Option<String>, Option<String>)> = None;
+    // The most recent message any event named: the run's final message.
+    let mut last_message: Option<String> = None;
+    let mut tool_finish = false;
     let mut session: Option<String> = None;
     let mut tool_activity = false;
     let mut failure: Option<ProviderError> = None;
@@ -352,24 +360,28 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
                 session = Some(id.to_owned());
             }
         }
+        if let Some(message) = event.pointer("/part/messageID").and_then(Value::as_str) {
+            last_message = Some(message.to_owned());
+        }
         match event_type {
-            "step_start" => {}
+            // A new step reopens the run: it must finish too.
+            "step_start" => last_finish = None,
             "step_finish" => {
-                saw_step_finish = true;
                 // Verified reason vocabulary: stop, length, tool-calls,
                 // content-filter, other (providers may add more).
-                match event.pointer("/part/reason").and_then(Value::as_str) {
-                    Some("tool-calls") => {
-                        rejected_finish = Some(ProviderError::other(
-                            ProviderErrorCode::UnexpectedToolActivity,
-                        ));
-                    }
-                    Some("length") => {
-                        rejected_finish =
-                            Some(ProviderError::other(ProviderErrorCode::InvalidOutput));
-                    }
-                    _ => {}
+                let reason = event.pointer("/part/reason").and_then(Value::as_str);
+                if reason == Some("tool-calls") {
+                    tool_finish = true;
                 }
+                if reason == Some("stop") {
+                    // The CLI recovered from any earlier error.
+                    failure = None;
+                }
+                let message = event
+                    .pointer("/part/messageID")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                last_finish = Some((message, reason.map(str::to_owned)));
             }
             "text" => {
                 let Some(part) = event.get("part") else {
@@ -389,23 +401,28 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
                 let Some(text) = part.get("text").and_then(Value::as_str) else {
                     return Err(ProviderError::other(ProviderErrorCode::InvalidOutput));
                 };
+                let message = part
+                    .get("messageID")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
                 match part.get("id").and_then(Value::as_str) {
                     Some(id) => match text_indexes.get(id) {
                         // A repeated part id is an updated part: keep the
                         // latest text at its original position.
-                        Some(&index) => texts[index] = text.to_owned(),
+                        Some(&index) => texts[index] = (message, text.to_owned()),
                         None => {
                             text_indexes.insert(id.to_owned(), texts.len());
-                            texts.push(text.to_owned());
+                            texts.push((message, text.to_owned()));
                         }
                     },
-                    None => texts.push(text.to_owned()),
+                    None => texts.push((message, text.to_owned())),
                 }
             }
             // A completed tool call (deny-all permissions should prevent
             // any; the event is printed for completed or errored tools).
             "tool_use" => tool_activity = true,
-            // CLI diagnostic; the first structured error classifies.
+            // CLI diagnostic; the first structured error since the last
+            // successful step classifies.
             "error" if failure.is_none() => {
                 failure = Some(classify_error(&event));
             }
@@ -420,8 +437,10 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
             ProviderErrorCode::UnexpectedToolActivity,
         ));
     }
-    if let Some(err) = rejected_finish {
-        return Err(err);
+    if tool_finish {
+        return Err(ProviderError::other(
+            ProviderErrorCode::UnexpectedToolActivity,
+        ));
     }
     if let Some(err) = failure {
         return Err(err);
@@ -429,10 +448,32 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
     if !output.status.success() {
         return Err(ProviderError::other(ProviderErrorCode::NonzeroExit));
     }
-    if !saw_step_finish || texts.is_empty() {
+    let Some((final_message, Some(reason))) = last_finish else {
+        return Err(ProviderError::other(ProviderErrorCode::InvalidOutput));
+    };
+    if reason != "stop" {
         return Err(ProviderError::other(ProviderErrorCode::InvalidOutput));
     }
-    Ok(texts.concat())
+    // A later message that started but never finished means the run's
+    // final answer is incomplete.
+    if let (Some(finished), Some(last)) = (&final_message, &last_message)
+        && finished != last
+    {
+        return Err(ProviderError::other(ProviderErrorCode::InvalidOutput));
+    }
+    // Only the final message's text: another message's text is not the
+    // answer. A part that names no message cannot be told apart and stays.
+    let result: String = texts
+        .iter()
+        .filter(|(message, _)| {
+            final_message.is_none() || message.is_none() || *message == final_message
+        })
+        .map(|(_, text)| text.as_str())
+        .collect();
+    if result.is_empty() {
+        return Err(ProviderError::other(ProviderErrorCode::InvalidOutput));
+    }
+    Ok(result)
 }
 
 /// Maps a structured `error` event to a safe error.
@@ -453,19 +494,20 @@ fn classify_error(event: &Value) -> ProviderError {
         .get("statusCode")
         .or_else(|| error.get("status"))
         .and_then(Value::as_u64);
-    match status {
-        Some(401) | Some(403) => {
-            return ProviderError::other(ProviderErrorCode::AuthenticationRejected)
-        }
-        Some(429) => return ProviderError::RateLimited { retry_after: None },
-        _ => {}
+    if matches!(status, Some(401) | Some(403)) {
+        return ProviderError::other(ProviderErrorCode::AuthenticationRejected);
     }
+    // Quota exhaustion often arrives as HTTP 429 too: the name decides
+    // before the status does.
     let quota_named = [name, error.get("code").and_then(Value::as_str)]
         .into_iter()
         .flatten()
         .any(|part| part.to_lowercase().contains("quota"));
     if quota_named {
         return ProviderError::QuotaExceeded { retry_after: None };
+    }
+    if status == Some(429) {
+        return ProviderError::RateLimited { retry_after: None };
     }
     ProviderError::other(ProviderErrorCode::NonzeroExit)
 }

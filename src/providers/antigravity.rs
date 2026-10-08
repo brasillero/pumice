@@ -211,7 +211,7 @@ impl CliAdapter for AntigravityAdapter {
 /// [`ProviderError::NotLoggedIn`]. Diagnostics are never copied into errors.
 pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
     parse_stream(
-        &String::from_utf8_lossy(&output.stdout),
+        super::cli::stdout_text(output)?,
         output.status.success(),
         &String::from_utf8_lossy(&output.stderr_tail),
     )

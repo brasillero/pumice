@@ -353,3 +353,55 @@ fn env_overrides_are_rejected() {
         "providers entry \"kiro\".env.KIRO_HOME is not an allowed environment variable (no environment overrides are allowed for this provider)",
     );
 }
+
+#[tokio::test]
+async fn text_after_end_turn_is_invalid_output() {
+    let stream = concat!(
+        "{\"sessionUpdate\":\"agent_message\",\"messageId\":\"m1\",\"content\":[{\"type\":\"text\",\"text\":\"First.\"}]}\n",
+        "{\"sessionUpdate\":\"state_update\",\"state\":\"idle\",\"stopReason\":\"end_turn\"}\n",
+        "{\"sessionUpdate\":\"agent_message_chunk\",\"messageId\":\"m2\",\"content\":{\"type\":\"text\",\"text\":\"Partial\"}}\n",
+    );
+    let fake = fake_kiro(stream, 0);
+    assert_eq!(
+        format(&fake, "text").await.unwrap_err(),
+        ProviderError::other(ProviderErrorCode::InvalidOutput)
+    );
+}
+
+#[tokio::test]
+async fn a_later_idle_state_without_end_turn_is_invalid_output() {
+    let stream = concat!(
+        "{\"sessionUpdate\":\"agent_message\",\"messageId\":\"m1\",\"content\":[{\"type\":\"text\",\"text\":\"First.\"}]}\n",
+        "{\"sessionUpdate\":\"state_update\",\"state\":\"idle\",\"stopReason\":\"end_turn\"}\n",
+        "{\"sessionUpdate\":\"state_update\",\"state\":\"idle\",\"stopReason\":\"cancelled\"}\n",
+    );
+    let fake = fake_kiro(stream, 0);
+    assert_eq!(
+        format(&fake, "text").await.unwrap_err(),
+        ProviderError::other(ProviderErrorCode::InvalidOutput)
+    );
+}
+
+#[tokio::test]
+async fn agent_message_without_message_id_is_accepted() {
+    let stream = concat!(
+        "{\"sessionUpdate\":\"agent_message\",\"content\":[{\"type\":\"text\",\"text\":\"No id.\"}]}\n",
+        "{\"sessionUpdate\":\"state_update\",\"state\":\"idle\",\"stopReason\":\"end_turn\"}\n",
+    );
+    let fake = fake_kiro(stream, 0);
+    assert_eq!(format(&fake, "text").await.unwrap(), "No id.");
+}
+
+#[tokio::test]
+async fn a_later_running_state_reopens_the_turn() {
+    let stream = concat!(
+        "{\"sessionUpdate\":\"agent_message\",\"messageId\":\"m1\",\"content\":[{\"type\":\"text\",\"text\":\"First.\"}]}\n",
+        "{\"sessionUpdate\":\"state_update\",\"state\":\"idle\",\"stopReason\":\"end_turn\"}\n",
+        "{\"sessionUpdate\":\"state_update\",\"state\":\"running\"}\n",
+    );
+    let fake = fake_kiro(stream, 0);
+    assert_eq!(
+        format(&fake, "text").await.unwrap_err(),
+        ProviderError::other(ProviderErrorCode::InvalidOutput)
+    );
+}

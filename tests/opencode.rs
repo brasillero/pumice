@@ -522,3 +522,77 @@ fn env_overrides_are_rejected() {
         "providers entry \"opencode\".env.OPENCODE_PERMISSION is not an allowed environment variable (no environment overrides are allowed for this provider)",
     );
 }
+
+/// One `step_start`/`text`/`step_finish` group for message `id`.
+fn opencode_step(message: &str, text: Option<&str>, reason: Option<&str>) -> String {
+    let mut out = format!(
+        "{{\"type\":\"step_start\",\"sessionID\":\"s\",\"part\":{{\"id\":\"{message}-start\",\"messageID\":\"{message}\",\"sessionID\":\"s\",\"type\":\"step-start\"}}}}\n"
+    );
+    if let Some(text) = text {
+        out.push_str(&format!(
+            "{{\"type\":\"text\",\"sessionID\":\"s\",\"part\":{{\"id\":\"{message}-text\",\"messageID\":\"{message}\",\"sessionID\":\"s\",\"type\":\"text\",\"text\":\"{text}\"}}}}\n"
+        ));
+    }
+    if let Some(reason) = reason {
+        out.push_str(&format!(
+            "{{\"type\":\"step_finish\",\"sessionID\":\"s\",\"part\":{{\"id\":\"{message}-finish\",\"messageID\":\"{message}\",\"sessionID\":\"s\",\"type\":\"step-finish\",\"reason\":\"{reason}\"}}}}\n"
+        ));
+    }
+    out
+}
+
+#[tokio::test]
+async fn an_unfinished_later_message_is_invalid_output() {
+    let stream = opencode_step("m1", Some("First."), Some("stop"))
+        + &opencode_step("m2", Some("Partial"), None);
+    let fake = fake_opencode(&stream, 0);
+    assert_eq!(
+        format(&fake, "text").await.unwrap_err(),
+        ProviderError::other(ProviderErrorCode::InvalidOutput)
+    );
+}
+
+#[tokio::test]
+async fn only_the_final_message_text_is_returned() {
+    let stream = opencode_step("m1", Some("Draft."), Some("stop"))
+        + &opencode_step("m2", Some("Final."), Some("stop"));
+    let fake = fake_opencode(&stream, 0);
+    assert_eq!(format(&fake, "text").await.unwrap(), "Final.");
+}
+
+#[tokio::test]
+async fn final_reason_other_than_stop_is_invalid_output() {
+    for reason in ["length", "content-filter", "other"] {
+        let fake = fake_opencode(&opencode_step("m", Some("Cut"), Some(reason)), 0);
+        assert_eq!(
+            format(&fake, "text").await.unwrap_err(),
+            ProviderError::other(ProviderErrorCode::InvalidOutput),
+            "reason {reason}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_error_the_run_recovered_from_is_not_a_failure() {
+    let stream = String::from(
+        "{\"type\":\"error\",\"sessionID\":\"s\",\"error\":{\"name\":\"APIError\",\"data\":{\"statusCode\":500}}}\n",
+    ) + &opencode_step("m", Some("Recovered."), Some("stop"));
+    let fake = fake_opencode(&stream, 0);
+    assert_eq!(format(&fake, "text").await.unwrap(), "Recovered.");
+}
+
+#[tokio::test]
+async fn an_unfinished_later_step_of_the_same_message_is_invalid_output() {
+    for later_text in [None, Some("Partial")] {
+        let stream = opencode_step("m1", Some("First."), Some("stop"))
+            + &opencode_step("m1", later_text, None)
+                .replace("m1-start", "m1-start2")
+                .replace("m1-text", "m1-text2");
+        let fake = fake_opencode(&stream, 0);
+        assert_eq!(
+            format(&fake, "text").await.unwrap_err(),
+            ProviderError::other(ProviderErrorCode::InvalidOutput),
+            "later text {later_text:?}"
+        );
+    }
+}

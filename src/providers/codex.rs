@@ -372,7 +372,7 @@ impl CliAdapter for CodexAdapter {
 /// classified; an agent message is returned only from a run that completed
 /// cleanly, and reasoning or progress text is never concatenated into it.
 pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = super::cli::stdout_text(output)?;
 
     let mut last_agent_message: Option<String> = None;
     let mut saw_turn_completed = false;
@@ -464,11 +464,18 @@ fn classify_failure(messages: &[impl AsRef<str>]) -> ProviderError {
     if any_contains(&["401", "incorrect api key"]) {
         return ProviderError::other(ProviderErrorCode::AuthenticationRejected);
     }
+    // Quota exhaustion usually arrives as HTTP 429 too, so it is checked
+    // before the generic rate limit. OpenAI's wording is "You exceeded your
+    // current quota".
+    if any_contains(&["usage limit"])
+        || any_contains(&["quota exceeded"])
+        || any_contains(&["exceeded your current quota"])
+        || any_contains(&["insufficient_quota"])
+    {
+        return ProviderError::QuotaExceeded { retry_after: None };
+    }
     if any_contains(&["429"]) || any_contains(&["rate limit"]) {
         return ProviderError::RateLimited { retry_after: None };
-    }
-    if any_contains(&["usage limit"]) || any_contains(&["quota exceeded"]) {
-        return ProviderError::QuotaExceeded { retry_after: None };
     }
     ProviderError::other(ProviderErrorCode::NonzeroExit)
 }
@@ -615,6 +622,16 @@ mod tests {
         );
         assert_eq!(
             classify_failure(&["usage limit reached, try again tomorrow"]),
+            ProviderError::QuotaExceeded { retry_after: None }
+        );
+        assert_eq!(
+            classify_failure(&[
+                "unexpected status 429 Too Many Requests: You exceeded your current quota"
+            ]),
+            ProviderError::QuotaExceeded { retry_after: None }
+        );
+        assert_eq!(
+            classify_failure(&["429: insufficient_quota"]),
             ProviderError::QuotaExceeded { retry_after: None }
         );
         assert_eq!(
