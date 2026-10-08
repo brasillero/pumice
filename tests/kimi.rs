@@ -253,11 +253,11 @@ async fn a_retry_the_run_recovers_from_is_not_a_failure() {
 }
 
 #[tokio::test]
-async fn tool_fixture_is_rejected_even_with_exit_zero() {
+async fn tool_records_are_ignored_and_assistant_text_is_the_answer() {
     let fake = fake_kimi(&fixture("kimi/tool.jsonl"), 0);
     assert_eq!(
-        format(&fake, "text").await.unwrap_err(),
-        ProviderError::other(ProviderErrorCode::UnexpectedToolActivity)
+        format(&fake, "text").await.as_deref(),
+        Ok("Let me list the files first.")
     );
 }
 
@@ -508,14 +508,14 @@ async fn null_or_empty_tool_calls_are_not_tool_activity() {
 }
 
 #[tokio::test]
-async fn null_content_with_tool_calls_is_tool_activity() {
+async fn a_tool_call_without_text_and_a_failed_exit_is_a_failure() {
     let stream = format!(
         "{VERSION_LINE}\n{{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{{\"id\":\"t\",\"type\":\"function\"}}]}}\n"
     );
     let fake = fake_kimi(&stream, 1);
     assert_eq!(
         format(&fake, "text").await.unwrap_err(),
-        ProviderError::other(ProviderErrorCode::UnexpectedToolActivity)
+        ProviderError::other(ProviderErrorCode::NonzeroExit)
     );
 }
 
