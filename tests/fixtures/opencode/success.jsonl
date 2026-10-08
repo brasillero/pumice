@@ -1,3 +1,0 @@
-{"type":"step_start","timestamp":1760000000000,"sessionID":"ses_pumicefixture1","part":{"id":"prt_1","messageID":"msg_1","sessionID":"ses_pumicefixture1","type":"step-start"}}
-{"type":"text","timestamp":1760000000500,"sessionID":"ses_pumicefixture1","part":{"id":"prt_2","messageID":"msg_1","sessionID":"ses_pumicefixture1","type":"text","text":"Formatted text.","time":{"start":1760000000100,"end":1760000000500}}}
-{"type":"step_finish","timestamp":1760000000600,"sessionID":"ses_pumicefixture1","part":{"id":"prt_3","messageID":"msg_1","sessionID":"ses_pumicefixture1","type":"step-finish","reason":"stop","cost":0,"tokens":{"input":1,"output":1,"reasoning":0,"cache":{"read":0,"write":0}}}}

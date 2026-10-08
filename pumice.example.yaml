@@ -78,21 +78,6 @@ providers:
     #   openai_base_url: "https://your-existing-gateway.example/v1"
     options: {}
 
-  # OpenCode is off. Enabling it requires an explicit provider/model: with
-  # no configured provider, OpenCode silently answers through a hosted
-  # default model. Upstream terms vary; startup customizations and CLI-owned
-  # transcript retention remain unverified.
-  - id: opencode
-    enabled: false
-    # model: opencode/<free-model>
-    # timeout_secs: 30
-    # OpenCode accepts no environment overrides; the adapter owns the child
-    # environment (an inline deny-all configuration).
-    env: {}
-    # The only supported option selects a provider-specific reasoning
-    # variant, for example variant: low.
-    options: {}
-
   # Kiro (AWS) is off and unverified in this version. Enabling it requires an
   # explicit model and accepts no adapter options or env overrides. The
   # adapter supplies a workspace-local no-tools agent; your own Kiro login

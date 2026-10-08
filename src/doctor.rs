@@ -277,7 +277,6 @@ mod tests {
                 found(),
                 Version::Parsed("0.160.0".to_owned()),
             ),
-            status("opencode", false, Found::Missing, Version::Unavailable),
             status("antigravity", false, found(), Version::Skipped),
             status("generic", false, Found::NotApplicable, Version::Skipped),
             status("kimi", false, Found::Missing, Version::Unavailable),
@@ -296,10 +295,6 @@ mod tests {
         );
         assert!(
             report.contains("codex: enabled, found 0.160.0\n"),
-            "{report}"
-        );
-        assert!(
-            report.contains("opencode: disabled, missing (install: npm install -g opencode-ai)\n"),
             "{report}"
         );
         assert!(
@@ -373,11 +368,11 @@ mod tests {
     #[test]
     fn render_shows_an_enabled_provider_without_warnings() {
         let mut statuses = full_scan();
-        statuses[2] = status("opencode", true, found(), Version::Unavailable);
+        statuses[4] = status("kimi", true, found(), Version::Unavailable);
         let report = render(&ConfigSource::BuiltInDefaults, &statuses);
 
         assert!(
-            report.contains("opencode: enabled, found (version unavailable)\n"),
+            report.contains("kimi: enabled, found (version unavailable)\n"),
             "{report}"
         );
         assert!(!report.contains("warning"), "{report}");
@@ -387,7 +382,7 @@ mod tests {
     #[test]
     fn render_reports_an_enabled_generic_as_a_local_endpoint() {
         let mut statuses = full_scan();
-        statuses[4] = status("generic", true, Found::NotApplicable, Version::Skipped);
+        statuses[3] = status("generic", true, Found::NotApplicable, Version::Skipped);
         let report = render(&ConfigSource::BuiltInDefaults, &statuses);
 
         assert!(

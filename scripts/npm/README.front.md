@@ -72,12 +72,11 @@ to local services.
 
 ## AI CLIs
 
-Pumice formats text **through the official CLIs of your subscriptions**
-(currently Claude, Codex and OpenCode), or a local OpenAI-compatible service such as Ollama or LM Studio.
-Install and authenticate those separately — the npm package does not install
-or log into them, and it cannot provide accounts. (Antigravity support is
-dormant and Kimi is not integrated yet.) If every provider fails or times
-out, Pumice returns the raw text unchanged.
+Pumice relays your dictation app's request **through the official CLIs of
+your subscriptions** (currently Claude, Codex and Kimi). Install and
+authenticate those separately — the npm package does not install or log into
+them, and it cannot provide accounts. If the selected provider fails or times
+out, Pumice returns the original text unchanged.
 
 ## Upgrade
 

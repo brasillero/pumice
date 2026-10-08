@@ -182,14 +182,12 @@ async fn generic_is_never_resolved_or_spawned() {
 async fn detection_covers_every_registered_provider_enabled_or_not() {
     let claude = FakeCli::new(json!({"stdout": "2.1.288 (Claude Code)"}));
     let codex = FakeCli::new(json!({"stdout": "codex-cli 0.160.0"}));
-    let opencode = FakeCli::new(json!({"stdout": "1.18.34"}));
     let antigravity = FakeCli::new(json!({}));
     let kiro = FakeCli::new(json!({"stdout": "2.24.1"}));
     let config = load(&format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{0}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{1}'\n  - id: opencode\n    enabled: false\n    binary: '{2}'\n  - id: antigravity\n    enabled: false\n    binary: '{3}'\n  - id: kiro\n    enabled: false\n    binary: '{4}'\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{0}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{1}'\n  - id: antigravity\n    enabled: false\n    binary: '{2}'\n  - id: kiro\n    enabled: false\n    binary: '{3}'\n",
         claude.path().display(),
         codex.path().display(),
-        opencode.path().display(),
         antigravity.path().display(),
         kiro.path().display(),
     ));
@@ -206,11 +204,8 @@ async fn detection_covers_every_registered_provider_enabled_or_not() {
     assert_eq!(status("claude").version, Version::Parsed("2.1.288".into()));
     assert_eq!(status("codex").version, Version::Parsed("0.160.0".into()));
     // Disabled but still probed, so `doctor` can show it later.
-    assert!(!status("opencode").enabled);
-    assert_eq!(
-        status("opencode").version,
-        Version::Parsed("1.18.34".into())
-    );
+    assert!(!status("kiro").enabled);
+    assert_eq!(status("kiro").version, Version::Parsed("2.24.1".into()));
     // PATH-only: resolved, never spawned, no version.
     assert!(matches!(status("antigravity").found, Found::Found(_)));
     assert_eq!(status("antigravity").version, Version::Skipped);

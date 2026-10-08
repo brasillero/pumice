@@ -252,10 +252,13 @@ fn validate(
             ));
         };
         let Some(descriptor) = descriptors.iter().find(|d| d.id == id.value) else {
-            return Err(ConfigError::at(
-                id.referenced,
-                format!("\"{}\" is not a known provider", id.value),
-            ));
+            // Removed providers get a precise message instead of "unknown".
+            let message = if id.value == "opencode" {
+                "\"opencode\" support was removed; delete this entry".to_owned()
+            } else {
+                format!("\"{}\" is not a known provider", id.value)
+            };
+            return Err(ConfigError::at(id.referenced, message));
         };
         if configured.iter().any(|existing| existing.id == id.value) {
             return Err(ConfigError::at(
