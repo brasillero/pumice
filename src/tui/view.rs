@@ -143,10 +143,9 @@ fn table_row(req: &RequestView, now: Instant) -> Row<'_> {
         .map(|m| truncate_model(m))
         .unwrap_or_else(|| "-".to_owned());
     let (state_text, state_color) = state_render(req.state());
-    let wait = fmt_duration_opt(req.wait(now), req.queued.is_some() && req.started.is_none());
-    let cli = fmt_duration_opt(req.cli(now), req.started.is_some() && req.attempt.is_none());
-    let total_live = req.responded.is_none() && req.dropped.is_none();
-    let total = fmt_duration_opt(req.total(now), total_live);
+    let wait = fmt_duration_opt(req.wait(now), req.waiting_in_line());
+    let cli = fmt_duration_opt(req.cli(now), req.cli_running());
+    let total = fmt_duration_opt(req.total(now), !req.finished());
     let detail = req
         .responded
         .as_ref()

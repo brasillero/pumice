@@ -28,53 +28,62 @@ pub struct Info {
 /// Runs the terminal view until the event channel disconnects or the user
 /// quits. Sends on `stop` the first time the user asks to quit; the service
 /// then drains and the receiver disconnects, which ends the loop cleanly.
+/// The terminal is restored on every return path; a panic restores it
+/// through the hook `ratatui::init` installs.
 pub fn run(
     events: mpsc::Receiver<MonitorEvent>,
     info: Info,
     stop: tokio::sync::oneshot::Sender<()>,
 ) -> io::Result<()> {
     let mut terminal = ratatui::init();
+    let result = run_loop(&mut terminal, events, info, stop);
+    ratatui::restore();
+    result
+}
+
+fn run_loop(
+    terminal: &mut ratatui::DefaultTerminal,
+    events: mpsc::Receiver<MonitorEvent>,
+    info: Info,
+    stop: tokio::sync::oneshot::Sender<()>,
+) -> io::Result<()> {
     let mut app = app::App::new(info);
     let mut stop = Some(stop);
-    let mut quitting = false;
-
-    let result = 'main: loop {
+    loop {
         // Drain every pending event before drawing.
         loop {
             match events.try_recv() {
                 Ok(event) => app.apply(event),
                 Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => break 'main Ok(()),
+                Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
             }
         }
 
         let now = std::time::Instant::now();
-        if let Err(error) = terminal.draw(|frame| view::draw(frame, &app, now)) {
-            break 'main Err(error);
-        }
+        terminal.draw(|frame| view::draw(frame, &app, now))?;
 
-        if event::poll(Duration::from_millis(200))?
-            && let Event::Key(key) = event::read()?
-        {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-            match app.key(key) {
-                app::Action::None => {}
-                app::Action::Quit => {
-                    if let Some(sender) = stop.take() {
-                        let _ = sender.send(());
-                        app.set_stopping();
-                        quitting = true;
-                    } else if quitting {
-                        ratatui::restore();
-                        std::process::exit(130);
-                    }
+        if !event::poll(Duration::from_millis(200))? {
+            continue;
+        }
+        // Windows reports key releases too; only presses count.
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        if let app::Action::Quit = app.key(key) {
+            match stop.take() {
+                Some(sender) => {
+                    let _ = sender.send(());
+                    app.set_stopping();
+                }
+                // A second quit while draining: leave at once.
+                None => {
+                    ratatui::restore();
+                    std::process::exit(130);
                 }
             }
         }
-    };
-
-    ratatui::restore();
-    result
+    }
 }

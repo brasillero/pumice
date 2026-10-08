@@ -360,3 +360,68 @@ async fn client_disconnect_while_cli_runs_emits_dropped() {
     let last = events.last().expect("at least one event");
     assert!(matches!(last.kind, EventKind::Dropped));
 }
+
+/// The detail of the diagnostic carried by the `AttemptEnded` event.
+fn diagnostic_detail(events: &[Event]) -> Option<String> {
+    events.iter().find_map(|e| match &e.kind {
+        EventKind::AttemptEnded { diagnostic, .. } => diagnostic
+            .as_ref()
+            .map(|diagnostic| diagnostic.detail.clone()),
+        _ => None,
+    })
+}
+
+#[tokio::test]
+async fn diagnostic_output_reaches_events_only_with_the_debug_log() {
+    // The failing CLI echoes the dictation on stderr, as a real CLI might.
+    let echoing_failure = json!({
+        "stderr": "error while handling: ditado-secreto",
+        "exit_code": 1,
+    });
+
+    let (port, monitor, _fake) = start_monitored_server(
+        CLAUDE_AT_FAKE,
+        echoing_failure.clone(),
+        Arc::new(DebugLog::disabled()),
+    )
+    .await;
+    let (status, _) = raw_http(
+        port,
+        http_request(
+            "/v1/chat/completions",
+            &handy_request("claude", "ditado-secreto"),
+        ),
+    )
+    .await;
+    assert_eq!(status, 502);
+    assert_eq!(
+        diagnostic_detail(&monitor.events()).as_deref(),
+        Some(""),
+        "debug log off: the diagnostic keeps only its safe fields"
+    );
+
+    let dir = TempDir::new().expect("temp dir");
+    let debug_log = Arc::new(
+        DebugLog::open(&config::DebugLogSettings {
+            enabled: true,
+            path: dir.path().join("debug.log"),
+        })
+        .expect("open debug log"),
+    );
+    let (port, monitor, _fake) =
+        start_monitored_server(CLAUDE_AT_FAKE, echoing_failure, debug_log).await;
+    let (status, _) = raw_http(
+        port,
+        http_request(
+            "/v1/chat/completions",
+            &handy_request("claude", "ditado-secreto"),
+        ),
+    )
+    .await;
+    assert_eq!(status, 502);
+    let detail = diagnostic_detail(&monitor.events()).expect("a diagnostic");
+    assert!(
+        detail.contains("ditado-secreto"),
+        "debug log on: the CLI output is kept: {detail:?}"
+    );
+}

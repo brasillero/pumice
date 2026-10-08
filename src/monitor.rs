@@ -69,7 +69,9 @@ pub enum EventKind {
         provider: &'static str,
         model: String,
     },
-    /// The provider run and output cleanup ended.
+    /// The provider run and output cleanup ended. The diagnostic's `detail`
+    /// (CLI output, which can quote the dictation) is empty unless text is
+    /// allowed; its other fields are safe.
     AttemptEnded {
         result: AttemptResult,
         diagnostic: Option<Diagnostic>,

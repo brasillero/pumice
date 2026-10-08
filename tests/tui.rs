@@ -407,3 +407,118 @@ fn details_pane_hides_text_when_debug_log_is_off_and_shows_it_when_on() {
         );
     }
 }
+
+/// The whole screen as text, one line per row.
+fn screen(app: &App, now: Instant) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+    terminal
+        .draw(|frame| view::draw(frame, app, now))
+        .expect("draw");
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn a_dropped_request_stops_its_clocks() {
+    let base = Instant::now();
+    let mut app = App::new(info(false));
+    // #1 was running its CLI when the client went away.
+    app.apply(arrived(1, base, 0));
+    app.apply(started(1, base, 1000));
+    app.apply(dropped(1, base, 2000));
+    // #2 was still waiting in line.
+    app.apply(arrived(2, base, 0));
+    app.apply(queued(2, base, 500));
+    app.apply(dropped(2, base, 1500));
+
+    let later = base + Duration::from_secs(10);
+    let rows = app.rows();
+    let (second, first) = (rows[0], rows[1]);
+    assert_eq!(first.cli(later), Some(Duration::from_secs(1)));
+    assert_eq!(first.total(later), Some(Duration::from_secs(2)));
+    assert_eq!(second.wait(later), Some(Duration::from_secs(1)));
+    assert_eq!(app.running(), 0);
+    assert_eq!(app.queued(), 0);
+
+    let screen = screen(&app, later);
+    assert!(
+        !screen.contains('…'),
+        "no live marker on finished rows:\n{screen}"
+    );
+    assert!(screen.contains("1.0s"), "{screen}");
+}
+
+#[test]
+fn the_cap_skips_unfinished_requests_and_applies_when_requests_finish() {
+    let base = Instant::now();
+    let mut app = App::new(info(false));
+    // The oldest request is still running while 699 quick ones finish.
+    app.apply(arrived(1, base, 0));
+    app.apply(started(1, base, 1));
+    for n in 2..=700 {
+        app.apply(arrived(n, base, n));
+        app.apply(responded(n, base, n, 200, "formatted", None));
+    }
+    let rows = app.rows();
+    assert_eq!(rows.len(), 500);
+    assert!(
+        rows.iter().any(|r| r.number == 1),
+        "the running request stays"
+    );
+    assert_eq!(rows[0].number, 700);
+
+    // A burst of unfinished requests beyond the cap is trimmed as they end,
+    // with no further arrival.
+    let mut app = App::new(info(false));
+    for n in 1..=600 {
+        app.apply(arrived(n, base, n));
+    }
+    assert_eq!(app.rows().len(), 600, "nothing finished: everything stays");
+    for n in 1..=600 {
+        app.apply(responded(n, base, 1000 + n, 200, "formatted", None));
+    }
+    assert_eq!(app.rows().len(), 500);
+    assert!(app.rows().iter().all(|r| r.number > 100));
+}
+
+#[test]
+fn filtering_keeps_a_visible_row_selected() {
+    let base = Instant::now();
+    let mut app = App::new(info(false));
+    app.apply(arrived(1, base, 0));
+    app.apply(parsed(1, base, 1, "claude", "ola"));
+    app.apply(responded(1, base, 2, 504, "timed out", None));
+    app.apply(arrived(2, base, 10));
+    app.apply(parsed(2, base, 11, "claude", "ola"));
+    app.apply(responded(2, base, 12, 200, "formatted", None));
+    assert_eq!(app.selected().map(|r| r.number), Some(2));
+
+    // Only the older failure is visible: it becomes the selection.
+    app.key(char_key('f'));
+    assert_eq!(app.filter_name(), "failed");
+    assert_eq!(app.selected().map(|r| r.number), Some(1));
+
+    // A new request hidden by the filter does not take the selection away.
+    app.apply(arrived(3, base, 20));
+    app.apply(parsed(3, base, 21, "claude", "ola"));
+    assert_eq!(app.selected().map(|r| r.number), Some(1));
+    // Once it fails it is visible, and the view follows the newest row.
+    app.apply(responded(3, base, 22, 502, "failed", None));
+    assert_eq!(app.selected().map(|r| r.number), Some(3));
+
+    // A search that hides the selection moves it to a visible row.
+    app.key(char_key('/'));
+    for c in "timed".chars() {
+        app.key(char_key(c));
+    }
+    assert_eq!(app.selected().map(|r| r.number), Some(1));
+    app.key(key(KeyCode::Esc));
+    assert!(app.selected().is_some());
+}

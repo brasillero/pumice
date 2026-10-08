@@ -112,14 +112,34 @@ impl RequestView {
         Some(end.duration_since(queued))
     }
 
-    /// Time spent inside the provider CLI, if it started.
+    /// Time spent inside the provider CLI, if it started: until the run
+    /// ended, or until the request got an answer or went away (which
+    /// cancels the run).
     pub fn cli(&self, now: Instant) -> Option<Duration> {
         let started = self.started.as_ref()?;
-        if let Some(attempt) = &self.attempt {
-            Some(attempt.at.duration_since(started.at))
-        } else {
-            Some(now.duration_since(started.at))
-        }
+        let end = self
+            .attempt
+            .as_ref()
+            .map(|attempt| attempt.at)
+            .or(self.responded.as_ref().map(|responded| responded.at))
+            .or(self.dropped)
+            .unwrap_or(now);
+        Some(end.duration_since(started.at))
+    }
+
+    /// Whether the request got an answer or went away.
+    pub fn finished(&self) -> bool {
+        self.responded.is_some() || self.dropped.is_some()
+    }
+
+    /// Whether the request is still waiting in line.
+    pub fn waiting_in_line(&self) -> bool {
+        self.queued.is_some() && self.started.is_none() && !self.finished()
+    }
+
+    /// Whether its CLI is still running.
+    pub fn cli_running(&self) -> bool {
+        self.started.is_some() && self.attempt.is_none() && !self.finished()
     }
 
     /// Total time since the request arrived.
@@ -154,6 +174,8 @@ pub enum Action {
 pub struct App {
     requests: Vec<RequestView>,
     selection: Option<u64>,
+    /// Whether the selection tracks the newest visible request.
+    follow: bool,
     filter: Filter,
     search: String,
     search_mode: bool,
@@ -169,6 +191,7 @@ impl App {
         App {
             requests: Vec::new(),
             selection: None,
+            follow: true,
             filter: Filter::All,
             search: String::new(),
             search_mode: false,
@@ -216,19 +239,13 @@ impl App {
 
     /// Number of unfinished requests still in the app.
     pub fn waiting(&self) -> usize {
-        self.requests
-            .iter()
-            .filter(|r| r.responded.is_none() && r.dropped.is_none())
-            .count()
+        self.requests.iter().filter(|r| !r.finished()).count()
     }
 
     /// Applies one monitor event, updating or creating the request it belongs to.
     pub fn apply(&mut self, event: Event) {
         match event.kind {
             EventKind::Arrived => {
-                let follow = self
-                    .selection
-                    .is_none_or(|sel| self.requests.first().is_none_or(|r| r.number == sel));
                 let view = RequestView {
                     number: event.number,
                     arrived: event.at,
@@ -243,10 +260,6 @@ impl App {
                     dropped: None,
                 };
                 self.requests.insert(0, view);
-                if follow {
-                    self.selection = Some(event.number);
-                }
-                self.trim_finished();
             }
             EventKind::Parsed { model, input } => {
                 if let Some(req) = self.request_mut(event.number) {
@@ -300,6 +313,8 @@ impl App {
                 }
             }
         }
+        self.trim_finished();
+        self.sync_selection();
     }
 
     /// Handles one keyboard event.
@@ -323,6 +338,7 @@ impl App {
                 KeyCode::Char(c) => self.search.push(c),
                 _ => {}
             }
+            self.sync_selection();
             return Action::None;
         }
         match key.code {
@@ -358,6 +374,7 @@ impl App {
             }
             KeyCode::Char('f') => {
                 self.next_filter();
+                self.sync_selection();
                 Action::None
             }
             KeyCode::Char('/') => {
@@ -367,6 +384,7 @@ impl App {
             KeyCode::Esc => {
                 self.filter = Filter::All;
                 self.search.clear();
+                self.sync_selection();
                 Action::None
             }
             _ => Action::None,
@@ -386,28 +404,12 @@ impl App {
 
     /// Number of provider runs currently active.
     pub fn running(&self) -> usize {
-        self.requests
-            .iter()
-            .filter(|r| {
-                r.started.is_some()
-                    && r.attempt.is_none()
-                    && r.responded.is_none()
-                    && r.dropped.is_none()
-            })
-            .count()
+        self.requests.iter().filter(|r| r.cli_running()).count()
     }
 
     /// Number of requests queued and not yet started.
     pub fn queued(&self) -> usize {
-        self.requests
-            .iter()
-            .filter(|r| {
-                r.queued.is_some()
-                    && r.started.is_none()
-                    && r.responded.is_none()
-                    && r.dropped.is_none()
-            })
-            .count()
+        self.requests.iter().filter(|r| r.waiting_in_line()).count()
     }
 
     /// Number of completed 2xx responses.
@@ -478,18 +480,31 @@ impl App {
         self.requests.iter_mut().find(|r| r.number == number)
     }
 
+    /// Drops the oldest finished requests beyond [`MAX_REQUESTS`]; requests
+    /// still in progress are always kept.
     fn trim_finished(&mut self) {
         while self.requests.len() > MAX_REQUESTS {
-            let last = self.requests.last().expect("non-empty");
-            if last.responded.is_some() || last.dropped.is_some() {
-                let removed = self.requests.pop().expect("non-empty");
-                if self.selection == Some(removed.number) {
-                    self.selection = self.requests.first().map(|r| r.number);
-                }
-            } else {
+            let Some(oldest_finished) = self.requests.iter().rposition(RequestView::finished)
+            else {
                 break;
-            }
+            };
+            self.requests.remove(oldest_finished);
         }
+    }
+
+    /// Keeps the selection on a visible row: the newest one while following,
+    /// otherwise the same request if it is still visible, else the newest.
+    fn sync_selection(&mut self) {
+        let rows = self.rows();
+        let newest = rows.first().map(|r| r.number);
+        let visible = rows.iter().any(|r| Some(r.number) == self.selection);
+        let selection = if self.follow || !visible {
+            newest
+        } else {
+            self.selection
+        };
+        self.selection = selection;
+        self.follow = selection == newest;
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -503,17 +518,22 @@ impl App {
             .unwrap_or(0);
         let new_index = (current as isize + delta).clamp(0, rows.len() as isize - 1) as usize;
         self.selection = Some(rows[new_index].number);
+        self.follow = new_index == 0;
     }
 
     fn select_first(&mut self) {
         if let Some(first) = self.rows().first() {
             self.selection = Some(first.number);
+            self.follow = true;
         }
     }
 
     fn select_last(&mut self) {
-        if let Some(last) = self.rows().last() {
-            self.selection = Some(last.number);
+        let rows = self.rows();
+        if let Some(last) = rows.last() {
+            let (number, only) = (last.number, rows.len() == 1);
+            self.selection = Some(number);
+            self.follow = only;
         }
     }
 

@@ -990,53 +990,57 @@ async fn progress_records_started_and_attempt_ended_for_success() {
 
 #[tokio::test]
 async fn progress_records_queued_before_started_when_slots_are_full() {
-    // One slot: the first run sleeps long enough for the second to arrive
-    // and queue, then the second records queued before it finally starts.
-    let (pipeline, fake) = pipeline(
-        "max_parallel: 1\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n",
-        json!({
-            "stdout": success_envelope("Olá."),
-            "exit_code": 0,
-            "sleep_ms": 200,
-        }),
+    // One slot, held by a first run parked at a barrier until the second
+    // request has reported waiting in line: no timing involved.
+    let gate = Arc::new(tokio::sync::Barrier::new(2));
+    let alpha = TestProvider::new(
+        "alpha",
+        vec![
+            Step::Gate(Arc::clone(&gate)),
+            Step::Ready("second".to_owned()),
+        ],
     );
-    let pipeline = Arc::new(pipeline);
-    let progress = RecordingProgress::new();
+    let config = direct_config(
+        Duration::from_secs(10),
+        vec![("alpha", test_settings(true))],
+    );
+    let pipeline = Arc::new(Pipeline::new(&config, vec![alpha.clone()]));
 
     let first = {
         let pipeline = Arc::clone(&pipeline);
         tokio::spawn(async move {
             pipeline
-                .format(&handy_request(Some("claude"), "ola"), Instant::now())
+                .format(&handy_request(Some("alpha"), "ola"), Instant::now())
                 .await
         })
     };
+    until_called(&alpha, 1).await;
 
-    // Wait until the first request has taken the only slot.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !fake.report_path().exists() && std::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(10)).await;
+    let progress = Arc::new(RecordingProgress::new());
+    let second = {
+        let (pipeline, progress) = (Arc::clone(&pipeline), Arc::clone(&progress));
+        tokio::spawn(async move {
+            pipeline
+                .format_observed(
+                    &handy_request(Some("alpha"), "outro ditado"),
+                    Instant::now(),
+                    &*progress,
+                )
+                .await
+        })
+    };
+    while progress.steps().is_empty() {
+        tokio::task::yield_now().await;
     }
-    assert!(fake.report_path().exists(), "the first run started");
+    assert_eq!(progress.steps(), ["queued"], "waits while the slot is held");
 
-    let second = pipeline
-        .format_observed(
-            &handy_request(Some("claude"), "outro ditado"),
-            Instant::now(),
-            &progress,
-        )
-        .await;
-
-    assert_eq!(second.kind, OutcomeKind::Formatted);
-    let _ = first.await;
-    let steps = progress.steps();
-    assert!(
-        steps.iter().any(|s| s == "queued"),
-        "queued recorded: {steps:?}"
+    gate.wait().await;
+    assert_eq!(first.await.expect("first").kind, OutcomeKind::Formatted);
+    assert_eq!(second.await.expect("second").text, "second");
+    assert_eq!(
+        progress.steps(),
+        ["queued", "started:alpha", "attempt_ended:formatted"]
     );
-    let queued_pos = steps.iter().position(|s| s == "queued").unwrap();
-    let started_pos = steps.iter().position(|s| s == "started:claude").unwrap();
-    assert!(queued_pos < started_pos, "queued before started: {steps:?}");
 }
 
 #[tokio::test]

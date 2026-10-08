@@ -21,6 +21,7 @@ use tokio::time::Instant;
 use crate::logging::DebugRecord;
 use crate::monitor::EventKind;
 use crate::pipeline::{FormatOutcome, OutcomeKind, Progress};
+use crate::providers::diagnostic::Diagnostic;
 use crate::request::{ChatCompletionRequest, extract_request};
 use crate::time::now_unix_secs;
 
@@ -119,12 +120,23 @@ impl Progress for RequestProgress<'_> {
         );
     }
 
+    /// The diagnostic's `detail` quotes the CLI's output, which can echo the
+    /// dictation, so it is kept only when text is allowed.
     fn attempt_ended(&self, attempt: &crate::pipeline::Attempt) {
+        let text_allowed = self.state.text_allowed();
+        let diagnostic = attempt.diagnostic.as_ref().map(|diagnostic| Diagnostic {
+            detail: if text_allowed {
+                diagnostic.detail.clone()
+            } else {
+                String::new()
+            },
+            ..diagnostic.clone()
+        });
         self.state.emit(
             self.number,
             EventKind::AttemptEnded {
                 result: attempt.result,
-                diagnostic: attempt.diagnostic.clone(),
+                diagnostic,
             },
         );
     }

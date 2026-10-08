@@ -406,15 +406,23 @@ async fn run_service(loaded: LoadedConfig, plain: bool) -> ExitCode {
     )
     .await;
 
-    if let Err(error) = view_thread
-        .join()
-        .unwrap_or_else(|_| Err(io::Error::other("live view thread panicked")))
-    {
-        eprintln!("error: live view failed: {error}");
-    }
+    // A view that fails or panics drops `stop`, which also stops the
+    // service; that unexpected stop is an error, not a clean exit.
+    let view_failed = match view_thread.join() {
+        Ok(Ok(())) => false,
+        Ok(Err(error)) => {
+            eprintln!("error: live view failed: {error}");
+            true
+        }
+        Err(_) => {
+            eprintln!("error: live view failed: the view thread panicked");
+            true
+        }
+    };
 
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) if !view_failed => ExitCode::SUCCESS,
+        Ok(()) => ExitCode::from(1),
         Err(error) => {
             eprintln!("error: the service stopped unexpectedly: {error}");
             ExitCode::from(1)
