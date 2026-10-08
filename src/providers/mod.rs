@@ -52,7 +52,7 @@ pub struct ProviderLocations {
 /// What the registry knows about one provider.
 ///
 /// The descriptor owns the provider's defaults and the validation of its
-/// option map, so a new provider brings its own rules with it. Enablement is
+/// settings, so a new provider brings its own rules with it. Enablement is
 /// never the descriptor's business: the configuration file decides, and
 /// nothing is enabled unless an entry says `enabled: true`.
 #[derive(Clone, Copy)]
@@ -65,8 +65,7 @@ pub struct ProviderDescriptor {
     pub build: BuildFn,
     /// Validates the provider's fully defaulted settings after overrides.
     /// Runs for every listed entry, enabled or not, so it can relate fields
-    /// `validate_options` sees separately (such as rejecting an enabled
-    /// provider without a `model`). Errors should point at the most
+    /// (such as rejecting an enabled provider without a `model`). Errors should point at the most
     /// specific [`ProviderLocations`] entry available.
     pub validate_settings: ValidateSettingsFn,
     /// How startup detection checks this provider's presence (S2.8).
