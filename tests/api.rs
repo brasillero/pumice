@@ -254,9 +254,33 @@ fn response_is_complete(bytes: &[u8]) -> bool {
         return body.len() >= length;
     }
     if head.contains("transfer-encoding: chunked") {
-        return body.ends_with(b"0\r\n\r\n");
+        return chunked_body_is_complete(body);
     }
     false
+}
+
+/// True when `body` is a whole chunked body: every chunk has the size its
+/// header announces, ending with the zero-size chunk and the final CRLF.
+fn chunked_body_is_complete(mut body: &[u8]) -> bool {
+    loop {
+        let Some(line_end) = body.windows(2).position(|w| w == b"\r\n") else {
+            return false;
+        };
+        let size_text = String::from_utf8_lossy(&body[..line_end]);
+        let size_text = size_text.split(';').next().unwrap_or_default().trim();
+        let Ok(size) = usize::from_str_radix(size_text, 16) else {
+            return false;
+        };
+        body = &body[line_end + 2..];
+        if size == 0 {
+            // No trailers are sent: the body ends with an empty line.
+            return body.starts_with(b"\r\n");
+        }
+        if body.len() < size + 2 || &body[size..size + 2] != b"\r\n" {
+            return false;
+        }
+        body = &body[size + 2..];
+    }
 }
 
 #[test]
@@ -271,6 +295,13 @@ fn response_completeness_follows_its_framing() {
         b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n"
     ));
     assert!(!response_is_complete(b"HTTP/1.1 200 OK\r\ncontent-le"));
+    // A chunk announcing 16 bytes that holds two is truncated.
+    assert!(!response_is_complete(
+        b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n10\r\n\r\n"
+    ));
+    assert!(!response_is_complete(
+        b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\n{}\r\n"
+    ));
 }
 
 /// Sends `request` verbatim over raw HTTP/1.1 and reads the whole response.
