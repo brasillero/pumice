@@ -121,7 +121,7 @@ async fn claude_uses_the_exact_restricted_argv() {
             "--effort",
             "low",
             "--settings",
-            "{\"env\":{\"CLAUDE_CODE_DISABLE_FAST_MODE\":\"1\",\"CLAUDE_CODE_DISABLE_THINKING\":\"\",\"CLAUDE_CODE_EFFORT_LEVEL\":\"low\",\"MAX_THINKING_TOKENS\":\"0\"},\"fastMode\":false}",
+            "{\"env\":{\"ANTHROPIC_BEDROCK_SERVICE_TIER\":\"default\",\"CLAUDE_CODE_DISABLE_FAST_MODE\":\"1\",\"CLAUDE_CODE_DISABLE_THINKING\":\"\",\"CLAUDE_CODE_EFFORT_LEVEL\":\"low\",\"MAX_THINKING_TOKENS\":\"0\"},\"fastMode\":false}",
             "--output-format",
             "json",
             "--system-prompt-file",

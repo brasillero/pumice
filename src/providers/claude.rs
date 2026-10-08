@@ -76,12 +76,14 @@ fn build(
 /// Environment pins for the cheapest call (owner rule): thinking off where
 /// the model allows it, the lowest effort, no fast mode, and the thinking
 /// compatibility switch cleared so an inherited `1` cannot turn "off" into
-/// "upstream default".
-const CHEAPEST_ENV: [(&str, &str); 4] = [
+/// "upstream default". Bedrock's service tier is pinned to standard too: the
+/// fast-mode switch does not cover an inherited Bedrock `priority` tier.
+const CHEAPEST_ENV: [(&str, &str); 5] = [
     ("MAX_THINKING_TOKENS", "0"),
     ("CLAUDE_CODE_EFFORT_LEVEL", "low"),
     ("CLAUDE_CODE_DISABLE_FAST_MODE", "1"),
     ("CLAUDE_CODE_DISABLE_THINKING", ""),
+    ("ANTHROPIC_BEDROCK_SERVICE_TIER", "default"),
 ];
 
 /// The per-call `--settings` layer: fast mode off plus [`CHEAPEST_ENV`].
