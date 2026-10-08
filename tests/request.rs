@@ -102,41 +102,18 @@ fn model_is_trimmed_and_empty_becomes_none() {
     }
 }
 
-// Plain dictation: Pumice's own envelope.
+// Plain text: passed through unchanged, with no envelope added.
 
 #[test]
-fn plain_user_text_is_wrapped_in_pumice_envelope() {
-    let extracted = extract_content(r#""Olá, mundo!""#).expect("request must extract");
-    assert_eq!(extracted.before_text, "<transcript>\n");
-    assert_eq!(extracted.text, "Olá, mundo!");
-    assert_eq!(extracted.after_text, "\n</transcript>");
-    assert_eq!(extracted.raw_text, "Olá, mundo!");
-    assert_eq!(
-        format!(
-            "{}{}{}",
-            extracted.before_text, extracted.text, extracted.after_text
-        ),
-        "<transcript>\nOlá, mundo!\n</transcript>"
-    );
-}
-
-#[test]
-fn literal_transcript_tags_in_plain_text_are_escaped_for_sending_only() {
-    // A closing-tag mention without an opening tag is plain dictation, not a
-    // malformed envelope. The sent span escapes the literal tag so Pumice's
-    // generated envelope stays unambiguous…
-    let extracted =
-        extract_content(r#""digite </transcript> agora""#).expect("request must extract");
-    assert_eq!(extracted.text, "digite &lt;/transcript> agora");
-    assert_eq!(
-        format!(
-            "{}{}{}",
-            extracted.before_text, extracted.text, extracted.after_text
-        ),
-        "<transcript>\ndigite &lt;/transcript> agora\n</transcript>"
-    );
-    // …while raw_text keeps the dictation exactly.
-    assert_eq!(extracted.raw_text, "digite </transcript> agora");
+fn plain_user_text_passes_through_unchanged() {
+    for content in [r#""Olá, mundo!""#, r#""digite </transcript> agora""#] {
+        let extracted = extract_content(content).expect("request must extract");
+        let text: String = serde_json::from_str(content).unwrap();
+        assert_eq!(extracted.before_text, "");
+        assert_eq!(extracted.after_text, "");
+        assert_eq!(extracted.text, text);
+        assert_eq!(extracted.raw_text, text);
+    }
 }
 
 // Array-of-parts content.

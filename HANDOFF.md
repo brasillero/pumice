@@ -4,10 +4,11 @@
 
 Open items we decided to revisit or defer are in [`BACKLOG.md`](BACKLOG.md).
 
-Owner decisions in force (2026-10-07), not in the spec, which agents must not edit:
+Owner decisions in force (2026-10-07/08), not in the spec, which agents must not edit:
 
 - **No default provider and no fallback.** A request without a model, or with an unknown or disabled one, and any provider failure, returns the original text byte for byte, and the log says why (deviates from spec S4.2 and S6.2).
 - **No provider risk warnings.** Every enabled provider is treated the same way (#61); the residual risks stay as comments in each adapter and in its research note.
+- **Pure pass-through (S3.8, owner decision 2026-10-08).** Pumice adds no instructions: the fixed adapter instruction, the YAML `prompts:` and the bare-text `<transcript>` envelope are gone. The system prompt is the client's own (empty for Handy); only Codex and Kimi, which refuse an empty one, get the neutral line `Follow the user's message.` AGENTS.md describes this direction (#70); it deviates from spec S3.1–S3.3 and the formatting-only scope.
 - **Minimal cleanup (S3.6, #63).** Pumice keeps the model's reply as is, apart from removing a leading `<think>` block, trimming outer whitespace and rejecting an empty reply (deviates from spec S3.4).
 
 Read [`AGENTS.md`](AGENTS.md) for the rules and [`docs/spec.md`](docs/spec.md) for the full spec. The Phase 2 design, the orchestrator's decisions and the PR-by-PR plan are in [`docs/research/phase2-architecture.md`](docs/research/phase2-architecture.md). The Phase 1 architecture they build on is in [`docs/research/phase1-architecture.md`](docs/research/phase1-architecture.md). Read both before starting a Phase 2 story.
@@ -91,6 +92,7 @@ Update this table in the PR that finishes each story. Order follows the plan in 
 | 36 | S6.9: remove provider env/options | Done | #72 | Owner decision (2026-10-08): each CLI's own config is inherited; `env:`/`options:` fail as removed; descriptor `allowed_env`/`validate_options` and `ProviderSettings.env/options` gone; Claude keeps only its thinking-off variable; generic's descriptor refuses to build (its config is redesigned when it returns) |
 | 37 | S3.7: no tool-activity output checks | Done | #73 | Owner decision (2026-10-08): Codex and Kimi ignore tool records and return the final answer; tools stay off in the invocation. Archived adapters keep their checks until they return |
 | 38 | S2.14: cheapest settings per CLI | Done | #74 | Owner rule (2026-10-08): lowest effort, thinking off, never fast. Pins from ~/pumice-research/cheapest-settings-2026-10-08.md; limits: models that cannot disable thinking, Kimi non-native provider routes, unknown aliases |
+| 39 | S3.8: pure pass-through | In review | — | Owner decision (2026-10-08): no fixed instruction, no bare-text envelope; Claude gets an empty system prompt when the client sends none, Codex and Kimi the neutral line `Follow the user's message.` |
 
 **Distribution review (2026-10-05):** the owner accepted the final review and authorized merging #36–#38. #36–#38 are merged; all 10 archive checks and all 16 npm checks passed, including Windows/Linux/macOS native installs and Linux pnpm/Bun. #38 also passed all 16 checks before merging. GitHub v0.1.0 is published; npm publication is pending account 2FA.
 

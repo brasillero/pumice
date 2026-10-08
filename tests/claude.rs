@@ -280,3 +280,20 @@ fn provider_reports_its_id_without_running() {
     assert_eq!(provider(&fake).id(), "claude");
     assert!(!fake.report_path().exists());
 }
+
+#[tokio::test]
+async fn an_empty_client_system_prompt_is_passed_through_empty() {
+    // Claude takes an empty system prompt file: nothing is added.
+    let fake = fake_claude(&fixture("claude/success.json"), 0);
+    let input = FormatInput {
+        system_prompt: "",
+        user_prompt: UserPrompt::default(),
+        text: "text",
+    };
+    provider(&fake)
+        .format(input, Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("success");
+    let file = &fake.report()["arg_files"]["--system-prompt-file"];
+    assert_eq!(file["contents"], json!(""));
+}

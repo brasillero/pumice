@@ -133,7 +133,7 @@ async fn the_agent_file_disables_tools_and_carries_the_system_prompt() {
 
     let file = agent_file(&fake.report());
     assert!(file.starts_with("---\nname: pumice\n"));
-    assert!(file.contains("description: Formats dictation without taking actions.\n"));
+    assert!(file.contains("description: Answers one message without tools.\n"));
     assert!(
         file.contains("subagents: []\n---\n"),
         "front matter must be closed: {file}"
@@ -545,5 +545,25 @@ async fn quota_reported_as_429_is_quota_exceeded() {
     assert_eq!(
         format(&fake, "text").await.unwrap_err(),
         ProviderError::QuotaExceeded { retry_after: None }
+    );
+}
+
+#[tokio::test]
+async fn an_empty_client_system_prompt_becomes_the_neutral_line() {
+    // Kimi rejects an agent file with an empty body.
+    let fake = fake_kimi(&fixture("kimi/success.jsonl"), 0);
+    let input = FormatInput {
+        system_prompt: "",
+        user_prompt: UserPrompt::default(),
+        text: "text",
+    };
+    provider(&fake, TEST_MODEL)
+        .format(input, Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("success");
+    let file = agent_file(&fake.report());
+    assert!(
+        file.ends_with(&format!("{}\n", pumice::providers::NEUTRAL_SYSTEM_PROMPT)),
+        "{file}"
     );
 }
