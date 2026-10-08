@@ -18,7 +18,6 @@ Last updated: 2026-10-07.
 
 | Item | Context | Source |
 | --- | --- | --- |
-| Docs and HANDOFF refresh | HANDOFF.md status rows for S1.1a–S3.6 (#56–#63), stale header and notes; install docs for 0.2; the S6.2 deviation (no model → original text) recorded in a research note. | Audit fix plan item 8 |
 | Release 0.2.0 | After local testing by the owner. CHANGELOG `[Unreleased]` is ready; the config format change makes it 0.2.0. Skip the unpublished npm 0.1.1. | Audit fix plan item 9 |
 | Setup preparation | Per-adapter metadata the wizard needs: option specs, model sources, verification status. | Audit fix plan item 10 |
 | `pumice setup` wizard | List installed CLIs, pick which to enable, pick a model each. "Dumb easy, frictionless, robust." | Owner, audit item 11 |
