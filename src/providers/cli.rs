@@ -67,12 +67,13 @@ pub(crate) fn stdout_text(output: &crate::process::ProcessOutput) -> Result<&str
         .map_err(|_| ProviderError::other(super::ProviderErrorCode::InvalidOutput))
 }
 
-#[cfg(test)]
+// The helper is platform-independent; building a `ProcessOutput` by hand
+// needs `ExitStatusExt::from_raw`, whose Unix form is used here.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::providers::ProviderErrorCode;
 
-    #[cfg(unix)]
     fn output(stdout: &[u8]) -> crate::process::ProcessOutput {
         use std::os::unix::process::ExitStatusExt;
         crate::process::ProcessOutput {
@@ -82,7 +83,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn stdout_text_rejects_invalid_utf8() {
         assert_eq!(stdout_text(&output("olá".as_bytes())), Ok("olá"));
