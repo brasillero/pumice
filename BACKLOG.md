@@ -29,7 +29,6 @@ Last updated: 2026-10-07.
 
 | Item | Context |
 | --- | --- |
-| Flaky test `oversized_body_is_413` | Failed once on macOS CI (#63, passed on rerun): the server answers 413 and closes while the test client is still writing the oversized body, so reading the response can hit a connection reset. Make the test tolerate a reset after a full response, or read while writing. |
 | Unverified adapters | OpenCode, Kiro and Antigravity have never run against the real CLI. Kiro has no quota or rate-limit classification yet. Antigravity cannot be enabled. |
 | Partial-stdin check | A CLI that exits cleanly without reading all of its stdin is treated as a failure (#62), but the OS pipe buffer (about 64 KB) absorbs normal-size dictations, so in practice only very long dictations are caught. |
 | Kimi argv transport | The dictation travels as a command-line argument (visible to other local processes while the call runs), capped at 24 KiB and at the Windows command-line limit. |

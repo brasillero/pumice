@@ -238,22 +238,107 @@ impl RawResponse {
     }
 }
 
+/// True when `bytes` hold a whole HTTP/1.1 response: the head, then a body
+/// matching `Content-Length`, or a chunked body up to its last chunk.
+fn response_is_complete(bytes: &[u8]) -> bool {
+    let Some(head_end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return false;
+    };
+    let head = String::from_utf8_lossy(&bytes[..head_end]).to_ascii_lowercase();
+    let body = &bytes[head_end + 4..];
+    if let Some(length) = head
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length:"))
+        .and_then(|value| value.trim().parse::<usize>().ok())
+    {
+        return body.len() >= length;
+    }
+    if head.contains("transfer-encoding: chunked") {
+        return chunked_body_is_complete(body);
+    }
+    false
+}
+
+/// True when `body` is a whole chunked body: every chunk has the size its
+/// header announces, ending with the zero-size chunk and the final CRLF.
+fn chunked_body_is_complete(mut body: &[u8]) -> bool {
+    loop {
+        let Some(line_end) = body.windows(2).position(|w| w == b"\r\n") else {
+            return false;
+        };
+        let size_text = String::from_utf8_lossy(&body[..line_end]);
+        let size_text = size_text.split(';').next().unwrap_or_default().trim();
+        let Ok(size) = usize::from_str_radix(size_text, 16) else {
+            return false;
+        };
+        body = &body[line_end + 2..];
+        if size == 0 {
+            // No trailers are sent: the body ends with an empty line.
+            return body.starts_with(b"\r\n");
+        }
+        if body.len() < size + 2 || &body[size..size + 2] != b"\r\n" {
+            return false;
+        }
+        body = &body[size + 2..];
+    }
+}
+
+#[test]
+fn response_completeness_follows_its_framing() {
+    assert!(response_is_complete(
+        b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 2\r\n\r\n{}"
+    ));
+    assert!(!response_is_complete(
+        b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 50\r\n\r\n"
+    ));
+    assert!(response_is_complete(
+        b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n"
+    ));
+    assert!(!response_is_complete(b"HTTP/1.1 200 OK\r\ncontent-le"));
+    // A chunk announcing 16 bytes that holds two is truncated.
+    assert!(!response_is_complete(
+        b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n10\r\n\r\n"
+    ));
+    assert!(!response_is_complete(
+        b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\n{}\r\n"
+    ));
+}
+
 /// Sends `request` verbatim over raw HTTP/1.1 and reads the whole response.
-/// Write errors are ignored: the server may stop reading an oversized body
-/// (413) before the client finishes sending. The write side stays open
-/// while the response is read — half-closing first makes hyper drop the
+/// Writing and reading run concurrently: the server may answer an oversized
+/// body (413) and close before the client finishes sending, and the response
+/// must be read as it arrives, before the connection reset that follows.
+/// Write errors are ignored, and a read error (the reset that follows)
+/// ends the read only when the response received so far is complete. The
+/// write side stays open while the response is read — half-closing first makes hyper drop the
 /// connection without answering.
 async fn raw_http(port: u16, request: Vec<u8>) -> RawResponse {
-    let mut stream = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+    let stream = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
         .await
         .expect("connect to server");
-    let _ = stream.write_all(&request).await;
+    let (mut reader, mut writer) = stream.into_split();
+    let write = async move {
+        let _ = writer.write_all(&request).await;
+        // Keep the write half open until the read finishes.
+        writer
+    };
     let read = async {
         let mut response = Vec::new();
-        stream
-            .read_to_end(&mut response)
-            .await
-            .expect("read response");
+        let mut chunk = [0u8; 8 * 1024];
+        loop {
+            match reader.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&chunk[..n]),
+                // The reset after a complete answer: keep what arrived. A
+                // reset in the middle of the answer is still a failure.
+                Err(_) if response_is_complete(&response) => break,
+                Err(error) => panic!("read response: {error}"),
+            }
+        }
+        response
+    };
+    let read = async {
+        let (response, _writer) = tokio::join!(read, write);
         response
     };
     let response = tokio::time::timeout(Duration::from_secs(30), read)
