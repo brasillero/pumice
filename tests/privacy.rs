@@ -468,8 +468,7 @@ fn write_config(yaml: &str) -> (TempDir, PathBuf) {
 
 /// YAML with the enable-able providers' binaries at their own disposable
 /// fakes, so spawned-`pumice` tests never look a real CLI up on PATH during
-/// startup detection; `antigravity` stays disabled (it refuses enablement).
-/// `debug_log` is appended verbatim. Returns the fakes — they must outlive
+/// startup detection. `debug_log` is appended verbatim. Returns the fakes — they must outlive
 /// the served process — and the YAML.
 fn hermetic_serve_yaml(port: u16, debug_log: &str) -> (Vec<FakeCli>, String) {
     let mut fakes: Vec<FakeCli> = Vec::new();
@@ -486,9 +485,6 @@ fn hermetic_serve_yaml(port: u16, debug_log: &str) -> (Vec<FakeCli>, String) {
         ));
         fakes.push(fake);
     }
-    // Antigravity refuses enablement entirely (no supported tool policy), so
-    // it stays disabled — startup then never probes a real CLI for it.
-    yaml.push_str("  - id: antigravity\n    enabled: false\n");
     yaml.push_str(debug_log);
     (fakes, yaml)
 }

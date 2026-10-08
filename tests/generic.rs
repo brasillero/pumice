@@ -1002,13 +1002,15 @@ fn nothing_is_enabled_without_an_entry() {
 
 const CONFIG_NAME: &str = "pumice.yaml";
 
+/// Validates `text` against the generic descriptor alone: the adapter is
+/// archived (not registered), but its own validation rules stay tested.
 fn load_text(text: &str) -> Result<Config, String> {
-    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let path = dir.path().join(CONFIG_NAME);
-    std::fs::write(&path, text).map_err(|e| e.to_string())?;
-    config::load_with_env(Some(&path), |_| None)
-        .map(|loaded| loaded.config)
-        .map_err(|error| error.to_string())
+    config::validate_text_with_descriptors(
+        text,
+        std::path::Path::new(CONFIG_NAME),
+        &[pumice::providers::generic::DESCRIPTOR],
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn load_error(text: &str) -> String {

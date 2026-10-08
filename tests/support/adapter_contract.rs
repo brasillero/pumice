@@ -300,7 +300,14 @@ fn handy_request(model: Option<&str>, text: &str) -> ExtractedRequest {
 
 /// Settings pointing the contract adapter at the fake CLI.
 fn settings_at<A: ContractAdapter>(fake: &FakeCli) -> ProviderSettings {
-    let descriptor = providers::descriptor(A::ID).expect("contract adapter is registered");
+    // Archived adapters are not registered but keep their contract tests.
+    let archived = [
+        &providers::antigravity::DESCRIPTOR,
+        &providers::kiro::DESCRIPTOR,
+    ];
+    let descriptor = providers::descriptor(A::ID)
+        .or_else(|| archived.into_iter().find(|d| d.id == A::ID))
+        .expect("contract adapter has a descriptor");
     let mut settings = (descriptor.defaults)();
     settings.binary = Some(fake.path().to_path_buf());
     settings

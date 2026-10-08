@@ -14,7 +14,6 @@ use std::process::{Command, Output};
 
 use serde_json::json;
 use support::FakeCli;
-use support::fake_http::{Behavior, FakeHttp, Reply};
 use tempfile::TempDir;
 
 /// The fixture's result text: the login check must never print it.
@@ -58,9 +57,7 @@ fn full_fake_yaml() -> (Vec<FakeCli>, String) {
     for (id, model, stdout) in [
         ("claude", Some("haiku"), "2.1.288 (Claude Code)\n"),
         ("codex", Some("gpt-6.1-sol"), "codex-cli 0.160.0\n"),
-        ("antigravity", None, ""),
         ("kimi", None, "2.1.1\n"),
-        ("kiro", None, ""),
     ] {
         let fake = FakeCli::new(json!({"stdout": stdout, "exit_code": 0}));
         yaml.push_str(&format!("  - id: {id}\n    enabled: {}\n", model.is_some()));
@@ -100,23 +97,7 @@ fn all_enabled_found_lists_every_provider_and_the_summary() {
         "stdout: {stdout}"
     );
     assert!(
-        stdout.contains("kiro: disabled, found (version unavailable)\n"),
-        "stdout: {stdout}"
-    );
-    assert!(
-        stdout.contains("antigravity: disabled, found, cannot be enabled yet (see docs)\n"),
-        "stdout: {stdout}"
-    );
-    assert!(
-        stdout.contains("generic: disabled, local endpoint (checked at call time)\n"),
-        "stdout: {stdout}"
-    );
-    assert!(
         stdout.contains("kimi: disabled, found 2.1.1\n"),
-        "stdout: {stdout}"
-    );
-    assert!(
-        stdout.contains("kiro: disabled, found (version unavailable)\n"),
         "stdout: {stdout}"
     );
     assert!(
@@ -146,56 +127,6 @@ fn missing_enabled_codex_exits_1_with_the_install_hint() {
     );
     assert!(
         text.contains("1 of 2 enabled providers ready\n"),
-        "output: {text}"
-    );
-}
-
-#[test]
-fn antigravity_is_detected_but_never_spawned() {
-    let antigravity = FakeCli::new(json!({}));
-    let claude = FakeCli::new(json!({"stdout": "2.1.288\n", "exit_code": 0}));
-    let codex = FakeCli::new(json!({"stdout": "0.160.0\n", "exit_code": 0}));
-    let (_dir, config_path) = write_config(&format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{}'\n  - id: antigravity\n    enabled: false\n    binary: '{}'\n",
-        claude.path().display(),
-        codex.path().display(),
-        antigravity.path().display()
-    ));
-
-    let output = run_doctor(&config_path, &[]);
-
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "output: {}",
-        combined(&output)
-    );
-    assert!(
-        !antigravity.report_path().exists(),
-        "antigravity must never be spawned, not even for --version"
-    );
-}
-
-#[test]
-fn generic_enabled_reports_the_endpoint_line_and_counts_ready() {
-    // The other providers are disabled, so the report is exactly one enabled
-    // provider and it is ready: there is no executable to miss, only the
-    // endpoint checked at call time.
-    let (_dir, config_path) = write_config(
-        "providers:\n  - id: claude\n    enabled: false\n  - id: codex\n    enabled: false\n  - id: generic\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
-    );
-
-    let output = run_doctor(&config_path, &[]);
-    let text = combined(&output);
-
-    assert_eq!(output.status.code(), Some(0), "output: {text}");
-    assert!(
-        text.contains("generic: enabled, local endpoint (checked at call time)\n"),
-        "output: {text}"
-    );
-    assert!(!text.contains("warning"), "output: {text}");
-    assert!(
-        text.contains("1 of 1 enabled providers ready\n"),
         "output: {text}"
     );
 }
@@ -312,33 +243,6 @@ fn provider_without_login_check_is_a_usage_error() {
 }
 
 #[test]
-fn login_check_refuses_antigravity_without_spawning() {
-    let antigravity = FakeCli::new(json!({}));
-    let claude = FakeCli::new(json!({"stdout": "2.1.288\n", "exit_code": 0}));
-    let (_dir, config_path) = write_config(&format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: antigravity\n    enabled: false\n    binary: '{}'\n",
-        claude.path().display(),
-        antigravity.path().display()
-    ));
-
-    let output = run_doctor(
-        &config_path,
-        &["--login-check", "--provider", "antigravity"],
-    );
-    let text = combined(&output);
-
-    assert_eq!(output.status.code(), Some(2), "output: {text}");
-    assert!(
-        text.contains("cannot be enabled yet (see docs)"),
-        "output: {text}"
-    );
-    assert!(
-        !antigravity.report_path().exists(),
-        "a refused provider must never be spawned"
-    );
-}
-
-#[test]
 fn login_check_runs_kimi_through_the_fake() {
     // One fake serves the probe and the call: `--version` gets the success
     // stream too, which only makes the parsed version unavailable.
@@ -399,57 +303,6 @@ fn login_check_failure_never_runs_other_providers() {
     assert!(
         !codex.report_path().exists(),
         "no other provider may run during a login check"
-    );
-}
-
-// Multi-threaded: `run_doctor` blocks its thread on the child process while
-// the in-process fake server must keep answering on another one.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn login_check_generic_ok_against_the_fake_http_server() {
-    let server = FakeHttp::spawn(Behavior::Reply(Reply::json(
-        200,
-        json!({"choices": [{"message": {"content": FIXTURE_RESULT, "role": "assistant"}, "finish_reason": "stop"}]}),
-    )))
-    .await;
-    let (_dir, config_path) = write_config(&format!(
-        "providers:\n  - id: generic\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"{}\"\n",
-        server.base_url()
-    ));
-
-    let output = run_doctor(&config_path, &["--login-check", "--provider", "generic"]);
-    let text = combined(&output);
-
-    assert_eq!(output.status.code(), Some(0), "output: {text}");
-    assert!(
-        text.contains("this runs one real formatting call and spends generic quota\n"),
-        "output: {text}"
-    );
-    assert!(text.contains("login check: ok ("), "output: {text}");
-    assert!(
-        !text.contains(FIXTURE_RESULT),
-        "the response text must never be printed: {text}"
-    );
-    // Exactly one call reached the endpoint: no fallback, no retry.
-    assert_eq!(server.hit_count(), 1, "one call reaches the endpoint");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn login_check_generic_without_a_server_reports_endpoint_unavailable_and_exits_1() {
-    // Grab a loopback port nothing listens on: bind, read the port, drop.
-    let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a probe socket");
-    let port = probe.local_addr().expect("probe address").port();
-    drop(probe);
-    let (_dir, config_path) = write_config(&format!(
-        "providers:\n  - id: generic\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"http://127.0.0.1:{port}/v1\"\n",
-    ));
-
-    let output = run_doctor(&config_path, &["--login-check", "--provider", "generic"]);
-    let text = combined(&output);
-
-    assert_eq!(output.status.code(), Some(1), "output: {text}");
-    assert!(
-        text.contains("login check: endpoint unavailable\n"),
-        "output: {text}"
     );
 }
 

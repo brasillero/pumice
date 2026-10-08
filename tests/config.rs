@@ -1145,10 +1145,7 @@ fn example_config_loads() {
         .iter()
         .map(|entry| entry.id.as_str())
         .collect();
-    assert_eq!(
-        ids,
-        ["claude", "codex", "kiro", "antigravity", "generic", "kimi"]
-    );
+    assert_eq!(ids, ["claude", "codex", "kimi"]);
 
     let claude = config.provider("claude").expect("claude is listed");
     assert!(claude.enabled);
@@ -1157,7 +1154,7 @@ fn example_config_loads() {
     assert!(claude.binary.is_none());
 
     // Every other entry ships disabled, with no model.
-    for id in ["codex", "kiro", "antigravity", "generic", "kimi"] {
+    for id in ["codex", "kimi"] {
         let settings = config
             .provider(id)
             .unwrap_or_else(|| panic!("{id} is listed"));
@@ -1188,22 +1185,13 @@ fn example_documented_overrides_load() {
         .expect("read example")
         .replace("\r\n", "\n");
 
-    // Apply the documented examples: route Codex through a gateway, enable
-    // the generic loopback adapter, and set both formatting prompts.
+    // Apply the documented examples: route Codex through a gateway and set
+    // both formatting prompts.
     let uncommented = edit_entry(&text, "  - id: codex", |block| {
         block.replace(
             "    # options:\n    #   openai_base_url: \"https://your-existing-gateway.example/v1\"\n    options: {}",
             "    options:\n      openai_base_url: \"https://your-existing-gateway.example/v1\"",
         )
-    });
-    let uncommented = edit_entry(&uncommented, "  - id: generic", |block| {
-        block
-            .replace("    enabled: false", "    enabled: true")
-            .replace("    # model: qwen2.5-7b", "    model: qwen2.5-7b")
-            .replace(
-                "    # options:\n    #   base_url: \"http://127.0.0.1:11434/v1\"",
-                "    options:\n      base_url: \"http://127.0.0.1:11434/v1\"",
-            )
     });
     let uncommented = uncommented
         .replace(
@@ -1222,13 +1210,6 @@ fn example_documented_overrides_load() {
             .get("openai_base_url")
             .map(String::as_str),
         Some("https://your-existing-gateway.example/v1")
-    );
-    let generic = config.provider("generic").expect("generic loads");
-    assert!(generic.enabled);
-    assert_eq!(generic.model, "qwen2.5-7b");
-    assert_eq!(
-        generic.options.get("base_url").map(String::as_str),
-        Some("http://127.0.0.1:11434/v1")
     );
     assert_eq!(
         config.prompts.system.as_deref(),
@@ -1330,15 +1311,6 @@ fn duplicate_option_keys_are_rejected_at_the_second_key() {
         error.contains(":7:7: duplicate key `openai_base_url`"),
         "{error}"
     );
-}
-
-#[test]
-fn generic_model_may_start_with_a_dash() {
-    let config = load_text(
-        "providers:\n  - id: generic\n    enabled: true\n    model: -local-model\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n",
-    )
-    .expect("a generic model is sent over HTTP, not as an argument");
-    assert_eq!(config.provider("generic").unwrap().model, "-local-model");
 }
 
 #[test]

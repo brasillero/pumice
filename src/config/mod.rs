@@ -252,11 +252,13 @@ fn validate(
             ));
         };
         let Some(descriptor) = descriptors.iter().find(|d| d.id == id.value) else {
-            // Removed providers get a precise message instead of "unknown".
-            let message = if id.value == "opencode" {
-                "\"opencode\" support was removed; delete this entry".to_owned()
-            } else {
-                format!("\"{}\" is not a known provider", id.value)
+            // Archived and removed providers get a precise message.
+            let message = match providers::RETIRED
+                .iter()
+                .find(|(retired, _)| *retired == id.value)
+            {
+                Some((_, why)) => format!("\"{}\" {why}", id.value),
+                None => format!("\"{}\" is not a known provider", id.value),
             };
             return Err(ConfigError::at(id.referenced, message));
         };
@@ -370,9 +372,8 @@ fn provider_settings(
             ));
         }
         // Every CLI receives the model as a command-line argument: a
-        // leading '-' would be read as a flag. The generic adapter sends it
-        // as a JSON string over HTTP instead.
-        if descriptor.id != providers::generic::ID && model.value.trim_start().starts_with('-') {
+        // leading '-' would be read as a flag.
+        if model.value.trim_start().starts_with('-') {
             return Err(ConfigError::at(
                 model.referenced,
                 format!("{base}.model must not start with '-'"),

@@ -273,13 +273,15 @@ fn descriptor_ships_disabled_defaults() {
 
 // Configuration validation, through the real YAML loader.
 
+/// Validates `text` against the Kiro descriptor alone: the adapter is
+/// archived (not registered), but its own validation rules stay tested.
 fn load(text: &str) -> Result<Config, String> {
-    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let path = dir.path().join("pumice.yaml");
-    std::fs::write(&path, text).map_err(|e| e.to_string())?;
-    config::load_with_env(Some(&path), |_| None)
-        .map(|loaded| loaded.config)
-        .map_err(|error| error.to_string())
+    config::validate_text_with_descriptors(
+        text,
+        std::path::Path::new("pumice.yaml"),
+        &[pumice::providers::kiro::DESCRIPTOR],
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn load_error(text: &str) -> String {

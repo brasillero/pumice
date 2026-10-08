@@ -957,39 +957,6 @@ async fn models_lists_enabled_providers() {
     );
 }
 
-#[tokio::test]
-async fn models_list_generic_only_when_enabled() {
-    // Enabled: listed even though nothing listens at the endpoint. Detection
-    // deliberately does no reachability probe for the generic adapter; the
-    // call-time check (`EndpointUnavailable`) is what fails the run and
-    // returns the original text.
-    let yaml = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n  - id: codex\n    enabled: false\n  - id: generic\n    enabled: true\n    model: qwen2.5-7b\n    options:\n      base_url: \"http://127.0.0.1:11434/v1\"\n";
-    let server = start_server(yaml, success_scenario("unused")).await;
-    let response = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
-
-    assert_eq!(response.status, 200);
-    assert_eq!(
-        listed_model_ids(&response.body_json()),
-        ["claude", "generic", "passthrough", "inspect"],
-        "list order: claude first, then generic"
-    );
-    assert!(
-        !server.fake.report_path().exists(),
-        "listing never invokes a CLI"
-    );
-
-    // No `generic` entry at all: absent from the list.
-    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
-    let response = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
-
-    assert_eq!(response.status, 200);
-    assert_eq!(
-        listed_model_ids(&response.body_json()),
-        ["claude", "passthrough", "inspect"],
-        "an unlisted generic is not offered"
-    );
-}
-
 /// The model IDs of a `/v1/models` body, in order.
 fn listed_model_ids(body: &Value) -> Vec<String> {
     body["data"]
@@ -1252,15 +1219,13 @@ async fn start_missing_selected_server(
     codex_scenario: Value,
 ) -> MissingSelectedServer {
     let codex = FakeCli::new(codex_scenario);
-    let kiro = FakeCli::new(json!({}));
-    let antigravity = FakeCli::new(json!({}));
+    let kimi = FakeCli::new(json!({}));
     let missing_dir = TempDir::new().expect("temp dir");
     let missing_binary = missing_dir.path().join("claude");
     let yaml = format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: kiro\n    enabled: false\n    binary: '{}'\n  - id: antigravity\n    enabled: false\n    binary: '{}'\n{yaml_tail}",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: kimi\n    enabled: false\n    binary: '{}'\n{yaml_tail}",
         missing_binary.display(),
-        kiro.path().display(),
-        antigravity.path().display(),
+        kimi.path().display(),
     )
     .replace("{codex}", &codex.path().display().to_string());
     let config_dir = TempDir::new().expect("temp dir");
@@ -1449,14 +1414,13 @@ fn hermetic_serve_yaml(port: u16, claude_scenario: Value) -> (FakeCli, Vec<FakeC
         "port: {port}\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex_path}'\n",
         claude.path().display(),
     );
-    for id in ["kiro", "antigravity"] {
-        let fake = FakeCli::new(json!({}));
-        yaml.push_str(&format!(
-            "  - id: {id}\n    enabled: false\n    binary: '{}'\n",
-            fake.path().display()
-        ));
-        fakes.push(fake);
-    }
+    // A disabled provider, at its own fake so detection never searches PATH.
+    let kimi = FakeCli::new(json!({}));
+    yaml.push_str(&format!(
+        "  - id: kimi\n    enabled: false\n    binary: '{}'\n",
+        kimi.path().display()
+    ));
+    fakes.push(kimi);
     (claude, fakes, yaml)
 }
 
@@ -1691,15 +1655,11 @@ fn serve_prints_one_status_line_per_enabled_provider() {
             "startup must print {wanted:?}; stderr: {lines:?}"
         );
     }
-    // Disabled providers were detected but get no line.
-    for id in ["kiro", "antigravity"] {
-        assert!(
-            !lines
-                .iter()
-                .any(|line| line.starts_with(&format!("provider {id}:"))),
-            "disabled provider {id} must get no line: {lines:?}"
-        );
-    }
+    // A disabled provider is detected but gets no line.
+    assert!(
+        !lines.iter().any(|line| line.starts_with("provider kimi:")),
+        "disabled provider kimi must get no line: {lines:?}"
+    );
 }
 
 #[tokio::test]

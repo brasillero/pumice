@@ -127,69 +127,15 @@ async fn a_slow_probe_dies_with_its_deadline() {
 }
 
 #[tokio::test]
-async fn antigravity_is_resolved_but_never_spawned() {
-    let fake = FakeCli::new(json!({"stdout": "1.2.14", "exit_code": 0}));
-    let config = load(&format!(
-        "providers:\n  - id: antigravity\n    enabled: false\n    binary: '{}'\n",
-        fake.path().display()
-    ));
-    let statuses =
-        discovery::detect(&config, &[descriptor("antigravity")], &ProcessRunner::new()).await;
-
-    assert_eq!(statuses.len(), 1);
-    assert!(!statuses[0].enabled);
-    assert!(
-        matches!(statuses[0].found, Found::Found(_)),
-        "PATH lookup still reports the binary"
-    );
-    assert_eq!(statuses[0].version, Version::Skipped);
-    assert!(
-        !fake.report_path().exists(),
-        "agy must never be spawned, not even for --version"
-    );
-}
-
-#[tokio::test]
-async fn generic_is_never_resolved_or_spawned() {
-    // The generic adapter has no CLI. Even with a `binary` configured
-    // (allowed while the provider is disabled), detection neither resolves
-    // it — a resolution would report the path, or Missing for a absent one —
-    // nor spawns it. The `binary` here exists on disk, so only the
-    // NotApplicable skip keeps the status free of any resolved path.
-    let fake = FakeCli::new(json!({}));
-    let config = load(&format!(
-        "providers:\n  - id: generic\n    enabled: false\n    binary: '{}'\n",
-        fake.path().display()
-    ));
-    let statuses =
-        discovery::detect(&config, &[descriptor("generic")], &ProcessRunner::new()).await;
-
-    assert_eq!(statuses.len(), 1);
-    assert!(!statuses[0].enabled);
-    assert_eq!(
-        statuses[0].found,
-        Found::NotApplicable,
-        "no executable exists, so detection must not resolve one"
-    );
-    assert_eq!(statuses[0].version, Version::Skipped);
-    assert!(
-        !fake.report_path().exists(),
-        "the generic adapter has no CLI: nothing may ever be spawned for it"
-    );
-}
-
-#[tokio::test]
 async fn detection_covers_every_registered_provider_enabled_or_not() {
     let claude = FakeCli::new(json!({"stdout": "2.1.288 (Claude Code)"}));
     let codex = FakeCli::new(json!({"stdout": "codex-cli 0.160.0"}));
-    let antigravity = FakeCli::new(json!({}));
-    let kiro = FakeCli::new(json!({"stdout": "2.24.1"}));
+    let kimi = FakeCli::new(json!({"stdout": "2.1.1"}));
     let config = load(&format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{0}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{1}'\n  - id: antigravity\n    enabled: false\n    binary: '{2}'\n  - id: kiro\n    enabled: false\n    binary: '{3}'\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{0}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{1}'\n  - id: kimi\n    enabled: false\n    binary: '{2}'\n",
         claude.path().display(),
         codex.path().display(),
-        antigravity.path().display(),
-        kiro.path().display(),
+        kimi.path().display(),
     ));
     let statuses = discovery::detect(&config, providers::PROVIDERS, &ProcessRunner::new()).await;
 
@@ -203,22 +149,9 @@ async fn detection_covers_every_registered_provider_enabled_or_not() {
     assert!(matches!(status("claude").found, Found::Found(_)));
     assert_eq!(status("claude").version, Version::Parsed("2.1.288".into()));
     assert_eq!(status("codex").version, Version::Parsed("0.160.0".into()));
-    // Disabled but still probed, so `doctor` can show it later.
-    assert!(!status("kiro").enabled);
-    assert_eq!(status("kiro").version, Version::Parsed("2.24.1".into()));
-    // PATH-only: resolved, never spawned, no version.
-    assert!(matches!(status("antigravity").found, Found::Found(_)));
-    assert_eq!(status("antigravity").version, Version::Skipped);
-    assert!(
-        !antigravity.report_path().exists(),
-        "the PathOnly provider was never spawned"
-    );
-    // NotApplicable: no CLI to resolve or probe, whatever the config says.
-    assert_eq!(status("generic").found, Found::NotApplicable);
-    assert_eq!(status("generic").version, Version::Skipped);
-    // Kiro is listed but disabled, and still probed.
-    assert!(!status("kiro").enabled);
-    assert_eq!(status("kiro").version, Version::Parsed("2.24.1".into()));
+    // Disabled but still probed, so `doctor` can show it.
+    assert!(!status("kimi").enabled);
+    assert_eq!(status("kimi").version, Version::Parsed("2.1.1".into()));
 }
 
 #[test]
@@ -236,18 +169,75 @@ fn registry_probe_metadata_is_consistent() {
         }
         assert!(!descriptor.install_hint.is_empty(), "{}", descriptor.id);
     }
+}
+
+/// Validates `yaml` against `descriptors` alone, so archived (unregistered)
+/// providers keep their detection guarantees tested.
+fn load_with(yaml: &str, descriptors: &[ProviderDescriptor]) -> Config {
+    config::validate_text_with_descriptors(yaml, Path::new("pumice.yaml"), descriptors)
+        .expect("config validates")
+}
+
+#[tokio::test]
+async fn archived_antigravity_is_resolved_but_never_spawned() {
+    let fake = FakeCli::new(json!({"stdout": "1.2.14", "exit_code": 0}));
+    let descriptors = [providers::antigravity::DESCRIPTOR];
+    let config = load_with(
+        &format!(
+            "providers:\n  - id: antigravity\n    enabled: false\n    binary: '{}'\n",
+            fake.path().display()
+        ),
+        &descriptors,
+    );
+    let statuses = discovery::detect(&config, &descriptors, &ProcessRunner::new()).await;
+
+    assert_eq!(statuses.len(), 1);
+    assert!(!statuses[0].enabled);
+    assert!(
+        matches!(statuses[0].found, Found::Found(_)),
+        "PATH lookup still reports the binary"
+    );
+    assert_eq!(statuses[0].version, Version::Skipped);
+    assert!(
+        !fake.report_path().exists(),
+        "agy must never be spawned, not even for --version"
+    );
+}
+
+#[tokio::test]
+async fn archived_generic_is_never_resolved_or_spawned() {
+    // The generic adapter has no CLI: even with a `binary` that exists on
+    // disk, detection neither resolves nor spawns it.
+    let fake = FakeCli::new(json!({}));
+    let descriptors = [providers::generic::DESCRIPTOR];
+    let config = load_with(
+        &format!(
+            "providers:\n  - id: generic\n    enabled: false\n    binary: '{}'\n",
+            fake.path().display()
+        ),
+        &descriptors,
+    );
+    let statuses = discovery::detect(&config, &descriptors, &ProcessRunner::new()).await;
+
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].found, Found::NotApplicable);
+    assert_eq!(statuses[0].version, Version::Skipped);
+    assert!(
+        !fake.report_path().exists(),
+        "the generic adapter has no CLI: nothing may ever be spawned for it"
+    );
+}
+
+#[test]
+fn archived_probe_metadata_keeps_its_guarantees() {
     assert_eq!(
-        descriptor("antigravity").probe,
+        providers::antigravity::DESCRIPTOR.probe,
         ProbeSpec::PathOnly,
         "agy is never spawned, so its probe must stay PATH-only"
     );
     assert_eq!(
-        descriptor("generic").probe,
+        providers::generic::DESCRIPTOR.probe,
         ProbeSpec::NotApplicable,
         "generic spawns no CLI, so detection must not touch PATH or the runner"
-    );
-    assert_eq!(
-        descriptor("generic").install_hint,
-        "start a local OpenAI-compatible server such as Ollama or LM Studio"
     );
 }

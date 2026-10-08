@@ -20,16 +20,11 @@ use crate::config::{Config, ConfigError, ConfigSource};
 use crate::process::ProcessRunner;
 use crate::prompts::compose_with_settings;
 use crate::providers::discovery::{self, Found, ProviderStatus, Version};
-use crate::providers::{self, Provider, ProviderError, ProviderErrorCode, antigravity};
+use crate::providers::{self, Provider, ProviderError, ProviderErrorCode};
 use crate::request::{ChatCompletionRequest, Content, Message, extract_request};
 
 /// The fixed tiny dictation the login check formats.
 pub const LOGIN_CHECK_SAMPLE: &str = "pumice login check";
-
-/// Fixed refusal for `--login-check --provider antigravity`: dormant until a
-/// supported per-launch tool policy exists, so no real call may ever run.
-pub const ANTIGRAVITY_REFUSAL: &str =
-    "antigravity cannot be login-checked: it cannot be enabled yet (see docs)";
 
 /// Renders the full doctor report: the config source, one line per registered
 /// provider and the readiness summary. Pure over the config and the detection
@@ -73,12 +68,7 @@ fn provider_line(status: &ProviderStatus) -> String {
     } else {
         "disabled"
     };
-    let mut line = format!("{}: {enabled}, {state}", status.id);
-    // Antigravity stays dormant regardless of detection (S2.5): say so.
-    if status.id == antigravity::ID {
-        line.push_str(", cannot be enabled yet (see docs)");
-    }
-    line
+    format!("{}: {enabled}, {state}", status.id)
 }
 
 /// Counts `(ready, total)` over the enabled providers: an enabled provider
@@ -103,8 +93,6 @@ pub fn enabled_ready(statuses: &[ProviderStatus]) -> (usize, usize) {
 /// Why a login check could not start; every variant carries a fixed,
 /// text-free message.
 pub enum LoginCheckError {
-    /// Antigravity is refused before anything runs.
-    Refused(&'static str),
     /// The ID names no registered provider.
     UnknownProvider,
     /// The provider is registered but has no entry in the configuration's
@@ -125,7 +113,6 @@ impl LoginCheckError {
     /// usage-style problems, 1 for a provider that is not ready.
     pub fn line_and_code(&self, id: &str) -> (String, u8) {
         match self {
-            LoginCheckError::Refused(message) => ((*message).to_owned(), 2),
             LoginCheckError::UnknownProvider => {
                 (format!("error: provider \"{id}\" is not registered"), 2)
             }
@@ -167,9 +154,6 @@ pub async fn prepare_login_check(
     id: &str,
     runner: &ProcessRunner,
 ) -> Result<Arc<dyn Provider>, LoginCheckError> {
-    if id == antigravity::ID {
-        return Err(LoginCheckError::Refused(ANTIGRAVITY_REFUSAL));
-    }
     let descriptor = providers::descriptor(id).ok_or(LoginCheckError::UnknownProvider)?;
     let settings = config.provider(id).ok_or(LoginCheckError::NotConfigured)?;
     if !settings.enabled {
@@ -277,10 +261,7 @@ mod tests {
                 found(),
                 Version::Parsed("0.160.0".to_owned()),
             ),
-            status("antigravity", false, found(), Version::Skipped),
-            status("generic", false, Found::NotApplicable, Version::Skipped),
             status("kimi", false, Found::Missing, Version::Unavailable),
-            status("kiro", false, Found::Missing, Version::Unavailable),
         ]
     }
 
@@ -298,21 +279,9 @@ mod tests {
             "{report}"
         );
         assert!(
-            report.contains("antigravity: disabled, found, cannot be enabled yet (see docs)\n"),
-            "{report}"
-        );
-        assert!(
-            report.contains("generic: disabled, local endpoint (checked at call time)\n"),
-            "{report}"
-        );
-        assert!(
             report.contains(
                 "kimi: disabled, missing (install: curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash)\n"
             ),
-            "{report}"
-        );
-        assert!(
-            report.contains("kiro: disabled, missing (install: curl -fsSL https://cli.kiro.dev/install | bash)\n"),
             "{report}"
         );
         assert!(
@@ -368,7 +337,7 @@ mod tests {
     #[test]
     fn render_shows_an_enabled_provider_without_warnings() {
         let mut statuses = full_scan();
-        statuses[4] = status("kimi", true, found(), Version::Unavailable);
+        statuses[2] = status("kimi", true, found(), Version::Unavailable);
         let report = render(&ConfigSource::BuiltInDefaults, &statuses);
 
         assert!(
@@ -382,7 +351,13 @@ mod tests {
     #[test]
     fn render_reports_an_enabled_generic_as_a_local_endpoint() {
         let mut statuses = full_scan();
-        statuses[3] = status("generic", true, Found::NotApplicable, Version::Skipped);
+        // Generic is archived; the rendering rule for endpoint providers stays.
+        statuses.push(status(
+            "generic",
+            true,
+            Found::NotApplicable,
+            Version::Skipped,
+        ));
         let report = render(&ConfigSource::BuiltInDefaults, &statuses);
 
         assert!(
@@ -432,11 +407,6 @@ mod tests {
 
     #[test]
     fn precondition_failures_map_to_fixed_lines_and_codes() {
-        let (line, code) =
-            LoginCheckError::Refused(ANTIGRAVITY_REFUSAL).line_and_code("antigravity");
-        assert_eq!(line, ANTIGRAVITY_REFUSAL);
-        assert_eq!(code, 2);
-
         let (line, code) = LoginCheckError::UnknownProvider.line_and_code("nope");
         assert_eq!(line, "error: provider \"nope\" is not registered");
         assert_eq!(code, 2);
