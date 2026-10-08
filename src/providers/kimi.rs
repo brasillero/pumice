@@ -18,8 +18,9 @@
 //! front matter, which the upstream agents documentation defines as
 //! disabling every tool (including MCP globs) and all delegation. Print
 //! mode otherwise runs tools under an auto permission policy, so the empty
-//! allowlist is the load-bearing restriction and any tool activity seen in
-//! the stream is rejected. `--skills-dir .` (the empty workspace) replaces
+//! allowlist is the load-bearing restriction. Tool records in the stream
+//! are ignored (owner decision 2026-10-08): the answer is the assistant
+//! text. `--skills-dir .` (the empty workspace) replaces
 //! the user's and project's skill directories, and
 //! `KIMI_CODE_BUILTIN_PRODUCT_SKILLS=false` turns off built-in product
 //! skills. `KIMI_CODE_BACKGROUND_PRINT_BACKGROUND_MODE=exit` makes the run
