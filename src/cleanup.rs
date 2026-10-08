@@ -94,7 +94,7 @@ pub fn cleanup(output: &str, raw_text: &str) -> Result<String, CleanupError> {
     // Strip it only when the output opens with more copies of those words
     // than the dictation does: an extra copy is the model's preamble.
     if is_preamble(line) {
-        let words = preamble_words(line);
+        let words = words_of(line);
         if leading_copies(start, &words) > leading_copies(raw_text, &words) {
             work = start.split_once('\n').map_or("", |(_, rest)| rest);
         }
@@ -202,21 +202,26 @@ fn is_one_quotation(text: &str) -> bool {
     })
 }
 
-/// How many of `text`'s first nonblank lines, in a row, say `words`.
-fn leading_copies(text: &str, words: &str) -> usize {
-    text.lines()
-        .filter(|line| !line.trim().is_empty())
-        .take_while(|line| preamble_words(line) == words)
-        .count()
+/// The lowercase alphanumeric words of `text`, ignoring punctuation and
+/// line breaks.
+fn words_of(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
 }
 
-/// The words of a line for preamble comparison: lowercased, without
-/// surrounding whitespace or trailing colons and periods.
-fn preamble_words(line: &str) -> String {
-    line.trim()
-        .trim_end_matches([':', '.'])
-        .trim_end()
-        .to_lowercase()
+/// How many times, in a row, `text` opens with `words` (punctuation and line
+/// breaks ignored, so `formatted text. the report` opens with one copy of
+/// `formatted text`).
+fn leading_copies(text: &str, words: &[String]) -> usize {
+    if words.is_empty() {
+        return 0;
+    }
+    let text = words_of(text);
+    text.chunks(words.len())
+        .take_while(|chunk| *chunk == words)
+        .count()
 }
 
 /// Unwraps one fence pair enclosing all of `t` (`t` must be trimmed already).

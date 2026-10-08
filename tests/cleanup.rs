@@ -457,3 +457,14 @@ fn strips_an_added_preamble_separated_by_a_blank_line() {
         "Formatted text:\nHello."
     );
 }
+
+#[test]
+fn keeps_a_dictated_heading_the_model_moved_to_its_own_line() {
+    assert_eq!(
+        ok(
+            "Formatted text:\nThe report is ready.",
+            "formatted text. the report is ready"
+        ),
+        "Formatted text:\nThe report is ready."
+    );
+}
