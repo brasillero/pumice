@@ -127,13 +127,17 @@ A `pumice setup` wizard that writes this file is planned next.
 
 Which providers are available today:
 
-- **Claude** and **Codex** — implemented; enable them in the YAML (the
-  example config shows how) and set the model in Handy to pick one.
-- **OpenCode** and **Kimi** — implemented, off by default; enable them in
-  the YAML with an explicit model.
+Nothing is on until you list it with `enabled: true` and a `model` (the
+example config shows how). Then set the model in Handy to the provider's
+id to pick it.
+
+- **Claude**, **Codex** and **Kimi** — implemented and tested with real calls.
+- **OpenCode** and **Kiro** — implemented, but not yet tested against the
+  real CLI.
 - **Local models (Ollama, LM Studio)** — a generic adapter for
-  OpenAI-compatible services listening on `127.0.0.1`, off by default.
-- **Antigravity** — dormant (protocol implemented, opt-in blocked for now).
+  OpenAI-compatible services listening on `127.0.0.1`.
+- **Antigravity** — dormant (protocol implemented, enabling it is refused
+  for now).
 
 ## Upgrade and remove
 
