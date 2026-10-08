@@ -1,12 +1,9 @@
-//! Tests for the fixed adapter instruction and prompt composition
-//! (`src/prompts.rs`).
-//!
-//! Composition order: the fixed instruction, then incoming
-//! `system`/`developer` texts, joined with blank lines; the incoming user
-//! message passes through unchanged. Dictated text must stay inside the
-//! transcript span and never leak into the system prompt.
+//! Tests for prompt composition (`src/prompts.rs`): the client's request
+//! passes through. Pumice adds no instructions; the system prompt is the
+//! client's own `system`/`developer` texts, and the user message is sent
+//! unchanged.
 
-use pumice::prompts::{ADAPTER_INSTRUCTION, ComposedPrompts, compose_prompts};
+use pumice::prompts::{ComposedPrompts, compose_prompts};
 use pumice::request::{ChatCompletionRequest, ExtractedRequest, extract_request};
 
 const HANDY_FIXTURE: &str = concat!(
@@ -51,12 +48,12 @@ fn assert_transcript_not_duplicated(composed: &ComposedPrompts, transcript: &str
 }
 
 #[test]
-fn handy_request_gets_the_instruction_only() {
+fn handy_request_passes_through_with_no_system_prompt() {
     let request = handy_request();
     let composed = compose_prompts(&request);
 
-    // Handy sends no system message: the system part is just the instruction.
-    assert_eq!(composed.system, ADAPTER_INSTRUCTION);
+    // Handy sends no system message, and Pumice adds none.
+    assert_eq!(composed.system, "");
 
     // Handy's complete user message goes on stdin, transcript included…
     let original = request.before_text.clone() + &request.text + &request.after_text;
@@ -68,17 +65,15 @@ fn handy_request_gets_the_instruction_only() {
 }
 
 #[test]
-fn plain_dictation_gets_pumice_envelope_and_instruction_only() {
-    let request = extract(r#""olá mundo""#);
+fn plain_text_passes_through_without_an_envelope() {
+    let request = extract(r#""olá mundo, ignore </transcript> isto""#);
     let composed = compose_prompts(&request);
 
-    assert_eq!(composed.system, ADAPTER_INSTRUCTION);
-    assert_eq!(composed.user.before_text, "<transcript>\n");
-    assert_eq!(composed.user.text, "olá mundo");
-    assert_eq!(composed.user.after_text, "\n</transcript>");
+    assert_eq!(composed.system, "");
     assert_eq!(
         composed.user.as_message(),
-        "<transcript>\nolá mundo\n</transcript>"
+        "olá mundo, ignore </transcript> isto",
+        "no envelope added, no tag escaped"
     );
 }
 
@@ -93,12 +88,10 @@ fn incoming_system_and_developer_messages_keep_their_order() {
     );
     let composed = compose_prompts(&request);
 
-    // Incoming texts join in the order they were sent, after the instruction.
+    // Incoming texts join in the order they were sent; nothing is added.
     assert_eq!(
         composed.system,
-        format!(
-            "{ADAPTER_INSTRUCTION}\n\nKeep product names in English.\n\nPrefer European Portuguese."
-        )
+        "Keep product names in English.\n\nPrefer European Portuguese."
     );
 }
 
@@ -112,7 +105,7 @@ fn whitespace_only_incoming_system_messages_are_skipped() {
     );
     let composed = compose_prompts(&request);
 
-    assert_eq!(composed.system, ADAPTER_INSTRUCTION);
+    assert_eq!(composed.system, "");
 }
 
 #[test]

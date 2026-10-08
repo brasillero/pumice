@@ -8,7 +8,6 @@ Last updated: 2026-10-07.
 
 | Item | Context | Source |
 | --- | --- | --- |
-| **Fixed prompt (`ADAPTER_INSTRUCTION`)** | Pumice prepends a fixed instruction to every call (`src/prompts.rs`), before the client's own system prompt (Handy's Wispr prompt). It may be redundant, or may conflict ("light corrections only") with a richer client prompt. It is also the only guard for clients that send bare text (AGENTS.md rule 4). Keep, shorten or make configurable? | Owner, 2026-10-07 |
 | **Cleanup: is any left?** | Cleanup is now minimal (#63): drop a leading `<think>` block, trim, reject an empty reply. Discuss whether even these stay. Note: translation use (dictating in Portuguese, getting English) is why heading and quote heuristics were removed. Spec S3.4 still describes preamble and code-fence stripping; this is a recorded deviation. | Owner, 2026-10-07 |
 | **B3: literal transcript tags** | Dictation containing literal `<transcript>…</transcript>` tags loses the surrounding words (the extraction accepts an envelope anywhere in the message). The owner will check whether it happens in practice and whether the prompt can handle it. | Audit 2026-10-07 |
 | **AGENTS.md exceptions** | Two documented deviations need an owner edit to AGENTS.md: the generic adapter's loopback HTTP call (outbound-call rule) and the Kiro agent file Pumice writes into the call's temporary directory (empty-directory rule). | Audit 2026-10-07 |

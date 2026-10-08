@@ -264,7 +264,9 @@ impl CliAdapter for KimiAdapter {
             remove_env: REMOVE_ENV_VARS.into_iter().map(OsString::from).collect(),
             control_files: vec![ControlFile {
                 name: AGENT_FILE_NAME.to_owned(),
-                contents: agent_file(input.system_prompt).into_bytes(),
+                // Kimi rejects an agent file with an empty body.
+                contents: agent_file(super::non_empty_system_prompt(input.system_prompt))
+                    .into_bytes(),
             }],
             workspace_files: Vec::new(),
             parser: parse_output,
@@ -282,7 +284,7 @@ impl CliAdapter for KimiAdapter {
 /// documented on the module and in the research note.
 fn agent_file(system_prompt: &str) -> String {
     let mut file = String::from(
-        "---\nname: pumice\ndescription: Formats dictation without taking actions.\ntools: []\nsubagents: []\n---\n\n",
+        "---\nname: pumice\ndescription: Answers one message without tools.\ntools: []\nsubagents: []\n---\n\n",
     );
     file.push_str(system_prompt);
     file.push('\n');

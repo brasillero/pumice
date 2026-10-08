@@ -16,7 +16,8 @@ use std::time::Duration;
 use serde_saphyr::Location;
 
 pub use interface::{
-    FormatInput, Provider, ProviderError, ProviderErrorCode, ProviderFuture, UserPrompt,
+    FormatInput, NEUTRAL_SYSTEM_PROMPT, Provider, ProviderError, ProviderErrorCode, ProviderFuture,
+    UserPrompt, non_empty_system_prompt,
 };
 
 use crate::config::{Config, ConfigError};

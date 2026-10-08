@@ -458,3 +458,23 @@ async fn warning_items_do_not_reject_a_successful_turn() {
     let fake = fake_codex(stdout, 0);
     assert_eq!(format(&fake, "text").await.unwrap(), "Formatted text.");
 }
+
+#[tokio::test]
+async fn an_empty_client_system_prompt_becomes_the_neutral_line() {
+    // Codex rejects an empty instructions file.
+    let fake = fake_codex(&fixture("codex/success.jsonl"), 0);
+    let input = FormatInput {
+        system_prompt: "  ",
+        user_prompt: UserPrompt::default(),
+        text: "text",
+    };
+    provider(&fake)
+        .format(input, Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("success");
+    let file = &fake.report()["config_files"]["model_instructions_file"];
+    assert_eq!(
+        file["contents"],
+        json!(pumice::providers::NEUTRAL_SYSTEM_PROMPT)
+    );
+}

@@ -2,7 +2,7 @@
 
 Polish your dictation with the AI subscriptions you already have.
 
-Pumice is a small local service that sits between a dictation app and the AI coding CLIs you already pay for. It receives the raw text transcribed by Whisper, lightly corrects it (transcription mistakes, punctuation, lists), and returns it ready to paste. No separately billed API keys required.
+Pumice is a small local service that sits between a dictation app and the AI coding CLIs you already pay for. The app sends its own prompt and the text transcribed by Whisper; Pumice hands that request, unchanged, to the official CLI of a subscription you are logged into and returns the answer ready to paste. Formatting, translating or anything else is decided by the app's prompt. No separately billed API keys required.
 
 ```
 Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude / Codex / Kimi CLI
@@ -44,7 +44,7 @@ In Handy: **Settings → Advanced → Experimental Features → Post Processing*
 
 | Stage | Status |
 | --- | --- |
-| Local formatting service (Claude, Codex, explicit provider list) | Implemented |
+| Local pass-through service (Claude, Codex, explicit provider list) | Implemented |
 | Kimi adapter, auto-detection | Implemented |
 | Kiro, Antigravity, generic loopback adapter | Archived; OpenCode support removed |
 | Distribution: GitHub release archives + npm package | Released (v0.1.1); 0.2.0 after local testing |

@@ -197,16 +197,14 @@ pub fn extract_request(request: ChatCompletionRequest) -> Result<ExtractedReques
 
     match opens.first() {
         None => {
-            // No opening tag: the whole message is plain dictation, even when
-            // it mentions the closing tag. Wrap it in Pumice's own envelope
-            // for the formatter, escaping literal tags so the envelope stays
-            // unambiguous. `raw_text` keeps the original.
+            // No opening tag: the whole message is the text, passed through
+            // unchanged (Pumice adds no envelope of its own).
             Ok(ExtractedRequest {
                 model,
                 system_texts,
-                before_text: format!("{OPEN_TAG}\n"),
-                text: escape_transcript_tags(&user_text),
-                after_text: format!("\n{CLOSE_TAG}"),
+                before_text: String::new(),
+                text: user_text.clone(),
+                after_text: String::new(),
                 raw_text: user_text,
             })
         }
@@ -290,13 +288,6 @@ fn content_to_text(content: Content) -> Result<String, RequestError> {
             Ok(text)
         }
     }
-}
-
-/// Replaces literal transcript tags in plain dictation so the generated
-/// envelope cannot be confused with dictated text.
-fn escape_transcript_tags(text: &str) -> String {
-    text.replace(OPEN_TAG, "&lt;transcript>")
-        .replace(CLOSE_TAG, "&lt;/transcript>")
 }
 
 #[cfg(test)]

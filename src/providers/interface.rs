@@ -20,6 +20,22 @@ pub struct UserPrompt<'a> {
     pub after_text: &'a str,
 }
 
+/// The system prompt a plugin sends when the client sent none and its CLI
+/// cannot take an empty one (Codex and Kimi reject it). The only text
+/// Pumice ever adds, and only as a transport necessity (owner decision
+/// 2026-10-08).
+pub const NEUTRAL_SYSTEM_PROMPT: &str = "Follow the user's message.";
+
+/// The client's system prompt, or [`NEUTRAL_SYSTEM_PROMPT`] when it is
+/// blank, for CLIs that refuse an empty one.
+pub fn non_empty_system_prompt(system_prompt: &str) -> &str {
+    if system_prompt.trim().is_empty() {
+        NEUTRAL_SYSTEM_PROMPT
+    } else {
+        system_prompt
+    }
+}
+
 /// Everything a provider needs to format one dictation.
 #[derive(Clone, Copy)]
 pub struct FormatInput<'a> {

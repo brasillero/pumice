@@ -272,7 +272,10 @@ impl CliAdapter for CodexAdapter {
             remove_env: Vec::new(),
             control_files: vec![ControlFile {
                 name: "system.txt".to_owned(),
-                contents: input.system_prompt.as_bytes().to_vec(),
+                // Codex rejects an empty instructions file.
+                contents: super::non_empty_system_prompt(input.system_prompt)
+                    .as_bytes()
+                    .to_vec(),
             }],
             workspace_files: Vec::new(),
             parser: parse_output,
