@@ -360,7 +360,7 @@ fn default_key_fails_with_a_removal_hint() {
         "{error}"
     );
     assert!(
-        error.contains("a request without a model returns the original text"),
+        error.contains("a request without a model gets an error and the app keeps its own text"),
         "{error}"
     );
     assert!(

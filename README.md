@@ -11,7 +11,7 @@ Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude
 
 - **Works with [Handy](https://github.com/cjpais/Handy)** through its Custom post-processing provider, and with any app that talks to an OpenAI-compatible endpoint.
 - **Uses the official CLIs** of your subscriptions: Claude, Codex and Kimi.
-- **Never loses a dictation:** if the selected provider fails or times out, you get the raw text back.
+- **Never loses a dictation:** if the selected provider fails or times out, Pumice answers with an error and the app pastes its own transcript.
 - **Local and private:** listens on localhost only, no telemetry.
 - **Single executable** for Windows, Linux and macOS, with nothing else to install.
 

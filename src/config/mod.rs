@@ -186,7 +186,7 @@ fn validate(
         return Err(ConfigError::at(
             span.referenced,
             format!(
-                "\"default\" was removed in 0.2: the client's model field picks the provider, and a request without a model returns the original text. List every provider you want offered under \"providers:\", e.g.:\n{}",
+                "\"default\" was removed in 0.2: the client's model field picks the provider, and a request without a model gets an error and the app keeps its own text. List every provider you want offered under \"providers:\", e.g.:\n{}",
                 raw::PROVIDERS_LIST_FORM
             ),
         ));
@@ -195,7 +195,7 @@ fn validate(
         return Err(ConfigError::at(
             span.referenced,
             format!(
-                "\"default_provider\" was removed in 0.2: providers are an explicit ordered list now, and the provider a request runs is the one its model names — a request without a model returns the original text. Use e.g.:\n{}",
+                "\"default_provider\" was removed in 0.2: providers are an explicit ordered list now, and the provider a request runs is the one its model names — a request without a model gets an error and the app keeps its own text. Use e.g.:\n{}",
                 raw::PROVIDERS_LIST_FORM
             ),
         ));
@@ -204,7 +204,7 @@ fn validate(
         return Err(ConfigError::at(
             span.referenced,
             format!(
-                "\"fallback_order\" was removed in 0.2: there is no fallback anymore — on failure the original text comes back unchanged. List every provider you want offered under \"providers:\" in order, e.g.:\n{}",
+                "\"fallback_order\" was removed in 0.2: there is no fallback anymore — on failure the app gets an error and keeps its own text. List every provider you want offered under \"providers:\" in order, e.g.:\n{}",
                 raw::PROVIDERS_LIST_FORM
             ),
         ));

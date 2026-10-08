@@ -23,7 +23,7 @@ use crate::request::{ChatCompletionRequest, extract_request};
 use crate::time::now_unix_secs;
 
 use super::ApiState;
-use super::log_entry::Unanswered;
+use super::log_entry::{self, Unanswered};
 use super::types::*;
 
 /// Writes the one log entry of a completion request. Each exit path logs
@@ -234,11 +234,21 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
     }
     entry.finish(extracted.model.as_deref(), &outcome);
 
+    // Could not format: answer with an HTTP error carrying the safe reason.
+    // The app keeps and pastes its own transcript, so Pumice never has to
+    // pick the transcript out of the app's prompt.
+    if let OutcomeKind::Raw(reason) = outcome.kind {
+        let status = log_entry::failure_status(reason);
+        return openai_error(
+            status,
+            &log_entry::raw_reason(reason, extracted.model.as_deref()),
+        );
+    }
+
     let created = now_unix_secs();
-    // The producing provider when formatting succeeded; otherwise the
-    // provider selection resolved to (when the original text comes back this
-    // names the selected provider), else the requested string, else a
-    // neutral default.
+    // The producing provider when formatting succeeded; otherwise (the
+    // built-in passthrough, an empty transcript) the provider selection
+    // resolved to, else the requested string, else a neutral default.
     let model = outcome
         .provider
         .map(str::to_owned)
@@ -360,11 +370,22 @@ fn openai_error(status: StatusCode, message: &str) -> Response {
         Json(ErrorBody {
             error: ErrorDetail {
                 message: message.to_owned(),
-                error_type: "invalid_request_error",
+                error_type: error_type(status),
             },
         }),
     )
         .into_response()
+}
+
+/// OpenAI's error `type` for `status`.
+fn error_type(status: StatusCode) -> &'static str {
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        "rate_limit_error"
+    } else if status.is_server_error() {
+        "server_error"
+    } else {
+        "invalid_request_error"
+    }
 }
 
 /// Whether the request's `model` field selects the built-in `inspect` model.

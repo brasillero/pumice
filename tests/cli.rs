@@ -515,7 +515,7 @@ fn startup_prints_the_route_line_naming_the_enabled_providers() {
     let line = startup_stderr_line(&mut child, "providers:");
     assert_eq!(
         line,
-        "providers: claude (haiku), codex (gpt-6.1-sol); on failure or no model: original text; total timeout 30s"
+        "providers: claude (haiku), codex (gpt-6.1-sol); on failure or no model: an HTTP error, the app keeps its own text; total timeout 30s"
     );
 }
 
@@ -535,7 +535,7 @@ fn startup_with_no_enabled_providers_prints_one_clear_line() {
     let line = startup_stderr_line(&mut child, "no providers enabled");
     assert!(
         line.contains(&format!(
-            "no providers enabled: every request returns the original text (add providers to {})",
+            "no providers enabled: every request gets an error and the app keeps its own text (add providers to {})",
             path.display()
         )),
         "{line}"

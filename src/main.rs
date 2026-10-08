@@ -335,7 +335,8 @@ async fn run_service(loaded: LoadedConfig) -> ExitCode {
 }
 
 /// The startup route line: every enabled provider in list order, and what a
-/// failure or a model-less request means — the original text comes back.
+/// failure or a model-less request means — an HTTP error; the app keeps
+/// its own text.
 /// When nothing is enabled, one clear line says what that means.
 fn route_line(
     pipeline: &Pipeline,
@@ -346,7 +347,7 @@ fn route_line(
     let route = pipeline.enabled_route();
     if route.is_empty() {
         return format!(
-            "no providers enabled: every request returns the original text (add providers to {config_path}); {timeout}"
+            "no providers enabled: every request gets an error and the app keeps its own text (add providers to {config_path}); {timeout}"
         );
     }
     let enabled = route
@@ -360,7 +361,9 @@ fn route_line(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    format!("providers: {enabled}; on failure or no model: original text; {timeout}")
+    format!(
+        "providers: {enabled}; on failure or no model: an HTTP error, the app keeps its own text; {timeout}"
+    )
 }
 
 fn config_location(source: &ConfigSource) -> String {

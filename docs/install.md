@@ -99,7 +99,7 @@ No Handy changes are needed beyond this Custom provider configuration.
 ## Configuration
 
 Without a config file Pumice starts with no providers: every request
-returns the original text. To format dictations, create the per-user config
+gets an error and the app keeps its own transcript. To format dictations, create the per-user config
 and list the providers you want:
 
 - Windows: `%APPDATA%\pumice\pumice.yaml`
@@ -108,16 +108,17 @@ and list the providers you want:
 
 ```yaml
 providers:                 # the client's model picks the entry; there is no
-  - id: claude             # fallback: a failure, or no model, returns the
-    enabled: true          # original text
+  - id: claude             # fallback: a failure, or no model, is an error
+    enabled: true          # and the app keeps its own transcript
     model: haiku           # required when enabled
   - id: codex
     enabled: false         # kept in the file, not offered, never run
 ```
 
 The client picks the provider: Handy sends the `model` the user chose, and
-Pumice runs exactly that provider. A request without a model returns the
-original text. Every entry needs `id` and `enabled`; `model` is required
+Pumice runs exactly that provider. A request without a model, or any
+failure, is answered with an HTTP error, and the app keeps its own
+transcript. Every entry needs `id` and `enabled`; `model` is required
 on enabled entries; `timeout_secs` and `binary` are optional and
 documented in [`pumice.example.yaml`](../pumice.example.yaml), which shows
 every supported provider. Gateways, routing and logins are configured in
@@ -156,5 +157,6 @@ remove that directory from your PATH if you added it.
 
 Pumice binds to `127.0.0.1` only, sends no telemetry, has no auto-updater and
 makes no external network calls itself; only the AI CLIs contact their
-providers. It never loses a dictation: if the
-selected provider fails or times out, the raw text comes back unchanged.
+providers. It never loses a dictation: if the selected provider fails or
+times out, Pumice answers with an error and the app pastes its own
+transcript.

@@ -42,7 +42,9 @@ pub fn render(source: &ConfigSource, statuses: &[ProviderStatus]) -> String {
     }
     let (ready, total) = enabled_ready(statuses);
     if total == 0 {
-        out.push_str("no providers enabled: every request returns the original text\n");
+        out.push_str(
+            "no providers enabled: every request gets an error and the app keeps its own text\n",
+        );
     }
     out.push_str(&format!("{ready} of {total} enabled providers ready\n"));
     out
