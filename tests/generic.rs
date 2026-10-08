@@ -946,6 +946,7 @@ fn chain_config(entries: Vec<(&str, pumice::providers::ProviderSettings)>) -> Co
     Config {
         port: 7567,
         total_timeout: Duration::from_secs(30),
+        max_parallel: 1,
         debug_log: DebugLogSettings {
             enabled: false,
             path: Path::new("pumice-debug.jsonl").to_path_buf(),

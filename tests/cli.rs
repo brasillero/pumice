@@ -515,7 +515,7 @@ fn startup_prints_the_route_line_naming_the_enabled_providers() {
     let line = startup_stderr_line(&mut child, "providers:");
     assert_eq!(
         line,
-        "providers: claude (haiku), codex (gpt-6.1-sol); on failure or no model: an HTTP error, the app keeps its own text; total timeout 30s"
+        "providers: claude (haiku), codex (gpt-6.1-sol); on failure or no model: an HTTP error, the app keeps its own text; total timeout 30s, up to 4 requests at once"
     );
 }
 

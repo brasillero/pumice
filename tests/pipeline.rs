@@ -115,6 +115,7 @@ fn direct_config(total_timeout: Duration, entries: Vec<(&str, ProviderSettings)>
     Config {
         port: 7567,
         total_timeout,
+        max_parallel: 1,
         debug_log: DebugLogSettings {
             enabled: false,
             path: PathBuf::from("pumice-debug.jsonl"),
@@ -382,44 +383,40 @@ async fn exhausted_budget_never_starts_the_cli() {
 }
 
 #[tokio::test]
-async fn a_second_run_gets_raw_text_while_one_is_active() {
-    let (pipeline, fake) = pipeline(
-        CLAUDE_AT_FAKE,
-        json!({
-            "stdout": success_envelope("Olá."),
-            "exit_code": 0,
-            "sleep_ms": 2_000,
-        }),
-    );
-    let pipeline = Arc::new(pipeline);
+async fn a_second_run_gets_raw_text_when_its_budget_runs_out_waiting() {
+    let alpha = TestProvider::new("alpha", vec![Step::Sleep(Duration::from_secs(10))]);
+    let config = direct_config(Duration::from_secs(2), vec![("alpha", test_settings(true))]);
+    let pipeline = Arc::new(Pipeline::new(&config, vec![alpha.clone()]));
 
     let first = {
         let pipeline = Arc::clone(&pipeline);
         tokio::spawn(async move {
             pipeline
-                .format(&handy_request(Some("claude"), "ola"), Instant::now())
+                .format(&handy_request(Some("alpha"), "ola"), Instant::now())
                 .await
         })
     };
 
-    // The fake writes its report before sleeping; once it exists the first
-    // run surely holds the busy permit.
+    // Once the provider is called, the first request holds the only slot.
     let started_by = std::time::Instant::now() + Duration::from_secs(5);
-    while !fake.report_path().exists() {
-        assert!(std::time::Instant::now() < started_by, "fake never started");
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    while alpha.calls() == 0 {
+        assert!(
+            std::time::Instant::now() < started_by,
+            "first run never started"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
+    // Back-dated so this request's budget ends about a second before the
+    // first run can release its slot (at its own 2 s deadline).
+    let started = Instant::now() - Duration::from_secs(1);
     let outcome = pipeline
-        .format(
-            &handy_request(Some("claude"), "outro ditado"),
-            Instant::now(),
-        )
+        .format(&handy_request(Some("alpha"), "outro ditado"), started)
         .await;
     assert_raw(&outcome, RawReason::Busy, "outro ditado");
     assert!(
-        outcome.elapsed < Duration::from_millis(500),
-        "busy fallback took {:?}",
+        outcome.elapsed < Duration::from_secs(3),
+        "waiting for a slot took {:?}",
         outcome.elapsed
     );
 
@@ -434,15 +431,91 @@ async fn a_second_run_gets_raw_text_while_one_is_active() {
     assert_eq!(passthrough.attempts, 0);
 
     let first = first.await.expect("first run completes");
+    assert_raw(
+        &first,
+        RawReason::ProviderFailed(ProviderErrorKind::Timeout),
+        "ola",
+    );
+}
+
+#[tokio::test]
+async fn queued_request_runs_after_the_slot_frees() {
+    let (pipeline, fake) = pipeline(
+        "total_timeout_secs: 10\nmax_parallel: 1\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n",
+        json!({
+            "stdout": success_envelope("Olá."),
+            "exit_code": 0,
+            "sleep_ms": 1_000,
+        }),
+    );
+    let pipeline = Arc::new(pipeline);
+
+    let first = {
+        let pipeline = Arc::clone(&pipeline);
+        tokio::spawn(async move {
+            pipeline
+                .format(&handy_request(Some("claude"), "ola"), Instant::now())
+                .await
+        })
+    };
+
+    let started_by = std::time::Instant::now() + Duration::from_secs(5);
+    while !fake.report_path().exists() {
+        assert!(std::time::Instant::now() < started_by, "fake never started");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let started = Instant::now();
+    let second = pipeline
+        .format(&handy_request(Some("claude"), "outro ditado"), started)
+        .await;
+
+    let first = first.await.expect("first run completes");
     assert_eq!(first.kind, OutcomeKind::Formatted);
     assert_eq!(first.text, "Olá.");
 
-    // After the first run finished, formatting works again.
-    let third = pipeline
-        .format(&handy_request(Some("claude"), "terceiro"), Instant::now())
-        .await;
-    assert_eq!(third.kind, OutcomeKind::Formatted);
-    assert_eq!(third.text, "Olá.");
+    assert_eq!(second.kind, OutcomeKind::Formatted);
+    assert_eq!(second.text, "Olá.");
+    assert!(
+        second.elapsed > Duration::from_millis(900),
+        "second waited for the slot, took {:?}",
+        second.elapsed
+    );
+    assert!(
+        second.elapsed < Duration::from_secs(5),
+        "second finished soon after the slot freed, took {:?}",
+        second.elapsed
+    );
+}
+
+#[tokio::test]
+async fn parallel_runs_overlap() {
+    let alpha = TestProvider::new("alpha", vec![Step::Sleep(Duration::from_secs(1))]);
+    let beta = TestProvider::new("beta", vec![Step::Sleep(Duration::from_secs(1))]);
+    let mut config = direct_config(
+        Duration::from_secs(10),
+        vec![
+            ("alpha", test_settings(true)),
+            ("beta", test_settings(true)),
+        ],
+    );
+    config.max_parallel = 2;
+    let pipeline = Pipeline::new(&config, vec![alpha.clone(), beta.clone()]);
+
+    let start = Instant::now();
+    let first_request = handy_request(Some("alpha"), "first");
+    let second_request = handy_request(Some("beta"), "second");
+    let first = pipeline.format(&first_request, start);
+    let second = pipeline.format(&second_request, start);
+    let (first, second) = tokio::join!(first, second);
+
+    assert_eq!(first.kind, OutcomeKind::Formatted);
+    assert_eq!(second.kind, OutcomeKind::Formatted);
+    assert!(
+        start.elapsed() < Duration::from_millis(1_800),
+        "two one-second runs finished sequentially would take at least 2s, took {:?}",
+        start.elapsed()
+    );
 }
 
 #[tokio::test]

@@ -54,10 +54,10 @@ struct ProviderEntry {
 /// budget and cleans the result; returns the raw dictation with the reason
 /// whenever formatting cannot deliver.
 ///
-/// One formatting run is active at a time: a concurrent request receives the
-/// raw dictation immediately ([`RawReason::Busy`]). The busy permit and the
-/// provider future both release on cancellation, killing the CLI's process
-/// tree.
+/// Up to `max_parallel` formatting runs are active at a time; extra requests
+/// wait in line (FIFO). A request still waiting when its total budget runs out
+/// gets [`RawReason::Busy`]. The busy permit and the provider future both
+/// release on cancellation, killing the CLI's process tree.
 pub struct Pipeline {
     /// The built (enabled) providers, by ID.
     providers: BTreeMap<String, ProviderEntry>,
@@ -74,6 +74,7 @@ pub struct Pipeline {
     /// adapter has no executable to find and counts as available whenever it
     /// is built. Selection ignores this; only model listing filters by it.
     available: Option<BTreeSet<String>>,
+    /// Limits how many provider calls run at once; extra requests wait in line.
     busy: Semaphore,
 }
 
@@ -136,7 +137,7 @@ impl Pipeline {
                 .collect(),
             total_timeout: config.total_timeout,
             available,
-            busy: Semaphore::new(1),
+            busy: Semaphore::new(config.max_parallel),
         }
     }
 
@@ -244,18 +245,23 @@ impl Pipeline {
             );
         }
 
-        // Held for the whole run; dropping it (including on cancellation)
-        // releases the permit.
-        let Ok(_permit) = self.busy.try_acquire() else {
-            return self.raw(request, RawReason::Busy, started, Vec::new());
-        };
-
         let Some(total_deadline) = started.checked_add(self.total_timeout) else {
             return self.raw(request, RawReason::BudgetExhausted, started, Vec::new());
         };
         let total_deadline = total_deadline
             .checked_sub(RESPONSE_RESERVE)
             .unwrap_or(started);
+        if total_deadline.duration_since(Instant::now()) < MIN_STARTUP {
+            return self.raw(request, RawReason::BudgetExhausted, started, Vec::new());
+        }
+
+        // Waits in line (first come, first served) for a free slot until the
+        // budget runs out. Held for the whole run; dropping it (including on
+        // cancellation) releases the slot.
+        let _permit = match tokio::time::timeout_at(total_deadline, self.busy.acquire()).await {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) | Err(_) => return self.raw(request, RawReason::Busy, started, Vec::new()),
+        };
         if total_deadline.duration_since(Instant::now()) < MIN_STARTUP {
             return self.raw(request, RawReason::BudgetExhausted, started, Vec::new());
         }
@@ -447,7 +453,7 @@ pub enum RawReason {
     /// The request named no provider: the `model` field was missing or
     /// blank, so the original text returns.
     NoModel,
-    /// Another formatting run is active.
+    /// Every slot was taken and the request waited until its budget ran out.
     Busy,
     /// The request's total budget is (nearly) spent before starting.
     BudgetExhausted,

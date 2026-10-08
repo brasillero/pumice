@@ -39,6 +39,8 @@ pub(crate) struct RawConfig {
     #[serde(default, deserialize_with = "removed_key")]
     pub default: Option<Spanned<serde::de::IgnoredAny>>,
     pub total_timeout_secs: Option<Spanned<u64>>,
+    /// How many provider calls may run at the same time.
+    pub max_parallel: Option<Spanned<u64>>,
     #[serde(default, deserialize_with = "provider_list")]
     pub providers: Vec<Spanned<RawProviderEntry>>,
     /// Removed in 0.2; parsed only so the error can point at the key.

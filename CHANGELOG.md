@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Parallel requests.** Up to `max_parallel` requests (default 4, at most 32) run at the same time; extra requests wait in line instead of getting an immediate busy error, and one still waiting when its time budget runs out gets HTTP 503.
+
 ### Changed
 
 - **A request that cannot be formatted is answered with an HTTP error** instead of a normal reply containing the transcript: 400 (no model), 404 (unknown or disabled provider), 429 (rate limit or quota), 502 (provider failure or empty reply), 503 (busy), 504 (timeout). The message is a text-free reason, the log line reads `FAILED  HTTP <status>: <reason>`, and the app pastes its own saved transcript (Handy and OpenWhispr both do).
