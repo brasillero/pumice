@@ -96,6 +96,7 @@ Update this table in the PR that finishes each story. Order follows the plan in 
 | 40 | S4.4: failures are HTTP errors | Done | #76 | Owner decision (2026-10-08): no 200-with-transcript on failure; the app keeps its own transcript. B3 now only affects the built-in `passthrough` |
 | 41 | S3.9: cleanup reads only the reply | Done | #77 | Owner decision (2026-10-08): cleanup no longer consults the dictation, and an unclosed `<think>` tag is kept as text instead of failing; `CleanupError::UnclosedReasoning` removed |
 | 42 | S4.5: parallel requests with a queue | Done | #78 | Owner request (2026-10-08, friends testing over the public link): up to `max_parallel` (default 4, max 32) provider runs at once; extra requests wait FIFO within their time budget, then get 503. Implemented by Kimi, reviewed by Claude and Codex |
+| 43 | S4.6: live request view | In review | — | Interactive ratatui-based request monitor with filter/search/details; `--plain` disables it; dictated text and replies shown only when the debug log is enabled |
 
 **Distribution review (2026-10-05):** the owner accepted the final review and authorized merging #36–#38. #36–#38 are merged; all 10 archive checks and all 16 npm checks passed, including Windows/Linux/macOS native installs and Linux pnpm/Bun. #38 also passed all 16 checks before merging. GitHub v0.1.0 is published; npm publication is pending account 2FA.
 

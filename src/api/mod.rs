@@ -5,7 +5,9 @@
 //! router until Ctrl-C. Dictated text never reaches the ordinary log sink —
 //! only one metadata entry per completion request does. When `debug_log` is
 //! enabled (S1.4), the opt-in debug sink additionally records full request
-//! and response payloads, including the dictation, for investigation.
+//! and response payloads, including the dictation, for investigation. The
+//! same `debug_log.enabled` flag controls whether dictated text and replies
+//! reach the live request monitor (S4.6).
 
 mod handlers;
 mod log_entry;
@@ -21,6 +23,7 @@ use axum::routing::{get, post};
 use tokio::net::TcpListener;
 
 use crate::logging::DebugLog;
+use crate::monitor::{Event, EventKind, Monitor, NoMonitor};
 use crate::pipeline::{FormatOutcome, Pipeline};
 
 /// State shared by every handler.
@@ -30,6 +33,7 @@ pub(crate) struct ApiState {
     counter: Arc<AtomicU64>,
     log: Arc<dyn RequestLog>,
     debug_log: Arc<DebugLog>,
+    monitor: Arc<dyn Monitor>,
 }
 
 impl ApiState {
@@ -37,13 +41,27 @@ impl ApiState {
         pipeline: Arc<Pipeline>,
         log: Arc<dyn RequestLog>,
         debug_log: Arc<DebugLog>,
+        monitor: Arc<dyn Monitor>,
     ) -> ApiState {
         ApiState {
             pipeline,
             counter: Arc::new(AtomicU64::new(1)),
             log,
             debug_log,
+            monitor,
         }
+    }
+
+    fn emit(&self, number: u64, kind: EventKind) {
+        self.emit_at(number, std::time::Instant::now(), kind);
+    }
+
+    fn emit_at(&self, number: u64, at: std::time::Instant, kind: EventKind) {
+        self.monitor.event(Event { number, at, kind });
+    }
+
+    fn text_allowed(&self) -> bool {
+        self.debug_log.is_enabled()
     }
 
     fn next_id(&self) -> u64 {
@@ -94,6 +112,14 @@ pub trait RequestLog: Send + Sync {
 /// stderr, never dictated text.
 pub struct StderrLog;
 
+/// A [`RequestLog`] that writes nothing. Used while the live view owns the
+/// terminal; the view shows the same information.
+pub struct NullLog;
+
+impl RequestLog for NullLog {
+    fn write_line(&self, _line: &str) {}
+}
+
 impl RequestLog for StderrLog {
     fn write_line(&self, line: &str) {
         eprintln!("{line}");
@@ -122,9 +148,31 @@ pub async fn serve(
     log: Arc<dyn RequestLog>,
     debug_log: Arc<DebugLog>,
 ) -> io::Result<()> {
-    let state = ApiState::new(pipeline, log, debug_log);
+    serve_monitored(
+        listener,
+        pipeline,
+        log,
+        debug_log,
+        Arc::new(NoMonitor),
+        shutdown_signal(),
+    )
+    .await
+}
+
+/// [`serve`] with a live monitor and a caller-chosen shutdown trigger
+/// (S4.6): the terminal view stops the service itself, since Ctrl-C reaches
+/// it as a key, not a signal.
+pub async fn serve_monitored(
+    listener: TcpListener,
+    pipeline: Arc<Pipeline>,
+    log: Arc<dyn RequestLog>,
+    debug_log: Arc<DebugLog>,
+    monitor: Arc<dyn Monitor>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> io::Result<()> {
+    let state = ApiState::new(pipeline, log, debug_log, monitor);
     axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown)
         .await
 }
 

@@ -59,6 +59,16 @@ That single command starts the service and prints the address it listens on,
 command, and `pumice --config <path>` starts it with an explicit config
 file.) Stop the service with Ctrl-C.
 
+When `pumice` runs in a terminal, it opens a live interactive view of every
+completion request: arrived, queued, CLI started, CLI ended, responded or
+dropped, with timing and provider/model metadata. Use `↑`/`↓` or `j`/`k` to
+select a request, `Enter` to open its details pane, `f` to cycle filters, `/`
+to search, and `q` or `Ctrl-C` to quit (requests already running finish
+first; press it again to quit at once). Dictated text and replies only appear
+in the details pane when `debug_log.enabled` is `true`; otherwise the view
+shows only metadata. Run with `--plain` to keep the old one-line-per-request
+output on stderr instead of the live view.
+
 If the executable is not on your PATH — for example right after extracting an
 archive — run it from its folder with an explicit path:
 

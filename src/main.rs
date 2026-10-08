@@ -6,7 +6,7 @@
 //! reports which provider CLIs are installed and can run one real formatting
 //! call to check a provider's login.
 
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -23,14 +23,16 @@ const USAGE: &str = "\
 pumice - local dictation formatting service
 
 usage:
-  pumice [--config <path>]                 run the local service on 127.0.0.1 (default)
-  pumice serve [--config <path>]           alias for the command above
+  pumice [--config <path>] [--plain]       run the local service on 127.0.0.1 (default)
+  pumice serve [--config <path>] [--plain] alias for the command above
   pumice check-config [--config <path>]    validate and summarize the configuration
   pumice doctor [--config <path>]          show which provider CLIs are installed
   pumice doctor --login-check --provider <id>
                                            run one real formatting call to check login
   pumice --help                            print this help
   pumice --version                         print the version
+
+  --plain prints one log line per request instead of the live view
 ";
 
 const DOCTOR_USAGE: &str = "usage: pumice doctor [--config <path>] [--login-check --provider <id>]";
@@ -59,9 +61,9 @@ fn main() -> ExitCode {
         ["check-config", rest @ ..] => check_config(rest),
         ["doctor", rest @ ..] => doctor(rest),
         ["serve", rest @ ..] => serve(rest, "pumice serve"),
-        // Bare `pumice` starts the service; a leading `--config <path>` is
-        // the explicit-configuration form of the same command.
-        [] | ["--config", ..] => serve(&args, "pumice"),
+        // Bare `pumice` starts the service. `--config`, `--plain` or both are
+        // the only accepted bare flags.
+        [] | ["--config", ..] | ["--plain", ..] => serve(&args, "pumice"),
         [first, ..] => {
             eprintln!("error: unexpected argument '{first}'\n");
             eprint!("{USAGE}");
@@ -70,8 +72,8 @@ fn main() -> ExitCode {
     }
 }
 
-/// Parses a trailing `[--config <path>]`; shared by `check-config` and the
-/// service command (`serve` is the explicit alias of the bare form).
+/// Parses a trailing `[--config <path>]` for `check-config`; the service
+/// command takes [`serve_flags`].
 fn config_flag<'a>(args: &'a [&'a str], command: &str) -> Result<Option<&'a Path>, ExitCode> {
     match args {
         [] => Ok(None),
@@ -81,6 +83,46 @@ fn config_flag<'a>(args: &'a [&'a str], command: &str) -> Result<Option<&'a Path
             Err(ExitCode::from(2))
         }
     }
+}
+
+/// Flags accepted by the service command and the bare form.
+struct ServeFlags<'a> {
+    config: Option<&'a Path>,
+    plain: bool,
+}
+
+/// Parses `[--config <path>] [--plain]` in any order, each at most once.
+fn serve_flags<'a>(args: &'a [&'a str], command: &str) -> Result<ServeFlags<'a>, ExitCode> {
+    let usage = format!("usage: {command} [--config <path>] [--plain]");
+    let mut config: Option<&'a Path> = None;
+    let mut plain = false;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        let repeated = match *arg {
+            "--config" => config.is_some(),
+            "--plain" => plain,
+            _ => false,
+        };
+        if repeated {
+            eprintln!("error: {arg} given more than once\n{usage}");
+            return Err(ExitCode::from(2));
+        }
+        match *arg {
+            "--config" => match rest.next() {
+                Some(path) => config = Some(Path::new(path)),
+                None => {
+                    eprintln!("error: --config requires a path\n{usage}");
+                    return Err(ExitCode::from(2));
+                }
+            },
+            "--plain" => plain = true,
+            other => {
+                eprintln!("error: unexpected argument '{other}'\n{usage}");
+                return Err(ExitCode::from(2));
+            }
+        }
+    }
+    Ok(ServeFlags { config, plain })
 }
 
 /// Config loading is shared between commands: same errors, same exit code 2.
@@ -116,11 +158,11 @@ fn check_config(args: &[&str]) -> ExitCode {
 }
 
 fn serve(args: &[&str], command: &str) -> ExitCode {
-    let explicit = match config_flag(args, command) {
-        Ok(explicit) => explicit,
+    let flags = match serve_flags(args, command) {
+        Ok(flags) => flags,
         Err(code) => return code,
     };
-    let loaded = match load_config(explicit) {
+    let loaded = match load_config(flags.config) {
         Ok(loaded) => loaded,
         Err(code) => return code,
     };
@@ -128,7 +170,7 @@ fn serve(args: &[&str], command: &str) -> ExitCode {
         Ok(runtime) => runtime,
         Err(code) => return code,
     };
-    runtime.block_on(run_service(loaded))
+    runtime.block_on(run_service(loaded, flags.plain))
 }
 
 /// `pumice doctor [--config <path>] [--login-check --provider <id>]`.
@@ -244,7 +286,7 @@ fn doctor_login_check(explicit: Option<&Path>, id: &str) -> ExitCode {
     })
 }
 
-async fn run_service(loaded: LoadedConfig) -> ExitCode {
+async fn run_service(loaded: LoadedConfig, plain: bool) -> ExitCode {
     let config = loaded.config.clone();
     let runner = Arc::new(ProcessRunner::new());
     let built = match providers::build_from_config(&config, Arc::clone(&runner)) {
@@ -319,14 +361,59 @@ async fn run_service(loaded: LoadedConfig) -> ExitCode {
         )
     );
     println!("pumice listening on http://127.0.0.1:{}/v1", config.port);
-    match api::serve(
+
+    if plain
+        || !std::io::stdin().is_terminal()
+        || !std::io::stdout().is_terminal()
+        || !std::io::stderr().is_terminal()
+    {
+        return match api::serve(
+            listener,
+            pipeline,
+            Arc::new(api::StderrLog),
+            Arc::new(debug_log),
+        )
+        .await
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("error: the service stopped unexpectedly: {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
+
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let view_url = format!("http://127.0.0.1:{}/v1", config.port);
+    let view_info = pumice::tui::Info {
+        version: env!("CARGO_PKG_VERSION"),
+        url: view_url,
+        max_parallel: config.max_parallel,
+        text_allowed: debug_log.is_enabled(),
+    };
+    let view_thread = std::thread::spawn(move || pumice::tui::run(event_rx, view_info, stop_tx));
+
+    let result = api::serve_monitored(
         listener,
         pipeline,
-        Arc::new(api::StderrLog),
+        Arc::new(api::NullLog),
         Arc::new(debug_log),
+        Arc::new(pumice::monitor::ChannelMonitor::new(event_tx)),
+        async {
+            let _ = stop_rx.await;
+        },
     )
-    .await
+    .await;
+
+    if let Err(error) = view_thread
+        .join()
+        .unwrap_or_else(|_| Err(io::Error::other("live view thread panicked")))
     {
+        eprintln!("error: live view failed: {error}");
+    }
+
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: the service stopped unexpectedly: {error}");

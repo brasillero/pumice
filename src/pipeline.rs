@@ -16,7 +16,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, TryAcquireError};
 use tokio::time::Instant;
 
 use crate::cleanup::{CleanupError, cleanup};
@@ -41,6 +41,21 @@ const MIN_STARTUP: Duration = Duration::from_millis(100);
 /// It stays below `RESPONSE_RESERVE`, so even then the response goes out
 /// before the total timeout and Handy still receives the raw text.
 const HARD_STOP_SLACK: Duration = Duration::from_millis(150);
+
+/// Observes one formatting run as it happens (S4.6). Every method has an
+/// empty default, so an observer implements only what it needs. Called on
+/// the request's own task; implementations must be quick and never block.
+pub trait Progress: Send + Sync {
+    /// Every slot was taken: the request starts waiting in line.
+    fn queued(&self) {}
+    /// A slot was taken and the provider's CLI is about to start.
+    fn started(&self, _provider: &'static str, _model: &str) {}
+    /// The provider run and output cleanup ended.
+    fn attempt_ended(&self, _attempt: &Attempt) {}
+}
+
+/// The observer for callers that do not watch progress.
+impl Progress for () {}
 
 /// A provider ready to run, its configured timeout and model (the model is
 /// only shown in logs).
@@ -207,6 +222,16 @@ impl Pipeline {
     /// [`RawReason::CleanupFailed`]. When the budget dies before the attempt
     /// starts, the reason is [`RawReason::BudgetExhausted`] instead.
     pub async fn format(&self, request: &ExtractedRequest, started: Instant) -> FormatOutcome {
+        self.format_observed(request, started, &()).await
+    }
+
+    /// [`format`](Self::format), reporting each step to `progress`.
+    pub async fn format_observed(
+        &self,
+        request: &ExtractedRequest,
+        started: Instant,
+        progress: &dyn Progress,
+    ) -> FormatOutcome {
         // Explicit passthrough preserves even whitespace-only transcripts and
         // bypasses prompts, cleanup, the busy guard and provider selection.
         if self.select(request.model.as_deref()) == Some("passthrough") {
@@ -257,16 +282,30 @@ impl Pipeline {
 
         // Waits in line (first come, first served) for a free slot until the
         // budget runs out. Held for the whole run; dropping it (including on
-        // cancellation) releases the slot.
-        let _permit = match tokio::time::timeout_at(total_deadline, self.busy.acquire()).await {
-            Ok(Ok(permit)) => permit,
-            Ok(Err(_)) | Err(_) => return self.raw(request, RawReason::Busy, started, Vec::new()),
+        // cancellation) releases the slot. `queued` only fires when the request
+        // really has to wait because every slot is taken.
+        let _permit = match self.busy.try_acquire() {
+            Ok(permit) => permit,
+            Err(TryAcquireError::NoPermits) => {
+                progress.queued();
+                match tokio::time::timeout_at(total_deadline, self.busy.acquire()).await {
+                    Ok(Ok(permit)) => permit,
+                    Ok(Err(_)) | Err(_) => {
+                        return self.raw(request, RawReason::Busy, started, Vec::new());
+                    }
+                }
+            }
+            Err(TryAcquireError::Closed) => {
+                return self.raw(request, RawReason::Busy, started, Vec::new());
+            }
         };
         // The budget was enough before waiting, so any shortfall now (even a
         // slot that freed just past the deadline) is the queue's: busy.
         if total_deadline.duration_since(Instant::now()) < MIN_STARTUP {
             return self.raw(request, RawReason::Busy, started, Vec::new());
         }
+
+        progress.started(candidate.provider.id(), &candidate.model);
 
         let prompts = compose_prompts(request);
         let attempt_started = Instant::now();
@@ -294,6 +333,7 @@ impl Pipeline {
             elapsed: attempt_started.elapsed(),
             diagnostic,
         }];
+        progress.attempt_ended(&trail[0]);
         match result {
             Ok(text) => FormatOutcome::finished(
                 text,
