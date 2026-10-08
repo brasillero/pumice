@@ -188,10 +188,7 @@ fn doctor_report(explicit: Option<&Path>) -> ExitCode {
         let runner = ProcessRunner::new();
         let detection =
             providers::discovery::detect(&loaded.config, providers::PROVIDERS, &runner).await;
-        print!(
-            "{}",
-            doctor::render(&loaded.config, &loaded.source, &detection)
-        );
+        print!("{}", doctor::render(&loaded.source, &detection));
         let (ready, total) = doctor::enabled_ready(&detection);
         if ready == total {
             ExitCode::SUCCESS
@@ -262,10 +259,6 @@ async fn run_service(loaded: LoadedConfig) -> ExitCode {
         }
     }
     let pipeline = Arc::new(Pipeline::with_detection(&config, built, detection));
-
-    for warning in providers::risk_warnings(&config, providers::PROVIDERS) {
-        eprintln!("{warning}");
-    }
 
     // The debug log holds dictated text, so it opens before serving and a
     // misconfigured path fails startup (exit 1) instead of silently losing
@@ -399,8 +392,5 @@ fn print_summary(loaded: &LoadedConfig) {
             }
             println!("{line}");
         }
-    }
-    for warning in providers::risk_warnings(config, providers::PROVIDERS) {
-        println!("{warning}");
     }
 }

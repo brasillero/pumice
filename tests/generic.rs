@@ -990,13 +990,6 @@ fn nothing_is_enabled_without_an_entry() {
     )
     .expect("defaults build");
     assert!(built.is_empty(), "without entries nothing is built or run");
-
-    // The descriptor still carries the risk warning for when it is enabled.
-    let descriptor = pumice::providers::descriptor("generic").expect("registered");
-    assert_eq!(
-        descriptor.risk_warning,
-        Some(pumice::providers::generic::RISK_WARNING)
-    );
 }
 
 const CONFIG_NAME: &str = "pumice.yaml";

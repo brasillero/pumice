@@ -82,7 +82,6 @@ mod capability_probe {
         allowed_env: &[],
         validate_options: probe_validate_options,
         build: probe_build,
-        risk_warning: Some("the probe formats nothing and is not real"),
         validate_settings: validate_settings_noop,
         probe: ProbeSpec::PathOnly,
         default_binary: "probe-cli",
@@ -849,26 +848,6 @@ fn enabled_without_a_model_is_rejected_at_the_id() {
     assert!(
         error.contains(CONFIG_NAME),
         "error names the file:\n{error}"
-    );
-}
-
-#[test]
-fn risk_warnings_render_only_for_enabled_providers() {
-    let descriptors = probe_registry();
-    let config = load_with_descriptors(
-        "providers:\n  - id: probe\n    enabled: true\n    model: test/model\n",
-        &descriptors,
-    )
-    .expect("config loads");
-    assert_eq!(
-        providers::risk_warnings(&config, &descriptors),
-        ["warning: probe: the probe formats nothing and is not real"]
-    );
-
-    let config = load_with_descriptors("", &descriptors).expect("defaults load");
-    assert!(
-        providers::risk_warnings(&config, &descriptors).is_empty(),
-        "no entries means no warnings"
     );
 }
 

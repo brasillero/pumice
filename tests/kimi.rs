@@ -12,7 +12,7 @@ use std::time::Duration;
 use pumice::config::{self, Config};
 use pumice::process::ProcessRunner;
 use pumice::providers::cli::CliProvider;
-use pumice::providers::kimi::{DESCRIPTOR, ID, KimiAdapter, RISK_WARNING};
+use pumice::providers::kimi::{DESCRIPTOR, ID, KimiAdapter};
 use pumice::providers::{FormatInput, Provider, ProviderError, ProviderErrorCode, UserPrompt};
 use serde_json::{Value, json};
 use support::{FakeCli, fixture};
@@ -363,8 +363,7 @@ fn provider_reports_its_id_without_running() {
 }
 
 #[test]
-fn descriptor_defaults_ship_disabled_with_an_empty_model_and_the_risk_warning() {
-    assert_eq!(DESCRIPTOR.risk_warning, Some(RISK_WARNING));
+fn descriptor_defaults_ship_disabled_with_an_empty_model() {
     assert!(DESCRIPTOR.allowed_env.is_empty());
     let settings = (DESCRIPTOR.defaults)();
     // Enablement is the configuration file's decision; the descriptor ships
@@ -468,7 +467,7 @@ fn malformed_model_reports_the_value() {
         "providers:\n  - id: kimi\n    enabled: true\n    model: bad model\n",
         4,
         12,
-        "providers.kimi.model must be a nonempty model alias without whitespace, control characters or a leading '-'",
+        "providers.kimi.model must be a nonempty model alias of at most 256 bytes, without whitespace, control characters or a leading '-'",
     );
 }
 

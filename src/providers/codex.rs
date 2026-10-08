@@ -56,7 +56,6 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     allowed_env: ALLOWED_ENV,
     validate_options,
     build,
-    risk_warning: None,
     validate_settings: validate_settings_noop,
     probe: ProbeSpec::Version(&["--version"]),
     default_binary: DEFAULT_BINARY,

@@ -8,7 +8,7 @@ use std::time::Duration;
 use pumice::config::{self, Config};
 use pumice::process::ProcessRunner;
 use pumice::providers::cli::CliProvider;
-use pumice::providers::opencode::{DESCRIPTOR, ID, OpenCodeAdapter, RISK_WARNING};
+use pumice::providers::opencode::{DESCRIPTOR, ID, OpenCodeAdapter};
 use pumice::providers::{FormatInput, Provider, ProviderError, ProviderErrorCode, UserPrompt};
 use serde_json::{Value, json};
 use support::{FakeCli, fixture};
@@ -402,10 +402,9 @@ fn provider_reports_its_id_without_running() {
 }
 
 #[test]
-fn descriptor_carries_the_risk_warning_and_disabled_defaults() {
+fn descriptor_ships_disabled_defaults() {
     // Nothing is enabled unless the configuration says so; the loader tests
     // prove the behavior end to end.
-    assert_eq!(DESCRIPTOR.risk_warning, Some(RISK_WARNING));
     assert!(DESCRIPTOR.allowed_env.is_empty());
     let settings = (DESCRIPTOR.defaults)();
     assert!(!settings.enabled);

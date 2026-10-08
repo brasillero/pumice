@@ -13,7 +13,7 @@ use std::time::Duration;
 use pumice::config::{self, Config};
 use pumice::process::{Argument, ProcessRunner};
 use pumice::providers::cli::{CliAdapter, CliProvider};
-use pumice::providers::kiro::{DESCRIPTOR, ID, KiroAdapter, RISK_WARNING};
+use pumice::providers::kiro::{DESCRIPTOR, ID, KiroAdapter};
 use pumice::providers::{FormatInput, Provider, ProviderError, ProviderErrorCode, UserPrompt};
 use serde_json::{Value, json};
 use support::{FakeCli, fixture};
@@ -264,8 +264,7 @@ fn provider_reports_its_id_without_running() {
 }
 
 #[test]
-fn descriptor_carries_the_risk_warning_and_disabled_defaults() {
-    assert_eq!(DESCRIPTOR.risk_warning, Some(RISK_WARNING));
+fn descriptor_ships_disabled_defaults() {
     assert!(DESCRIPTOR.allowed_env.is_empty());
     let settings = (DESCRIPTOR.defaults)();
     assert!(!settings.enabled);

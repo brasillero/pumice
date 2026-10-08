@@ -38,9 +38,9 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// per-launch mechanism a safe routing variable could ride on.
 const ALLOWED_ENV: &[&str] = &[];
 
-/// Fixed notice `check-config` and startup print while the provider is
-/// enabled (it cannot be, but the warning stays with any future enablement).
-pub const RISK_WARNING: &str = "Experimental and disabled by default. Third-party integration may risk account access. Tool/startup isolation and transcript suppression are unverified.";
+// Residual risk (recorded here; not printed, owner decision 2026-10-07):
+// Third-party integration may risk account access. Tool/startup isolation
+// and transcript suppression are unverified.
 
 /// Fixed refusal for attempted enablement, pointing at the design note.
 const ENABLEMENT_REFUSAL: &str = "providers.antigravity cannot be enabled yet: no supported per-launch tool policy exists (see docs/research/phase2-architecture.md §3.2)";
@@ -51,7 +51,6 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     allowed_env: ALLOWED_ENV,
     validate_options,
     build,
-    risk_warning: Some(RISK_WARNING),
     validate_settings,
     // PATH-only: `agy` is never spawned, not even for `--version`
     // (orchestrator decision 4).

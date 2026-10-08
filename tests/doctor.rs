@@ -194,13 +194,7 @@ fn generic_enabled_reports_the_endpoint_line_and_counts_ready() {
         text.contains("generic: enabled, local endpoint (checked at call time)\n"),
         "output: {text}"
     );
-    assert!(
-        text.contains(&format!(
-            "  warning: generic: {}\n",
-            pumice::providers::generic::RISK_WARNING
-        )),
-        "output: {text}"
-    );
+    assert!(!text.contains("warning"), "output: {text}");
     assert!(
         text.contains("1 of 1 enabled providers ready\n"),
         "output: {text}"
