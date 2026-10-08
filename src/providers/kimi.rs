@@ -69,7 +69,7 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Adapter-owned child environment (2.1.1 bundled source; the background
 /// mode, the skills switches and the telemetry call were also verified in
 /// real runs).
-const DISABLE_ENV_VARS: [(&str, &str); 4] = [
+const DISABLE_ENV_VARS: [(&str, &str); 5] = [
     // Return after the main turn instead of the built-in `steer` default,
     // which waits for background task completions.
     ("KIMI_CODE_BACKGROUND_PRINT_BACKGROUND_MODE", "exit"),
@@ -80,6 +80,11 @@ const DISABLE_ENV_VARS: [(&str, &str); 4] = [
     ("KIMI_DISABLE_TELEMETRY", "1"),
     // No update checks from runs Pumice starts.
     ("KIMI_CODE_NO_AUTO_UPDATE", "1"),
+    // Cheapest settings (owner rule): thinking off. Kimi 2.1.1 has no
+    // thinking flag; this forced override beats the user's config for
+    // models served through Kimi's own provider. Other provider routes
+    // ignore it (a recorded limitation).
+    ("KIMI_MODEL_THINKING_EFFORT", "off"),
 ];
 
 /// Inherited variables removed from the child: it would mark the fresh

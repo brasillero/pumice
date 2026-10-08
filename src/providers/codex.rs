@@ -225,6 +225,13 @@ impl CliAdapter for CodexAdapter {
             "features.plugins=false",
             "features.apps=false",
             "notify=[]",
+            // Cheapest settings (owner rule): the standard service tier even
+            // when the user's config prefers fast (`default` is Codex's
+            // sentinel for standard routing; omitting it would inherit the
+            // user's tier), the fast feature off, and no reasoning summary.
+            r#"service_tier="default""#,
+            "features.fast_mode=false",
+            r#"model_reasoning_summary="none""#,
         ] {
             args.push(Argument::literal("-c"));
             args.push(Argument::literal(value));
@@ -430,6 +437,9 @@ mod tests {
             "features.plugins=false",
             "features.apps=false",
             "notify=[]",
+            r#"service_tier="default""#,
+            "features.fast_mode=false",
+            r#"model_reasoning_summary="none""#,
         ] {
             assert!(args.contains(&wanted.to_owned()), "missing {wanted}: {args:?}");
         }

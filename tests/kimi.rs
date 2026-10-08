@@ -32,6 +32,7 @@ const REPORTED_ENV: [&str; 5] = [
     "KIMI_CODE_BACKGROUND_PRINT_BACKGROUND_MODE",
     "KIMI_CODE_BUILTIN_PRODUCT_SKILLS",
     "KIMI_DISABLE_TELEMETRY",
+    "KIMI_MODEL_THINKING_EFFORT",
     "KIMI_CODE_NO_AUTO_UPDATE",
     "KIMI_CODE_TRUST_WORKSPACE",
 ];
@@ -153,6 +154,7 @@ async fn sets_the_adapter_owned_environment_and_removes_the_trust_override() {
     );
     assert_eq!(env["KIMI_CODE_BUILTIN_PRODUCT_SKILLS"], json!("false"));
     assert_eq!(env["KIMI_DISABLE_TELEMETRY"], json!("1"));
+    assert_eq!(env["KIMI_MODEL_THINKING_EFFORT"], json!("off"));
     assert_eq!(env["KIMI_CODE_NO_AUTO_UPDATE"], json!("1"));
     assert_eq!(
         env["KIMI_CODE_TRUST_WORKSPACE"],

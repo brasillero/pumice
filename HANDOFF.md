@@ -90,6 +90,7 @@ Update this table in the PR that finishes each story. Order follows the plan in 
 | 35 | S6.8: remove YAML prompts | Done | #71 | Owner decision (2026-10-08): no Pumice prompts from config; `prompts:` fails as removed. The fixed instruction stays until the owner decides after the client-protocol investigation |
 | 36 | S6.9: remove provider env/options | Done | #72 | Owner decision (2026-10-08): each CLI's own config is inherited; `env:`/`options:` fail as removed; descriptor `allowed_env`/`validate_options` and `ProviderSettings.env/options` gone; Claude keeps only its thinking-off variable; generic's descriptor refuses to build (its config is redesigned when it returns) |
 | 37 | S3.7: no tool-activity output checks | Done | #73 | Owner decision (2026-10-08): Codex and Kimi ignore tool records and return the final answer; tools stay off in the invocation. Archived adapters keep their checks until they return |
+| 38 | S2.14: cheapest settings per CLI | Done | #74 | Owner rule (2026-10-08): lowest effort, thinking off, never fast. Pins from ~/pumice-research/cheapest-settings-2026-10-08.md; limits: models that cannot disable thinking, Kimi non-native provider routes, unknown aliases |
 
 **Distribution review (2026-10-05):** the owner accepted the final review and authorized merging #36–#38. #36–#38 are merged; all 10 archive checks and all 16 npm checks passed, including Windows/Linux/macOS native installs and Linux pnpm/Bun. #38 also passed all 16 checks before merging. GitHub v0.1.0 is published; npm publication is pending account 2FA.
 

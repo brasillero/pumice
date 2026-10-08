@@ -73,6 +73,26 @@ fn build(
     )))
 }
 
+/// Environment pins for the cheapest call (owner rule): thinking off where
+/// the model allows it, the lowest effort, no fast mode, and the thinking
+/// compatibility switch cleared so an inherited `1` cannot turn "off" into
+/// "upstream default".
+const CHEAPEST_ENV: [(&str, &str); 4] = [
+    ("MAX_THINKING_TOKENS", "0"),
+    ("CLAUDE_CODE_EFFORT_LEVEL", "low"),
+    ("CLAUDE_CODE_DISABLE_FAST_MODE", "1"),
+    ("CLAUDE_CODE_DISABLE_THINKING", ""),
+];
+
+/// The per-call `--settings` layer: fast mode off plus [`CHEAPEST_ENV`].
+fn cheapest_settings_json() -> String {
+    let env: serde_json::Map<String, serde_json::Value> = CHEAPEST_ENV
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), serde_json::Value::from(*value)))
+        .collect();
+    serde_json::json!({"fastMode": false, "env": env}).to_string()
+}
+
 /// Builds restricted `claude -p` calls.
 #[derive(Clone, Debug)]
 pub struct ClaudeAdapter {
@@ -117,6 +137,16 @@ impl CliAdapter for ClaudeAdapter {
         ];
         let mut args: Vec<Argument> = flags.into_iter().map(Argument::literal).collect();
         args.push(Argument::literal(&self.model));
+        // Cheapest settings (owner rule): lowest effort, and the same pins
+        // as a per-call settings layer, because a user's settings `env`
+        // block would otherwise overwrite the child environment. The layer
+        // only sets these keys; the user's routing and login stay.
+        args.extend([
+            Argument::literal("--effort"),
+            Argument::literal("low"),
+            Argument::literal("--settings"),
+            Argument::literal(cheapest_settings_json()),
+        ]);
         args.extend([
             Argument::literal("--output-format"),
             Argument::literal("json"),
@@ -127,13 +157,12 @@ impl CliAdapter for ClaudeAdapter {
         let user = input.user_prompt;
         let stdin = [user.before_text, input.text, user.after_text].concat();
 
-        // Thinking off: the cheapest setting, and it dominated latency in
-        // S0.2 (owner decision). Everything else the CLI inherits from the
-        // user's own configuration.
-        let env = BTreeMap::from([(
-            OsString::from("MAX_THINKING_TOKENS"),
-            OsString::from("0"),
-        )]);
+        // The same pins in the child environment. Everything else the CLI
+        // inherits from the user's own configuration.
+        let env: BTreeMap<OsString, OsString> = CHEAPEST_ENV
+            .iter()
+            .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+            .collect();
 
         Ok(CliInvocation {
             program: ProgramSpec {
