@@ -16,6 +16,7 @@ Last updated: 2026-10-07.
 
 | Item | Context | Source |
 | --- | --- | --- |
+| OpenWhispr support | OpenWhispr's dictation window is a browser context: it likely needs a restricted CORS/preflight policy in Pumice before its requests succeed, and it retries 408/429/5xx up to 3 times. It first tries `/v1/responses` and falls back to chat completions on 404. Needs a check in the real desktop app. See `~/pumice-research/client-protocols-2026-10-08.md`. | Owner, 2026-10-08 (deferred) |
 | Release 0.2.0 | After local testing by the owner. CHANGELOG `[Unreleased]` is ready; the config format change makes it 0.2.0. Skip the unpublished npm 0.1.1. | Audit fix plan item 9 |
 | Setup preparation | Per-adapter metadata the wizard needs: option specs, model sources, verification status. | Audit fix plan item 10 |
 | `pumice setup` wizard | List installed CLIs, pick which to enable, pick a model each. "Dumb easy, frictionless, robust." | Owner, audit item 11 |
