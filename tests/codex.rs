@@ -35,7 +35,7 @@ const FIXED_ARGS: [&str; 11] = [
 ];
 
 /// The `-c` argument pairs after `-m <model>`, up to the control file.
-const CONFIG_ARGS: [&str; 20] = [
+const CONFIG_ARGS: [&str; 26] = [
     "-c",
     r#"web_search="disabled""#,
     "-c",
@@ -56,6 +56,12 @@ const CONFIG_ARGS: [&str; 20] = [
     "features.apps=false",
     "-c",
     "notify=[]",
+    "-c",
+    r#"service_tier="default""#,
+    "-c",
+    "features.fast_mode=false",
+    "-c",
+    r#"model_reasoning_summary="none""#,
 ];
 
 /// A fake Codex CLI that records argv, stdin and the instructions file named

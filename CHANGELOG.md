@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Every call uses the cheapest settings, even when the user's CLI config asks for more: Claude runs with `--effort low`, thinking off and fast mode off (also as a per-call settings layer, so a settings `env` block cannot undo them); Codex pins the standard service tier, turns the fast feature off and requests no reasoning summary (effort stays `low`); Kimi forces thinking off for models served by Kimi's own provider.
 - Claude, Codex and Kimi no longer reject a reply because the CLI's output shows tool activity: each plugin returns the final answer, and tools stay switched off in the invocation (owner decision).
 - **Provider `env:` and `options:` are removed.** Each CLI keeps its own configuration (gateway, routing, login) and Pumice inherits it: set Claude's `ANTHROPIC_BASE_URL` in `~/.claude/settings.json` and Codex's `openai_base_url` in `~/.codex/config.toml`. A file that still has `env:` or `options:` fails at that line. The generic local-server adapter, whose only setting was `options.base_url`, can no longer be built from a config until it returns.
 - **The `prompts:` section is removed.** The app that sends the dictation (Handy, OpenWhispr) sends its own prompt; Pumice adds none from the config. A file that still has `prompts:` fails at that line with a message saying so.
