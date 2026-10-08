@@ -8,12 +8,17 @@
 //! produced the text, the total time and the text length. When the provider
 //! ran but failed, one indented attempt line follows with the safe reason:
 //!
+//! A request that could not be formatted is answered with an HTTP error
+//! (the app keeps its own transcript) and labelled `FAILED`:
+//!
 //! ```text
-//! 2026-10-06 14:04:01  #13  RAW          original text returned: timed out  6.2s  98 chars  [requested: claude]
+//! 2026-10-06 14:04:01  #13  FAILED       HTTP 504: timed out  6.2s  0 chars  [requested: claude]
 //!                           ✗ claude (haiku)        timed out          6.0s
 //! ```
 
 use std::fmt::Write as _;
+
+use axum::http::StatusCode;
 use std::time::Duration;
 
 use crate::pipeline::{Attempt, AttemptResult, FormatOutcome, OutcomeKind, RawReason};
@@ -64,10 +69,11 @@ fn render_at(entry: &Entry<'_>, color: bool, timestamp: &str) -> String {
         OutcomeKind::Inspect => ("inspect", Style::Cyan, "request body echoed".to_owned()),
         OutcomeKind::Empty => ("empty", Style::Dim, "nothing to format".to_owned()),
         OutcomeKind::Raw(reason) => (
-            "RAW",
-            Style::Yellow,
+            "FAILED",
+            Style::Red,
             format!(
-                "original text returned: {}",
+                "HTTP {}: {}",
+                failure_status(reason).as_u16(),
                 raw_reason(reason, entry.requested)
             ),
         ),
@@ -84,7 +90,12 @@ fn render_at(entry: &Entry<'_>, color: bool, timestamp: &str) -> String {
         paint.apply(style, &format!("{label:<11}")),
         what,
         seconds(outcome.elapsed),
-        outcome.text.chars().count(),
+        // A failure sends no text: the app keeps its own transcript.
+        if matches!(outcome.kind, OutcomeKind::Raw(_)) {
+            0
+        } else {
+            outcome.text.chars().count()
+        },
         paint.apply(Style::Dim, &format!("[{notes}]")),
     );
 
@@ -160,7 +171,26 @@ fn requested(requested: Option<&str>) -> String {
     }
 }
 
-fn raw_reason(reason: RawReason, requested_model: Option<&str>) -> String {
+/// The HTTP status a request that could not be formatted is answered with.
+/// The app then pastes its own transcript (Handy and OpenWhispr both do).
+pub(super) fn failure_status(reason: RawReason) -> StatusCode {
+    match reason {
+        RawReason::NoModel => StatusCode::BAD_REQUEST,
+        RawReason::UnknownProvider | RawReason::ProviderDisabled => StatusCode::NOT_FOUND,
+        RawReason::Busy => StatusCode::SERVICE_UNAVAILABLE,
+        RawReason::BudgetExhausted | RawReason::ProviderFailed(ProviderError::Timeout) => {
+            StatusCode::GATEWAY_TIMEOUT
+        }
+        RawReason::ProviderFailed(
+            ProviderError::RateLimited { .. } | ProviderError::QuotaExceeded { .. },
+        ) => StatusCode::TOO_MANY_REQUESTS,
+        RawReason::ProviderFailed(_) | RawReason::CleanupFailed(_) => StatusCode::BAD_GATEWAY,
+    }
+}
+
+/// A safe, text-free description of why a request could not be formatted:
+/// written to the log and sent as the HTTP error message.
+pub(super) fn raw_reason(reason: RawReason, requested_model: Option<&str>) -> String {
     match reason {
         RawReason::UnknownProvider => format!(
             "no provider named \"{}\" in the config",
@@ -255,7 +285,6 @@ fn local_timestamp() -> String {
 enum Style {
     Dim,
     Green,
-    Yellow,
     Red,
     Cyan,
 }
@@ -270,7 +299,6 @@ impl Paint {
         let code = match style {
             Style::Dim => "2",
             Style::Green => "32",
-            Style::Yellow => "33",
             Style::Red => "31",
             Style::Cyan => "36",
         };
@@ -394,7 +422,7 @@ mod tests {
         });
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2, "{text}");
-        assert!(lines[0].contains("RAW"), "{text}");
+        assert!(lines[0].contains("FAILED       HTTP 504: timed out"), "{text}");
         assert!(lines[0].contains("[requested: claude]"), "{text}");
         assert!(!lines[0].contains("fallback"), "{text}");
         assert!(
@@ -404,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_after_failure_names_the_provider_error() {
+    fn failure_names_the_status_and_the_provider_error() {
         let outcome = outcome(
             OutcomeKind::Raw(RawReason::ProviderFailed(ProviderError::RateLimited {
                 retry_after: Some(Duration::from_secs(60)),
@@ -425,7 +453,7 @@ mod tests {
             outcome: &outcome,
         });
         assert!(
-            text.contains("RAW          original text returned: rate limited (retry in 60s)"),
+            text.contains("FAILED       HTTP 429: rate limited (retry in 60s)"),
             "{text}"
         );
         assert!(text.contains("rate limited (retry in 60s)"), "{text}");

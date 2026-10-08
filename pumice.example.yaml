@@ -9,13 +9,14 @@
 # Pumice assumes nothing: no provider is enabled by default and no model is
 # built in. Copy this to your own pumice.yaml, list the providers you want,
 # and keep only what you change. Without a file (or with an empty one) the
-# service starts with no providers: every request returns the original text.
+# service starts with no providers: every request gets an error, and the app
+# keeps its own transcript.
 #
 # The client picks the provider: the app sends the `model` the user chose
 # (a provider id such as `claude`), and Pumice runs exactly that provider. A
-# request without a model, an unknown or disabled model, or any failure
-# returns the original text unchanged, and every request is logged with what
-# happened and why.
+# request without a model, an unknown or disabled model, or any failure is
+# answered with an HTTP error (the app pastes its own transcript), and every
+# request is logged with what happened and why.
 #
 # Pumice reads exactly one configuration file:
 #   1. the path passed with --config (pumice --config my.yaml), else
@@ -63,7 +64,7 @@ providers:
     # model: gpt-6.1-sol
 
   # Kimi Code CLI, off. The dictation travels in the command line, so very
-  # long dictations are refused (the original text comes back). Any alias
+  # long dictations are refused (an error; the app keeps its text). Any alias
   # from `kimi provider list` works.
   - id: kimi
     enabled: false

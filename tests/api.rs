@@ -485,7 +485,7 @@ async fn handy_request_formats_and_returns_fake_output() {
 }
 
 #[tokio::test]
-async fn handy_fixture_verbatim_keeps_unknown_model_dictation_raw() {
+async fn handy_fixture_with_an_unknown_model_is_an_http_404() {
     // As recorded, the fixture's model is `pumice-echo`, which no
     // configuration knows: the dictation must come back byte for byte and
     // no CLI may run.
@@ -501,21 +501,18 @@ async fn handy_fixture_verbatim_keeps_unknown_model_dictation_raw() {
     )
     .await;
 
-    assert_eq!(response.status, 200);
-    let body = response.body_json();
-    assert_eq!(body["choices"][0]["message"]["content"], FIXTURE_TRANSCRIPT);
-    assert_eq!(body["model"], "pumice-echo");
+    assert_failure(&response, 404, "no provider named \"pumice-echo\"");
     assert!(
         !server.fake.report_path().exists(),
         "no provider may run for an unknown model"
     );
     let lines = server.log_lines();
-    assert!(lines[0].contains(" RAW "), "line: {}", lines[0]);
+    assert!(lines[0].contains(" FAILED "), "line: {}", lines[0]);
     assert!(lines[0].contains("no provider named"), "line: {}", lines[0]);
 }
 
 #[tokio::test]
-async fn failing_provider_returns_the_raw_transcript_with_200() {
+async fn failing_provider_returns_an_http_error_and_no_dictation() {
     let server = start_server(
         CLAUDE_AT_FAKE,
         json!({
@@ -544,15 +541,12 @@ async fn failing_provider_returns_the_raw_transcript_with_200() {
     )
     .await;
 
-    assert_eq!(response.status, 200, "raw fallback is a normal completion");
-    let body = response.body_json();
-    assert_eq!(
-        body["choices"][0]["message"]["content"], raw,
-        "raw text is byte for byte"
-    );
+    assert_eq!(response.status, 502, "body: {}", response.body_text());
+    assert!(response.body_text().contains("not logged in"));
+    assert!(!response.body_text().contains(raw), "no dictation in the error");
     let lines = server.log_lines();
     assert!(
-        lines[0].contains("original text returned: not logged in"),
+        lines[0].contains("FAILED") && lines[0].contains("HTTP 502: not logged in"),
         "line: {}",
         lines[0]
     );
@@ -1080,7 +1074,7 @@ async fn model_matching_is_case_insensitive_and_trims_whitespace() {
 }
 
 #[tokio::test]
-async fn missing_and_blank_model_return_raw_text_and_run_no_provider() {
+async fn missing_and_blank_model_are_an_http_400_and_run_no_provider() {
     let server = start_dual_server(
         BOTH_AT_FAKES,
         success_scenario("unused"),
@@ -1089,12 +1083,7 @@ async fn missing_and_blank_model_return_raw_text_and_run_no_provider() {
     .await;
 
     let empty = post_model(server.port, "").await;
-    assert_eq!(empty.status, 200, "body: {}", empty.body_text());
-    assert_eq!(
-        empty.body_json()["choices"][0]["message"]["content"],
-        FIXTURE_TRANSCRIPT,
-        "blank model: the original text comes back"
-    );
+    assert_failure(&empty, 400, "the request named no provider");
 
     // The same fixture without a `model` key at all.
     let mut body: Value =
@@ -1111,12 +1100,7 @@ async fn missing_and_blank_model_return_raw_text_and_run_no_provider() {
     )
     .await;
 
-    assert_eq!(missing.status, 200, "body: {}", missing.body_text());
-    assert_eq!(
-        missing.body_json()["choices"][0]["message"]["content"],
-        FIXTURE_TRANSCRIPT,
-        "missing model: the original text comes back"
-    );
+    assert_failure(&missing, 400, "the request named no provider");
     assert!(
         !server.claude.report_path().exists() && !server.codex.report_path().exists(),
         "no provider runs for a model-less request"
@@ -1125,14 +1109,14 @@ async fn missing_and_blank_model_return_raw_text_and_run_no_provider() {
     assert!(
         lines
             .iter()
-            .any(|line| line.contains(" RAW ") && line.contains("the request named no provider")),
+            .any(|line| line.contains(" FAILED ") && line.contains("the request named no provider")),
         "the raw outcome names the missing model: {:?}",
         lines
     );
 }
 
 #[tokio::test]
-async fn unknown_model_returns_raw_text_and_runs_no_provider() {
+async fn unknown_model_is_an_http_404_and_runs_no_provider() {
     let server = start_dual_server(
         BOTH_AT_FAKES,
         success_scenario("unused"),
@@ -1142,13 +1126,7 @@ async fn unknown_model_returns_raw_text_and_runs_no_provider() {
 
     let response = post_model(server.port, "gpt-4").await;
 
-    assert_eq!(response.status, 200, "raw fallback is a normal completion");
-    let body = response.body_json();
-    assert_eq!(
-        body["choices"][0]["message"]["content"], FIXTURE_TRANSCRIPT,
-        "unknown model: dictation comes back byte for byte"
-    );
-    assert_eq!(body["model"], "gpt-4", "the requested string is echoed");
+    assert_failure(&response, 404, "no provider named \"gpt-4\"");
     assert!(
         !server.claude.report_path().exists() && !server.codex.report_path().exists(),
         "no provider may run for an unknown model"
@@ -1156,7 +1134,7 @@ async fn unknown_model_returns_raw_text_and_runs_no_provider() {
 }
 
 #[tokio::test]
-async fn disabled_provider_is_not_listed_and_keeps_dictation_raw() {
+async fn disabled_provider_is_not_listed_and_is_an_http_404() {
     let yaml = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{claude}'\n  - id: codex\n    enabled: false\n";
     let server = start_dual_server(
         yaml,
@@ -1174,13 +1152,8 @@ async fn disabled_provider_is_not_listed_and_keeps_dictation_raw() {
     );
 
     let response = post_model(server.port, "codex").await;
-    assert_eq!(response.status, 200, "raw fallback is a normal completion");
-    let body = response.body_json();
-    assert_eq!(
-        body["choices"][0]["message"]["content"], FIXTURE_TRANSCRIPT,
-        "disabled provider: dictation comes back byte for byte"
-    );
-    assert_eq!(body["model"], "codex", "the selected provider is named");
+    // A disabled provider is an HTTP error; the app keeps its transcript.
+    assert_failure(&response, 404, "provider \"codex\" is disabled");
     assert!(
         !server.claude.report_path().exists() && !server.codex.report_path().exists(),
         "no provider may run for a disabled selection"
@@ -1283,7 +1256,7 @@ async fn models_omit_an_enabled_provider_whose_binary_is_missing() {
 }
 
 #[tokio::test]
-async fn selecting_a_missing_provider_returns_raw_text_and_runs_no_other_provider() {
+async fn selecting_a_missing_provider_is_an_http_error_and_runs_no_other_provider() {
     let server = start_missing_selected_server(
         "  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex}'\n",
         codex_success_scenario("unused"),
@@ -1292,13 +1265,9 @@ async fn selecting_a_missing_provider_returns_raw_text_and_runs_no_other_provide
 
     let response = post_model(server.port, "claude").await;
 
-    assert_eq!(response.status, 200, "body: {}", response.body_text());
-    let body = response.body_json();
-    assert_eq!(body["model"], "claude", "the selected provider is named");
-    assert_eq!(
-        body["choices"][0]["message"]["content"], FIXTURE_TRANSCRIPT,
-        "the dictation comes back byte for byte: there is no fallback chain"
-    );
+    // The selected provider is not installed: an HTTP error, and no other
+    // provider runs (there is no fallback chain).
+    assert_eq!(response.status, 502, "body: {}", response.body_text());
     // The fake only ever answers a startup detection probe (`--version`);
     // a formatting call would arrive as `codex exec ...`.
     let report = server.codex.report();
@@ -1311,7 +1280,7 @@ async fn selecting_a_missing_provider_returns_raw_text_and_runs_no_other_provide
     assert!(
         lines
             .iter()
-            .any(|line| line.contains(" RAW ") && line.contains("not installed")),
+            .any(|line| line.contains(" FAILED ") && line.contains("not installed")),
         "a raw outcome naming the failure: {:?}",
         lines
     );
@@ -1325,7 +1294,7 @@ async fn selecting_a_missing_provider_returns_raw_text_and_runs_no_other_provide
 }
 
 #[tokio::test]
-async fn model_less_request_returns_raw_text_and_runs_nothing() {
+async fn model_less_request_is_an_http_400_and_runs_nothing() {
     let server =
         start_missing_selected_server("  - id: codex\n    enabled: false\n", json!({})).await;
 
@@ -1343,12 +1312,7 @@ async fn model_less_request_returns_raw_text_and_runs_nothing() {
     )
     .await;
 
-    assert_eq!(response.status, 200, "body: {}", response.body_text());
-    let response_body = response.body_json();
-    assert_eq!(
-        response_body["choices"][0]["message"]["content"], FIXTURE_TRANSCRIPT,
-        "a request without a model gets the original text back"
-    );
+    assert_failure(&response, 400, "the request named no provider");
     assert!(
         !server.codex.report_path().exists(),
         "no provider may run for a model-less request"
@@ -1357,7 +1321,7 @@ async fn model_less_request_returns_raw_text_and_runs_nothing() {
     assert!(
         lines
             .iter()
-            .any(|line| line.contains(" RAW ") && line.contains("the request named no provider")),
+            .any(|line| line.contains(" FAILED ") && line.contains("the request named no provider")),
         "the raw outcome names the missing model: {:?}",
         lines
     );
@@ -2139,4 +2103,14 @@ async fn inspect_rejects_malformed_json_encoding_and_stream_without_leaking_text
         bytes
     );
     assert!(!server.fake.report_path().exists());
+}
+
+/// Asserts an OpenAI-style error response with `status` whose message
+/// contains `reason` and never the dictation.
+fn assert_failure(response: &RawResponse, status: u16, reason: &str) {
+    assert_eq!(response.status, status, "body: {}", response.body_text());
+    let body = response.body_json();
+    let message = body["error"]["message"].as_str().expect("error message");
+    assert!(message.contains(reason), "message: {message}");
+    assert!(!response.body_text().contains(FIXTURE_TRANSCRIPT));
 }

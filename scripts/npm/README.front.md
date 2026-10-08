@@ -75,7 +75,7 @@ Pumice relays your dictation app's request **through the official CLIs of
 your subscriptions** (currently Claude, Codex and Kimi). Install and
 authenticate those separately — the npm package does not install or log into
 them, and it cannot provide accounts. If the selected provider fails or times
-out, Pumice returns the original text unchanged.
+out, Pumice answers with an error and the app keeps its own transcript.
 
 ## Upgrade
 
