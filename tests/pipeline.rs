@@ -924,3 +924,163 @@ async fn passthrough_and_inspect_work_with_no_providers() {
         assert_eq!(outcome.provider, None);
     }
 }
+
+/// Records progress step names for S4.6 assertions.
+struct RecordingProgress {
+    steps: std::sync::Mutex<Vec<String>>,
+}
+
+impl RecordingProgress {
+    fn new() -> RecordingProgress {
+        RecordingProgress {
+            steps: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn steps(&self) -> Vec<String> {
+        self.steps.lock().unwrap().clone()
+    }
+}
+
+impl pumice::pipeline::Progress for RecordingProgress {
+    fn queued(&self) {
+        self.steps.lock().unwrap().push("queued".to_owned());
+    }
+
+    fn started(&self, provider: &'static str, _model: &str) {
+        self.steps
+            .lock()
+            .unwrap()
+            .push(format!("started:{provider}"));
+    }
+
+    fn attempt_ended(&self, attempt: &pumice::pipeline::Attempt) {
+        let label = match attempt.result {
+            pumice::pipeline::AttemptResult::Formatted => "formatted",
+            pumice::pipeline::AttemptResult::Failed(_) => "failed",
+            pumice::pipeline::AttemptResult::CleanupRejected(_) => "cleanup_rejected",
+        };
+        self.steps
+            .lock()
+            .unwrap()
+            .push(format!("attempt_ended:{label}"));
+    }
+}
+
+#[tokio::test]
+async fn progress_records_started_and_attempt_ended_for_success() {
+    let (pipeline, _fake) = pipeline(
+        CLAUDE_AT_FAKE,
+        success_scenario("<think>plan</think>\n  Olá mundo.\n"),
+    );
+    let progress = RecordingProgress::new();
+    let outcome = pipeline
+        .format_observed(
+            &handy_request(Some("claude"), "ola mundo"),
+            Instant::now(),
+            &progress,
+        )
+        .await;
+    assert_eq!(outcome.kind, OutcomeKind::Formatted);
+    assert_eq!(
+        progress.steps(),
+        ["started:claude", "attempt_ended:formatted"]
+    );
+}
+
+#[tokio::test]
+async fn progress_records_queued_before_started_when_slots_are_full() {
+    // One slot, held by a first run parked at a barrier until the second
+    // request has reported waiting in line: no timing involved.
+    let gate = Arc::new(tokio::sync::Barrier::new(2));
+    let alpha = TestProvider::new(
+        "alpha",
+        vec![
+            Step::Gate(Arc::clone(&gate)),
+            Step::Ready("second".to_owned()),
+        ],
+    );
+    let config = direct_config(
+        Duration::from_secs(10),
+        vec![("alpha", test_settings(true))],
+    );
+    let pipeline = Arc::new(Pipeline::new(&config, vec![alpha.clone()]));
+
+    let first = {
+        let pipeline = Arc::clone(&pipeline);
+        tokio::spawn(async move {
+            pipeline
+                .format(&handy_request(Some("alpha"), "ola"), Instant::now())
+                .await
+        })
+    };
+    until_called(&alpha, 1).await;
+
+    let progress = Arc::new(RecordingProgress::new());
+    let second = {
+        let (pipeline, progress) = (Arc::clone(&pipeline), Arc::clone(&progress));
+        tokio::spawn(async move {
+            pipeline
+                .format_observed(
+                    &handy_request(Some("alpha"), "outro ditado"),
+                    Instant::now(),
+                    &*progress,
+                )
+                .await
+        })
+    };
+    while progress.steps().is_empty() {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(progress.steps(), ["queued"], "waits while the slot is held");
+
+    gate.wait().await;
+    assert_eq!(first.await.expect("first").kind, OutcomeKind::Formatted);
+    assert_eq!(second.await.expect("second").text, "second");
+    assert_eq!(
+        progress.steps(),
+        ["queued", "started:alpha", "attempt_ended:formatted"]
+    );
+}
+
+#[tokio::test]
+async fn progress_records_nothing_for_passthrough_unknown_model_and_empty() {
+    let (pipeline, fake) = pipeline(CLAUDE_AT_FAKE, success_scenario("unused"));
+
+    let progress = RecordingProgress::new();
+    let outcome = pipeline
+        .format_observed(
+            &handy_request(Some("passthrough"), "  raw text  "),
+            Instant::now(),
+            &progress,
+        )
+        .await;
+    assert_eq!(outcome.kind, OutcomeKind::Passthrough);
+    assert!(progress.steps().is_empty(), "passthrough records nothing");
+
+    let progress = RecordingProgress::new();
+    let outcome = pipeline
+        .format_observed(
+            &handy_request(Some("gpt-99"), "olá"),
+            Instant::now(),
+            &progress,
+        )
+        .await;
+    assert!(matches!(outcome.kind, OutcomeKind::Raw(_)));
+    assert!(progress.steps().is_empty(), "unknown model records nothing");
+
+    let progress = RecordingProgress::new();
+    let outcome = pipeline
+        .format_observed(
+            &handy_request(Some("claude"), "   "),
+            Instant::now(),
+            &progress,
+        )
+        .await;
+    assert_eq!(outcome.kind, OutcomeKind::Empty);
+    assert!(
+        progress.steps().is_empty(),
+        "empty transcript records nothing"
+    );
+    assert!(!fake.report_path().exists(), "no CLI ran");
+}

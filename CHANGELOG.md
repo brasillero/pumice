@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Live request view (S4.6).** When `pumice` runs in a terminal it shows an interactive view of each completion request's lifecycle with timing, provider/model metadata, filter, search and details. `--plain` keeps the old one-line-per-request stderr output. Dictated text and replies only appear in the view when the debug log is enabled.
 - **Parallel requests.** Up to `max_parallel` requests (default 4, at most 32) run at the same time; extra requests wait in line instead of getting an immediate busy error, and one still waiting when its time budget runs out gets HTTP 503.
 
 ### Changed

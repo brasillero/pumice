@@ -4,7 +4,8 @@
 //! Dictated text flows through [`chat_completions`] but never into the
 //! ordinary log: only the outcome metadata line is written. The opt-in debug
 //! log ([`crate::logging`]) is the one exception, and only when the
-//! configuration enables it. Errors use OpenAI's
+//! configuration enables it. The same flag decides whether dictated text and
+//! replies are emitted as live monitor events (S4.6). Errors use OpenAI's
 //! `{"error":{"message","type"}}` envelope with fixed, text-free messages.
 
 use std::future::poll_fn;
@@ -18,7 +19,9 @@ use axum::response::{IntoResponse, Response};
 use tokio::time::Instant;
 
 use crate::logging::DebugRecord;
-use crate::pipeline::{FormatOutcome, OutcomeKind};
+use crate::monitor::EventKind;
+use crate::pipeline::{FormatOutcome, OutcomeKind, Progress};
+use crate::providers::diagnostic::Diagnostic;
 use crate::request::{ChatCompletionRequest, extract_request};
 use crate::time::now_unix_secs;
 
@@ -49,12 +52,37 @@ impl EntryGuard {
             },
             self.started.elapsed(),
         );
+        self.state.emit(
+            self.number,
+            EventKind::Responded {
+                status: status.as_u16(),
+                outcome: None,
+                detail: message.to_owned(),
+                reply: None,
+            },
+        );
         openai_error(status, message)
     }
 
-    fn finish(&mut self, requested: Option<&str>, outcome: &FormatOutcome) {
+    fn finish(
+        &mut self,
+        requested: Option<&str>,
+        status: StatusCode,
+        detail: &str,
+        reply: Option<String>,
+        outcome: &FormatOutcome,
+    ) {
         self.logged = true;
         self.state.log_request(self.number, requested, outcome);
+        self.state.emit(
+            self.number,
+            EventKind::Responded {
+                status: status.as_u16(),
+                outcome: Some(outcome.kind),
+                detail: detail.to_owned(),
+                reply,
+            },
+        );
     }
 }
 
@@ -66,7 +94,51 @@ impl Drop for EntryGuard {
                 Unanswered::Disconnected,
                 self.started.elapsed(),
             );
+            self.state.emit(self.number, EventKind::Dropped);
         }
+    }
+}
+
+/// Turns pipeline progress into monitor events for one request.
+struct RequestProgress<'a> {
+    state: &'a ApiState,
+    number: u64,
+}
+
+impl Progress for RequestProgress<'_> {
+    fn queued(&self) {
+        self.state.emit(self.number, EventKind::Queued);
+    }
+
+    fn started(&self, provider: &'static str, model: &str) {
+        self.state.emit(
+            self.number,
+            EventKind::Started {
+                provider,
+                model: model.to_owned(),
+            },
+        );
+    }
+
+    /// The diagnostic's `detail` quotes the CLI's output, which can echo the
+    /// dictation, so it is kept only when text is allowed.
+    fn attempt_ended(&self, attempt: &crate::pipeline::Attempt) {
+        let text_allowed = self.state.text_allowed();
+        let diagnostic = attempt.diagnostic.as_ref().map(|diagnostic| Diagnostic {
+            detail: if text_allowed {
+                diagnostic.detail.clone()
+            } else {
+                String::new()
+            },
+            ..diagnostic.clone()
+        });
+        self.state.emit(
+            self.number,
+            EventKind::AttemptEnded {
+                result: attempt.result,
+                diagnostic,
+            },
+        );
     }
 }
 
@@ -94,6 +166,7 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
     // happens next: the guard logs a rejection, a completion, or (when this
     // future is dropped because the client went away) a dropped request.
     let number = state.next_id();
+    state.emit_at(number, started.into_std(), EventKind::Arrived);
     let mut entry = EntryGuard {
         state: state.clone(),
         number,
@@ -162,6 +235,13 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
     // by the initial parse with the same text-free 400.
     if is_inspect_model(selection.model.as_deref()) {
         let echo_text = String::from_utf8(bytes.clone()).expect("request body is valid UTF-8");
+        state.emit(
+            number,
+            EventKind::Parsed {
+                model: selection.model.clone(),
+                input: state.text_allowed().then(|| echo_text.clone()),
+            },
+        );
         let outcome = FormatOutcome {
             text: echo_text.clone(),
             kind: OutcomeKind::Inspect,
@@ -179,7 +259,14 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
                 &outcome,
             ));
         }
-        entry.finish(selection.model.as_deref(), &outcome);
+        let reply = state.text_allowed().then(|| outcome.text.clone());
+        entry.finish(
+            selection.model.as_deref(),
+            StatusCode::OK,
+            "inspect",
+            reply,
+            &outcome,
+        );
         let created = now_unix_secs();
         return if stream {
             sse_response(&id, created, "inspect", echo_text)
@@ -217,8 +304,22 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
         Ok(extracted) => extracted,
         Err(error) => return entry.reject(StatusCode::BAD_REQUEST, &error.to_string()),
     };
+    state.emit(
+        number,
+        EventKind::Parsed {
+            model: extracted.model.clone(),
+            input: state.text_allowed().then(|| extracted.raw_text.clone()),
+        },
+    );
 
-    let outcome = state.pipeline.format(&extracted, started).await;
+    let progress = RequestProgress {
+        state: &state,
+        number,
+    };
+    let outcome = state
+        .pipeline
+        .format_observed(&extracted, started, &progress)
+        .await;
 
     // The opt-in debug log (S1.4) records the full exchange — dictation
     // included — only when `debug_log.enabled` turns it on; the metadata
@@ -232,17 +333,26 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
             &outcome,
         ));
     }
-    entry.finish(extracted.model.as_deref(), &outcome);
 
+    // The status and the text-free detail the log line, the live monitor and
+    // (for an error) the client all share.
+    let (status, detail) = match outcome.kind {
+        OutcomeKind::Raw(reason) => (
+            log_entry::failure_status(reason),
+            log_entry::raw_reason(reason, extracted.model.as_deref()),
+        ),
+        OutcomeKind::Formatted => (StatusCode::OK, "formatted".to_owned()),
+        OutcomeKind::Passthrough => (StatusCode::OK, "passthrough".to_owned()),
+        OutcomeKind::Inspect => (StatusCode::OK, "inspect".to_owned()),
+        OutcomeKind::Empty => (StatusCode::OK, "empty".to_owned()),
+    };
+    let reply = (status == StatusCode::OK && state.text_allowed()).then(|| outcome.text.clone());
+    entry.finish(extracted.model.as_deref(), status, &detail, reply, &outcome);
     // Could not format: answer with an HTTP error carrying the safe reason.
     // The app keeps and pastes its own transcript, so Pumice never has to
     // pick the transcript out of the app's prompt.
-    if let OutcomeKind::Raw(reason) = outcome.kind {
-        let status = log_entry::failure_status(reason);
-        return openai_error(
-            status,
-            &log_entry::raw_reason(reason, extracted.model.as_deref()),
-        );
+    if status != StatusCode::OK {
+        return openai_error(status, &detail);
     }
 
     let created = now_unix_secs();
