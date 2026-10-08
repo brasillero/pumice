@@ -97,18 +97,6 @@ providers:
     env: {}
     options: {}
 
-# Optional formatting instructions, added after Pumice's fixed instruction.
-# Both are off by default (null); a block scalar (|) keeps line breaks.
-prompts:
-  # Example: replace `system: null` with a block scalar:
-  # system: |
-  #   Preserve technical terms and product names.
-  system: null
-  # Example: replace `user: null` with a block scalar:
-  # user: |
-  #   Format spoken enumerations as Markdown lists.
-  user: null
-
 # Dictated text is written to a log only when debug logging is enabled.
 debug_log:
   enabled: false

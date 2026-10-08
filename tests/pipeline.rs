@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pumice::config::{self, Config, DebugLogSettings, PromptSettings, ProviderConfig};
+use pumice::config::{self, Config, DebugLogSettings, ProviderConfig};
 use pumice::pipeline::{FormatOutcome, OutcomeKind, Pipeline, ProviderErrorKind, RawReason};
 use pumice::process::ProcessRunner;
 use pumice::providers::{self, Provider, ProviderError, ProviderErrorCode, ProviderSettings};
@@ -115,7 +115,6 @@ fn direct_config(total_timeout: Duration, entries: Vec<(&str, ProviderSettings)>
     Config {
         port: 7567,
         total_timeout,
-        prompts: PromptSettings::default(),
         debug_log: DebugLogSettings {
             enabled: false,
             path: PathBuf::from("pumice-debug.jsonl"),

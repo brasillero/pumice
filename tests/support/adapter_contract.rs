@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use pumice::config::{Config, DebugLogSettings, PromptSettings, ProviderConfig};
+use pumice::config::{Config, DebugLogSettings, ProviderConfig};
 use pumice::pipeline::{OutcomeKind, Pipeline};
 use pumice::providers::{
     self, FormatInput, Provider, ProviderError, ProviderErrorCode, ProviderSettings, UserPrompt,
@@ -319,7 +319,6 @@ fn chain_config(total_timeout: Duration, entries: Vec<(&str, ProviderSettings)>)
     Config {
         port: 7567,
         total_timeout,
-        prompts: PromptSettings::default(),
         debug_log: DebugLogSettings {
             enabled: false,
             path: PathBuf::from("pumice-debug.jsonl"),

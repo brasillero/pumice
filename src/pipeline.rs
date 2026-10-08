@@ -20,8 +20,8 @@ use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
 use crate::cleanup::{CleanupError, cleanup};
-use crate::config::{Config, PromptSettings};
-use crate::prompts::compose_with_settings;
+use crate::config::Config;
+use crate::prompts::compose_prompts;
 use crate::providers::diagnostic::{self, Diagnostic};
 use crate::providers::discovery::{Found, ProviderStatus};
 use crate::providers::{FormatInput, Provider, ProviderError};
@@ -68,7 +68,6 @@ pub struct Pipeline {
     /// Enabled provider IDs in configuration (list) order.
     order: Vec<String>,
     total_timeout: Duration,
-    prompt_settings: PromptSettings,
     /// Provider IDs startup detection confirmed installed. `None` when the
     /// pipeline was built without detection (the Phase 1 behavior): then
     /// every built provider counts as available. The generic loopback
@@ -136,7 +135,6 @@ impl Pipeline {
                 .map(|entry| entry.id.clone())
                 .collect(),
             total_timeout: config.total_timeout,
-            prompt_settings: config.prompts.clone(),
             available,
             busy: Semaphore::new(1),
         }
@@ -262,7 +260,7 @@ impl Pipeline {
             return self.raw(request, RawReason::BudgetExhausted, started, Vec::new());
         }
 
-        let prompts = compose_with_settings(request, &self.prompt_settings);
+        let prompts = compose_prompts(request);
         let attempt_started = Instant::now();
         let (run, diagnostic) = diagnostic::capture(run_within_budget(
             candidate,
