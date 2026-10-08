@@ -238,13 +238,48 @@ impl RawResponse {
     }
 }
 
+/// True when `bytes` hold a whole HTTP/1.1 response: the head, then a body
+/// matching `Content-Length`, or a chunked body up to its last chunk.
+fn response_is_complete(bytes: &[u8]) -> bool {
+    let Some(head_end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return false;
+    };
+    let head = String::from_utf8_lossy(&bytes[..head_end]).to_ascii_lowercase();
+    let body = &bytes[head_end + 4..];
+    if let Some(length) = head
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length:"))
+        .and_then(|value| value.trim().parse::<usize>().ok())
+    {
+        return body.len() >= length;
+    }
+    if head.contains("transfer-encoding: chunked") {
+        return body.ends_with(b"0\r\n\r\n");
+    }
+    false
+}
+
+#[test]
+fn response_completeness_follows_its_framing() {
+    assert!(response_is_complete(
+        b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 2\r\n\r\n{}"
+    ));
+    assert!(!response_is_complete(
+        b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 50\r\n\r\n"
+    ));
+    assert!(response_is_complete(
+        b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n"
+    ));
+    assert!(!response_is_complete(b"HTTP/1.1 200 OK\r\ncontent-le"));
+}
+
 /// Sends `request` verbatim over raw HTTP/1.1 and reads the whole response.
 /// Writing and reading run concurrently: the server may answer an oversized
 /// body (413) and close before the client finishes sending, and the response
 /// must be read as it arrives, before the connection reset that follows.
-/// Write errors are ignored, and a read error after part of the response
-/// arrived ends the read with what was received. The write side stays open
-/// while the response is read — half-closing first makes hyper drop the
+/// Write errors are ignored, and a read error (the reset that follows)
+/// ends the read only when the response received so far is complete. The
+/// write side stays open while the response is read — half-closing first makes hyper drop the
 /// connection without answering.
 async fn raw_http(port: u16, request: Vec<u8>) -> RawResponse {
     let stream = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
@@ -263,8 +298,9 @@ async fn raw_http(port: u16, request: Vec<u8>) -> RawResponse {
             match reader.read(&mut chunk).await {
                 Ok(0) => break,
                 Ok(n) => response.extend_from_slice(&chunk[..n]),
-                // The reset after a complete answer: keep what arrived.
-                Err(_) if !response.is_empty() => break,
+                // The reset after a complete answer: keep what arrived. A
+                // reset in the middle of the answer is still a failure.
+                Err(_) if response_is_complete(&response) => break,
                 Err(error) => panic!("read response: {error}"),
             }
         }
