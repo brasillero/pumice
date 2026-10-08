@@ -28,7 +28,7 @@ const AFTER: &str = "\n</transcript>";
 
 /// Environment variables the fake reports back: the adapter-owned switches
 /// and the inherited variable the adapter must remove from the child.
-const REPORTED_ENV: [&str; 5] = [
+const REPORTED_ENV: [&str; 6] = [
     "KIMI_CODE_BACKGROUND_PRINT_BACKGROUND_MODE",
     "KIMI_CODE_BUILTIN_PRODUCT_SKILLS",
     "KIMI_DISABLE_TELEMETRY",
