@@ -6,6 +6,7 @@
 
 mod support;
 
+use pumice::cleanup::CleanupError;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -138,7 +139,7 @@ fn settings_of<'a>(config: &'a Config, id: &str) -> &'a ProviderSettings {
 async fn formats_cleaned_text_and_reports_the_provider() {
     let (pipeline, fake) = pipeline(
         CLAUDE_AT_FAKE,
-        success_scenario("Here is the formatted text:\nOlá mundo."),
+        success_scenario("<think>plan</think>\n  Olá mundo.\n"),
     );
     let outcome = pipeline
         .format(&handy_request(Some("claude"), "ola mundo"), Instant::now())
@@ -447,11 +448,11 @@ async fn a_second_run_gets_raw_text_while_one_is_active() {
 
 #[tokio::test]
 async fn cleanup_failure_keeps_the_dictation_raw() {
-    // A preamble-only result cleans down to nothing; the raw dictation is
-    // returned whole instead.
+    // A reasoning-only result cleans down to nothing; the raw dictation is
+    // returned whole instead, and the reason says why.
     let (pipeline, _fake) = pipeline(
         CLAUDE_AT_FAKE,
-        success_scenario("Here is the formatted text:"),
+        success_scenario("<think>just thinking</think>"),
     );
     let outcome = pipeline
         .format(
@@ -459,7 +460,11 @@ async fn cleanup_failure_keeps_the_dictation_raw() {
             Instant::now(),
         )
         .await;
-    assert_raw(&outcome, RawReason::CleanupFailed, "algum texto ditado");
+    assert_raw(
+        &outcome,
+        RawReason::CleanupFailed(CleanupError::Empty),
+        "algum texto ditado",
+    );
 }
 
 #[tokio::test]
@@ -573,9 +578,9 @@ async fn requested_provider_failure_never_runs_other_enabled_providers() {
 
 #[tokio::test]
 async fn cleanup_failure_never_runs_other_enabled_providers() {
-    // Preamble-only output fails cleanup; the raw dictation comes back and
-    // no other provider runs.
-    let fake = FakeCli::new(success_scenario("Here is the formatted text:"));
+    // An unclosed reasoning block fails cleanup; the raw dictation comes
+    // back and no other provider runs.
+    let fake = FakeCli::new(success_scenario("<think>never closed"));
     let backup = TestProvider::new("backup", vec![Step::Ready("unused".to_owned())]);
     let config = direct_config(
         Duration::from_secs(30),
@@ -591,7 +596,11 @@ async fn cleanup_failure_never_runs_other_enabled_providers() {
     let outcome = pipeline
         .format(&handy_request(Some("claude"), "ola mundo"), Instant::now())
         .await;
-    assert_raw(&outcome, RawReason::CleanupFailed, "ola mundo");
+    assert_raw(
+        &outcome,
+        RawReason::CleanupFailed(CleanupError::UnclosedReasoning),
+        "ola mundo",
+    );
     assert_eq!(outcome.attempts, 1);
     assert!(fake.report_path().exists(), "the fake ran once");
     assert_eq!(backup.calls(), 0);

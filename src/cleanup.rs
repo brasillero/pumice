@@ -1,49 +1,25 @@
-//! Conservative cleanup of a provider's final text.
+//! Minimal cleanup of a provider's final text.
 //!
-//! Handy pastes Pumice's response verbatim into the user's text field, so any
-//! wrapper a CLI adds (reasoning tags, preamble lines, code fences, quote
-//! pairs) would end up in the user's document. Every rule here is exact and
-//! uses the original dictation as a preservation guard: when the dictation
-//! itself contains the wrapper pattern, the output is kept untouched. When
-//! cleanup would lose a nonempty dictation, it fails instead, so the caller
-//! can fall back to the raw text.
+//! Handy pastes Pumice's response verbatim, so Pumice trusts what the model
+//! returns and changes as little as possible (owner decision 2026-10-07):
+//! formatting instructions belong in the prompt, not in post-processing.
+//! Only three rules remain:
+//!
+//! 1. Reasoning blocks (`<think>…</think>`) at the very start are removed;
+//!    they are never dictated text. An opened block that never closes is
+//!    rejected.
+//! 2. Whitespace around the text is trimmed.
+//! 3. An empty result for a nonempty dictation is rejected.
+//!
+//! A rejection makes the caller return the original text, and the log names
+//! the reason.
 
 use std::fmt;
-
-/// Standalone leading lines a CLI may print before the formatted text. Each
-/// entry must match the whole first line (case-insensitive, trailing
-/// whitespace ignored); a line that merely starts with one of these is never
-/// removed. Extend this list when a new recurring wrapper is observed.
-const PREAMBLES: &[&str] = &[
-    // English
-    "Here is the cleaned text:",
-    "Here is the cleaned-up text:",
-    "Here is the formatted text:",
-    "Here is the corrected text:",
-    "Here's the cleaned text:",
-    "Here's the formatted text:",
-    "Here's the corrected text:",
-    "Cleaned text:",
-    "Formatted text:",
-    // Portuguese
-    "Aqui está o texto corrigido:",
-    "Aqui está o texto formatado:",
-    "Aqui está o texto limpo:",
-    "Texto corrigido:",
-    "Texto formatado:",
-    // Spanish
-    "Aquí está el texto corregido:",
-    "Aquí está el texto formateado:",
-];
 
 /// Reasoning-tag wrappers removed from the start of the output, as
 /// (opening, closing) pairs. Tag names are matched case-insensitively.
 const REASONING_OPENERS: &[(&str, &str)] =
     &[("<think>", "</think>"), ("<thinking>", "</thinking>")];
-
-/// Quote wrappers removed when they enclose the whole output, as
-/// (opening, closing) pairs.
-const QUOTE_PAIRS: &[(&str, &str)] = &[("\"", "\""), ("“", "”"), ("'", "'"), ("«", "»")];
 
 /// Why cleanup refused to return text.
 ///
@@ -51,20 +27,19 @@ const QUOTE_PAIRS: &[(&str, &str)] = &[("\"", "\""), ("“", "”"), ("'", "'"),
 /// log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CleanupError {
-    /// Cleanup removed everything although the dictation was nonempty. The
-    /// caller must fall back to the raw dictation.
+    /// The reply was empty (or only a reasoning block) although the
+    /// dictation was not.
     Empty,
-    /// The output opens a reasoning block it never closes. The caller must
-    /// fall back to the raw dictation.
+    /// The reply opens a reasoning block it never closes.
     UnclosedReasoning,
 }
 
 impl fmt::Display for CleanupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CleanupError::Empty => f.write_str("cleanup removed all dictated text"),
+            CleanupError::Empty => f.write_str("the provider returned an empty reply"),
             CleanupError::UnclosedReasoning => {
-                f.write_str("output opens a reasoning block it never closes")
+                f.write_str("the reply opened a reasoning block it never closed")
             }
         }
     }
@@ -72,77 +47,15 @@ impl fmt::Display for CleanupError {
 
 impl std::error::Error for CleanupError {}
 
-/// Removes formatting wrappers from a provider's final `output`.
-///
-/// `raw_text` is the original dictation and acts as a preservation guard:
-/// any wrapper pattern the dictation itself contains is kept. Fails with
-/// [`CleanupError::Empty`] when cleanup would erase a nonempty dictation,
-/// and with [`CleanupError::UnclosedReasoning`] when a reasoning block is
-/// opened but never closed; in both cases the caller sends the raw dictation
-/// to the user.
+/// Applies the three rules above to a provider's final `output`.
+/// `raw_text` is the original dictation: when it mentions reasoning tags
+/// itself, rule 1 is skipped.
 pub fn cleanup(output: &str, raw_text: &str) -> Result<String, CleanupError> {
-    let mut work = output;
-
-    // 1. Balanced reasoning blocks at the start, possibly more than one.
-    work = strip_reasoning_tags(work, raw_text)?;
-
-    // 2. One allow-listed preamble line, unless the dictation opens with the
-    //    same words (a dictated heading such as "Formatted text" that the
-    //    model punctuated as "Formatted text:").
-    let start = work.trim_start();
-    let line = first_line(start);
-    // Strip it only when the output opens with more copies of those words
-    // than the dictation does: an extra copy is the model's preamble.
-    if is_preamble(line) {
-        let words = words_of(line);
-        if leading_copies(start, &words) > leading_copies(raw_text, &words) {
-            work = start.split_once('\n').map_or("", |(_, rest)| rest);
-        }
-    }
-
-    // 3. One code fence pair enclosing the whole remaining output.
-    if !raw_text.contains("```")
-        && let Some(inner) = unwrap_enclosing_fence(work.trim())
-    {
-        work = inner;
-    }
-
-    // 4. One quote pair wrapping the whole output. Skipped when the
-    //    dictation itself is wrapped in any quote marks: the model may have
-    //    changed their style ("…" to “…”), and they are the user's.
-    let trimmed = work.trim();
-    let raw_trimmed = raw_text.trim();
-    let raw_quoted = is_one_quotation(raw_trimmed);
-    for &(open, close) in QUOTE_PAIRS {
-        if raw_quoted {
-            break;
-        }
-        if trimmed.len() < open.len() + close.len() {
-            continue;
-        }
-        if trimmed.starts_with(open) && trimmed.ends_with(close) {
-            let inner = &trimmed[open.len()..trimmed.len() - close.len()];
-            // `"Hi," she said, "bye."` starts and ends with a quote but is not
-            // one wrapping pair: an inner quote mark means it is quoted speech.
-            if inner.contains(open) || inner.contains(close) {
-                break;
-            }
-            work = inner;
-            break;
-        }
-    }
-
-    // 5. Trim outside whitespace; normalize CRLF only when line endings mix.
-    let mut result = work.trim().to_string();
-    if mixes_line_endings(&result) {
-        result = result.replace("\r\n", "\n");
-    }
-
-    // 6. Never turn a nonempty dictation into empty text.
+    let result = strip_reasoning_tags(output, raw_text)?.trim();
     if result.is_empty() && !raw_text.trim().is_empty() {
         return Err(CleanupError::Empty);
     }
-    Ok(result)
+    Ok(result.to_owned())
 }
 
 /// Removes the balanced reasoning blocks at the start of `work`, possibly
@@ -166,102 +79,6 @@ fn strip_reasoning_tags<'a>(mut work: &'a str, raw_text: &str) -> Result<&'a str
         work = &start[open.len() + close_at + close.len()..];
     }
     Ok(work)
-}
-
-/// True when `line` (already stripped of its terminator and trailing
-/// whitespace) is one of the known preamble lines.
-fn is_preamble(line: &str) -> bool {
-    let line = line.to_lowercase();
-    PREAMBLES.iter().any(|p| p.to_lowercase() == line)
-}
-
-/// True when `text` is one quotation: it starts and ends with the same
-/// quote pair, and that pair's marks do not appear inside. Other quote
-/// styles may nest inside (`"say «hello»"`), and an apostrophe between two
-/// letters is not a quote mark (`'don't'`); `“a” and “b”` is two
-/// quotations, not one.
-fn is_one_quotation(text: &str) -> bool {
-    QUOTE_PAIRS.iter().any(|&(open, close)| {
-        if text.len() < open.len() + close.len()
-            || !text.starts_with(open)
-            || !text.ends_with(close)
-        {
-            return false;
-        }
-        let inner = &text[open.len()..text.len() - close.len()];
-        let chars: Vec<char> = inner.chars().collect();
-        !chars.iter().enumerate().any(|(i, &c)| {
-            let is_mark = open.starts_with(c) || close.starts_with(c);
-            let apostrophe = c == '\''
-                && i > 0
-                && i + 1 < chars.len()
-                && chars[i - 1].is_alphanumeric()
-                && chars[i + 1].is_alphanumeric();
-            is_mark && !apostrophe
-        })
-    })
-}
-
-/// The lowercase alphanumeric words of `text`, ignoring punctuation and
-/// line breaks.
-fn words_of(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .map(str::to_lowercase)
-        .collect()
-}
-
-/// How many times, in a row, `text` opens with `words` (punctuation and line
-/// breaks ignored, so `formatted text. the report` opens with one copy of
-/// `formatted text`).
-fn leading_copies(text: &str, words: &[String]) -> usize {
-    if words.is_empty() {
-        return 0;
-    }
-    let text = words_of(text);
-    text.chunks(words.len())
-        .take_while(|chunk| *chunk == words)
-        .count()
-}
-
-/// Unwraps one fence pair enclosing all of `t` (`t` must be trimmed already).
-/// Returns the inner text, or `None` when `t` is not exactly one fenced
-/// block. Internal fences stay untouched.
-fn unwrap_enclosing_fence(t: &str) -> Option<&str> {
-    let opener_end = t.find('\n')?;
-    let language = t[..opener_end].trim_end_matches('\r').strip_prefix("```")?;
-    if language.chars().any(char::is_whitespace) {
-        return None;
-    }
-    let inner = t[opener_end + 1..].strip_suffix("```")?;
-    if !inner.ends_with('\n') {
-        return None;
-    }
-    Some(inner)
-}
-
-/// True when `s` contains both CRLF and at least one lone `\r` or `\n`.
-fn mixes_line_endings(s: &str) -> bool {
-    let mut has_crlf = false;
-    let mut has_lone = false;
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\r' if chars.peek() == Some(&'\n') => {
-                chars.next();
-                has_crlf = true;
-            }
-            '\r' | '\n' => has_lone = true,
-            _ => {}
-        }
-    }
-    has_crlf && has_lone
-}
-
-/// The first line of `s` without its terminator, with trailing whitespace
-/// removed.
-fn first_line(s: &str) -> &str {
-    s.split('\n').next().unwrap_or_default().trim_end()
 }
 
 /// Case-insensitive `starts_with` for ASCII prefixes.

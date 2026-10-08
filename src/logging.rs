@@ -250,7 +250,9 @@ impl OutcomeSummary {
                         result: match attempt.result {
                             AttemptResult::Formatted => "formatted".to_owned(),
                             AttemptResult::Failed(error) => format!("{error:?}"),
-                            AttemptResult::CleanupRejected => "cleanup_rejected".to_owned(),
+                            AttemptResult::CleanupRejected(error) => {
+                                format!("cleanup_rejected: {error}")
+                            }
                         },
                         elapsed_ms: attempt.elapsed.as_millis(),
                         exit_code: diagnostic.and_then(|d| d.exit_code),

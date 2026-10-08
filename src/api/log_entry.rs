@@ -110,9 +110,7 @@ fn render_at(entry: &Entry<'_>, color: bool, timestamp: &str) -> String {
                         }
                         ("✗", Style::Red, label)
                     }
-                    AttemptResult::CleanupRejected => {
-                        ("✗", Style::Red, "output rejected by cleanup".to_owned())
-                    }
+                    AttemptResult::CleanupRejected(error) => ("✗", Style::Red, error.to_string()),
                 };
                 (mark, style, result, attempt)
             })
@@ -176,7 +174,7 @@ fn raw_reason(reason: RawReason, requested_model: Option<&str>) -> String {
         RawReason::Busy => "another dictation was still being formatted".to_owned(),
         RawReason::BudgetExhausted => "the total time budget ran out".to_owned(),
         RawReason::ProviderFailed(error) => provider_error(error),
-        RawReason::CleanupFailed => "output rejected by cleanup".to_owned(),
+        RawReason::CleanupFailed(error) => error.to_string(),
     }
 }
 
@@ -308,6 +306,22 @@ mod tests {
             trail,
             elapsed: Duration::from_millis(9_100),
         }
+    }
+
+    #[test]
+    fn cleanup_failure_names_its_cause() {
+        use crate::cleanup::CleanupError;
+        assert_eq!(
+            raw_reason(RawReason::CleanupFailed(CleanupError::Empty), None),
+            "the provider returned an empty reply"
+        );
+        assert_eq!(
+            raw_reason(
+                RawReason::CleanupFailed(CleanupError::UnclosedReasoning),
+                None
+            ),
+            "the reply opened a reasoning block it never closed"
+        );
     }
 
     #[test]
