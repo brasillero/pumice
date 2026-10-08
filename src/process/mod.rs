@@ -73,10 +73,10 @@ impl ProcessRunner {
             return Err(ProviderError::Timeout);
         }
         let program = resolve_program(&invocation.program)?;
-        let root = private_temp::tempdir().map_err(io_error)?;
-        let result = run_in(root.path(), &program, invocation, deadline).await;
-        remove_root(root).await;
-        result
+        // Dropping the guard removes the root, on success, failure and
+        // cancellation alike.
+        let root = RootGuard(Some(private_temp::tempdir().map_err(io_error)?));
+        run_in(root.path(), &program, invocation, deadline).await
     }
 }
 
@@ -143,8 +143,13 @@ async fn run_in(
     // If this future is dropped before here, `ProcessTree`'s drop kills the
     // tree instead.
     let status = tree.finish(REAP_LIMIT).await;
-    let (stdout, stderr_tail) = captured?;
+    let (stdout, stderr_tail, stdin_complete) = captured?;
     let status = status.ok_or(ProviderError::other(ProviderErrorCode::Io))?;
+    // A CLI that exits cleanly without taking all of its stdin answered a
+    // truncated prompt. A failed exit keeps its own classification.
+    if status.success() && !stdin_complete {
+        return Err(ProviderError::other(ProviderErrorCode::Io));
+    }
     Ok(ProcessOutput {
         status,
         stdout,
@@ -152,18 +157,57 @@ async fn run_in(
     })
 }
 
-/// Removes the temporary root, retrying briefly: on Windows a killed
-/// descendant can hold the workspace for a moment after termination.
-/// Failure must not hide the call's outcome, so it is ignored after the last
-/// attempt (and `TempDir`'s drop tries once more).
-async fn remove_root(root: tempfile::TempDir) {
+/// Owns a call's temporary root and removes it when dropped: after the
+/// call, or when the call is cancelled (the request was dropped). One
+/// attempt runs inline; when it fails (on Windows a killed descendant can
+/// hold the workspace for a moment after termination) a plain thread keeps
+/// retrying, so the retries depend neither on the request nor on the async
+/// runtime still running.
+struct RootGuard(Option<tempfile::TempDir>);
+
+impl RootGuard {
+    fn path(&self) -> &Path {
+        self.0.as_ref().expect("root present until dropped").path()
+    }
+}
+
+impl Drop for RootGuard {
+    fn drop(&mut self) {
+        let Some(root) = self.0.take() else { return };
+        if try_remove(root.path()) {
+            return;
+        }
+        let spawned = std::thread::Builder::new()
+            .name("pumice-temp-cleanup".to_owned())
+            .spawn(move || remove_root_with_retries(root));
+        // Could not start a thread: `TempDir`'s drop (inside the failed
+        // closure) tries once more.
+        drop(spawned);
+    }
+}
+
+/// One removal attempt; true when the root is gone.
+fn try_remove(root: &Path) -> bool {
+    match std::fs::remove_dir_all(root) {
+        Ok(()) => true,
+        Err(e) => e.kind() == io::ErrorKind::NotFound,
+    }
+}
+
+/// Retries removal briefly. Failure must not hide the call's outcome: after
+/// the last attempt it is reported on stderr (the path only, never dictated
+/// text) and `TempDir`'s drop tries once more.
+fn remove_root_with_retries(root: tempfile::TempDir) {
     for _ in 0..REMOVE_ATTEMPTS {
-        match std::fs::remove_dir_all(root.path()) {
-            Ok(()) => return,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return,
-            Err(_) => tokio::time::sleep(REMOVE_RETRY_DELAY).await,
+        std::thread::sleep(REMOVE_RETRY_DELAY);
+        if try_remove(root.path()) {
+            return;
         }
     }
+    eprintln!(
+        "warning: could not remove the temporary directory {}",
+        root.path().display()
+    );
 }
 
 /// Writes files into `dir` and returns their absolute paths.
@@ -204,12 +248,13 @@ enum Abort {
 
 /// Feeds stdin, drains stdout/stderr and waits for the direct child to
 /// exit, all concurrently and bounded by `deadline`. Returns the captured
-/// stdout and stderr tail; the caller kills the tree and reaps the child.
+/// stdout, the stderr tail and whether all of stdin was written; the caller
+/// kills the tree and reaps the child.
 async fn drive(
     tree: &mut ProcessTree,
     stdin: Vec<u8>,
     deadline: Instant,
-) -> Result<(Vec<u8>, Vec<u8>), ProviderError> {
+) -> Result<(Vec<u8>, Vec<u8>, bool), ProviderError> {
     let stdin_pipe = tree.take_stdin();
     let stdout_pipe = tree.take_stdout();
     let stderr_pipe = tree.take_stderr();
@@ -220,6 +265,7 @@ async fn drive(
     let mut stdout_done = stdout_pipe.is_none();
     let mut stderr_done = stderr_pipe.is_none();
     let mut stdin_done = stdin_pipe.is_none();
+    let mut stdin_complete = stdin_pipe.is_none() || stdin.is_empty();
 
     // The futures borrow the buffers, so whatever was read survives when they
     // are dropped early (at the end of this block).
@@ -262,28 +308,38 @@ async fn drive(
                     Ok(()) => stderr_done = true,
                     Err(abort) => break Err(abort),
                 },
-                () = &mut stdin_fut, if !stdin_done => stdin_done = true,
+                written = &mut stdin_fut, if !stdin_done => {
+                    stdin_done = true;
+                    stdin_complete = written;
+                }
             }
         }
     };
 
     match outcome {
         Ok(()) if Instant::now() >= deadline => Err(ProviderError::Timeout),
-        Ok(()) => Ok((stdout, stderr_tail)),
+        Ok(()) => Ok((stdout, stderr_tail, stdin_complete)),
         Err(Abort::Timeout) => Err(ProviderError::Timeout),
         Err(Abort::TooLarge) => Err(ProviderError::other(ProviderErrorCode::OutputTooLarge)),
         Err(Abort::Io) => Err(ProviderError::other(ProviderErrorCode::Io)),
     }
 }
 
-/// Writes `data` and closes stdin. Errors are ignored: a CLI may exit or
-/// close stdin without reading it, and its exit status tells the rest.
-async fn write_stdin(pipe: Option<ChildStdin>, data: Vec<u8>) {
-    if let Some(mut pipe) = pipe
-        && pipe.write_all(&data).await.is_ok()
-    {
-        let _ = pipe.shutdown().await;
+/// Writes `data` and closes stdin; returns whether every byte was written.
+/// A CLI may exit or close stdin without reading it: the caller decides
+/// with the exit status. A failed close after a full write is ignored.
+async fn write_stdin(pipe: Option<ChildStdin>, data: Vec<u8>) -> bool {
+    let Some(mut pipe) = pipe else {
+        return data.is_empty();
+    };
+    // On Windows `write_all` can return once the data is buffered: the
+    // flush waits for the pipe to take it, so a CLI that never reads is
+    // caught here too.
+    if pipe.write_all(&data).await.is_err() || pipe.flush().await.is_err() {
+        return false;
     }
+    let _ = pipe.shutdown().await;
+    true
 }
 
 async fn read_capped(

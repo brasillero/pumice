@@ -360,3 +360,111 @@ fn fence_with_crlf_line_endings_is_unwrapped() {
     let out = "```\r\nFormatted text.\r\n```";
     assert_eq!(cleanup(out, "formatted text").unwrap(), "Formatted text.");
 }
+
+#[test]
+fn keeps_dictated_heading_the_model_punctuated_like_a_preamble() {
+    // The user dictated a heading; the model only added a colon.
+    assert_eq!(
+        ok(
+            "Formatted text:\nThe report is ready.",
+            "formatted text\nthe report is ready"
+        ),
+        "Formatted text:\nThe report is ready."
+    );
+}
+
+#[test]
+fn still_strips_a_preamble_the_dictation_does_not_open_with() {
+    assert_eq!(
+        ok(
+            "Formatted text:\nSend the formatted text to John.",
+            "send the formatted text to john"
+        ),
+        "Send the formatted text to John."
+    );
+}
+
+#[test]
+fn keeps_dictated_quotes_when_the_model_changes_their_style() {
+    assert_eq!(
+        ok("“Ship it on Friday.”", "\"ship it on friday\""),
+        "“Ship it on Friday.”"
+    );
+    assert_eq!(
+        ok("\"Ship it on Friday.\"", "“ship it on friday”"),
+        "\"Ship it on Friday.\""
+    );
+}
+
+#[test]
+fn strips_added_outer_quotes_around_separate_dictated_quotations() {
+    assert_eq!(
+        ok("\"“Hello” and “goodbye”\"", "“hello” and “goodbye”"),
+        "“Hello” and “goodbye”"
+    );
+}
+
+#[test]
+fn strips_a_preamble_on_top_of_the_dictated_heading() {
+    assert_eq!(
+        ok(
+            "Formatted text:\nFormatted text:\nHello.",
+            "formatted text\nhello"
+        ),
+        "Formatted text:\nHello."
+    );
+}
+
+#[test]
+fn keeps_a_dictated_quotation_with_nested_quotes_of_another_style() {
+    assert_eq!(
+        ok("\"Say «hello».\"", "\"say «hello»\""),
+        "\"Say «hello».\""
+    );
+}
+
+#[test]
+fn separate_single_quoted_phrases_are_not_one_quotation() {
+    assert_eq!(
+        ok("\"'Hello' and 'goodbye'\"", "'hello' and 'goodbye'"),
+        "'Hello' and 'goodbye'"
+    );
+}
+
+#[test]
+fn keeps_a_single_quoted_dictation_with_an_apostrophe() {
+    assert_eq!(ok("'Don't stop.'", "'don't stop'"), "'Don't stop.'");
+}
+
+#[test]
+fn keeps_headings_the_dictation_repeats() {
+    assert_eq!(
+        ok(
+            "Formatted text:\nFormatted text:\nHello.",
+            "formatted text\nformatted text\nhello"
+        ),
+        "Formatted text:\nFormatted text:\nHello."
+    );
+}
+
+#[test]
+fn strips_an_added_preamble_separated_by_a_blank_line() {
+    assert_eq!(
+        ok(
+            "Formatted text:\n\nFormatted text:\nHello.",
+            "formatted text\nhello"
+        ),
+        "Formatted text:\nHello."
+    );
+}
+
+#[test]
+fn keeps_a_dictated_heading_the_model_moved_to_its_own_line() {
+    assert_eq!(
+        ok(
+            "Formatted text:\nThe report is ready.",
+            "formatted text. the report is ready"
+        ),
+        "Formatted text:\nThe report is ready."
+    );
+}

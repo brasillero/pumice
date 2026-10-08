@@ -109,7 +109,16 @@ fn open_append(path: &Path) -> io::Result<File> {
     #[cfg(unix)]
     // The file holds dictated text: readable only by its owner.
     options.mode(0o600);
-    options.open(path)
+    let file = options.open(path)?;
+    // `mode` only applies when the file is created: an existing file keeps
+    // whatever it had, so make it private now. On Windows the file inherits
+    // the ACL of its directory (the per-user config directory by default).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
 }
 
 /// Why the debug log file could not be opened at startup.
@@ -390,5 +399,26 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600, "the log holds dictated text: mode {mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_file_is_made_owner_readable_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("debug.jsonl");
+        std::fs::write(&path, "").expect("pre-create");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        let _log = DebugLog::open(&enabled_settings(&path)).expect("sink opens");
+        let mode = std::fs::metadata(&path)
+            .expect("log metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "an existing log is made private: mode {mode:o}"
+        );
     }
 }

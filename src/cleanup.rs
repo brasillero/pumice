@@ -86,12 +86,18 @@ pub fn cleanup(output: &str, raw_text: &str) -> Result<String, CleanupError> {
     // 1. Balanced reasoning blocks at the start, possibly more than one.
     work = strip_reasoning_tags(work, raw_text)?;
 
-    // 2. One allow-listed preamble line.
+    // 2. One allow-listed preamble line, unless the dictation opens with the
+    //    same words (a dictated heading such as "Formatted text" that the
+    //    model punctuated as "Formatted text:").
     let start = work.trim_start();
     let line = first_line(start);
-    let raw_line = first_line(raw_text.trim_start()).to_lowercase();
-    if is_preamble(line) && raw_line != line.to_lowercase() {
-        work = start.split_once('\n').map_or("", |(_, rest)| rest);
+    // Strip it only when the output opens with more copies of those words
+    // than the dictation does: an extra copy is the model's preamble.
+    if is_preamble(line) {
+        let words = words_of(line);
+        if leading_copies(start, &words) > leading_copies(raw_text, &words) {
+            work = start.split_once('\n').map_or("", |(_, rest)| rest);
+        }
     }
 
     // 3. One code fence pair enclosing the whole remaining output.
@@ -101,14 +107,17 @@ pub fn cleanup(output: &str, raw_text: &str) -> Result<String, CleanupError> {
         work = inner;
     }
 
-    // 4. One quote pair wrapping the whole output.
+    // 4. One quote pair wrapping the whole output. Skipped when the
+    //    dictation itself is wrapped in any quote marks: the model may have
+    //    changed their style ("…" to “…”), and they are the user's.
     let trimmed = work.trim();
     let raw_trimmed = raw_text.trim();
+    let raw_quoted = is_one_quotation(raw_trimmed);
     for &(open, close) in QUOTE_PAIRS {
-        if trimmed.len() < open.len() + close.len() {
-            continue;
+        if raw_quoted {
+            break;
         }
-        if raw_trimmed.starts_with(open) && raw_trimmed.ends_with(close) {
+        if trimmed.len() < open.len() + close.len() {
             continue;
         }
         if trimmed.starts_with(open) && trimmed.ends_with(close) {
@@ -164,6 +173,55 @@ fn strip_reasoning_tags<'a>(mut work: &'a str, raw_text: &str) -> Result<&'a str
 fn is_preamble(line: &str) -> bool {
     let line = line.to_lowercase();
     PREAMBLES.iter().any(|p| p.to_lowercase() == line)
+}
+
+/// True when `text` is one quotation: it starts and ends with the same
+/// quote pair, and that pair's marks do not appear inside. Other quote
+/// styles may nest inside (`"say «hello»"`), and an apostrophe between two
+/// letters is not a quote mark (`'don't'`); `“a” and “b”` is two
+/// quotations, not one.
+fn is_one_quotation(text: &str) -> bool {
+    QUOTE_PAIRS.iter().any(|&(open, close)| {
+        if text.len() < open.len() + close.len()
+            || !text.starts_with(open)
+            || !text.ends_with(close)
+        {
+            return false;
+        }
+        let inner = &text[open.len()..text.len() - close.len()];
+        let chars: Vec<char> = inner.chars().collect();
+        !chars.iter().enumerate().any(|(i, &c)| {
+            let is_mark = open.starts_with(c) || close.starts_with(c);
+            let apostrophe = c == '\''
+                && i > 0
+                && i + 1 < chars.len()
+                && chars[i - 1].is_alphanumeric()
+                && chars[i + 1].is_alphanumeric();
+            is_mark && !apostrophe
+        })
+    })
+}
+
+/// The lowercase alphanumeric words of `text`, ignoring punctuation and
+/// line breaks.
+fn words_of(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// How many times, in a row, `text` opens with `words` (punctuation and line
+/// breaks ignored, so `formatted text. the report` opens with one copy of
+/// `formatted text`).
+fn leading_copies(text: &str, words: &[String]) -> usize {
+    if words.is_empty() {
+        return 0;
+    }
+    let text = words_of(text);
+    text.chunks(words.len())
+        .take_while(|chunk| *chunk == words)
+        .count()
 }
 
 /// Unwraps one fence pair enclosing all of `t` (`t` must be trimmed already).
