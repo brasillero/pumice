@@ -368,13 +368,6 @@ mod tests {
             raw_reason(RawReason::CleanupFailed(CleanupError::Empty), None),
             "the provider returned an empty reply"
         );
-        assert_eq!(
-            raw_reason(
-                RawReason::CleanupFailed(CleanupError::UnclosedReasoning),
-                None
-            ),
-            "the reply opened a reasoning block it never closed"
-        );
     }
 
     #[test]

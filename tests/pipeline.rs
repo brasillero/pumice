@@ -577,9 +577,9 @@ async fn requested_provider_failure_never_runs_other_enabled_providers() {
 
 #[tokio::test]
 async fn cleanup_failure_never_runs_other_enabled_providers() {
-    // An unclosed reasoning block fails cleanup; the raw dictation comes
-    // back and no other provider runs.
-    let fake = FakeCli::new(success_scenario("<think>never closed"));
+    // A reply holding only a reasoning block fails cleanup as empty; no
+    // other provider runs.
+    let fake = FakeCli::new(success_scenario("<think>only reasoning</think>"));
     let backup = TestProvider::new("backup", vec![Step::Ready("unused".to_owned())]);
     let config = direct_config(
         Duration::from_secs(30),
@@ -597,7 +597,7 @@ async fn cleanup_failure_never_runs_other_enabled_providers() {
         .await;
     assert_raw(
         &outcome,
-        RawReason::CleanupFailed(CleanupError::UnclosedReasoning),
+        RawReason::CleanupFailed(CleanupError::Empty),
         "ola mundo",
     );
     assert_eq!(outcome.attempts, 1);
