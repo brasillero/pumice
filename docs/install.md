@@ -126,6 +126,11 @@ each CLI itself; Pumice inherits them. Validate the file with `pumice check-conf
 config lives outside the install folder, so upgrading never touches it.
 A `pumice setup` wizard that writes this file is planned next.
 
+`max_parallel` (default 4, at most 32) sets how many requests may run their
+provider at the same time. Extra requests wait in line, first come first
+served; a request still waiting when its `total_timeout_secs` budget runs
+out gets HTTP 503.
+
 Which providers are available today:
 
 Nothing is on until you list it with `enabled: true` and a `model` (the

@@ -314,6 +314,7 @@ async fn run_service(loaded: LoadedConfig) -> ExitCode {
         route_line(
             &pipeline,
             config.total_timeout,
+            config.max_parallel,
             &config_location(&loaded.source)
         )
     );
@@ -341,13 +342,15 @@ async fn run_service(loaded: LoadedConfig) -> ExitCode {
 fn route_line(
     pipeline: &Pipeline,
     total_timeout: std::time::Duration,
+    max_parallel: usize,
     config_path: &str,
 ) -> String {
     let timeout = format!("total timeout {}s", total_timeout.as_secs());
+    let parallel = format!("up to {max_parallel} requests at once");
     let route = pipeline.enabled_route();
     if route.is_empty() {
         return format!(
-            "no providers enabled: every request gets an error and the app keeps its own text (add providers to {config_path}); {timeout}"
+            "no providers enabled: every request gets an error and the app keeps its own text (add providers to {config_path}); {timeout}, {parallel}"
         );
     }
     let enabled = route
@@ -362,7 +365,7 @@ fn route_line(
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "providers: {enabled}; on failure or no model: an HTTP error, the app keeps its own text; {timeout}"
+        "providers: {enabled}; on failure or no model: an HTTP error, the app keeps its own text; {timeout}, {parallel}"
     )
 }
 
@@ -383,6 +386,7 @@ fn print_summary(loaded: &LoadedConfig) {
     let config = &loaded.config;
     println!("port: {}", config.port);
     println!("total timeout: {}s", config.total_timeout.as_secs());
+    println!("max parallel: {}", config.max_parallel);
     if config.providers.is_empty() {
         println!("providers: (none configured)");
     } else {

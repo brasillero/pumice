@@ -201,7 +201,7 @@ pub(super) fn raw_reason(reason: RawReason, requested_model: Option<&str>) -> St
             requested(requested_model)
         ),
         RawReason::NoModel => "the request named no provider".to_owned(),
-        RawReason::Busy => "another dictation was still being formatted".to_owned(),
+        RawReason::Busy => "no free slot before the time budget ran out".to_owned(),
         RawReason::BudgetExhausted => "the total time budget ran out".to_owned(),
         RawReason::ProviderFailed(error) => provider_error(error),
         RawReason::CleanupFailed(error) => error.to_string(),

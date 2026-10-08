@@ -36,6 +36,11 @@ port: 7567
 # Total seconds budget for one dictation.
 total_timeout_secs: 30
 
+# How many requests may run their provider at the same time (1–32).
+# Extra requests wait in line, first come first served; one still waiting
+# when its total_timeout_secs runs out gets HTTP 503.
+max_parallel: 4
+
 # The explicit provider list. ORDER MATTERS for the model list a client
 # shows: the enabled entries are listed in this order. There is NO fallback:
 # a request runs exactly one provider — the one its model names.

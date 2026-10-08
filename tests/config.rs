@@ -245,6 +245,42 @@ fn zero_timeouts_are_rejected_at_the_value() {
 }
 
 #[test]
+fn max_parallel_defaults_to_four() {
+    let config = load_text("providers:\n  - id: claude\n    enabled: true\n    model: haiku\n")
+        .expect("loads");
+    assert_eq!(config.max_parallel, 4);
+}
+
+#[test]
+fn max_parallel_is_read_from_config() {
+    let config = load_text(
+        "max_parallel: 2\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n",
+    )
+    .expect("loads");
+    assert_eq!(config.max_parallel, 2);
+}
+
+#[test]
+fn zero_max_parallel_is_rejected_at_the_value() {
+    assert_error(
+        "max_parallel: 0\n",
+        1,
+        15,
+        "max_parallel must be at least 1",
+    );
+}
+
+#[test]
+fn max_parallel_above_limit_is_rejected_at_the_value() {
+    assert_error(
+        "max_parallel: 33\n",
+        1,
+        15,
+        "max_parallel must be at most 32",
+    );
+}
+
+#[test]
 fn port_outside_u16_range_is_a_type_error_at_the_value() {
     assert_error("port: 70000\n", 1, 7, "invalid u16");
     assert_error("port: not-a-port\n", 1, 7, "invalid u16");
@@ -676,6 +712,7 @@ fn check_config_success_prints_summary() {
     );
     assert!(stdout.contains("port: 8000"), "{stdout}");
     assert!(stdout.contains("total timeout: 30s"), "{stdout}");
+    assert!(stdout.contains("max parallel: 4"), "{stdout}");
     assert!(!stdout.contains("default"), "{stdout}");
     assert!(stdout.contains("providers (in order):"), "{stdout}");
     assert!(

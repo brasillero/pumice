@@ -328,6 +328,7 @@ fn chain_config(total_timeout: Duration, entries: Vec<(&str, ProviderSettings)>)
     Config {
         port: 7567,
         total_timeout,
+        max_parallel: 1,
         debug_log: DebugLogSettings {
             enabled: false,
             path: PathBuf::from("pumice-debug.jsonl"),

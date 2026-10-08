@@ -24,6 +24,10 @@ use crate::providers::{self, ProviderSettings};
 pub const DEFAULT_PORT: u16 = 7567;
 
 const DEFAULT_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default number of provider calls that may run at the same time.
+pub const DEFAULT_MAX_PARALLEL: usize = 4;
+/// Hard upper bound for `max_parallel`, kept small to limit resource use.
+pub const MAX_PARALLEL_LIMIT: usize = 32;
 const DEFAULT_DEBUG_LOG_FILE: &str = "pumice-debug.jsonl";
 const PER_USER_FILE: &str = "pumice.yaml";
 
@@ -35,6 +39,8 @@ const PER_USER_FILE: &str = "pumice.yaml";
 pub struct Config {
     pub port: u16,
     pub total_timeout: Duration,
+    /// How many provider calls may run at the same time.
+    pub max_parallel: usize,
     pub debug_log: DebugLogSettings,
     /// Every provider entry in file (list) order, enabled or not.
     pub providers: Vec<ProviderConfig>,
@@ -63,6 +69,7 @@ impl fmt::Debug for Config {
         f.debug_struct("Config")
             .field("port", &self.port)
             .field("total_timeout", &self.total_timeout)
+            .field("max_parallel", &self.max_parallel)
             .field("debug_log", &self.debug_log)
             .field("providers", &self.providers)
             .finish()
@@ -281,6 +288,23 @@ fn validate(
         None => DEFAULT_TOTAL_TIMEOUT,
     };
 
+    let max_parallel = match &raw.max_parallel {
+        Some(span) if span.value == 0 => {
+            return Err(ConfigError::at(
+                span.referenced,
+                "max_parallel must be at least 1",
+            ));
+        }
+        Some(span) if span.value > MAX_PARALLEL_LIMIT as u64 => {
+            return Err(ConfigError::at(
+                span.referenced,
+                format!("max_parallel must be at most {MAX_PARALLEL_LIMIT}"),
+            ));
+        }
+        Some(span) => span.value as usize,
+        None => DEFAULT_MAX_PARALLEL,
+    };
+
     let debug_log = {
         let raw_log = raw.debug_log.as_ref();
         DebugLogSettings {
@@ -298,6 +322,7 @@ fn validate(
     Ok(Config {
         port,
         total_timeout,
+        max_parallel,
         debug_log,
         providers: configured,
     })

@@ -54,6 +54,10 @@ jiff = "0.2.38"
 # Reads only the MCP server names in the user's Codex config (S5.1).
 toml = { version = "1.1.6", default-features = false, features = ["parse", "std", "serde"] }
 
+[dev-dependencies]
+# Paused clock for deterministic deadline and queue tests.
+tokio = { version = "1.53.2", features = ["test-util"] }
+
 [target.'cfg(unix)'.dependencies]
 # `waitid(WNOWAIT)`: observe the CLI's exit without reaping it (src/process/tree.rs).
 libc = "0.2.190"
