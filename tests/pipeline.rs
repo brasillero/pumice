@@ -489,6 +489,35 @@ async fn queued_request_runs_after_the_slot_frees() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_slot_freed_too_late_to_start_is_busy() {
+    // Budget 2 s, so both requests must start a run before 1.75 s. The
+    // first run frees the slot at 1.70 s: the waiter gets it with less than
+    // the minimum startup time left, which the queue caused, so it is Busy
+    // (503), not BudgetExhausted (504), and the provider is not called again.
+    let alpha = TestProvider::new("alpha", vec![Step::Sleep(Duration::from_millis(1_700))]);
+    let config = direct_config(Duration::from_secs(2), vec![("alpha", test_settings(true))]);
+    let pipeline = Arc::new(Pipeline::new(&config, vec![alpha.clone()]));
+    let started = Instant::now();
+
+    let first = {
+        let pipeline = Arc::clone(&pipeline);
+        tokio::spawn(async move {
+            pipeline
+                .format(&handy_request(Some("alpha"), "ola"), started)
+                .await
+        })
+    };
+    until_called(&alpha, 1).await;
+
+    let outcome = pipeline
+        .format(&handy_request(Some("alpha"), "outro ditado"), started)
+        .await;
+    assert_raw(&outcome, RawReason::Busy, "outro ditado");
+    assert_eq!(first.await.expect("first").kind, OutcomeKind::Formatted);
+    assert_eq!(alpha.calls(), 1, "the late waiter never ran the provider");
+}
+
 #[tokio::test]
 async fn parallel_runs_overlap() {
     // Each run waits at a shared two-party barrier: both succeed only if
