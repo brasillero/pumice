@@ -163,7 +163,11 @@ impl<'a> DebugRecord<'a> {
             request: redacted_request(body, headers),
             raw_text,
             outcome: OutcomeSummary::of(outcome),
-            response_text: &outcome.text,
+            // A failure is answered with an HTTP error: no text is sent.
+            response_text: match outcome.kind {
+                OutcomeKind::Raw(_) => "",
+                _ => &outcome.text,
+            },
         }
     }
 }
@@ -234,7 +238,7 @@ impl OutcomeSummary {
             OutcomeKind::Passthrough => ("passthrough", None),
             OutcomeKind::Inspect => ("inspect", None),
             OutcomeKind::Empty => ("empty", None),
-            OutcomeKind::Raw(reason) => ("raw", Some(format!("{reason:?}"))),
+            OutcomeKind::Raw(reason) => ("failed", Some(format!("{reason:?}"))),
         };
         OutcomeSummary {
             kind,

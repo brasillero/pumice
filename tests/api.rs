@@ -543,7 +543,10 @@ async fn failing_provider_returns_an_http_error_and_no_dictation() {
 
     assert_eq!(response.status, 502, "body: {}", response.body_text());
     assert!(response.body_text().contains("not logged in"));
-    assert!(!response.body_text().contains(raw), "no dictation in the error");
+    assert!(
+        !response.body_text().contains(raw),
+        "no dictation in the error"
+    );
     let lines = server.log_lines();
     assert!(
         lines[0].contains("FAILED") && lines[0].contains("HTTP 502: not logged in"),
@@ -2113,4 +2116,117 @@ fn assert_failure(response: &RawResponse, status: u16, reason: &str) {
     let message = body["error"]["message"].as_str().expect("error message");
     assert!(message.contains(reason), "message: {message}");
     assert!(!response.body_text().contains(FIXTURE_TRANSCRIPT));
+}
+
+/// A Claude error envelope whose `result` is the CLI's failure message.
+fn claude_error_scenario(message: &str) -> Value {
+    json!({
+        "stdout": json!({"type": "result", "subtype": "success", "is_error": true, "result": message}).to_string(),
+        "exit_code": 1,
+    })
+}
+
+#[tokio::test]
+async fn every_failure_kind_is_one_http_error_without_dictation() {
+    let claude_timeout_1s =
+        CLAUDE_AT_FAKE.replace("model: haiku\n", "model: haiku\n    timeout_secs: 1\n");
+    let cases: Vec<(&str, String, Value, u16, &str)> = vec![
+        (
+            "rate limit",
+            CLAUDE_AT_FAKE.to_owned(),
+            claude_error_scenario(
+                r#"API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}"#,
+            ),
+            429,
+            "rate_limit_error",
+        ),
+        (
+            "quota",
+            CLAUDE_AT_FAKE.to_owned(),
+            claude_error_scenario("You've hit your weekly limit · resets Monday"),
+            429,
+            "rate_limit_error",
+        ),
+        (
+            "not logged in",
+            CLAUDE_AT_FAKE.to_owned(),
+            claude_error_scenario("Not logged in · Please run /login"),
+            502,
+            "server_error",
+        ),
+        (
+            "cleanup rejection",
+            CLAUDE_AT_FAKE.to_owned(),
+            success_scenario("<think>never closed"),
+            502,
+            "server_error",
+        ),
+        (
+            "timeout",
+            claude_timeout_1s,
+            json!({"stdout": success_envelope("late"), "exit_code": 0, "sleep_ms": 3_000}),
+            504,
+            "server_error",
+        ),
+    ];
+    for (name, yaml, scenario, status, error_type) in cases {
+        for stream in [false, true] {
+            let server = start_server(&yaml, scenario.clone()).await;
+            let mut body: Value =
+                serde_json::from_str(&support::fixture("handy-request.json")).unwrap();
+            body["model"] = json!("claude");
+            body["stream"] = json!(stream);
+            let response = raw_http(
+                server.port,
+                http_request(
+                    "POST",
+                    "/v1/chat/completions",
+                    &[("content-type", "application/json")],
+                    &serde_json::to_vec(&body).unwrap(),
+                ),
+            )
+            .await;
+            let case = format!("{name} (stream {stream})");
+            assert_eq!(response.status, status, "{case}: {}", response.body_text());
+            assert!(
+                response
+                    .headers
+                    .to_ascii_lowercase()
+                    .contains("content-type: application/json"),
+                "{case}: {}",
+                response.headers
+            );
+            assert_eq!(response.body_json()["error"]["type"], error_type, "{case}");
+            assert!(!response.body_text().contains(FIXTURE_TRANSCRIPT), "{case}");
+            let lines = server.log_lines();
+            assert_eq!(lines.len(), 1, "{case}: one log entry: {lines:?}");
+            assert!(
+                lines[0].contains(&format!("FAILED       HTTP {status}")),
+                "{case}: {}",
+                lines[0]
+            );
+            assert!(!lines[0].contains(FIXTURE_TRANSCRIPT), "{case}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_debug_log_records_a_failure_without_response_text() {
+    let (server, debug_path) = start_server_with_debug_log(
+        CLAUDE_AT_FAKE,
+        claude_error_scenario("Not logged in · Please run /login"),
+    )
+    .await;
+    let response = post_model(server.port, "claude").await;
+    assert_eq!(response.status, 502);
+    let record: Value = serde_json::from_str(
+        fs::read_to_string(&debug_path)
+            .unwrap()
+            .lines()
+            .next()
+            .expect("one record"),
+    )
+    .unwrap();
+    assert_eq!(record["outcome"]["kind"], "failed");
+    assert_eq!(record["response_text"], "", "no text was sent");
 }

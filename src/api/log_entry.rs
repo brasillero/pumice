@@ -337,6 +337,31 @@ mod tests {
     }
 
     #[test]
+    fn every_failure_reason_has_its_status() {
+        use crate::cleanup::CleanupError;
+        for (reason, status) in [
+            (RawReason::NoModel, 400),
+            (RawReason::UnknownProvider, 404),
+            (RawReason::ProviderDisabled, 404),
+            (RawReason::Busy, 503),
+            (RawReason::BudgetExhausted, 504),
+            (RawReason::ProviderFailed(ProviderError::Timeout), 504),
+            (
+                RawReason::ProviderFailed(ProviderError::RateLimited { retry_after: None }),
+                429,
+            ),
+            (
+                RawReason::ProviderFailed(ProviderError::QuotaExceeded { retry_after: None }),
+                429,
+            ),
+            (RawReason::ProviderFailed(ProviderError::NotLoggedIn), 502),
+            (RawReason::CleanupFailed(CleanupError::Empty), 502),
+        ] {
+            assert_eq!(failure_status(reason).as_u16(), status, "{reason:?}");
+        }
+    }
+
+    #[test]
     fn cleanup_failure_names_its_cause() {
         use crate::cleanup::CleanupError;
         assert_eq!(
@@ -422,7 +447,10 @@ mod tests {
         });
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2, "{text}");
-        assert!(lines[0].contains("FAILED       HTTP 504: timed out"), "{text}");
+        assert!(
+            lines[0].contains("FAILED       HTTP 504: timed out"),
+            "{text}"
+        );
         assert!(lines[0].contains("[requested: claude]"), "{text}");
         assert!(!lines[0].contains("fallback"), "{text}");
         assert!(
