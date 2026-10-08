@@ -710,6 +710,8 @@ Quota and rate-limit signatures remain **unverified**. Classify only recognized 
 
 ## 5. Cleanup rules
 
+> **Superseded (owner decision, 2026-10-07, S3.6):** cleanup is now minimal. Only rule 1 (leading reasoning blocks), the outer-whitespace trim and the empty-result rejection remain. Preamble, code-fence and quote removal (rules 2–4) were removed: the model's reply is kept as is and formatting is controlled through the prompt. Do not reintroduce them without the owner. The rules below are kept as the original design record.
+
 Implement small explicit transformations, with the original transcript available as a preservation guard.
 
 1. **Reasoning tags:** remove balanced leading `<think>…</think>` blocks. Do not delete matching spans inside legitimate content. Unclosed reasoning blocks cause raw fallback.

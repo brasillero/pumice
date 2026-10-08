@@ -19,7 +19,7 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
-use crate::cleanup::cleanup;
+use crate::cleanup::{CleanupError, cleanup};
 use crate::config::{Config, PromptSettings};
 use crate::prompts::compose_with_settings;
 use crate::providers::diagnostic::{self, Diagnostic};
@@ -273,7 +273,7 @@ impl Pipeline {
         let result = match run {
             Ok(output) => match cleanup(&output, &request.raw_text) {
                 Ok(text) => Ok(text),
-                Err(_) => Err(ChainFailure::Cleanup),
+                Err(error) => Err(ChainFailure::Cleanup(error)),
             },
             Err(kind) => Err(ChainFailure::Provider(kind)),
         };
@@ -283,7 +283,7 @@ impl Pipeline {
             result: match &result {
                 Ok(_) => AttemptResult::Formatted,
                 Err(ChainFailure::Provider(kind)) => AttemptResult::Failed(*kind),
-                Err(ChainFailure::Cleanup) => AttemptResult::CleanupRejected,
+                Err(ChainFailure::Cleanup(error)) => AttemptResult::CleanupRejected(*error),
             },
             elapsed: attempt_started.elapsed(),
             diagnostic,
@@ -299,8 +299,8 @@ impl Pipeline {
             Err(ChainFailure::Provider(kind)) => {
                 self.raw(request, RawReason::ProviderFailed(kind), started, trail)
             }
-            Err(ChainFailure::Cleanup) => {
-                self.raw(request, RawReason::CleanupFailed, started, trail)
+            Err(ChainFailure::Cleanup(error)) => {
+                self.raw(request, RawReason::CleanupFailed(error), started, trail)
             }
         }
     }
@@ -328,7 +328,7 @@ impl Pipeline {
 /// outcome.
 enum ChainFailure {
     Provider(ProviderErrorKind),
-    Cleanup,
+    Cleanup(CleanupError),
 }
 
 /// Runs one provider: its own timeout capped by the total deadline, plus a
@@ -386,7 +386,7 @@ pub enum AttemptResult {
     Formatted,
     Failed(ProviderErrorKind),
     /// The provider answered, but output cleanup refused the text.
-    CleanupRejected,
+    CleanupRejected(CleanupError),
 }
 
 // Manual impl: `text` may be the raw dictation, which must never reach logs
@@ -455,8 +455,8 @@ pub enum RawReason {
     BudgetExhausted,
     /// The selected provider failed, timed out or returned unusable output.
     ProviderFailed(ProviderErrorKind),
-    /// Output cleanup refused the provider's text.
-    CleanupFailed,
+    /// Output cleanup refused the provider's text, for this reason.
+    CleanupFailed(CleanupError),
 }
 
 /// Text-free summary of a provider failure. [`ProviderError`] already
