@@ -5,7 +5,8 @@
 //! prompt inside one user message, and plain dictation clients, whose whole
 //! user message is the dictation. Extraction keeps the incoming user message
 //! reconstructable byte for byte (`before_text + text + after_text`) while
-//! exposing the transcript separately as `raw_text` for fallback and cleanup.
+//! exposing the transcript separately as `raw_text` for `passthrough`,
+//! cleanup and logs. Pumice adds no envelope of its own.
 
 use std::fmt;
 
@@ -75,10 +76,9 @@ pub struct ContentPart {
 /// A validated request with the transcript span separated from its message.
 ///
 /// `before_text + text + after_text` reconstructs the incoming user message
-/// exactly. `text` is what formatting sends (literal transcript tags inside
-/// plain dictation are escaped there); `raw_text` is the transcript as
-/// dictated, unescaped and without the envelope's framing newlines, and is
-/// what cleanup and the raw fallback use.
+/// exactly, and that message is sent to the CLI unchanged. `raw_text` is the
+/// transcript (without the envelope's framing newlines; the whole message
+/// when there is no envelope), used by `passthrough`, cleanup and the logs.
 pub struct ExtractedRequest {
     pub model: Option<String>,
     /// Incoming `system`/`developer` messages, in order.
@@ -158,8 +158,8 @@ impl std::error::Error for RequestError {}
 /// Accepts any number of `system`/`developer` messages plus exactly one
 /// `user` message. With a `<transcript>…</transcript>` envelope the
 /// transcript is what's inside it and the surrounding message is kept
-/// unchanged. Without one, the whole user message is the dictation and is
-/// wrapped in Pumice's own envelope for formatting.
+/// unchanged. Without one, the whole user message is the dictation, sent
+/// unchanged.
 pub fn extract_request(request: ChatCompletionRequest) -> Result<ExtractedRequest, RequestError> {
     let model = request.model.and_then(|model| {
         let trimmed = model.trim();
