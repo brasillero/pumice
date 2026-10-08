@@ -5,8 +5,8 @@
 //! prompt inside one user message, and plain dictation clients, whose whole
 //! user message is the dictation. Extraction keeps the incoming user message
 //! reconstructable byte for byte (`before_text + text + after_text`) while
-//! exposing the transcript separately as `raw_text` for `passthrough`,
-//! cleanup and logs. Pumice adds no envelope of its own.
+//! exposing the transcript separately as `raw_text` for `passthrough`, the
+//! empty-dictation check and logs. Pumice adds no envelope of its own.
 
 use std::fmt;
 
@@ -78,7 +78,8 @@ pub struct ContentPart {
 /// `before_text + text + after_text` reconstructs the incoming user message
 /// exactly, and that message is sent to the CLI unchanged. `raw_text` is the
 /// transcript (without the envelope's framing newlines; the whole message
-/// when there is no envelope), used by `passthrough`, cleanup and the logs.
+/// when there is no envelope), used by `passthrough`, the empty-dictation
+/// check and the logs.
 pub struct ExtractedRequest {
     pub model: Option<String>,
     /// Incoming `system`/`developer` messages, in order.
