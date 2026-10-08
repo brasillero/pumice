@@ -73,6 +73,15 @@ pub trait ContractAdapter {
     /// `None` when it cannot (the run must then fail for some other reason).
     fn tool_activity() -> Option<(String, i32)>;
 
+    /// The answer a plugin returns from [`tool_activity`](Self::tool_activity)
+    /// output. Active plugins do not police tool use in the output (owner
+    /// decision 2026-10-08) and return their final answer; `None` (the
+    /// default, kept by archived adapters) means the run is rejected with
+    /// `UnexpectedToolActivity`.
+    fn tool_activity_answer() -> Option<&'static str> {
+        None
+    }
+
     /// Adds the scenario keys that make the fake CLI capture the system
     /// prompt control file (for example `report_arg_files`). Adapters whose
     /// transport has no control file (Antigravity's merged stdin event) keep
@@ -472,9 +481,10 @@ pub async fn invalid_output<A: ContractAdapter>() {
     }
 }
 
-/// Tool activity: when the protocol can express it, a run showing tool
-/// activity is rejected with `UnexpectedToolActivity` (adapters that cannot
-/// express tool activity in their protocol pass trivially).
+/// Tool activity: when the protocol can express it, an active plugin
+/// returns the run's final answer regardless of tool records; an archived
+/// adapter rejects the run with `UnexpectedToolActivity`. Adapters that
+/// cannot express tool activity in their protocol pass trivially.
 pub async fn tool_activity<A: ContractAdapter>() {
     let Some((stdout, exit_code)) = A::tool_activity() else {
         return;
@@ -482,12 +492,16 @@ pub async fn tool_activity<A: ContractAdapter>() {
     let fake = FakeCli::new(json!({"stdout": stdout, "exit_code": exit_code}));
     let provider = A::provider(fake.path(), CALL_TIMEOUT);
 
-    assert_eq!(
-        format_with(&provider, "ditado").await.unwrap_err(),
-        ProviderError::Other {
-            code: ProviderErrorCode::UnexpectedToolActivity
-        }
-    );
+    let result = format_with(&provider, "ditado").await;
+    match A::tool_activity_answer() {
+        Some(answer) => assert_eq!(result.as_deref(), Ok(answer)),
+        None => assert_eq!(
+            result.unwrap_err(),
+            ProviderError::Other {
+                code: ProviderErrorCode::UnexpectedToolActivity
+            }
+        ),
+    }
 }
 
 /// Privacy: a unique marker in stdin, stdout and stderr appears in neither

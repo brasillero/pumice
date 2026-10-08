@@ -281,9 +281,9 @@ async fn unknown_failure_is_a_plain_nonzero_exit() {
 }
 
 #[tokio::test]
-async fn tool_activity_never_returns_text() {
-    // Even a clean exit with a completed turn must fail when any item is a
-    // tool or activity event; agent text from such a run is never returned.
+async fn tool_and_activity_items_are_ignored() {
+    // Pumice does not police tool use in the output: any other item is
+    // ignored and the final agent message is the answer.
     for item in [
         r#"{"id":"1","type":"command_execution","command":"ls -la","status":"completed"}"#,
         r#"{"id":"1","type":"file_change","changes":[{"path":"a.txt"}]}"#,
@@ -298,29 +298,22 @@ async fn tool_activity_never_returns_text() {
         );
         let fake = fake_codex(&stream, 0);
         assert_eq!(
-            format(&fake, "text").await.unwrap_err(),
-            ProviderError::Other {
-                code: ProviderErrorCode::UnexpectedToolActivity
-            },
+            format(&fake, "text").await.as_deref(),
+            Ok("Tool output."),
             "item: {item}"
         );
     }
 }
 
 #[tokio::test]
-async fn tool_activity_in_item_started_is_rejected() {
+async fn tool_items_in_item_started_are_ignored() {
     let stream = concat!(
         "{\"type\":\"item.started\",\"item\":{\"id\":\"1\",\"type\":\"command_execution\",\"command\":\"ls\"}}\n",
         "{\"type\":\"item.completed\",\"item\":{\"id\":\"2\",\"type\":\"agent_message\",\"text\":\"done.\"}}\n",
         "{\"type\":\"turn.completed\"}\n",
     );
     let fake = fake_codex(stream, 0);
-    assert_eq!(
-        format(&fake, "text").await.unwrap_err(),
-        ProviderError::Other {
-            code: ProviderErrorCode::UnexpectedToolActivity
-        }
-    );
+    assert_eq!(format(&fake, "text").await.as_deref(), Ok("done."));
 }
 
 #[tokio::test]

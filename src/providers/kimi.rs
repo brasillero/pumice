@@ -18,8 +18,9 @@
 //! front matter, which the upstream agents documentation defines as
 //! disabling every tool (including MCP globs) and all delegation. Print
 //! mode otherwise runs tools under an auto permission policy, so the empty
-//! allowlist is the load-bearing restriction and any tool activity seen in
-//! the stream is rejected. `--skills-dir .` (the empty workspace) replaces
+//! allowlist is the load-bearing restriction. Tool records in the stream
+//! are ignored (owner decision 2026-10-08): the answer is the assistant
+//! text. `--skills-dir .` (the empty workspace) replaces
 //! the user's and project's skill directories, and
 //! `KIMI_CODE_BUILTIN_PRODUCT_SKILLS=false` turns off built-in product
 //! skills. `KIMI_CODE_BACKGROUND_PRINT_BACKGROUND_MODE=exit` makes the run
@@ -300,9 +301,9 @@ fn quoted_units(message: &str) -> usize {
 /// A run opens with the `system.version` meta message and, on success,
 /// carries one or more `assistant` messages whose `content` strings
 /// concatenate into the result; the `session.resume_hint` meta message
-/// closes it. A `tool` message, or an `assistant` message with
-/// `tool_calls`, means the model tried to use a tool and is rejected even
-/// with a clean exit. `turn.step.retrying` meta messages carry the
+/// closes it. `tool` messages and `tool_calls` are ignored: Pumice does not
+/// police tool use in the output (owner decision 2026-10-08); the agent
+/// file switches tools off instead. `turn.step.retrying` meta messages carry the
 /// failure's `status_code`, `error_name` and `error_message`: those
 /// structured fields (never message text) classify authentication, quota
 /// and rate-limit failures of a run that ultimately failed; a retry the
@@ -314,7 +315,6 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
 
     let mut texts: Vec<String> = Vec::new();
     let mut saw_version = false;
-    let mut tool_activity = false;
     let mut failure: Option<ProviderError> = None;
 
     for line in stdout.lines() {
@@ -348,8 +348,7 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
                 // result text.
             }
             Some("assistant") => {
-                // `content: null` accompanies a tool call; it carries no
-                // text and is not malformed.
+                // `content: null` (as with a tool call) carries no text.
                 match message.get("content") {
                     None | Some(Value::Null) => {}
                     Some(Value::String(text)) => texts.push(text.clone()),
@@ -357,23 +356,12 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
                         return Err(ProviderError::other(ProviderErrorCode::InvalidOutput));
                     }
                 }
-                // `tool_calls: null` or `[]` means no tool call.
-                match message.get("tool_calls") {
-                    None | Some(Value::Null) => {}
-                    Some(Value::Array(calls)) if calls.is_empty() => {}
-                    Some(_) => tool_activity = true,
-                }
             }
-            Some("tool") => tool_activity = true,
+            Some("tool") => {}
             _ => return Err(ProviderError::other(ProviderErrorCode::InvalidOutput)),
         }
     }
 
-    if tool_activity {
-        return Err(ProviderError::other(
-            ProviderErrorCode::UnexpectedToolActivity,
-        ));
-    }
     // The structured failure evidence only classifies a run that ultimately
     // failed; a retry the run recovered from (assistant text, clean exit)
     // is not a failure.

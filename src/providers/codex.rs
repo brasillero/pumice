@@ -276,7 +276,10 @@ impl CliAdapter for CodexAdapter {
 /// Parses Codex's `--json` JSONL event stream (one event per line).
 ///
 /// Success requires a `turn.completed` event and exit code 0; the result is
-/// the text of the last completed `agent_message` item. Failure events carry
+/// the text of the last completed `agent_message` item. Every other item
+/// (reasoning, warnings, tool or activity items) is ignored: Pumice does not
+/// police tool use in the output (owner decision 2026-10-08); tools are
+/// switched off in the invocation instead. Failure events carry
 /// CLI diagnostics, never dictation, so they are the only text that is
 /// classified; an agent message is returned only from a run that completed
 /// cleanly, and reasoning or progress text is never concatenated into it.
@@ -286,7 +289,6 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
     let mut last_agent_message: Option<String> = None;
     let mut saw_turn_completed = false;
     let mut saw_turn_failed = false;
-    let mut tool_activity = false;
     let mut failure_messages: Vec<String> = Vec::new();
 
     for line in stdout.lines() {
@@ -299,8 +301,7 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
         match event_type {
             "item.started" | "item.updated" | "item.completed" => {
                 match event.pointer("/item/type").and_then(Value::as_str) {
-                    // Only agent output may carry text; anything else is a
-                    // tool or activity item and must never reach the result.
+                    // Only agent output carries the answer.
                     Some("agent_message") if event_type == "item.completed" => {
                         let text = event
                             .pointer("/item/text")
@@ -310,11 +311,9 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
                             })?;
                         last_agent_message = Some(text.to_owned());
                     }
-                    // Codex reports non-fatal warnings (config, deprecation,
-                    // model rerouting) as `error` items; they carry no tool
-                    // activity and no output text.
-                    Some("agent_message" | "reasoning" | "error") => {}
-                    Some(_) => tool_activity = true,
+                    // Reasoning, warnings (`error` items) and any other
+                    // item carry no answer text.
+                    Some(_) => {}
                     None => return Err(ProviderError::other(ProviderErrorCode::InvalidOutput)),
                 }
             }
@@ -335,11 +334,6 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
         }
     }
 
-    if tool_activity {
-        return Err(ProviderError::other(
-            ProviderErrorCode::UnexpectedToolActivity,
-        ));
-    }
     // Transient `error` events ("Reconnecting... 1/5") can precede a turn that
     // still completes, so they only matter when the turn did not succeed.
     let succeeded = saw_turn_completed && !saw_turn_failed && output.status.success();

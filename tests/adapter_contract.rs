@@ -381,9 +381,13 @@ impl ContractAdapter for CodexContract {
         ]
     }
 
+    fn tool_activity_answer() -> Option<&'static str> {
+        Some("Tool output.")
+    }
+
     fn tool_activity() -> Option<(String, i32)> {
-        // A completed turn that also completed a tool call must be rejected
-        // even with a clean exit; its agent text is never returned.
+        // A completed turn that also completed a tool call: the tool item is
+        // ignored and the final agent message is the answer.
         Some((
             concat!(
                 r#"{"type":"item.completed","item":{"id":"1","type":"command_execution","command":"ls -la","status":"completed"}}"#,
@@ -677,9 +681,14 @@ impl ContractAdapter for KimiContract {
         ]
     }
 
+    fn tool_activity_answer() -> Option<&'static str> {
+        Some("Let me list the files first.")
+    }
+
     fn tool_activity() -> Option<(String, i32)> {
         // The verified tool sequence: an assistant message with tool_calls
-        // followed by the tool result. A clean exit must not rescue the run.
+        // followed by the tool result. Tool records are ignored; the
+        // assistant text is the answer.
         Some((fixture("kimi/tool.jsonl"), 0))
     }
 

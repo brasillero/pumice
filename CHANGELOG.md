@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Claude, Codex and Kimi no longer reject a reply because the CLI's output shows tool activity: each plugin returns the final answer, and tools stay switched off in the invocation (owner decision).
 - **Provider `env:` and `options:` are removed.** Each CLI keeps its own configuration (gateway, routing, login) and Pumice inherits it: set Claude's `ANTHROPIC_BASE_URL` in `~/.claude/settings.json` and Codex's `openai_base_url` in `~/.codex/config.toml`. A file that still has `env:` or `options:` fails at that line. The generic local-server adapter, whose only setting was `options.base_url`, can no longer be built from a config until it returns.
 - **The `prompts:` section is removed.** The app that sends the dictation (Handy, OpenWhispr) sends its own prompt; Pumice adds none from the config. A file that still has `prompts:` fails at that line with a message saying so.
 - **Kiro, Antigravity and the generic local-server adapter are archived** until the plugin architecture settles: their code stays, but they are no longer registered, so listing one in the config fails with a message saying so, and `doctor` and `/v1/models` show only Claude, Codex and Kimi.
