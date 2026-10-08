@@ -48,8 +48,9 @@ providers:
   # Short working example: Claude Code, enabled.
   - id: claude
     enabled: true
-    # null looks up "claude" on PATH; a relative path resolves against this
-    # file's directory, an absolute path is used as-is.
+    # null looks up "claude" on PATH, and so does any bare command name
+    # (no slash); a relative path with a slash resolves against this file's
+    # directory, an absolute path is used as-is.
     binary: null
     # Any alias `claude --model` accepts; there is no built-in default.
     model: haiku

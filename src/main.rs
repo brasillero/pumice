@@ -138,6 +138,17 @@ fn doctor(args: &[&str]) -> ExitCode {
     let mut provider: Option<&str> = None;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
+        // A flag given twice is a usage error, never "last one wins".
+        let repeated = match *arg {
+            "--config" => explicit.is_some(),
+            "--login-check" => login_check,
+            "--provider" => provider.is_some(),
+            _ => false,
+        };
+        if repeated {
+            eprintln!("error: {arg} given more than once\n{DOCTOR_USAGE}");
+            return ExitCode::from(2);
+        }
         match *arg {
             "--config" => match rest.next() {
                 Some(path) => explicit = Some(Path::new(path)),

@@ -268,7 +268,7 @@ pub fn status_line(status: &ProviderStatus, install_hint: &str) -> String {
             Version::Skipped => "found".to_owned(),
         },
         Found::Missing => format!("missing (install: {install_hint})"),
-        Found::UnsupportedShim => format!("unsupported wrapper (install: {install_hint})"),
+        Found::UnsupportedShim => format!("unsupported launcher (install: {install_hint})"),
         Found::NotApplicable => "local endpoint (checked at call time)".to_owned(),
     };
     format!("provider {}: {state}", status.id)

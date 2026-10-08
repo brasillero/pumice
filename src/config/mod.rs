@@ -129,7 +129,7 @@ pub fn load_with_env(
             if !path.exists() {
                 return Err(ConfigError::file(
                     path,
-                    format!("configuration file {} does not exist", path.display()),
+                    "the configuration file does not exist",
                 ));
             }
             ConfigSource::File(path.to_path_buf())

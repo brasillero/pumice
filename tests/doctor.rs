@@ -453,3 +453,24 @@ async fn login_check_generic_without_a_server_reports_endpoint_unavailable_and_e
         "output: {text}"
     );
 }
+
+#[test]
+fn repeated_provider_flag_is_a_usage_error() {
+    let (_dir, config_path) = write_config("");
+    let output = run_doctor(
+        &config_path,
+        &[
+            "--login-check",
+            "--provider",
+            "claude",
+            "--provider",
+            "codex",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        combined(&output).contains("--provider given more than once"),
+        "{}",
+        combined(&output)
+    );
+}

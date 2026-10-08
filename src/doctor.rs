@@ -232,7 +232,7 @@ pub fn error_category(error: ProviderError) -> String {
             ProviderErrorCode::AuthenticationRejected => {
                 "the CLI rejected its credentials".to_owned()
             }
-            ProviderErrorCode::UnsupportedShim => "the CLI is an unsupported wrapper".to_owned(),
+            ProviderErrorCode::UnsupportedShim => "the CLI is an unsupported launcher".to_owned(),
             ProviderErrorCode::InvalidOutput => "the CLI returned unparseable output".to_owned(),
             ProviderErrorCode::OutputTooLarge => "the CLI returned too much output".to_owned(),
             ProviderErrorCode::InputTooLarge => "input too large".to_owned(),
