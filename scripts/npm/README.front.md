@@ -67,8 +67,7 @@ customize, create the per-user config and edit it:
 - Linux and macOS: `~/.config/pumice/pumice.yaml`
 
 The service listens on `127.0.0.1` only, sends no telemetry and makes no
-external connections of its own. The optional generic adapter connects only
-to local services.
+external connections of its own.
 
 ## AI CLIs
 

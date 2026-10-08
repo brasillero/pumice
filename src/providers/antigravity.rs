@@ -143,7 +143,9 @@ impl CliAdapter for AntigravityAdapter {
     fn invocation(&self, input: FormatInput<'_>) -> Result<CliInvocation, ProviderError> {
         // A model that looks like a flag would change the command's meaning.
         if self.model.is_empty() || self.model.starts_with('-') {
-            return Err(ProviderError::other(ProviderErrorCode::InvalidConfiguration));
+            return Err(ProviderError::other(
+                ProviderErrorCode::InvalidConfiguration,
+            ));
         }
 
         // Documentation-derived argv (headless docs, S0.2): one fresh process
@@ -253,7 +255,10 @@ fn parse_stream(
             // tool step makes the run ineligible.
             "tool_use" | "tool_call" | "tool_result" => tool_activity = true,
             "result" => results.push(TerminalResult {
-                status: record.get("status").and_then(Value::as_str).map(str::to_owned),
+                status: record
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
                 response: record
                     .pointer("/result/response")
                     .and_then(Value::as_str)
@@ -294,7 +299,10 @@ fn parse_stream(
 /// the matched text never leaves this function, and successful text is never
 /// heuristically classified.
 fn auth_required(results: &[TerminalResult], stderr_tail: &str) -> bool {
-    if stderr_tail.to_lowercase().contains("authentication required") {
+    if stderr_tail
+        .to_lowercase()
+        .contains("authentication required")
+    {
         return true;
     }
     results.iter().any(|result| {
@@ -357,10 +365,7 @@ mod tests {
             .err()
             .expect("build never produces a runnable provider")
             .to_string();
-        assert!(
-            error.contains("cannot be enabled yet"),
-            "{error}"
-        );
+        assert!(error.contains("cannot be enabled yet"), "{error}");
     }
 
     #[test]
@@ -392,14 +397,20 @@ mod tests {
             r#"{"event":"result","status":"FAILURE","result":{"error":"authentication required: no cached login"}}"#,
             "\n",
         );
-        assert_eq!(parse_stream(failed, false, "").unwrap_err(), ProviderError::NotLoggedIn);
+        assert_eq!(
+            parse_stream(failed, false, "").unwrap_err(),
+            ProviderError::NotLoggedIn
+        );
         // The same evidence is documented on stderr.
         assert_eq!(
             parse_stream("{\"event\":\"init\"}\n", false, "authentication required"),
             Err(ProviderError::NotLoggedIn)
         );
         // A successful turn is never reclassified on stderr text.
-        assert_eq!(parse_stream(OK, true, "authentication required").unwrap(), "Olá mundo.");
+        assert_eq!(
+            parse_stream(OK, true, "authentication required").unwrap(),
+            "Olá mundo."
+        );
     }
 
     #[test]
@@ -489,7 +500,11 @@ mod tests {
             .expect("invocation builds");
 
         let stdin = String::from_utf8(invocation.stdin).expect("UTF-8 stdin");
-        assert_eq!(stdin.matches('\n').count(), 1, "one newline-terminated line");
+        assert_eq!(
+            stdin.matches('\n').count(),
+            1,
+            "one newline-terminated line"
+        );
         let event: Value =
             serde_json::from_str(stdin.trim_end_matches('\n')).expect("valid JSON event");
         assert_eq!(event["event"], serde_json::json!("user"));

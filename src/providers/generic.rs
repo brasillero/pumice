@@ -155,9 +155,15 @@ fn validate_settings(
             ),
         ));
     };
-    let endpoint = parse_endpoint(base_url)
-        .map_err(|error| ConfigError::at(base_url_at(locations), format!("providers.{ID}.options.{BASE_URL_KEY} {error}")))?;
-    if endpoint.addr.is_ipv4() && endpoint.addr.ip().is_loopback() && endpoint.port() == locations.port
+    let endpoint = parse_endpoint(base_url).map_err(|error| {
+        ConfigError::at(
+            base_url_at(locations),
+            format!("providers.{ID}.options.{BASE_URL_KEY} {error}"),
+        )
+    })?;
+    if endpoint.addr.is_ipv4()
+        && endpoint.addr.ip().is_loopback()
+        && endpoint.port() == locations.port
     {
         return Err(ConfigError::at(
             base_url_at(locations),
@@ -268,7 +274,10 @@ pub fn parse_endpoint(value: &str) -> Result<LoopbackEndpoint, EndpointError> {
     };
     // '%' (percent-encoding and zone ids), '\\', '@' (userinfo), '?' and '#'
     // are never part of an accepted spelling.
-    if rest.bytes().any(|b| matches!(b, b'%' | b'\\' | b'@' | b'?' | b'#')) {
+    if rest
+        .bytes()
+        .any(|b| matches!(b, b'%' | b'\\' | b'@' | b'?' | b'#'))
+    {
         return Err(EndpointError::ForbiddenCharacters);
     }
     let rest = rest.strip_suffix('/').unwrap_or(rest);
@@ -289,9 +298,7 @@ pub fn parse_endpoint(value: &str) -> Result<LoopbackEndpoint, EndpointError> {
     } else {
         format!("{connect_host}:{port}")
     };
-    let addr: SocketAddr = addr_text
-        .parse()
-        .map_err(|_| EndpointError::PortInvalid)?;
+    let addr: SocketAddr = addr_text.parse().map_err(|_| EndpointError::PortInvalid)?;
     Ok(LoopbackEndpoint {
         addr,
         authority: format!("{authority_host}:{port}"),
@@ -387,24 +394,22 @@ impl GenericProvider {
             return Err(ProviderError::Timeout);
         }
 
-        let connect_cap = deadline.saturating_duration_since(Instant::now()).min(CONNECT_TIMEOUT);
-        let stream = match tokio::time::timeout(
-            connect_cap,
-            TcpStream::connect(self.endpoint.addr),
-        )
-        .await
-        {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(error)) => return Err(connect_error(&error)),
-            // The connect cap, not the request deadline, ran out: the local
-            // endpoint did not accept the connection. Windows retries a closed
-            // loopback port for about 2 s before reporting a refusal, so this
-            // is how "nothing is listening" usually surfaces there.
-            Err(_) if connect_cap == CONNECT_TIMEOUT => {
-                return Err(ProviderError::other(ProviderErrorCode::EndpointUnavailable));
-            }
-            Err(_) => return Err(ProviderError::Timeout),
-        };
+        let connect_cap = deadline
+            .saturating_duration_since(Instant::now())
+            .min(CONNECT_TIMEOUT);
+        let stream =
+            match tokio::time::timeout(connect_cap, TcpStream::connect(self.endpoint.addr)).await {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(error)) => return Err(connect_error(&error)),
+                // The connect cap, not the request deadline, ran out: the local
+                // endpoint did not accept the connection. Windows retries a closed
+                // loopback port for about 2 s before reporting a refusal, so this
+                // is how "nothing is listening" usually surfaces there.
+                Err(_) if connect_cap == CONNECT_TIMEOUT => {
+                    return Err(ProviderError::other(ProviderErrorCode::EndpointUnavailable));
+                }
+                Err(_) => return Err(ProviderError::Timeout),
+            };
         if Instant::now() >= deadline {
             return Err(ProviderError::Timeout);
         }
@@ -492,9 +497,7 @@ fn serialize_request(model: &str, input: FormatInput<'_>) -> Result<Vec<u8>, Pro
     let mut writer = CappedWriter::new(MAX_REQUEST_BYTES);
     match serde_json::to_writer(&mut writer, &payload) {
         Ok(()) => Ok(writer.into_inner()),
-        Err(_) if writer.exceeded() => {
-            Err(ProviderError::other(ProviderErrorCode::InputTooLarge))
-        }
+        Err(_) if writer.exceeded() => Err(ProviderError::other(ProviderErrorCode::InputTooLarge)),
         Err(_) => Err(ProviderError::other(
             ProviderErrorCode::InvalidConfiguration,
         )),
@@ -649,7 +652,7 @@ async fn drain_body(
                     ProviderError::other(ProviderErrorCode::OutputTooLarge)
                 } else {
                     ProviderError::other(ProviderErrorCode::InvalidOutput)
-                })
+                });
             }
         }
     }
@@ -661,8 +664,8 @@ async fn drain_body(
 /// unchanged for pipeline cleanup.
 fn parse_success_body(bytes: &[u8]) -> Result<String, ProviderError> {
     let invalid = || ProviderError::other(ProviderErrorCode::InvalidOutput);
-    let value: serde_json::Value =
-        serde_json::from_slice(bytes).map_err(|_| ProviderError::other(ProviderErrorCode::InvalidOutput))?;
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|_| ProviderError::other(ProviderErrorCode::InvalidOutput))?;
     let choices = value
         .get("choices")
         .and_then(serde_json::Value::as_array)

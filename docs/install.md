@@ -131,12 +131,10 @@ Nothing is on until you list it with `enabled: true` and a `model` (the
 example config shows how). Then set the model in Handy to the provider's
 id to pick it.
 
-- **Claude**, **Codex** and **Kimi** — implemented and tested with real calls.
-- **Kiro** — on hold. OpenCode support was removed.
-- **Local models (Ollama, LM Studio)** — a generic adapter for
-  OpenAI-compatible services listening on `127.0.0.1`.
-- **Antigravity** — dormant (protocol implemented, enabling it is refused
-  for now).
+- **Claude**, **Codex** and **Kimi** — supported and tested with real calls.
+- **Kiro**, **Antigravity** and the **local-model adapter** (Ollama, LM
+  Studio) — archived for now; listing them in the config is an error.
+- **OpenCode** — support was removed.
 
 ## Upgrade and remove
 
@@ -157,6 +155,6 @@ remove that directory from your PATH if you added it.
 ## Privacy
 
 Pumice binds to `127.0.0.1` only, sends no telemetry, has no auto-updater and
-makes no external network calls itself. AI CLIs contact their providers;
-the generic adapter connects only to local services. It never loses a dictation: if the
+makes no external network calls itself; only the AI CLIs contact their
+providers. It never loses a dictation: if the
 selected provider fails or times out, the raw text comes back unchanged.

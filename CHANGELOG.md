@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Kiro, Antigravity and the generic local-server adapter are archived** until the plugin architecture settles: their code stays, but they are no longer registered, so listing one in the config fails with a message saying so, and `doctor` and `/v1/models` show only Claude, Codex and Kimi.
 - **OpenCode support is removed.** A config entry `id: opencode` now fails with a message saying so; delete the entry.
 - Cleanup is minimal: Pumice keeps the model's reply as is apart from removing a `<think>…</think>` block at the start and trimming outer whitespace. Preamble lines, wrapping quotes and code fences are no longer removed; the prompt is where formatting is controlled (owner decision, deviates from spec S3.4). When cleanup returns the original text, the log says why (`the provider returned an empty reply`, or an unclosed reasoning block).
 - Provider risk warnings are no longer printed at startup, in `check-config` or in `doctor`: every enabled provider is treated the same way (owner decision). The residual-risk notes stay in each adapter's source and research notes.

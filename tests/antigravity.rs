@@ -262,61 +262,21 @@ fn absent_entry_means_not_configured() {
 }
 
 #[test]
-fn enabled_true_is_refused_at_the_enabled_line() {
+fn a_config_entry_is_refused_as_archived() {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join("pumice.yaml");
     fs::write(
         &path,
-        "providers:\n  - id: antigravity\n    enabled: true\n",
+        "providers:\n  - id: antigravity\n    enabled: false\n",
     )
     .expect("write config");
 
     let error = config::load_with_env(Some(&path), no_env)
-        .expect_err("enablement is refused")
+        .expect_err("archived providers cannot be listed")
         .to_string();
     assert!(
         error.contains(
-            ":3:14: providers.antigravity cannot be enabled yet: no supported per-launch tool policy exists (see docs/research/phase2-architecture.md §3.2)"
-        ),
-        "{error}"
-    );
-}
-
-#[test]
-fn options_are_rejected() {
-    let dir = TempDir::new().expect("temp dir");
-    let path = dir.path().join("pumice.yaml");
-    fs::write(
-        &path,
-        "providers:\n  - id: antigravity\n    enabled: false\n    options:\n      effort: high\n",
-    )
-    .expect("write config");
-
-    let error = config::load_with_env(Some(&path), no_env)
-        .expect_err("options are refused")
-        .to_string();
-    assert!(
-        error.contains(":5:7: providers.antigravity.options.effort is not supported"),
-        "{error}"
-    );
-}
-
-#[test]
-fn env_overrides_are_rejected() {
-    let dir = TempDir::new().expect("temp dir");
-    let path = dir.path().join("pumice.yaml");
-    fs::write(
-        &path,
-        "providers:\n  - id: antigravity\n    enabled: false\n    env:\n      AGY_HOME: /tmp\n",
-    )
-    .expect("write config");
-
-    let error = config::load_with_env(Some(&path), no_env)
-        .expect_err("env overrides are refused")
-        .to_string();
-    assert!(
-        error.contains(
-            "providers entry \"antigravity\".env.AGY_HOME is not an allowed environment variable (no environment overrides are allowed for this provider)"
+            ":2:9: \"antigravity\" is archived for now and cannot be used; delete this entry"
         ),
         "{error}"
     );
@@ -324,7 +284,7 @@ fn env_overrides_are_rejected() {
 
 #[test]
 fn build_fails_even_when_called_directly() {
-    let descriptor = pumice::providers::descriptor("antigravity").expect("registered");
+    let descriptor = &pumice::providers::antigravity::DESCRIPTOR;
     let settings = ProviderSettings {
         enabled: false,
         ..(descriptor.defaults)()

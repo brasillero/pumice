@@ -54,7 +54,9 @@ use super::{
     ProviderLocations, ProviderSettings, RawOption,
 };
 use crate::config::ConfigError;
-use crate::process::{Argument, CliInvocation, ControlFile, ProcessOutput, ProcessRunner, ProgramSpec};
+use crate::process::{
+    Argument, CliInvocation, ControlFile, ProcessOutput, ProcessRunner, ProgramSpec,
+};
 
 pub const ID: &str = "kiro";
 pub const DEFAULT_BINARY: &str = "kiro-cli";
@@ -155,9 +157,7 @@ fn is_valid_model(model: &str) -> bool {
     if model.is_empty() || model.starts_with('-') {
         return false;
     }
-    model
-        .chars()
-        .all(|c| !c.is_whitespace() && !c.is_control())
+    model.chars().all(|c| !c.is_whitespace() && !c.is_control())
 }
 
 fn build(
@@ -195,7 +195,9 @@ impl CliAdapter for KiroAdapter {
 
     fn invocation(&self, input: FormatInput<'_>) -> Result<CliInvocation, ProviderError> {
         if !is_valid_model(&self.model) {
-            return Err(ProviderError::other(ProviderErrorCode::InvalidConfiguration));
+            return Err(ProviderError::other(
+                ProviderErrorCode::InvalidConfiguration,
+            ));
         }
 
         let agent_name = unique_agent_name();
@@ -510,7 +512,8 @@ mod tests {
 
     #[test]
     fn agent_config_carries_prompt_and_empty_tools() {
-        let config: Value = serde_json::from_str(&agent_config("the prompt", "pumice-abc123")).unwrap();
+        let config: Value =
+            serde_json::from_str(&agent_config("the prompt", "pumice-abc123")).unwrap();
         assert_eq!(config["name"], Value::from("pumice-abc123"));
         assert_eq!(config["prompt"], Value::from("the prompt"));
         assert_eq!(config["tools"], Value::Array(Vec::new()));
