@@ -94,7 +94,7 @@ Update this table in the PR that finishes each story. Order follows the plan in 
 | 38 | S2.14: cheapest settings per CLI | Done | #74 | Owner rule (2026-10-08): lowest effort, thinking off, never fast. Pins from ~/pumice-research/cheapest-settings-2026-10-08.md; limits: models that cannot disable thinking, Kimi non-native provider routes, unknown aliases |
 | 39 | S3.8: pure pass-through | Done | #75 | Owner decision (2026-10-08): no fixed instruction, no bare-text envelope; Claude gets an empty system prompt when the client sends none, Codex and Kimi the neutral line `Follow the user's message.` |
 | 40 | S4.4: failures are HTTP errors | Done | #76 | Owner decision (2026-10-08): no 200-with-transcript on failure; the app keeps its own transcript. B3 now only affects the built-in `passthrough` |
-| 41 | S3.9: cleanup reads only the reply | In review | — | Owner decision (2026-10-08): cleanup no longer consults the dictation, and an unclosed `<think>` tag is kept as text instead of failing; `CleanupError::UnclosedReasoning` removed |
+| 41 | S3.9: cleanup reads only the reply | Done | #77 | Owner decision (2026-10-08): cleanup no longer consults the dictation, and an unclosed `<think>` tag is kept as text instead of failing; `CleanupError::UnclosedReasoning` removed |
 
 **Distribution review (2026-10-05):** the owner accepted the final review and authorized merging #36–#38. #36–#38 are merged; all 10 archive checks and all 16 npm checks passed, including Windows/Linux/macOS native installs and Linux pnpm/Bun. #38 also passed all 16 checks before merging. GitHub v0.1.0 is published; npm publication is pending account 2FA.
 
