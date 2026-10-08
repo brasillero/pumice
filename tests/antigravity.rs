@@ -345,3 +345,19 @@ async fn end_to_end_format_through_the_fake_cli() {
         "the workspace starts empty"
     );
 }
+
+#[test]
+fn enabled_true_is_refused_at_the_enabled_line() {
+    // The archived descriptor still refuses enablement at the exact line.
+    let error = config::validate_text_with_descriptors(
+        "providers:\n  - id: antigravity\n    enabled: true\n",
+        std::path::Path::new("pumice.yaml"),
+        &[pumice::providers::antigravity::DESCRIPTOR],
+    )
+    .expect_err("enablement is refused")
+    .to_string();
+    assert!(
+        error.contains(":3:14: providers.antigravity cannot be enabled yet"),
+        "{error}"
+    );
+}

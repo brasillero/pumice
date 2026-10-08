@@ -170,3 +170,74 @@ fn registry_probe_metadata_is_consistent() {
         assert!(!descriptor.install_hint.is_empty(), "{}", descriptor.id);
     }
 }
+
+/// Validates `yaml` against `descriptors` alone, so archived (unregistered)
+/// providers keep their detection guarantees tested.
+fn load_with(yaml: &str, descriptors: &[ProviderDescriptor]) -> Config {
+    config::validate_text_with_descriptors(yaml, Path::new("pumice.yaml"), descriptors)
+        .expect("config validates")
+}
+
+#[tokio::test]
+async fn archived_antigravity_is_resolved_but_never_spawned() {
+    let fake = FakeCli::new(json!({"stdout": "1.2.14", "exit_code": 0}));
+    let descriptors = [providers::antigravity::DESCRIPTOR];
+    let config = load_with(
+        &format!(
+            "providers:\n  - id: antigravity\n    enabled: false\n    binary: '{}'\n",
+            fake.path().display()
+        ),
+        &descriptors,
+    );
+    let statuses = discovery::detect(&config, &descriptors, &ProcessRunner::new()).await;
+
+    assert_eq!(statuses.len(), 1);
+    assert!(!statuses[0].enabled);
+    assert!(
+        matches!(statuses[0].found, Found::Found(_)),
+        "PATH lookup still reports the binary"
+    );
+    assert_eq!(statuses[0].version, Version::Skipped);
+    assert!(
+        !fake.report_path().exists(),
+        "agy must never be spawned, not even for --version"
+    );
+}
+
+#[tokio::test]
+async fn archived_generic_is_never_resolved_or_spawned() {
+    // The generic adapter has no CLI: even with a `binary` that exists on
+    // disk, detection neither resolves nor spawns it.
+    let fake = FakeCli::new(json!({}));
+    let descriptors = [providers::generic::DESCRIPTOR];
+    let config = load_with(
+        &format!(
+            "providers:\n  - id: generic\n    enabled: false\n    binary: '{}'\n",
+            fake.path().display()
+        ),
+        &descriptors,
+    );
+    let statuses = discovery::detect(&config, &descriptors, &ProcessRunner::new()).await;
+
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].found, Found::NotApplicable);
+    assert_eq!(statuses[0].version, Version::Skipped);
+    assert!(
+        !fake.report_path().exists(),
+        "the generic adapter has no CLI: nothing may ever be spawned for it"
+    );
+}
+
+#[test]
+fn archived_probe_metadata_keeps_its_guarantees() {
+    assert_eq!(
+        providers::antigravity::DESCRIPTOR.probe,
+        ProbeSpec::PathOnly,
+        "agy is never spawned, so its probe must stay PATH-only"
+    );
+    assert_eq!(
+        providers::generic::DESCRIPTOR.probe,
+        ProbeSpec::NotApplicable,
+        "generic spawns no CLI, so detection must not touch PATH or the runner"
+    );
+}
