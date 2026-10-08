@@ -2,6 +2,8 @@
 
 **Current focus: CLI-managed configuration, with one selected model per provider, under discussion.** Phase 2 passed its gate with recorded conditions. The owner cancelled unmerged Phase 3 distribution PRs #33–#35; their branches, active runs and preview artifacts were removed. Distribution remains deferred. Phase 1 is [below](#phase-1-done), Phase 0 [further below](#phase-0-done).
 
+Open items we decided to revisit or defer are in [`BACKLOG.md`](BACKLOG.md).
+
 **Cleanup is minimal (owner decision, 2026-10-07, S3.6, #63):** Pumice keeps the model's reply as is, apart from removing a leading `<think>` block, trimming outer whitespace and rejecting an empty reply. This deviates from spec S3.4 (preamble and code-fence stripping); the spec is not edited.
 
 Read [`AGENTS.md`](AGENTS.md) for the rules and [`docs/spec.md`](docs/spec.md) for the full spec. The Phase 2 design, the orchestrator's decisions and the PR-by-PR plan are in [`docs/research/phase2-architecture.md`](docs/research/phase2-architecture.md). The Phase 1 architecture they build on is in [`docs/research/phase1-architecture.md`](docs/research/phase1-architecture.md). Read both before starting a Phase 2 story.
