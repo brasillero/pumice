@@ -87,6 +87,7 @@ Update this table in the PR that finishes each story. Order follows the plan in 
 | 32 | Backlog | Done | #64 | `BACKLOG.md` tracks items to discuss, deferred work and known limitations |
 | 33 | S2.12: remove OpenCode | Done | #68 | Owner decision (2026-10-08): OpenCode support deprecated and deleted; a config entry `id: opencode` fails with a removal message |
 | 34 | S2.13: archive Kiro, Antigravity, generic | Done | #69 | Owner decision (2026-10-08): not registered until the plugin architecture settles; code and adapter-level tests kept; config entries fail with an archived message |
+| 35 | S6.8: remove YAML prompts | Done | #71 | Owner decision (2026-10-08): no Pumice prompts from config; `prompts:` fails as removed. The fixed instruction stays until the owner decides after the client-protocol investigation |
 
 **Distribution review (2026-10-05):** the owner accepted the final review and authorized merging #36–#38. #36–#38 are merged; all 10 archive checks and all 16 npm checks passed, including Windows/Linux/macOS native installs and Linux pnpm/Bun. #38 also passed all 16 checks before merging. GitHub v0.1.0 is published; npm publication is pending account 2FA.
 

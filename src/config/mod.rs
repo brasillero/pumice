@@ -30,13 +30,12 @@ const PER_USER_FILE: &str = "pumice.yaml";
 
 /// Validated settings with every default applied.
 ///
-/// `Debug` is implemented by hand: prompts, environment values and option
-/// values may be private, so only their shape is shown.
+/// `Debug` is implemented by hand: environment and option values may be
+/// private, so only their shape is shown.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Config {
     pub port: u16,
     pub total_timeout: Duration,
-    pub prompts: PromptSettings,
     pub debug_log: DebugLogSettings,
     /// Every provider entry in file (list) order, enabled or not.
     pub providers: Vec<ProviderConfig>,
@@ -65,26 +64,8 @@ impl fmt::Debug for Config {
         f.debug_struct("Config")
             .field("port", &self.port)
             .field("total_timeout", &self.total_timeout)
-            .field("prompts", &self.prompts)
             .field("debug_log", &self.debug_log)
             .field("providers", &self.providers)
-            .finish()
-    }
-}
-
-/// Optional formatting instructions; both are off by default.
-#[derive(Clone, Default, PartialEq, Eq)]
-pub struct PromptSettings {
-    pub system: Option<String>,
-    pub user: Option<String>,
-}
-
-impl fmt::Debug for PromptSettings {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Prompt contents may be private; show only whether they are set.
-        f.debug_struct("PromptSettings")
-            .field("system", &self.system.as_ref().map(|s| s.len()))
-            .field("user", &self.user.as_ref().map(|s| s.len()))
             .finish()
     }
 }
@@ -229,6 +210,12 @@ fn validate(
             ),
         ));
     }
+    if let Some(span) = &raw.prompts {
+        return Err(ConfigError::at(
+            span.referenced,
+            "\"prompts\" was removed: the app that sends the dictation (Handy, OpenWhispr, …) sends its own prompt, and Pumice adds none. Delete this section and put your instructions in the app's prompt instead.",
+        ));
+    }
 
     let port = match &raw.port {
         Some(span) if span.value == 0 => {
@@ -295,19 +282,6 @@ fn validate(
         None => DEFAULT_TOTAL_TIMEOUT,
     };
 
-    let prompts = PromptSettings {
-        system: raw
-            .prompts
-            .as_ref()
-            .and_then(|prompts| prompts.system.as_ref())
-            .map(|system| system.value.clone()),
-        user: raw
-            .prompts
-            .as_ref()
-            .and_then(|prompts| prompts.user.as_ref())
-            .map(|user| user.value.clone()),
-    };
-
     let debug_log = {
         let raw_log = raw.debug_log.as_ref();
         DebugLogSettings {
@@ -325,7 +299,6 @@ fn validate(
     Ok(Config {
         port,
         total_timeout,
-        prompts,
         debug_log,
         providers: configured,
     })

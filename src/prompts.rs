@@ -1,15 +1,13 @@
 //! The fixed adapter instruction and prompt composition.
 //!
 //! Every provider receives the same system prompt: the fixed instruction,
-//! then optional Pumice formatting preferences, then the client's own
-//! `system`/`developer` messages, joined with blank lines. The user prompt is
-//! the optional Pumice user preference followed by the incoming user message
-//! with its transcript span kept separate, so the transcript is never
-//! duplicated or substituted into a template.
+//! then the client's own `system`/`developer` messages, joined with blank
+//! lines. The user prompt is the incoming user message with its transcript
+//! span kept separate, so the transcript is never duplicated or substituted
+//! into a template.
 
 use std::fmt;
 
-use crate::config::PromptSettings;
 use crate::providers::{FormatInput, UserPrompt};
 use crate::request::ExtractedRequest;
 
@@ -51,8 +49,7 @@ impl ComposedPrompts {
 /// The user message sent to a provider: `before_text + text + after_text`.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct UserPromptOwned {
-    /// The optional Pumice user prompt, then the incoming message up to the
-    /// transcript.
+    /// The incoming message up to the transcript.
     pub before_text: String,
     /// The transcript as sent to formatting (tags escaped when Pumice
     /// generated the envelope).
@@ -87,20 +84,12 @@ impl UserPromptOwned {
 
 /// Builds the system prompt and user message for a provider call.
 ///
-/// System parts are the fixed instruction, then `pumice_system`, then the
-/// incoming `system`/`developer` texts, in that order, joined with a blank
-/// line; empty or whitespace-only parts are skipped. The user message is
-/// `pumice_user` plus a blank line prepended to the incoming message's
-/// `before_text`, keeping `text` and `after_text` unchanged.
-pub fn compose_prompts(
-    request: &ExtractedRequest,
-    pumice_system: Option<&str>,
-    pumice_user: Option<&str>,
-) -> ComposedPrompts {
+/// System parts are the fixed instruction, then the incoming
+/// `system`/`developer` texts, in that order, joined with a blank line;
+/// empty or whitespace-only parts are skipped. The user message is the
+/// incoming one, unchanged.
+pub fn compose_prompts(request: &ExtractedRequest) -> ComposedPrompts {
     let mut system_parts: Vec<&str> = vec![ADAPTER_INSTRUCTION];
-    if let Some(prompt) = pumice_system.filter(|prompt| !prompt.trim().is_empty()) {
-        system_parts.push(prompt);
-    }
     system_parts.extend(
         request
             .system_texts
@@ -109,36 +98,12 @@ pub fn compose_prompts(
             .filter(|text| !text.trim().is_empty()),
     );
 
-    let mut before_text = String::new();
-    if let Some(prompt) = pumice_user.filter(|prompt| !prompt.trim().is_empty()) {
-        before_text.push_str(prompt);
-        before_text.push_str("\n\n");
-    }
-    before_text.push_str(&request.before_text);
-
     ComposedPrompts {
         system: system_parts.join("\n\n"),
         user: UserPromptOwned {
-            before_text,
+            before_text: request.before_text.clone(),
             text: request.text.clone(),
             after_text: request.after_text.clone(),
         },
     }
-}
-
-/// Builds the composed prompts from the validated configuration's
-/// [`PromptSettings`].
-///
-/// The optional Pumice prompts are off by default and, when configured, apply
-/// to every provider: the composed result never depends on which provider
-/// will run the call.
-pub fn compose_with_settings(
-    request: &ExtractedRequest,
-    settings: &PromptSettings,
-) -> ComposedPrompts {
-    compose_prompts(
-        request,
-        settings.system.as_deref(),
-        settings.user.as_deref(),
-    )
 }

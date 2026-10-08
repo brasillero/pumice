@@ -40,7 +40,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pumice::config::{self, Config, DebugLogSettings, PromptSettings};
+use pumice::config::{self, Config, DebugLogSettings};
 use pumice::pipeline::{OutcomeKind, Pipeline, RawReason};
 use pumice::providers::generic::{
     DESCRIPTOR, EndpointError, GenericProvider, LoopbackEndpoint, parse_endpoint,
@@ -950,7 +950,6 @@ fn chain_config(entries: Vec<(&str, pumice::providers::ProviderSettings)>) -> Co
     Config {
         port: 7567,
         total_timeout: Duration::from_secs(30),
-        prompts: PromptSettings::default(),
         debug_log: DebugLogSettings {
             enabled: false,
             path: Path::new("pumice-debug.jsonl").to_path_buf(),

@@ -18,7 +18,7 @@ use tokio::time::Instant;
 
 use crate::config::{Config, ConfigError, ConfigSource};
 use crate::process::ProcessRunner;
-use crate::prompts::compose_with_settings;
+use crate::prompts::compose_prompts;
 use crate::providers::discovery::{self, Found, ProviderStatus, Version};
 use crate::providers::{self, Provider, ProviderError, ProviderErrorCode};
 use crate::request::{ChatCompletionRequest, Content, Message, extract_request};
@@ -184,7 +184,7 @@ pub async fn run_login_call(config: &Config, provider: &Arc<dyn Provider>) -> Lo
         stream: None,
     })
     .expect("the fixed login-check sample always extracts");
-    let prompts = compose_with_settings(&request, &config.prompts);
+    let prompts = compose_prompts(&request);
     let now = Instant::now();
     // The provider still applies its own (configured) timeout inside this
     // deadline. An overflowing total timeout cannot happen in practice; any

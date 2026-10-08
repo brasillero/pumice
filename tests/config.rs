@@ -126,8 +126,6 @@ fn empty_file_gives_all_defaults() {
     assert_eq!(config.port, DEFAULT_PORT);
     assert_eq!(config.port, 7567);
     assert_eq!(config.total_timeout, Duration::from_secs(30));
-    assert_eq!(config.prompts.system, None);
-    assert_eq!(config.prompts.user, None);
     assert!(!config.debug_log.enabled);
 
     // Since 0.2 an empty file configures nothing: no providers — every
@@ -151,7 +149,10 @@ fn missing_default_config_gives_all_defaults() {
     let from_empty = load_text("").expect("empty file loads");
     assert_eq!(loaded.config.port, from_empty.port);
     assert_eq!(loaded.config.providers, from_empty.providers);
-    assert_eq!(loaded.config.prompts, from_empty.prompts);
+    assert_eq!(
+        loaded.config.debug_log.enabled,
+        from_empty.debug_log.enabled
+    );
 }
 
 #[test]
@@ -163,15 +164,13 @@ fn comment_only_file_gives_all_defaults() {
 #[test]
 fn partial_nested_override_keeps_sibling_defaults() {
     let config = load_text(
-        "prompts:\n  system: Keep technical terms.\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    timeout_secs: 5\n",
+        "debug_log:\n  enabled: true\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    timeout_secs: 5\n",
     )
     .expect("partial override loads");
     assert_eq!(config.port, 7567);
-    assert_eq!(
-        config.prompts.system.as_deref(),
-        Some("Keep technical terms.")
-    );
-    assert_eq!(config.prompts.user, None);
+    assert!(config.debug_log.enabled);
+    // The sibling `path` keeps its default.
+    assert!(config.debug_log.path.ends_with("pumice-debug.jsonl"));
 
     let claude = claude(&config);
     assert_eq!(claude.timeout, Duration::from_secs(5));
@@ -181,8 +180,7 @@ fn partial_nested_override_keeps_sibling_defaults() {
 
 #[test]
 fn null_sections_behave_like_absent_ones() {
-    let config =
-        load_text("providers: null\nprompts: null\ndebug_log: null\n").expect("null sections load");
+    let config = load_text("providers: null\ndebug_log: null\n").expect("null sections load");
     assert_eq!(config.port, 7567);
     assert!(config.providers.is_empty());
 
@@ -229,24 +227,13 @@ fn mapping_form_of_providers_fails_with_a_removal_hint() {
 }
 
 #[test]
-fn block_scalar_prompts_are_read_exactly() {
-    let config = load_text(
-        "prompts:\n  system: |\n    First line.\n    Second line.\n  user: >\n    folded\n    text\n",
-    )
-    .expect("block prompts load");
-    assert_eq!(
-        config.prompts.system.as_deref(),
-        Some("First line.\nSecond line.\n")
-    );
-    assert_eq!(config.prompts.user.as_deref(), Some("folded text\n"));
-}
-
-#[test]
 fn crlf_line_endings_parse_and_positions_count_lines() {
-    let config =
-        load_text("port: 9001\r\nprompts:\r\n  system: |\r\n    olá\r\n").expect("CRLF loads");
+    let config = load_text(
+        "port: 9001\r\nproviders:\r\n  - id: claude\r\n    enabled: true\r\n    model: olá\r\n",
+    )
+    .expect("CRLF loads");
     assert_eq!(config.port, 9001);
-    assert_eq!(config.prompts.system.as_deref(), Some("olá\n"));
+    assert_eq!(claude(&config).model, "olá");
 
     // Line numbers count CRLF files exactly like LF files.
     assert_error(
@@ -259,12 +246,11 @@ fn crlf_line_endings_parse_and_positions_count_lines() {
 
 #[test]
 fn unicode_content_round_trips() {
-    let config = load_text("# configuração\nprompts:\n  system: |\n    ünïcodé e acentos: ãõ\n")
-        .expect("unicode loads");
-    assert_eq!(
-        config.prompts.system.as_deref(),
-        Some("ünïcodé e acentos: ãõ\n")
-    );
+    let config = load_text(
+        "# configuração\nproviders:\n  - id: claude\n    enabled: true\n    model: ünïcodé-ãõ\n",
+    )
+    .expect("unicode loads");
+    assert_eq!(claude(&config).model, "ünïcodé-ãõ");
     assert_eq!(config.port, 7567);
 }
 
@@ -852,11 +838,10 @@ fn enabled_without_a_model_is_rejected_at_the_id() {
 #[test]
 fn debug_output_masks_private_content() {
     let config = load_text(
-        "prompts:\n  system: PROMPT-MARKER-SECRET\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    env:\n      ANTHROPIC_BASE_URL: ENV-MARKER-SECRET\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    env:\n      ANTHROPIC_BASE_URL: ENV-MARKER-SECRET\n",
     )
     .expect("config loads");
     let debug = format!("{config:?}");
-    assert!(!debug.contains("PROMPT-MARKER-SECRET"), "{debug}");
     assert!(!debug.contains("ENV-MARKER-SECRET"), "{debug}");
 }
 
@@ -933,14 +918,13 @@ fn check_config_success_never_prints_private_values() {
     let path = dir.path().join(CONFIG_NAME);
     fs::write(
         &path,
-        "prompts:\n  system: PROMPT-MARKER\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    env:\n      ANTHROPIC_BASE_URL: ENV-MARKER\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    env:\n      ANTHROPIC_BASE_URL: ENV-MARKER\n",
     )
     .expect("write config");
 
     let output = run_pumice(&["check-config", "--config", path.to_str().unwrap()]);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     let combined = format!("{}{}", stdout(&output), stderr(&output));
-    assert!(!combined.contains("PROMPT-MARKER"), "{combined}");
     assert!(!combined.contains("ENV-MARKER"), "{combined}");
 }
 
@@ -1185,23 +1169,13 @@ fn example_documented_overrides_load() {
         .expect("read example")
         .replace("\r\n", "\n");
 
-    // Apply the documented examples: route Codex through a gateway and set
-    // both formatting prompts.
+    // Apply the documented example: route Codex through a gateway.
     let uncommented = edit_entry(&text, "  - id: codex", |block| {
         block.replace(
             "    # options:\n    #   openai_base_url: \"https://your-existing-gateway.example/v1\"\n    options: {}",
             "    options:\n      openai_base_url: \"https://your-existing-gateway.example/v1\"",
         )
     });
-    let uncommented = uncommented
-        .replace(
-            "  system: null",
-            "  system: |\n    Preserve technical terms and product names.",
-        )
-        .replace(
-            "  user: null",
-            "  user: |\n    Format spoken enumerations as Markdown lists.",
-        );
 
     let config = load_text(&uncommented).expect("documented overrides load");
     assert_eq!(
@@ -1210,14 +1184,6 @@ fn example_documented_overrides_load() {
             .get("openai_base_url")
             .map(String::as_str),
         Some("https://your-existing-gateway.example/v1")
-    );
-    assert_eq!(
-        config.prompts.system.as_deref(),
-        Some("Preserve technical terms and product names.\n")
-    );
-    assert_eq!(
-        config.prompts.user.as_deref(),
-        Some("Format spoken enumerations as Markdown lists.\n")
     );
 }
 
@@ -1321,4 +1287,18 @@ fn removed_opencode_entry_says_so() {
         error.contains("\"opencode\" support was removed; delete this entry"),
         "{error}"
     );
+}
+
+#[test]
+fn prompts_section_is_rejected_as_removed() {
+    // The error points at the value: the next line for a block mapping.
+    for (value, line) in [
+        ("\n  system: Keep technical terms.\n", 3),
+        (" null\n", 2),
+        (" Keep technical terms.\n", 2),
+    ] {
+        let error = load_error(&format!("port: 7567\nprompts:{value}"));
+        assert!(error.contains(&format!(":{line}:")), "{error}");
+        assert!(error.contains("\"prompts\" was removed"), "{error}");
+    }
 }

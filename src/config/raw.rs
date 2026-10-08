@@ -46,7 +46,11 @@ pub(crate) struct RawConfig {
     /// Removed in 0.2; parsed only so the error can point at the key.
     #[serde(default, deserialize_with = "removed_key")]
     pub fallback_order: Option<Spanned<serde::de::IgnoredAny>>,
-    pub prompts: Option<RawPrompts>,
+    /// Removed (owner decision 2026-10-08): the client app sends its own
+    /// prompt and Pumice adds none. Parsed only so the error can point at
+    /// the key.
+    #[serde(default, deserialize_with = "removed_key")]
+    pub prompts: Option<Spanned<serde::de::IgnoredAny>>,
     pub debug_log: Option<RawDebugLog>,
 }
 
@@ -66,13 +70,6 @@ pub(crate) struct RawProviderEntry {
     pub env: Vec<(Spanned<String>, Spanned<String>)>,
     #[serde(default, deserialize_with = "spanned_string_map")]
     pub options: Vec<(Spanned<String>, Spanned<String>)>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawPrompts {
-    pub system: Option<Spanned<String>>,
-    pub user: Option<Spanned<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
