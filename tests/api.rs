@@ -239,21 +239,39 @@ impl RawResponse {
 }
 
 /// Sends `request` verbatim over raw HTTP/1.1 and reads the whole response.
-/// Write errors are ignored: the server may stop reading an oversized body
-/// (413) before the client finishes sending. The write side stays open
+/// Writing and reading run concurrently: the server may answer an oversized
+/// body (413) and close before the client finishes sending, and the response
+/// must be read as it arrives, before the connection reset that follows.
+/// Write errors are ignored, and a read error after part of the response
+/// arrived ends the read with what was received. The write side stays open
 /// while the response is read — half-closing first makes hyper drop the
 /// connection without answering.
 async fn raw_http(port: u16, request: Vec<u8>) -> RawResponse {
-    let mut stream = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+    let stream = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
         .await
         .expect("connect to server");
-    let _ = stream.write_all(&request).await;
+    let (mut reader, mut writer) = stream.into_split();
+    let write = async move {
+        let _ = writer.write_all(&request).await;
+        // Keep the write half open until the read finishes.
+        writer
+    };
     let read = async {
         let mut response = Vec::new();
-        stream
-            .read_to_end(&mut response)
-            .await
-            .expect("read response");
+        let mut chunk = [0u8; 8 * 1024];
+        loop {
+            match reader.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&chunk[..n]),
+                // The reset after a complete answer: keep what arrived.
+                Err(_) if !response.is_empty() => break,
+                Err(error) => panic!("read response: {error}"),
+            }
+        }
+        response
+    };
+    let read = async {
+        let (response, _writer) = tokio::join!(read, write);
         response
     };
     let response = tokio::time::timeout(Duration::from_secs(30), read)
