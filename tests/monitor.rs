@@ -1,5 +1,6 @@
-//! Tests for the live request monitor (S4.6): event order, text gating and
-//! the terminal lifecycle events emitted by the API layer.
+//! Tests for the live request monitor (S4.6/S4.7): event order, text gating,
+//! request/response capture and the terminal lifecycle events emitted by the
+//! API layer.
 
 mod support;
 
@@ -127,8 +128,16 @@ async fn raw_http(port: u16, request: Vec<u8>) -> (u16, String) {
 }
 
 fn http_request(path: &str, body: &[u8]) -> Vec<u8> {
+    http_request_with_headers(path, body, &[])
+}
+
+fn http_request_with_headers(path: &str, body: &[u8], headers: &[(&str, &str)]) -> Vec<u8> {
+    let mut header_lines = String::new();
+    for (name, value) in headers {
+        header_lines.push_str(&format!("{name}: {value}\r\n"));
+    }
     format!(
-        "POST {path} HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\ncontent-length: {}\r\n\r\n",
+        "POST {path} HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\n{header_lines}content-length: {}\r\n\r\n",
         body.len()
     )
     .into_bytes()
@@ -167,12 +176,14 @@ async fn formatted_request_emits_arrived_parsed_started_attempt_ended_responded(
     let kind_names: Vec<_> = events
         .iter()
         .map(|e| match &e.kind {
-            EventKind::Arrived => "Arrived",
+            EventKind::Arrived { .. } => "Arrived",
+            EventKind::Received { .. } => "Received",
             EventKind::Parsed { .. } => "Parsed",
             EventKind::Queued => "Queued",
             EventKind::Started { .. } => "Started",
             EventKind::AttemptEnded { .. } => "AttemptEnded",
             EventKind::Responded { .. } => "Responded",
+            EventKind::Sent { .. } => "Sent",
             EventKind::Dropped => "Dropped",
         })
         .collect();
@@ -182,10 +193,10 @@ async fn formatted_request_emits_arrived_parsed_started_attempt_ended_responded(
     );
 
     let parsed = events.iter().find_map(|e| match &e.kind {
-        EventKind::Parsed { model, input } => Some((model.clone(), input.clone())),
+        EventKind::Parsed { model, text } => Some((model.clone(), text.is_some())),
         _ => None,
     });
-    assert_eq!(parsed, Some((Some("claude".to_owned()), None)));
+    assert_eq!(parsed, Some((Some("claude".to_owned()), false)));
 
     let responded = events.iter().find_map(|e| match &e.kind {
         EventKind::Responded {
@@ -226,17 +237,278 @@ async fn debug_log_enabled_shows_input_and_reply_in_events() {
     assert_eq!(status, 200);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let parsed = monitor.events().iter().find_map(|e| match &e.kind {
-        EventKind::Parsed { input, .. } => input.clone(),
+    let events = monitor.events();
+    let arrived = events.iter().find_map(|e| match &e.kind {
+        EventKind::Arrived { client } => client.clone(),
+        _ => None,
+    });
+    assert_eq!(arrived, None, "no X-Title means no client");
+
+    let parsed = events.iter().find_map(|e| match &e.kind {
+        EventKind::Parsed { text, .. } => text.as_ref().map(|t| t.input.clone()),
         _ => None,
     });
     assert_eq!(parsed, Some(text.to_owned()));
 
-    let reply = monitor.events().iter().find_map(|e| match &e.kind {
+    let reply = events.iter().find_map(|e| match &e.kind {
         EventKind::Responded { reply, .. } => reply.clone(),
         _ => None,
     });
     assert_eq!(reply, Some("Resposta.".to_owned()));
+
+    let received = events
+        .iter()
+        .any(|e| matches!(e.kind, EventKind::Received { .. }));
+    assert!(received, "debug log on emits Received");
+
+    let sent = events
+        .iter()
+        .any(|e| matches!(e.kind, EventKind::Sent { .. }));
+    assert!(sent, "debug log on emits Sent");
+}
+
+#[tokio::test]
+async fn debug_log_on_with_x_title_and_handy_request_captures_all_tabs() {
+    let (port, monitor, _fake) =
+        start_monitored_server(CLAUDE_AT_FAKE, success_scenario("Resposta."), {
+            let dir = TempDir::new().expect("temp dir");
+            let path = dir.path().join("debug.log");
+            Arc::new(
+                DebugLog::open(&config::DebugLogSettings {
+                    enabled: true,
+                    path,
+                })
+                .expect("open debug log"),
+            )
+        })
+        .await;
+
+    let text = "dictado especial";
+    let body = handy_request("claude", text);
+    let (status, response_text) = raw_http(
+        port,
+        http_request_with_headers("/v1/chat/completions", &body, &[("x-title", "Handy")]),
+    )
+    .await;
+    assert_eq!(status, 200);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let events = monitor.events();
+
+    let arrived = events.iter().find_map(|e| match &e.kind {
+        EventKind::Arrived { client } => client.clone(),
+        _ => None,
+    });
+    assert_eq!(arrived, Some("Handy".to_owned()));
+
+    let received = events.iter().find_map(|e| match &e.kind {
+        EventKind::Received { headers, body } => Some((headers.clone(), body.clone())),
+        _ => None,
+    });
+    let (headers, received_body) = received.expect("Received event");
+    assert!(headers.iter().any(|(n, _)| n == "x-title"));
+    assert!(received_body.contains("dictado especial"));
+
+    let parsed = events.iter().find_map(|e| match &e.kind {
+        EventKind::Parsed { text, .. } => text.clone(),
+        _ => None,
+    });
+    let text = parsed.expect("Parsed.text");
+    assert!(text.system.is_empty());
+    assert!(
+        text.before.starts_with("<transcript>"),
+        "before starts with opening tag: {:?}",
+        text.before
+    );
+    assert_eq!(text.input, "dictado especial");
+    assert!(
+        text.after.ends_with("</transcript>"),
+        "after ends with closing tag: {:?}",
+        text.after
+    );
+
+    let sent = events.iter().find_map(|e| match &e.kind {
+        EventKind::Sent {
+            status,
+            headers,
+            body,
+        } => Some((*status, headers.clone(), body.clone())),
+        _ => None,
+    });
+    let (sent_status, sent_headers, sent_body) = sent.expect("Sent event");
+    // Same request: the Sent event holds exactly what the client received.
+    assert_eq!(sent_status, 200);
+    assert_eq!(sent_body, response_body(&response_text));
+    for (name, value) in &sent_headers {
+        assert!(
+            response_text.contains(&format!("{name}: {value}\r\n")),
+            "client got header {name}: {value}"
+        );
+    }
+}
+
+/// Returns the body of an HTTP/1.1 response, i.e. everything after the first
+/// blank line. If there is no blank line, returns the whole string.
+fn response_body(text: &str) -> &str {
+    text.split_once("\r\n\r\n")
+        .or_else(|| text.split_once("\n\n"))
+        .map(|(_, body)| body)
+        .unwrap_or(text)
+}
+
+/// Sets every `"created":` number in a body to 0: the one value two
+/// otherwise identical responses differ in.
+fn zero_created(body: &str) -> String {
+    let mut out = String::new();
+    let mut rest = body;
+    while let Some(index) = rest.find("\"created\":") {
+        let (head, tail) = rest.split_at(index + "\"created\":".len());
+        out.push_str(head);
+        out.push('0');
+        rest = tail.trim_start_matches(|c: char| c.is_ascii_digit());
+    }
+    out.push_str(rest);
+    out
+}
+
+fn debug_log(enabled: bool) -> (Arc<DebugLog>, Option<TempDir>) {
+    if !enabled {
+        return (Arc::new(DebugLog::disabled()), None);
+    }
+    let dir = TempDir::new().expect("temp dir");
+    let log = DebugLog::open(&config::DebugLogSettings {
+        enabled: true,
+        path: dir.path().join("debug.log"),
+    })
+    .expect("open debug log");
+    (Arc::new(log), Some(dir))
+}
+
+/// Status, headers (without `date`) and body of the response a fresh server
+/// gives `request`, with the debug log on or off.
+async fn exchange(debug: bool, request: &[u8]) -> (u16, Vec<String>, String) {
+    let (log, _dir) = debug_log(debug);
+    let (port, _monitor, _fake) =
+        start_monitored_server(CLAUDE_AT_FAKE, success_scenario("Resposta."), log).await;
+    let (status, text) = raw_http(port, request.to_vec()).await;
+    let (head, body) = text.split_once("\r\n\r\n").expect("a full response");
+    let headers = head
+        .lines()
+        .skip(1)
+        .filter(|line| !line.to_ascii_lowercase().starts_with("date:"))
+        .map(str::to_owned)
+        .collect();
+    (status, headers, zero_created(body))
+}
+
+#[tokio::test]
+async fn responses_are_identical_with_the_debug_log_on_and_off() {
+    let streaming = serde_json::to_vec(&json!({
+        "model": "claude",
+        "messages": [{"role": "user", "content": "<transcript>\nola\n</transcript>"}],
+        "stream": true,
+    }))
+    .unwrap();
+    let cases: [(&str, Vec<u8>); 5] = [
+        ("formatted", handy_request("claude", "ola")),
+        ("streamed", streaming),
+        ("inspect", handy_request("inspect", "ola")),
+        ("invalid json", b"{not json".to_vec()),
+        ("unknown model", handy_request("nope", "ola")),
+    ];
+    for (name, body) in cases {
+        let request = http_request("/v1/chat/completions", &body);
+        let off = exchange(false, &request).await;
+        let on = exchange(true, &request).await;
+        assert_eq!(on, off, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn a_huge_model_name_is_capped_in_events_with_the_debug_log_on_and_off() {
+    for debug in [false, true] {
+        let (log, _dir) = debug_log(debug);
+        let (port, monitor, _fake) =
+            start_monitored_server(CLAUDE_AT_FAKE, success_scenario("ok"), log).await;
+        let model = "m".repeat(100_000);
+        let (status, _) = raw_http(
+            port,
+            http_request("/v1/chat/completions", &handy_request(&model, "ola")),
+        )
+        .await;
+        assert_eq!(status, 404, "debug {debug}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let events = monitor.events();
+        let parsed_model = events
+            .iter()
+            .find_map(|e| match &e.kind {
+                EventKind::Parsed { model, .. } => model.clone(),
+                _ => None,
+            })
+            .expect("Parsed model");
+        assert!(parsed_model.len() < 70_000, "debug {debug}");
+        assert!(parsed_model.contains("[cut:"), "debug {debug}");
+        for event in &events {
+            if let EventKind::Responded { detail, .. } = &event.kind {
+                assert!(detail.len() < 70_000, "debug {debug}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn debug_log_off_hides_received_and_sent_and_parsed_text() {
+    let (port, monitor, _fake) = start_monitored_server(
+        CLAUDE_AT_FAKE,
+        success_scenario("Resposta."),
+        Arc::new(DebugLog::disabled()),
+    )
+    .await;
+
+    let (status, _) = raw_http(
+        port,
+        http_request_with_headers(
+            "/v1/chat/completions",
+            &handy_request("claude", "ola"),
+            &[("x-title", "Handy")],
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let events = monitor.events();
+    let arrived = events.iter().find_map(|e| match &e.kind {
+        EventKind::Arrived { client } => client.clone(),
+        _ => None,
+    });
+    assert_eq!(
+        arrived,
+        Some("Handy".to_owned()),
+        "client is always present"
+    );
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.kind, EventKind::Received { .. })),
+        "no Received when debug log is off"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.kind, EventKind::Sent { .. })),
+        "no Sent when debug log is off"
+    );
+    let parsed_has_text = events.iter().find_map(|e| match &e.kind {
+        EventKind::Parsed { text, .. } => Some(text.is_some()),
+        _ => None,
+    });
+    assert_eq!(
+        parsed_has_text,
+        Some(false),
+        "Parsed.text is None when debug log is off"
+    );
 }
 
 #[tokio::test]
@@ -260,7 +532,7 @@ async fn invalid_json_body_emits_arrived_and_responded_400() {
         .events()
         .iter()
         .map(|e| match &e.kind {
-            EventKind::Arrived => "Arrived",
+            EventKind::Arrived { .. } => "Arrived",
             EventKind::Parsed { .. } => "Parsed",
             EventKind::Responded { .. } => "Responded",
             _ => "other",
@@ -275,6 +547,45 @@ async fn invalid_json_body_emits_arrived_and_responded_400() {
         _ => None,
     });
     assert_eq!(responded, Some((400, None)));
+}
+
+#[tokio::test]
+async fn invalid_json_body_with_debug_log_emits_received_before_responded_400() {
+    let (port, monitor, _fake) =
+        start_monitored_server(CLAUDE_AT_FAKE, success_scenario("unused"), {
+            let dir = TempDir::new().expect("temp dir");
+            let path = dir.path().join("debug.log");
+            Arc::new(
+                DebugLog::open(&config::DebugLogSettings {
+                    enabled: true,
+                    path,
+                })
+                .expect("open debug log"),
+            )
+        })
+        .await;
+
+    let (status, _) = raw_http(
+        port,
+        http_request("/v1/chat/completions", b"{\"messages\": ["),
+    )
+    .await;
+    assert_eq!(status, 400);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let kinds: Vec<_> = monitor
+        .events()
+        .iter()
+        .map(|e| match &e.kind {
+            EventKind::Arrived { .. } => "Arrived",
+            EventKind::Received { .. } => "Received",
+            EventKind::Parsed { .. } => "Parsed",
+            EventKind::Responded { .. } => "Responded",
+            EventKind::Sent { .. } => "Sent",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(kinds, ["Arrived", "Received", "Responded", "Sent"]);
 }
 
 #[tokio::test]
@@ -423,5 +734,48 @@ async fn diagnostic_output_reaches_events_only_with_the_debug_log() {
     assert!(
         detail.contains("ditado-secreto"),
         "debug log on: the CLI output is kept: {detail:?}"
+    );
+}
+
+#[tokio::test]
+async fn large_input_is_capped_in_events() {
+    let (port, monitor, _fake) = start_monitored_server(CLAUDE_AT_FAKE, success_scenario("ok"), {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("debug.log");
+        Arc::new(
+            DebugLog::open(&config::DebugLogSettings {
+                enabled: true,
+                path,
+            })
+            .expect("open debug log"),
+        )
+    })
+    .await;
+
+    let big = "x".repeat(100_000);
+    let body = handy_request("claude", &big);
+    let (status, _) = raw_http(port, http_request("/v1/chat/completions", &body)).await;
+    assert_eq!(status, 200);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let events = monitor.events();
+    let received_body = events.iter().find_map(|e| match &e.kind {
+        EventKind::Received { body, .. } => Some(body.clone()),
+        _ => None,
+    });
+    let received = received_body.expect("Received event");
+    assert!(
+        received.contains("[cut:"),
+        "Received body over MAX_TEXT is capped"
+    );
+
+    let input = events.iter().find_map(|e| match &e.kind {
+        EventKind::Parsed { text, .. } => text.as_ref().map(|t| t.input.clone()),
+        _ => None,
+    });
+    let input = input.expect("Parsed input");
+    assert!(
+        input.contains("[cut:"),
+        "Parsed input over MAX_TEXT is capped"
     );
 }

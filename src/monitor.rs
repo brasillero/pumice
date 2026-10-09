@@ -10,6 +10,29 @@ use std::time::Instant;
 use crate::pipeline::{AttemptResult, OutcomeKind};
 use crate::providers::diagnostic::Diagnostic;
 
+/// Maximum bytes kept for any single text field in a live event. Longer
+/// strings are cut on a character boundary and marked with their original
+/// size, bounding the view's memory when many large bodies arrive.
+pub const MAX_TEXT: usize = 64 * 1024;
+
+/// Keeps at most [`MAX_TEXT`] bytes of `text`, cutting on a character
+/// boundary. When the string is cut, a marker line with the original byte
+/// count is appended.
+pub fn capped(text: String) -> String {
+    if text.len() <= MAX_TEXT {
+        return text;
+    }
+    let mut len = 0;
+    for c in text.chars() {
+        let next = len + c.len_utf8();
+        if next > MAX_TEXT {
+            break;
+        }
+        len = next;
+    }
+    format!("{}\n… [cut: {} bytes in all]", &text[..len], text.len())
+}
+
 /// Receives the live events of every completion request. Production sends
 /// them to the terminal view; tests capture them. Must be quick and never
 /// block: it runs on the request's task.
@@ -53,14 +76,27 @@ pub struct Event {
 
 #[derive(Clone)]
 pub enum EventKind {
-    /// The request reached the completion handler.
-    Arrived,
-    /// The body was read and parsed. `model` is the `model` field exactly as
-    /// the client sent it. `input` is the dictation as extracted (for
-    /// `inspect`, the whole body), only when text is allowed.
+    /// The request reached the completion handler. `client` is the app name the
+    /// request states itself in its `X-Title` header (Handy sends `X-Title:
+    /// Handy`), trimmed and cut to 32 characters; `None` when absent, empty or
+    /// not printable ASCII. It is not dictated text, so it is sent whether or
+    /// not text is allowed.
+    Arrived { client: Option<String> },
+    /// The request as received, only when text is allowed: every header
+    /// (credential values masked; grouped by name, not necessarily in wire
+    /// order) and the body as text (lossy UTF-8).
+    /// Emitted right after the body was read, before it is parsed, so rejected
+    /// bodies are visible too.
+    Received {
+        headers: Vec<(String, String)>,
+        body: String,
+    },
+    /// The body was read and parsed. `model` is the `model` field as the
+    /// client sent it. `text` is the extracted request (for `inspect`, the
+    /// whole body as the input), only when text is allowed.
     Parsed {
         model: Option<String>,
-        input: Option<String>,
+        text: Option<ParsedText>,
     },
     /// Every slot was taken; the request waits in line.
     Queued,
@@ -87,7 +123,55 @@ pub enum EventKind {
         detail: String,
         reply: Option<String>,
     },
+    /// The exact HTTP response handed to the server, only when text is allowed:
+    /// status, every response header and the body (lossy UTF-8). Emitted after
+    /// `Responded`, from the same request.
+    Sent {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: String,
+    },
     /// The client went away before the answer was ready; any CLI run was
     /// cancelled.
     Dropped,
+}
+
+/// What Pumice extracted from a dictation request.
+// No `Debug`: it holds dictated text, which must never reach logs through `{:?}`.
+#[derive(Clone)]
+pub struct ParsedText {
+    /// The `system`/`developer` messages, in order.
+    pub system: Vec<String>,
+    /// The user message up to the input (Handy: through the opening tag).
+    pub before: String,
+    /// The input itself.
+    pub input: String,
+    /// The user message after the input.
+    pub after: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capped_cuts_on_char_boundary() {
+        let text = "a".repeat(MAX_TEXT - 1) + "é";
+        let result = capped(text.clone());
+        assert!(result.contains(" bytes in all]"));
+        let marker = "\n… [cut:";
+        let marker_pos = result.find(marker).expect("cut marker");
+        let prefix = &result[..marker_pos];
+        // The cut landed before the multi-byte character, so the kept prefix
+        // is shorter than the original and ends on a character boundary.
+        assert!(prefix.len() < text.len());
+        assert!(text.is_char_boundary(prefix.len()));
+        assert!(prefix.chars().all(|c| c == 'a'));
+    }
+
+    #[test]
+    fn capped_keeps_short_text_unchanged() {
+        let text = "é".repeat(MAX_TEXT / 2);
+        assert_eq!(capped(text.clone()), text);
+    }
 }
