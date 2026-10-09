@@ -62,12 +62,42 @@ file.) Stop the service with Ctrl-C.
 When `pumice` runs in a terminal, it opens a live interactive view of every
 completion request: arrived, queued, CLI started, CLI ended, responded or
 dropped, with timing and provider/model metadata. Use `↑`/`↓` or `j`/`k` to
-select a request, `Enter` to open its details pane, `f` to cycle filters, `/`
-to search, and `q` or `Ctrl-C` to quit (requests already running finish
-first; press it again to quit at once). Dictated text and replies only appear
-in the details pane when `debug_log.enabled` is `true`; otherwise the view
-shows only metadata. Run with `--plain` to keep the old one-line-per-request
-output on stderr instead of the live view.
+select a request, `PgUp`/`PgDn` to page through the table, `Enter` to open its
+full-screen details, `f` to cycle filters, `/` to search, `Esc` to clear the
+filter/search, and `q` or `Ctrl-C` to quit (requests already running finish
+first; press it again to quit at once). Press `?` (except while typing a
+search) to open a help screen listing every key; `?`, `Esc` or `q` close it.
+The bottom line always shows the keys of the current screen.
+
+In full-screen details, the top shows the request number and four tabs:
+**Summary**, **Received**, **Parsed** and **Sent**. Use `Tab`/`Shift-Tab` or
+`1`–`4` to switch tabs, `↑`/`↓` or `j`/`k` to scroll, `PgUp`/`PgDn` or
+`Space` to page, `Home`/`End` or `g`/`G` to jump to the top/bottom, and
+`←`/`→` or `h`/`l` to move to the previous/next request while keeping the
+current tab. `Esc`, `Enter` or `q` return to the table (`q` does not quit
+here). The mouse wheel scrolls too in terminals that turn it into arrow keys,
+such as Windows Terminal; Pumice does not capture the mouse, so you can still
+select and copy text.
+
+- **Summary**: the request timeline, any diagnostic and, when allowed, the
+  input and reply.
+- **Received**: the request headers (credential headers such as
+  `Authorization` or `Cookie` are masked as `[hidden]`) and the body as Pumice
+  received it, JSON indented with its keys in their original order.
+- **Parsed**: the model, system prompts, and the parts of the user message
+  before, during and after the dictated input.
+- **Sent**: the HTTP response Pumice sent back: status, headers and body.
+
+Each text the view keeps (a body, a prompt, the input, a reply) is cut at
+64 KiB, marked with its full size, so a stream of large requests cannot fill
+the memory.
+
+Dictated text, request bodies, response bodies and headers only appear when
+`debug_log.enabled` is `true`; otherwise those tabs show only metadata and the
+message "Text hidden: debug_log is off." The `app` column in the table shows
+the value of the client's `X-Title` header (for example `Handy`) when the
+request names one; otherwise it shows `-`. Run with `--plain` to keep the old
+one-line-per-request output on stderr instead of the live view.
 
 If the executable is not on your PATH — for example right after extracting an
 archive — run it from its folder with an explicit path:

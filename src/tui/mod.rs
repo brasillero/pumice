@@ -60,7 +60,15 @@ fn run_loop(
         }
 
         let now = std::time::Instant::now();
-        terminal.draw(|frame| view::draw(frame, &app, now))?;
+        let mut result = None;
+        terminal.draw(|frame| {
+            result = Some(view::draw(frame, &app, now));
+        })?;
+        if let Some(result) = result {
+            app.set_details_bounds(result.details_bounds);
+            app.set_help_bounds(result.help_bounds);
+            app.set_table_page(result.table_page);
+        }
 
         if !event::poll(Duration::from_millis(200))? {
             continue;

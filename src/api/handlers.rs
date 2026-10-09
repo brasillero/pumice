@@ -7,6 +7,8 @@
 //! configuration enables it. The same flag decides whether dictated text and
 //! replies are emitted as live monitor events (S4.6). Errors use OpenAI's
 //! `{"error":{"message","type"}}` envelope with fixed, text-free messages.
+//! With text allowed, the monitor also receives the request as it arrived
+//! (`Received`) and the HTTP response as sent (`Sent`) (S4.7).
 
 use std::future::poll_fn;
 use std::time::Duration;
@@ -14,12 +16,12 @@ use std::time::Duration;
 use axum::Json;
 use axum::body::{Body, HttpBody};
 use axum::extract::{Request, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use tokio::time::Instant;
 
 use crate::logging::DebugRecord;
-use crate::monitor::EventKind;
+use crate::monitor::{EventKind, ParsedText, capped};
 use crate::pipeline::{FormatOutcome, OutcomeKind, Progress};
 use crate::providers::diagnostic::Diagnostic;
 use crate::request::{ChatCompletionRequest, extract_request};
@@ -57,7 +59,7 @@ impl EntryGuard {
             EventKind::Responded {
                 status: status.as_u16(),
                 outcome: None,
-                detail: message.to_owned(),
+                detail: capped(message.to_owned()),
                 reply: None,
             },
         );
@@ -79,7 +81,7 @@ impl EntryGuard {
             EventKind::Responded {
                 status: status.as_u16(),
                 outcome: Some(outcome.kind),
-                detail: detail.to_owned(),
+                detail: capped(detail.to_owned()),
                 reply,
             },
         );
@@ -115,7 +117,7 @@ impl Progress for RequestProgress<'_> {
             self.number,
             EventKind::Started {
                 provider,
-                model: model.to_owned(),
+                model: capped(model.to_owned()),
             },
         );
     }
@@ -126,7 +128,7 @@ impl Progress for RequestProgress<'_> {
         let text_allowed = self.state.text_allowed();
         let diagnostic = attempt.diagnostic.as_ref().map(|diagnostic| Diagnostic {
             detail: if text_allowed {
-                diagnostic.detail.clone()
+                capped(diagnostic.detail.clone())
             } else {
                 String::new()
             },
@@ -157,29 +159,61 @@ struct ModelSelection {
 const BODY_LIMIT: usize = 10 * 1024 * 1024;
 const BODY_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Formats one dictation and answers 200, non-streaming or SSE. Requests
-/// that are not usable dictations get a 400; failures after extraction
-/// return the raw dictation as a normal completion.
+/// The client-facing handler: assigns the request number, emits `Arrived`,
+/// runs the completion, and (when text is allowed) captures the exact HTTP
+/// response for the `Sent` event before returning it unchanged.
 pub async fn chat_completions(State(state): State<ApiState>, request: Request) -> Response {
     let started = Instant::now();
+    let number = state.next_id();
+    let client = stated_client(request.headers());
+    state.emit_at(number, started.into_std(), EventKind::Arrived { client });
+
+    let response = complete(state.clone(), request, number, started).await;
+    if !state.text_allowed() {
+        return response;
+    }
+    // Every completion body is already in memory (JSON, an error or the
+    // whole SSE stream), so collecting it waits for nothing; only copying it
+    // into the event adds work before the response goes out.
+    let (parts, body) = response.into_parts();
+    let bytes = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .unwrap_or_default();
+    state.emit(
+        number,
+        EventKind::Sent {
+            status: parts.status.as_u16(),
+            headers: response_header_pairs(&parts.headers),
+            body: capped(String::from_utf8_lossy(&bytes).into_owned()),
+        },
+    );
+    Response::from_parts(parts, Body::from(bytes))
+}
+
+/// The body of the completion handler, split out so the public wrapper can
+/// capture the response for the monitor after `Responded` is emitted.
+async fn complete(state: ApiState, request: Request, number: u64, started: Instant) -> Response {
     // Every request gets its number and exactly one log entry, whatever
     // happens next: the guard logs a rejection, a completion, or (when this
     // future is dropped because the client went away) a dropped request.
-    let number = state.next_id();
-    state.emit_at(number, started.into_std(), EventKind::Arrived);
     let mut entry = EntryGuard {
         state: state.clone(),
         number,
         started,
         logged: false,
     };
-    // The debug log (when enabled) is the only reader of request headers, and
-    // only through `DebugRecord::new`; the map must be captured before the
-    // request is consumed. Disabled (the default): nothing is captured.
+    // Headers must be captured before the request is consumed. The debug log
+    // (when enabled) reads them only through `DebugRecord::new`; disabled (the
+    // default), nothing is captured for it.
     let debug_headers = state
         .debug_log
         .is_enabled()
         .then(|| request.headers().clone());
+    // The live view shows them (credential values masked) when text is
+    // allowed.
+    let received_headers = state
+        .text_allowed()
+        .then(|| shown_headers(request.headers()));
 
     let bytes = match read_body_bounded(request.into_body()).await {
         Ok(bytes) => bytes,
@@ -202,6 +236,16 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
             );
         }
     };
+
+    if let Some(headers) = received_headers {
+        state.emit(
+            number,
+            EventKind::Received {
+                headers,
+                body: capped(String::from_utf8_lossy(&bytes).into_owned()),
+            },
+        );
+    }
 
     // The serde error is deliberately dropped: its messages can quote values
     // from the body, which may be dictated text. First do a minimal parse so
@@ -238,8 +282,13 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
         state.emit(
             number,
             EventKind::Parsed {
-                model: selection.model.clone(),
-                input: state.text_allowed().then(|| echo_text.clone()),
+                model: selection.model.clone().map(capped),
+                text: state.text_allowed().then(|| ParsedText {
+                    system: vec![],
+                    before: String::new(),
+                    input: capped(echo_text.clone()),
+                    after: String::new(),
+                }),
             },
         );
         let outcome = FormatOutcome {
@@ -259,7 +308,7 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
                 &outcome,
             ));
         }
-        let reply = state.text_allowed().then(|| outcome.text.clone());
+        let reply = state.text_allowed().then(|| capped(outcome.text.clone()));
         entry.finish(
             selection.model.as_deref(),
             StatusCode::OK,
@@ -307,8 +356,13 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
     state.emit(
         number,
         EventKind::Parsed {
-            model: extracted.model.clone(),
-            input: state.text_allowed().then(|| extracted.raw_text.clone()),
+            model: extracted.model.clone().map(capped),
+            text: state.text_allowed().then(|| ParsedText {
+                system: extracted.system_texts.iter().cloned().map(capped).collect(),
+                before: capped(extracted.before_text.clone()),
+                input: capped(extracted.text.clone()),
+                after: capped(extracted.after_text.clone()),
+            }),
         },
     );
 
@@ -346,7 +400,8 @@ pub async fn chat_completions(State(state): State<ApiState>, request: Request) -
         OutcomeKind::Inspect => (StatusCode::OK, "inspect".to_owned()),
         OutcomeKind::Empty => (StatusCode::OK, "empty".to_owned()),
     };
-    let reply = (status == StatusCode::OK && state.text_allowed()).then(|| outcome.text.clone());
+    let reply =
+        (status == StatusCode::OK && state.text_allowed()).then(|| capped(outcome.text.clone()));
     entry.finish(extracted.model.as_deref(), status, &detail, reply, &outcome);
     // Could not format: answer with an HTTP error carrying the safe reason.
     // The app keeps and pastes its own transcript, so Pumice never has to
@@ -464,6 +519,59 @@ async fn read_body_bounded(body: Body) -> Result<Vec<u8>, ReadBodyError> {
     }
 }
 
+/// The app name the request states in its `X-Title` header, trimmed and cut
+/// to 32 characters. `None` when the header is absent, empty, or holds
+/// anything but printable ASCII (letters, digits, punctuation, spaces).
+fn stated_client(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get("x-title")?.to_str().ok()?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() || !trimmed.chars().all(|c| c == ' ' || c.is_ascii_graphic()) {
+        return None;
+    }
+    Some(trimmed.chars().take(32).collect())
+}
+
+/// Every request header, with credential-related values replaced by
+/// `[hidden]`. The order is the `HeaderMap`'s (values of one name stay
+/// together), not necessarily the order on the wire. Names are lowercase, as
+/// axum gives them.
+fn shown_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            let name = name.as_str().to_owned();
+            let lower = name.to_lowercase();
+            let hidden = ["auth", "cookie", "key", "token", "secret", "session"]
+                .iter()
+                .any(|needle| lower.contains(needle));
+            let value = if hidden {
+                "[hidden]".to_owned()
+            } else {
+                value
+                    .to_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|_| String::from_utf8_lossy(value.as_bytes()).into_owned())
+            };
+            (name, capped(value))
+        })
+        .collect()
+}
+
+/// Every response header as a `(name, value)` pair, for the `Sent` event.
+fn response_header_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            let name = name.as_str().to_owned();
+            let value = value
+                .to_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|_| String::from_utf8_lossy(value.as_bytes()).into_owned());
+            (name, capped(value))
+        })
+        .collect()
+}
+
 /// The request body as a JSON value for the debug log. The body already
 /// parsed once, but a field the typed parse skipped can hold an escape that
 /// does not decode into a value (for example a lone surrogate): then a fixed,
@@ -552,4 +660,69 @@ fn sse_response(id: &str, created: u64, model: &str, text: String) -> Response {
         .header(header::CONTENT_TYPE, "text/event-stream")
         .body(Body::from(body))
         .expect("static response parts are valid")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stated_client_from_x_title() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(stated_client(&headers), None);
+
+        headers.insert("x-title", "Handy".parse().unwrap());
+        assert_eq!(stated_client(&headers), Some("Handy".to_owned()));
+
+        headers.insert("x-title", "  Handy  ".parse().unwrap());
+        assert_eq!(stated_client(&headers), Some("Handy".to_owned()));
+
+        headers.insert("x-title", "".parse().unwrap());
+        assert_eq!(stated_client(&headers), None);
+
+        headers.insert("x-title", "   ".parse().unwrap());
+        assert_eq!(stated_client(&headers), None);
+
+        headers.insert("x-title", "My Dictation App".parse().unwrap());
+        assert_eq!(stated_client(&headers), Some("My Dictation App".to_owned()));
+
+        headers.insert(
+            "x-title",
+            axum::http::HeaderValue::from_bytes("Olá".as_bytes()).unwrap(),
+        );
+        assert_eq!(stated_client(&headers), None);
+
+        headers.insert("x-title", "Handy\tApp".parse().unwrap());
+        assert_eq!(stated_client(&headers), None);
+
+        let long = "a".repeat(50);
+        headers.insert("x-title", long.parse().unwrap());
+        assert_eq!(stated_client(&headers), Some("a".repeat(32)));
+    }
+
+    #[test]
+    fn shown_headers_masks_credentials() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "secret".parse().unwrap());
+        headers.insert("x-api-key", "secret".parse().unwrap());
+        headers.insert("cookie", "session=xyz".parse().unwrap());
+        headers.insert("user-agent", "test".parse().unwrap());
+        headers.insert("x-title", "Handy".parse().unwrap());
+
+        let shown = shown_headers(&headers);
+        assert_eq!(shown.len(), 5);
+        assert!(
+            shown
+                .iter()
+                .any(|(n, v)| n == "authorization" && v == "[hidden]")
+        );
+        assert!(
+            shown
+                .iter()
+                .any(|(n, v)| n == "x-api-key" && v == "[hidden]")
+        );
+        assert!(shown.iter().any(|(n, v)| n == "cookie" && v == "[hidden]"));
+        assert!(shown.iter().any(|(n, v)| n == "user-agent" && v == "test"));
+        assert!(shown.iter().any(|(n, v)| n == "x-title" && v == "Handy"));
+    }
 }

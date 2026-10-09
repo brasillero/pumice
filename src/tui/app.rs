@@ -11,14 +11,11 @@ use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::monitor::{Event, EventKind};
+use crate::monitor::{Event, EventKind, ParsedText};
 use crate::pipeline::{AttemptResult, OutcomeKind};
 use crate::providers::diagnostic::Diagnostic;
 
 use super::Info;
-
-/// Lines one PageUp/PageDown moves the details pane.
-const DETAILS_PAGE: usize = 5;
 
 /// Most requests kept; the oldest finished ones go first.
 const MAX_REQUESTS: usize = 500;
@@ -28,15 +25,31 @@ pub struct RequestView {
     pub number: u64,
     pub arrived: Instant,
     pub arrived_wall: jiff::Zoned,
+    pub client: Option<String>,
     /// When the body was read and parsed.
     pub parsed: Option<Instant>,
     pub model: Option<String>,
-    pub input: Option<String>,
+    pub received: Option<Received>,
+    pub text: Option<ParsedText>,
     pub queued: Option<Instant>,
     pub started: Option<Started>,
     pub attempt: Option<Attempt>,
     pub responded: Option<Responded>,
+    pub sent: Option<Sent>,
     pub dropped: Option<Instant>,
+}
+
+/// The raw request as received from the client.
+pub struct Received {
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+}
+
+/// The raw HTTP response sent to the client.
+pub struct Sent {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: String,
 }
 
 /// When the provider CLI started and which one.
@@ -162,6 +175,85 @@ enum Filter {
     Model(String),
 }
 
+/// Tab shown in the full-screen details view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tab {
+    Summary,
+    Received,
+    Parsed,
+    Sent,
+}
+
+impl Tab {
+    /// The tab to the right, wrapping around.
+    fn next(self) -> Tab {
+        match self {
+            Tab::Summary => Tab::Received,
+            Tab::Received => Tab::Parsed,
+            Tab::Parsed => Tab::Sent,
+            Tab::Sent => Tab::Summary,
+        }
+    }
+
+    /// The tab to the left, wrapping around.
+    fn prev(self) -> Tab {
+        match self {
+            Tab::Summary => Tab::Sent,
+            Tab::Received => Tab::Summary,
+            Tab::Parsed => Tab::Received,
+            Tab::Sent => Tab::Parsed,
+        }
+    }
+
+    /// The tab a digit key selects: `1` Summary to `4` Sent.
+    fn from_digit(c: char) -> Option<Tab> {
+        match c {
+            '1' => Some(Tab::Summary),
+            '2' => Some(Tab::Received),
+            '3' => Some(Tab::Parsed),
+            '4' => Some(Tab::Sent),
+            _ => None,
+        }
+    }
+
+    /// The tab's label.
+    pub fn name(self) -> &'static str {
+        match self {
+            Tab::Summary => "Summary",
+            Tab::Received => "Received",
+            Tab::Parsed => "Parsed",
+            Tab::Sent => "Sent",
+        }
+    }
+}
+
+/// Scroll geometry of a scrolling screen (details or help), reported by the
+/// renderer after each draw.
+pub struct ScrollBounds {
+    /// The largest scroll offset that still fills the screen.
+    pub max_scroll: usize,
+    /// Rows one PageUp/PageDown moves.
+    pub page: usize,
+}
+
+/// Applies a scrolling key (`↑↓`/`jk` one row, `PgUp`/`PgDn`/`Space` one
+/// page, `Home`/`End`/`g`/`G` to the ends) to `scroll`, within `bounds`.
+/// Other keys do nothing.
+fn scroll_key(code: KeyCode, scroll: &mut usize, bounds: Option<&ScrollBounds>) {
+    let max = bounds.map_or(0, |b| b.max_scroll);
+    let page = bounds.map_or(1, |b| b.page);
+    *scroll = match code {
+        KeyCode::Up | KeyCode::Char('k') => scroll.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => scroll.saturating_add(1),
+        KeyCode::PageUp => scroll.saturating_sub(page),
+        KeyCode::PageDown | KeyCode::Char(' ') => scroll.saturating_add(page),
+        KeyCode::Home | KeyCode::Char('g') => 0,
+        KeyCode::End | KeyCode::Char('G') => max,
+        _ => *scroll,
+    }
+    .min(max);
+}
+
 /// Action returned by key handling for the terminal loop to perform.
 pub enum Action {
     /// Nothing special; keep looping.
@@ -180,7 +272,13 @@ pub struct App {
     search: String,
     search_mode: bool,
     details: bool,
+    tab: Tab,
+    help: bool,
     details_scroll: usize,
+    details_bounds: Option<ScrollBounds>,
+    help_scroll: usize,
+    help_bounds: Option<ScrollBounds>,
+    table_page: usize,
     stopping: bool,
     info: Info,
 }
@@ -196,7 +294,13 @@ impl App {
             search: String::new(),
             search_mode: false,
             details: false,
+            tab: Tab::Summary,
+            help: false,
             details_scroll: 0,
+            details_bounds: None,
+            help_scroll: 0,
+            help_bounds: None,
+            table_page: 1,
             stopping: false,
             info,
         }
@@ -212,9 +316,24 @@ impl App {
         self.details
     }
 
-    /// Current scroll offset of the details pane.
+    /// Whether the help screen is open.
+    pub fn help_open(&self) -> bool {
+        self.help
+    }
+
+    /// Current tab in the details view.
+    pub fn tab(&self) -> Tab {
+        self.tab
+    }
+
+    /// Current scroll offset of the details view.
     pub fn details_scroll(&self) -> usize {
         self.details_scroll
+    }
+
+    /// Current scroll offset of the help screen.
+    pub fn help_scroll(&self) -> usize {
+        self.help_scroll
     }
 
     /// Whether a key press is currently editing the search query.
@@ -245,27 +364,35 @@ impl App {
     /// Applies one monitor event, updating or creating the request it belongs to.
     pub fn apply(&mut self, event: Event) {
         match event.kind {
-            EventKind::Arrived => {
+            EventKind::Arrived { client } => {
                 let view = RequestView {
                     number: event.number,
                     arrived: event.at,
                     arrived_wall: jiff::Zoned::now(),
+                    client,
                     parsed: None,
                     model: None,
-                    input: None,
+                    received: None,
+                    text: None,
                     queued: None,
                     started: None,
                     attempt: None,
                     responded: None,
+                    sent: None,
                     dropped: None,
                 };
                 self.requests.insert(0, view);
             }
-            EventKind::Parsed { model, input } => {
+            EventKind::Received { headers, body } => {
+                if let Some(req) = self.request_mut(event.number) {
+                    req.received = Some(Received { headers, body });
+                }
+            }
+            EventKind::Parsed { model, text } => {
                 if let Some(req) = self.request_mut(event.number) {
                     req.parsed = Some(event.at);
                     req.model = model;
-                    req.input = input;
+                    req.text = text;
                 }
             }
             EventKind::Queued => {
@@ -307,18 +434,47 @@ impl App {
                     });
                 }
             }
+            EventKind::Sent {
+                status,
+                headers,
+                body,
+            } => {
+                if let Some(req) = self.request_mut(event.number) {
+                    req.sent = Some(Sent {
+                        status,
+                        headers,
+                        body,
+                    });
+                }
+            }
             EventKind::Dropped => {
                 if let Some(req) = self.request_mut(event.number) {
                     req.dropped = Some(event.at);
                 }
             }
         }
+        let before = self.selection;
         self.trim_finished();
         self.sync_selection();
+        if self.selection != before {
+            self.details_scroll = 0;
+        }
     }
 
-    /// Handles one keyboard event.
+    /// Handles one keyboard event. A details view that changes to another
+    /// request starts at its top.
     pub fn key(&mut self, key: KeyEvent) -> Action {
+        let before = self.selection;
+        let action = self.handle_key(key);
+        if self.selection != before {
+            self.details_scroll = 0;
+        }
+        action
+    }
+
+    /// The key handling of [`key`](Self::key), by screen: search, help,
+    /// details, then the request list.
+    fn handle_key(&mut self, key: KeyEvent) -> Action {
         if key.kind != KeyEventKind::Press {
             return Action::None;
         }
@@ -341,14 +497,54 @@ impl App {
             self.sync_selection();
             return Action::None;
         }
+        if self.help {
+            match key.code {
+                KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => {
+                    self.help = false;
+                    self.help_scroll = 0;
+                }
+                code => scroll_key(code, &mut self.help_scroll, self.help_bounds.as_ref()),
+            }
+            return Action::None;
+        }
+        if self.details {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                    self.details = false;
+                    self.details_scroll = 0;
+                }
+                KeyCode::Left | KeyCode::Char('h') => self.move_selection(-1),
+                KeyCode::Right | KeyCode::Char('l') => self.move_selection(1),
+                KeyCode::Tab => self.set_tab(self.tab.next()),
+                KeyCode::BackTab => self.set_tab(self.tab.prev()),
+                KeyCode::Char('?') => self.help = true,
+                KeyCode::Char(c) if Tab::from_digit(c).is_some() => {
+                    self.set_tab(Tab::from_digit(c).expect("checked above"));
+                }
+                code => scroll_key(code, &mut self.details_scroll, self.details_bounds.as_ref()),
+            }
+            return Action::None;
+        }
         match key.code {
             KeyCode::Char('q') => Action::Quit,
+            KeyCode::Char('?') => {
+                self.help = true;
+                Action::None
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.move_selection(-1);
                 Action::None
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.move_selection(1);
+                Action::None
+            }
+            KeyCode::PageUp => {
+                self.page_selection(-1);
+                Action::None
+            }
+            KeyCode::PageDown => {
+                self.page_selection(1);
                 Action::None
             }
             KeyCode::Home | KeyCode::Char('g') => {
@@ -360,16 +556,8 @@ impl App {
                 Action::None
             }
             KeyCode::Enter => {
-                self.details = !self.details;
+                self.details = true;
                 self.details_scroll = 0;
-                Action::None
-            }
-            KeyCode::PageUp => {
-                self.details_scroll = self.details_scroll.saturating_sub(DETAILS_PAGE);
-                Action::None
-            }
-            KeyCode::PageDown => {
-                self.details_scroll = self.details_scroll.saturating_add(DETAILS_PAGE);
                 Action::None
             }
             KeyCode::Char('f') => {
@@ -389,6 +577,28 @@ impl App {
             }
             _ => Action::None,
         }
+    }
+
+    /// Records the geometry of the drawn details tab, used to clamp and page
+    /// scrolling on the next key event.
+    pub fn set_details_bounds(&mut self, bounds: Option<ScrollBounds>) {
+        if let Some(bounds) = &bounds {
+            self.details_scroll = self.details_scroll.min(bounds.max_scroll);
+        }
+        self.details_bounds = bounds;
+    }
+
+    /// Records the geometry of the drawn help screen.
+    pub fn set_help_bounds(&mut self, bounds: Option<ScrollBounds>) {
+        if let Some(bounds) = &bounds {
+            self.help_scroll = self.help_scroll.min(bounds.max_scroll);
+        }
+        self.help_bounds = bounds;
+    }
+
+    /// Records the number of visible table rows, used to page the selection.
+    pub fn set_table_page(&mut self, page: usize) {
+        self.table_page = page.max(1);
     }
 
     /// Requests after filter and search, newest first.
@@ -480,6 +690,12 @@ impl App {
         self.requests.iter_mut().find(|r| r.number == number)
     }
 
+    /// Switches tab, starting at its top.
+    fn set_tab(&mut self, tab: Tab) {
+        self.tab = tab;
+        self.details_scroll = 0;
+    }
+
     /// Drops the oldest finished requests beyond [`MAX_REQUESTS`]; requests
     /// still in progress are always kept.
     fn trim_finished(&mut self) {
@@ -492,13 +708,14 @@ impl App {
         }
     }
 
-    /// Keeps the selection on a visible row: the newest one while following,
-    /// otherwise the same request if it is still visible, else the newest.
+    /// Keeps the selection on a visible row: the newest one while following
+    /// (except while details are open, which hold their request), otherwise
+    /// the same request if it is still visible, else the newest.
     fn sync_selection(&mut self) {
         let rows = self.rows();
         let newest = rows.first().map(|r| r.number);
         let visible = rows.iter().any(|r| Some(r.number) == self.selection);
-        let selection = if self.follow || !visible {
+        let selection = if (self.follow && !self.details) || !visible {
             newest
         } else {
             self.selection
@@ -516,6 +733,23 @@ impl App {
             .iter()
             .position(|r| Some(r.number) == self.selection)
             .unwrap_or(0);
+        let new_index = (current as isize + delta).clamp(0, rows.len() as isize - 1) as usize;
+        self.selection = Some(rows[new_index].number);
+        self.follow = new_index == 0;
+    }
+
+    /// Moves the selection one table page up (`direction` < 0) or down.
+    fn page_selection(&mut self, direction: isize) {
+        let rows = self.rows();
+        if rows.is_empty() {
+            return;
+        }
+        let current = rows
+            .iter()
+            .position(|r| Some(r.number) == self.selection)
+            .unwrap_or(0);
+        let page = self.table_page as isize;
+        let delta = if direction < 0 { -page } else { page };
         let new_index = (current as isize + delta).clamp(0, rows.len() as isize - 1) as usize;
         self.selection = Some(rows[new_index].number);
         self.follow = new_index == 0;
@@ -593,6 +827,14 @@ impl App {
         {
             return true;
         }
+        if req
+            .client
+            .as_ref()
+            .map(|c| c.to_lowercase().contains(&query))
+            .unwrap_or(false)
+        {
+            return true;
+        }
         if let Some(started) = &req.started
             && started.provider.to_lowercase().contains(&query)
         {
@@ -604,11 +846,8 @@ impl App {
             return true;
         }
         if self.info.text_allowed {
-            if req
-                .input
-                .as_ref()
-                .map(|s| s.to_lowercase().contains(&query))
-                .unwrap_or(false)
+            if let Some(text) = &req.text
+                && text.input.to_lowercase().contains(&query)
             {
                 return true;
             }
