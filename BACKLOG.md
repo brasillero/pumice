@@ -2,7 +2,7 @@
 
 Things we decided to revisit, defer or keep an eye on. Each item says where it came from. When an item becomes work, it gets a story ID, a branch and a PR, and moves out of here. The owner decides priorities.
 
-Last updated: 2026-10-08.
+Last updated: 2026-10-10.
 
 ## To discuss (owner decision needed)
 
@@ -13,7 +13,7 @@ Last updated: 2026-10-08.
 | **Plugin contract standard** | Write down what every plugin may receive and must return, independent of its internals, so anyone can build a plugin against it and swap parts freely. Today the shared types are `FormatInput` in and `Result<String, ProviderError>` out (`src/providers/interface.rs`). | Owner, 2026-10-08 |
 | **Decouple plugins from the Handy format** | Pumice splits Handy's user message around `<transcript>` into `before_text`/`text`/`after_text`, and each plugin (Claude, Codex, Kimi) glues the three back together. Plugins should receive just the system prompt and the whole user message, with no knowledge of transcript tags. Fine while Handy is the only client; revisit when Pumice goes generic. | Owner, 2026-10-08 |
 | **Transcript tags in normal requests** | The `<transcript>` extraction still drives normal requests, not only `passthrough`: an empty envelope returns an empty answer without calling the CLI, and a malformed one returns 400. Fine while Handy is the only client; make generic later (also covers B3). | Architecture review 2026-10-08 |
-| **AGENTS.md exceptions** | Two documented deviations need an owner edit to AGENTS.md: the generic adapter's loopback HTTP call (outbound-call rule) and the Kiro agent file Pumice writes into the call's temporary directory (empty-directory rule). | Audit 2026-10-07 |
+| **AGENTS.md exceptions** | Two documented deviations need an owner edit to AGENTS.md: the generic adapter's loopback HTTP call (outbound-call rule) and the Kiro agent file Pumice writes into the call's temporary directory (empty-directory rule; approved 2026-10-10, wording proposed in the S2.14 PR). | Audit 2026-10-07 |
 
 ## Deferred work
 
@@ -35,7 +35,13 @@ Last updated: 2026-10-08.
 
 | Item | Context |
 | --- | --- |
-| Unverified adapters | Kiro and Antigravity have never run against the real CLI. Kiro has no quota or rate-limit classification yet. Antigravity cannot be enabled. |
+| Unverified adapter | Antigravity has never run against the real CLI and cannot be enabled. |
+| Kiro errors unclassified | Kiro's `runError` carries only a free-text message, so login, quota and rate-limit failures are all HTTP 502 (S2.14). |
+| Kiro login hang | A `kiro-cli` that is not logged in starts a device-code login even with `--no-interactive` and waits; Pumice answers 504 when the provider timeout runs out. |
+| Kiro session history | Kiro V2 saves every run, dictation included, under the user's own `~/.kiro/sessions/cli/`. Pumice does not touch `~/.kiro`; deleting its own session after each run is an open question in `docs/research/S2.14-kiro-plugin.md`. |
+| Kiro engine pin | The plugin pins `--agent-engine v2`, which `--help` calls "the pre-3.0 default". If Kiro CLI 3.0 drops V2, the plugin needs a V3 recipe. |
+| Kiro base instructions | Kiro's built-in assistant instructions sit under the client's system prompt. In the S2.14 end-to-end check (`claude-haiku-4.5`, Handy's request) Kiro answered the dictation instead of formatting it. |
+| Kiro effort | `--effort low` for every model. GPT-5.6 models also offer `none`, which Claude models do not accept; models without effort levels print a warning and run normally. |
 | Partial-stdin check | A CLI that exits cleanly without reading all of its stdin is treated as a failure (#62), but the OS pipe buffer (about 64 KB) absorbs normal-size dictations, so in practice only very long dictations are caught. |
 | Kimi thinking off | Pumice forces `KIMI_MODEL_THINKING_EFFORT=off` (S2.14). Kimi 2.1.1 sends it even for models that must think; such a backend could reject every call (an HTTP error, logged; the app keeps its transcript). The owner's models (k2.7-code-highspeed, k2.8) offer thinking off. If a thinking-required model is ever used, pin its lowest effort instead. Routes through non-Kimi providers ignore the override. |
 | Kimi argv transport | The dictation travels as a command-line argument (visible to other local processes while the call runs), capped at 24 KiB and at the Windows command-line limit. |

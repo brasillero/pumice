@@ -117,7 +117,7 @@ macro_rules! register_providers {
     };
 }
 
-register_providers!(claude, codex, kimi);
+register_providers!(claude, codex, kimi, kiro);
 
 // Archived providers (owner decision 2026-10-08): their code and tests stay,
 // but they are not registered, so configuration, detection, `doctor` and
@@ -125,7 +125,6 @@ register_providers!(claude, codex, kimi);
 // settles.
 pub mod antigravity;
 pub mod generic;
-pub mod kiro;
 
 /// Provider IDs that are archived or removed, with what the configuration
 /// loader says when a file still lists one.
@@ -136,10 +135,6 @@ pub const RETIRED: &[(&str, &str)] = &[
     ),
     (
         "generic",
-        "is archived for now and cannot be used; delete this entry",
-    ),
-    (
-        "kiro",
         "is archived for now and cannot be used; delete this entry",
     ),
     ("opencode", "support was removed; delete this entry"),
@@ -186,7 +181,7 @@ mod tests {
 
     #[test]
     fn registry_ids_are_unique_and_found() {
-        assert_eq!(PROVIDERS.len(), 3, "three providers are registered");
+        assert_eq!(PROVIDERS.len(), 4, "four providers are registered");
         for (i, d) in PROVIDERS.iter().enumerate() {
             assert!(PROVIDERS[..i].iter().all(|other| other.id != d.id));
             assert!(std::ptr::eq(descriptor(d.id).unwrap(), d));

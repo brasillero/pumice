@@ -75,8 +75,16 @@ providers:
     enabled: false
     # model: kimi-k2.7-code-highspeed
 
-  # Kiro, Antigravity and the generic local-server adapter are archived for
-  # now, and OpenCode support was removed: listing any of them is an error.
+  # Kiro CLI, off. Pumice writes a one-off no-tools agent file into the
+  # call's empty temporary directory to carry the app's system prompt; your
+  # own ~/.kiro login and settings are used. `kiro-cli chat --list-models`
+  # shows the model ids.
+  - id: kiro
+    enabled: false
+    # model: claude-haiku-4.5
+
+  # Antigravity and the generic local-server adapter are archived for now,
+  # and OpenCode support was removed: listing any of them is an error.
 
 # Dictated text is written to a log only when debug logging is enabled.
 debug_log:

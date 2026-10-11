@@ -24,30 +24,10 @@ use support::adapter_contract::{
 };
 use support::fixture;
 
-/// True when `child` is located inside `parent`, compared case-insensitively
-/// and with separators normalized. This lets tests compare a canonicalized
-/// path reported by the fake CLI against a non-canonical `cwd` string on
-/// Windows.
-fn path_is_inside(parent: &Path, child: &Path) -> bool {
-    let normalize = |p: &Path| {
-        let s = p.to_string_lossy();
-        // On Windows `std::fs::canonicalize` returns verbatim paths
-        // (`\\?\C:\...`) that do not prefix-match ordinary absolute paths.
-        let s = s
-            .strip_prefix(r"\\?\")
-            .map(String::from)
-            .unwrap_or_else(|| s.into_owned());
-        s.replace('\\', "/").trim_end_matches('/').to_lowercase()
-    };
-    let parent = normalize(parent);
-    let child = normalize(child);
-    child.starts_with(&format!("{parent}/"))
-}
-
 adapter_contract!(claude, ClaudeContract);
 adapter_contract!(codex, CodexContract);
-adapter_contract!(antigravity, AntigravityContract);
 adapter_contract!(kiro, KiroContract);
+adapter_contract!(antigravity, AntigravityContract);
 
 /// Kimi's contract cases. The shared `transport` case drives a 200 KiB
 /// dictation, which the argv transport rejects by design with
@@ -778,131 +758,123 @@ impl ContractAdapter for KimiContract {
         }
     }
 }
+
+/// Kiro's protocol fixtures and adapter-specific assertions. The stream
+/// vocabulary (runStarted / metadata / sessionUpdate / runFinished / runError)
+/// is verified against the installed 2.29.0 in S2.14 with real calls
+/// (docs/research/S2.14-kiro-plugin.md). The system prompt travels in a
+/// workspace-local agent file — the approved exception to the outside-cwd
+/// rule — so placement assertions override the default.
 struct KiroContract;
-
-const KIRO_MODEL: &str = "claude-sonnet-4.6";
-
-/// Finds the reported Kiro agent file key under `.kiro/agents/`.
-fn kiro_agent_file_key(report: &Value) -> String {
-    let files = report["report_files"]
-        .as_object()
-        .expect("report_files is a map");
-    files
-        .keys()
-        .find(|k| k.replace('\\', "/").starts_with(".kiro/agents/"))
-        .expect("agent file reported")
-        .clone()
-}
 
 impl ContractAdapter for KiroContract {
     const ID: &'static str = "kiro";
 
     fn provider(fake: &Path, timeout: Duration) -> Arc<dyn Provider> {
         Arc::new(CliProvider::new(
-            KiroAdapter::new(fake.to_path_buf(), KIRO_MODEL.to_owned()),
+            KiroAdapter::new(fake.to_path_buf(), "claude-haiku-4.5".to_owned()),
             Arc::new(ProcessRunner::new()),
             timeout,
         ))
     }
 
     fn success(text: &str) -> (String, i32) {
-        let events = [
-            json!({"sessionUpdate": "state_update", "state": "running"}),
-            json!({"sessionUpdate": "agent_message", "messageId": "msg_contract", "content": [{"type": "text", "text": text}]}),
-            json!({"sessionUpdate": "state_update", "state": "idle", "stopReason": "end_turn"}),
+        let (first, rest) = split_at_char(text);
+        let mut records: Vec<Value> = vec![
+            serde_json::from_str(r#"{"type":"runStarted","data":{"payloadSchema":"acp","acpProtocolVersion":1,"engine":"v2"}}"#).unwrap(),
+            serde_json::from_str(r#"{"type":"metadata","data":{"sessionId":"00000000-0000-4000-8000-000000000001","contextUsagePercentage":0.0,"reasoning":{"support":"unavailable","effortLevels":[]}}}"#).unwrap(),
+            serde_json::from_str(r#"{"type":"sessionUpdate","data":{"sessionId":"00000000-0000-4000-8000-000000000001","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Thinking."}}}}"#).unwrap(),
         ];
-        let stream = events
-            .into_iter()
-            .map(|event| event.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-        (format!("{stream}\n"), 0)
+        if !first.is_empty() {
+            records.push(json!({"type":"sessionUpdate","data":{"sessionId":"00000000-0000-4000-8000-000000000001","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":first}}}}));
+        }
+        if !rest.is_empty() {
+            records.push(json!({"type":"sessionUpdate","data":{"sessionId":"00000000-0000-4000-8000-000000000001","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":rest}}}}));
+        }
+        records.push(serde_json::from_str(r#"{"type":"metadata","data":{"sessionId":"00000000-0000-4000-8000-000000000001","contextUsagePercentage":0.0,"meteringUsage":[{"value":0.001,"unit":"credit","unitPlural":"credits"}],"reasoning":{"support":"unavailable","effortLevels":[]}}}"#).unwrap());
+        records.push(json!({"type":"runFinished","data":{"sessionId":"00000000-0000-4000-8000-000000000001","status":"success","stopReason":"end_turn","finalText":text,"finalTextTruncated":false}}));
+        (ndjson(&records), 0)
     }
 
     fn not_logged_in(marker: &str) -> (String, i32) {
-        let events = [
-            json!({"sessionUpdate": "state_update", "state": "running"}),
-            json!({"sessionUpdate": "state_update", "state": "idle", "stopReason": "error", "error": {"code": -32000, "message": format!("Authentication required ({marker})")}}),
-        ];
-        let stream = events
-            .into_iter()
-            .map(|event| event.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-        (format!("{stream}\n"), 1)
+        (
+            format!(
+                "\nConfirm the following code in the browser\nCode: ABCD-EFGH\n\nOpen this URL: https://example.invalid/device?code={marker}\n"
+            ),
+            1,
+        )
     }
 
     fn invalid_outputs() -> Vec<(String, i32)> {
+        let success = Self::success("x").0;
         vec![
             ("not json\n".to_owned(), 0),
-            ("{}\n".to_owned(), 0),
-            ("[1,2]\n".to_owned(), 0),
             (String::new(), 0),
-            // A text message without the final idle/end_turn is incomplete.
+            ("\n".to_owned(), 0),
+            // A run that never started.
             (
-                concat!(
-                    r#"{"sessionUpdate":"agent_message","messageId":"m","content":[{"type":"text","text":"Partial."}]}"#,
-                    "\n",
-                )
-                .to_owned(),
+                ndjson(&[
+                    json!({"type":"runFinished","data":{"status":"success","finalText":"x","finalTextTruncated":false}}),
+                ]),
                 0,
             ),
-            // An idle end_turn without any agent text produced no answer.
+            // A successful finish without any answer text.
             (
-                concat!(
-                    r#"{"sessionUpdate":"state_update","state":"idle","stopReason":"end_turn"}"#,
-                    "\n",
-                )
-                .to_owned(),
+                ndjson(&[
+                    json!({"type":"runStarted","data":{"payloadSchema":"acp","acpProtocolVersion":1,"engine":"v2"}}),
+                    json!({"type":"runFinished","data":{"status":"success","finalText":"","finalTextTruncated":false}}),
+                ]),
                 0,
             ),
-            // Non-end_turn stop reason.
+            // Non-string agent message content.
             (
-                concat!(
-                    r#"{"sessionUpdate":"agent_message","messageId":"m","content":[{"type":"text","text":"Truncated."}]}"#,
-                    "\n",
-                    r#"{"sessionUpdate":"state_update","state":"idle","stopReason":"max_tokens"}"#,
-                    "\n",
-                )
-                .to_owned(),
+                ndjson(&[
+                    json!({"type":"runStarted","data":{"payloadSchema":"acp","acpProtocolVersion":1,"engine":"v2"}}),
+                    json!({"type":"sessionUpdate","data":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":42}}}}),
+                    json!({"type":"runFinished","data":{"status":"success","finalText":"x","finalTextTruncated":false}}),
+                ]),
                 0,
             ),
+            // A line without a type field.
+            ("{\"data\":{}}\n".to_owned(), 0),
+            // Truncated mid-line.
+            (success.chars().take(40).collect::<String>(), 0),
         ]
     }
 
+    fn tool_activity_answer() -> Option<&'static str> {
+        Some("Texto formatado.")
+    }
+
     fn tool_activity() -> Option<(String, i32)> {
-        Some((
-            concat!(
-                r#"{"sessionUpdate":"agent_message","messageId":"m","content":[{"type":"text","text":"I'll use a tool."}]}"#,
-                "\n",
-                r#"{"sessionUpdate":"tool_call_update","toolCallId":"call_1","status":"pending"}"#,
-                "\n",
-                r#"{"sessionUpdate":"state_update","state":"idle","stopReason":"end_turn"}"#,
-                "\n",
-            )
-            .to_owned(),
-            0,
-        ))
+        Some((fixture("kiro/tool.jsonl"), 0))
     }
 
     fn capture_system_prompt(scenario: &mut Value) {
-        scenario["report_files"] = json!([".kiro/agents"]);
-    }
-
-    fn captured_system_prompt(report: &Value) -> (PathBuf, String) {
-        let key = kiro_agent_file_key(report);
-        let file = &report["report_files"][&key];
-        let contents = file["contents"].as_str().expect("agent file contents");
-        let agent: Value = serde_json::from_str(contents).expect("agent file is JSON");
-        let path = file["path"].as_str().unwrap();
-        (
-            PathBuf::from(path),
-            agent["prompt"].as_str().unwrap().to_owned(),
-        )
+        scenario["report_files"] = json!([".kiro/agents/pumice.json"]);
     }
 
     fn expected_workspace_entries() -> Vec<&'static str> {
         vec![".kiro"]
+    }
+
+    fn captured_system_prompt(report: &Value) -> (PathBuf, String) {
+        let files = report["report_files"]
+            .as_object()
+            .expect("report_files captured");
+        let (path, entry) = files
+            .iter()
+            .find(|(k, _)| k.replace('\\', "/").ends_with(".kiro/agents/pumice.json"))
+            .expect("agent file reported");
+        let file = entry.as_object().expect("agent file present");
+        (
+            PathBuf::from(file["path"].as_str().unwrap_or(path)),
+            file["contents"]
+                .as_str()
+                .and_then(|c| serde_json::from_str::<Value>(c).ok())
+                .and_then(|v| v["prompt"].as_str().map(str::to_owned))
+                .expect("agent file prompt"),
+        )
     }
 
     fn assert_system_prompt_placement(report: &Value) {
@@ -911,46 +883,69 @@ impl ContractAdapter for KiroContract {
         assert_eq!(contents, SYSTEM_PROMPT);
         assert!(path.is_absolute(), "{}", path.display());
         assert!(
-            path_is_inside(cwd, &path),
-            "agent file should be inside cwd: cwd={cwd:?}, path={path:?}"
-        );
-        let normalized = path.to_string_lossy().replace('\\', "/");
-        assert!(
-            normalized.contains("/.kiro/agents/"),
-            "agent file should be under .kiro/agents/: path={path:?}"
+            path_inside_cwd(&path, cwd),
+            "agent file must be inside the cwd: {} vs {}",
+            path.display(),
+            cwd.display()
         );
         assert!(
-            normalized.ends_with(".json"),
-            "agent file should end with .json: path={path:?}"
+            normalize_path(&path).ends_with(".kiro/agents/pumice.json"),
+            "unexpected agent file: {}",
+            path.display()
         );
     }
 
     fn assert_restricted_argv(argv: &[String]) {
         let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-        assert_eq!(argv.first(), Some(&"chat"));
-        assert!(argv.contains(&"--v3"), "missing --v3");
+        assert!(has_pair(&argv, "--agent-engine", "v2"));
+        assert!(has_pair(&argv, "--output-format", "stream-json"));
+        assert!(has_pair(&argv, "--agent", "pumice"));
+        assert!(has_pair(&argv, "--model", "claude-haiku-4.5"));
+        assert!(has_pair(&argv, "--effort", "low"));
         assert!(
             argv.contains(&"--no-interactive"),
             "missing --no-interactive"
         );
-        let agent = argv
-            .windows(2)
-            .find(|pair| pair[0] == "--agent")
-            .map(|pair| pair[1])
-            .expect("missing --agent");
-        assert!(
-            agent.starts_with("pumice-") && agent.len() > "pumice-".len(),
-            "agent should be pumice-<hex>, got {agent:?}"
-        );
-        assert!(has_pair(&argv, "--model", KIRO_MODEL));
-        assert!(has_pair(&argv, "--output-format", "stream-json"));
-        assert!(
-            argv.contains(&"--trust-tools="),
-            "missing empty --trust-tools="
-        );
-        assert!(
-            !argv.contains(&"--trust-all-tools"),
-            "must not use --trust-all-tools"
-        );
+        assert!(argv.contains(&"--trust-tools="), "missing --trust-tools=");
+        for forbidden in [
+            "-a",
+            "--trust-all-tools",
+            "--resume",
+            "-r",
+            "--resume-id",
+            "--v3",
+            "--tui",
+            "--cloud",
+            "--require-mcp-startup",
+        ] {
+            assert!(!argv.contains(&forbidden), "forbidden flag {forbidden}");
+        }
     }
+}
+
+/// Splits `text` after its first UTF-8 character, returning ("", text) when
+/// empty and (text, "") when it has only one character.
+fn split_at_char(text: &str) -> (&str, &str) {
+    match text.chars().next() {
+        None => ("", text),
+        Some(c) => text.split_at(c.len_utf8()),
+    }
+}
+
+/// True when `path` is inside `cwd`, robustly on Windows (canonicalized `\\?\`
+/// prefixes, case and separator differences).
+fn path_inside_cwd(path: &Path, cwd: &Path) -> bool {
+    let path = normalize_path(path);
+    let cwd = normalize_path(cwd);
+    let prefix = format!("{cwd}/");
+    path.starts_with(&prefix)
+}
+
+fn normalize_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .strip_prefix(r"\\?\")
+        .map(String::from)
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+        .replace('\\', "/")
+        .to_lowercase()
 }

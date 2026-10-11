@@ -1,0 +1,5 @@
+{"type":"runStarted","data":{"payloadSchema":"acp","acpProtocolVersion":1,"engine":"v2"}}
+{"type":"metadata","data":{"sessionId":"00000000-0000-4000-8000-000000000001","contextUsagePercentage":3.627000093460083,"reasoning":{"support":"unavailable","effortLevels":[]}}}
+{"type":"metadata","data":{"sessionId":"00000000-0000-4000-8000-000000000001","contextUsagePercentage":0.0,"reasoning":{"support":"unavailable","effortLevels":[]}}}
+{"type":"metadata","data":{"sessionId":"00000000-0000-4000-8000-000000000001","contextUsagePercentage":0.0,"reasoning":{"support":"unavailable","effortLevels":[]}}}
+{"type":"runError","data":{"sessionId":"00000000-0000-4000-8000-000000000001","stage":"prompt","message":"Internal error (code -32603): Encountered an error in the response stream: The model 'no-such-model-xyz' is not available. Please use '/model' to select a different model and try again. (request_id: 00000000-0000-4000-8000-000000000002)"}}

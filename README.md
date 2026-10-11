@@ -10,14 +10,14 @@ Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude
 ```
 
 - **Works with [Handy](https://github.com/cjpais/Handy)** through its Custom post-processing provider, and with any app that talks to an OpenAI-compatible endpoint.
-- **Uses the official CLIs** of your subscriptions: Claude, Codex and Kimi.
+- **Uses the official CLIs** of your subscriptions: Claude, Codex, Kimi and Kiro.
 - **Never loses a dictation:** if the selected provider fails or times out, Pumice answers with an error and the app pastes its own transcript.
 - **Local and private:** listens on localhost only, no telemetry.
 - **Single executable** for Windows, Linux and macOS, with nothing else to install.
 
 ## Status
 
-Pumice works end to end through Claude, Codex and Kimi. Kiro, Antigravity and the local OpenAI-compatible adapter are archived for now. You choose the providers in an explicit list in the YAML config — nothing is enabled by default, and there is no fallback: a failure returns the raw dictation. Run `pumice doctor` to see which CLIs it found.
+Pumice works end to end through Claude, Codex, Kimi and Kiro. Antigravity and the local OpenAI-compatible adapter are archived for now. You choose the providers in an explicit list in the YAML config — nothing is enabled by default, and there is no fallback: a failure returns the raw dictation. Run `pumice doctor` to see which CLIs it found.
 
 Pumice supports standalone downloads and the npm package `@brasillero/pumice` (installable with npm, pnpm, Bun or npx; the installed command is `pumice`). Check [GitHub Releases](https://github.com/brasillero/pumice/releases) and the [npm registry](https://www.npmjs.com/package/@brasillero/pumice) for published versions. See the [installation guide](docs/install.md) for installation, startup and Handy setup; building from source is also supported below.
 
@@ -34,7 +34,7 @@ cargo build --release --locked --bin pumice
 ./target/release/pumice                # starts the service (live view; use --plain for one-line stderr logs)
 ```
 
-In Handy: **Settings → Advanced → Experimental Features → Post Processing**, set the provider to **Custom**, base URL `http://127.0.0.1:7567/v1`, API key empty, model `claude` or `codex`. Choose `passthrough` to return the original transcript exactly, including whitespace and line breaks, without calling an AI. With Handy, only the text inside its `<transcript>` envelope is returned; its formatting prompt is omitted. Choose `inspect` to echo the full JSON request body that Pumice received, including Handy's attached prompt and every message and option; the result is pasted as JSON, which is useful for diagnostics, and it never calls an AI. See [`pumice.example.yaml`](pumice.example.yaml) for every configuration setting. On WSL, use `127.0.0.1`, not `localhost` (see [`docs/research/S0.5-wsl-localhost.md`](docs/research/S0.5-wsl-localhost.md)).
+In Handy: **Settings → Advanced → Experimental Features → Post Processing**, set the provider to **Custom**, base URL `http://127.0.0.1:7567/v1`, API key empty, model `claude`, `codex`, `kimi` or `kiro`. Choose `passthrough` to return the original transcript exactly, including whitespace and line breaks, without calling an AI. With Handy, only the text inside its `<transcript>` envelope is returned; its formatting prompt is omitted. Choose `inspect` to echo the full JSON request body that Pumice received, including Handy's attached prompt and every message and option; the result is pasted as JSON, which is useful for diagnostics, and it never calls an AI. See [`pumice.example.yaml`](pumice.example.yaml) for every configuration setting. On WSL, use `127.0.0.1`, not `localhost` (see [`docs/research/S0.5-wsl-localhost.md`](docs/research/S0.5-wsl-localhost.md)).
 
 - Product spec: [`docs/spec.md`](docs/spec.md)
 - Current plan and status: [`HANDOFF.md`](HANDOFF.md)
@@ -46,7 +46,8 @@ In Handy: **Settings → Advanced → Experimental Features → Post Processing*
 | --- | --- |
 | Local pass-through service (Claude, Codex, explicit provider list) | Implemented |
 | Kimi adapter, auto-detection | Implemented |
-| Kiro, Antigravity, generic loopback adapter | Archived; OpenCode support removed |
+| Kiro plugin | Implemented |
+| Antigravity, generic loopback adapter | Archived; OpenCode support removed |
 | Distribution: GitHub release archives + npm package | Released (v0.1.1); 0.2.0 after local testing |
 | `pumice setup` configuration wizard | Next |
 | Tauri installer, auto-update, start-with-the-system | Deferred |

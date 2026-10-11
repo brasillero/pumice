@@ -198,8 +198,8 @@ pub struct CliInvocation {
     pub control_files: Vec<ControlFile>,
     /// Files written inside the CLI's working directory before spawn.
     ///
-    /// This lets an adapter supply workspace-local configuration (for
-    /// example Kiro's `.kiro/agents/pumice.json`) without relocating the
+    /// This lets an adapter supply workspace-local configuration that its
+    /// CLI only reads from the working directory, without relocating the
     /// user's global profile. The directory is otherwise empty.
     pub workspace_files: Vec<ControlFile>,
     pub parser: OutputParser,

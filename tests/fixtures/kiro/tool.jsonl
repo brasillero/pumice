@@ -1,3 +1,8 @@
-{"sessionUpdate":"agent_message","messageId":"msg_1","content":[{"type":"text","text":"I'll run a tool."}]}
-{"sessionUpdate":"tool_call_update","toolCallId":"call_1","status":"pending"}
-{"sessionUpdate":"state_update","state":"idle","stopReason":"end_turn"}
+{"type":"runStarted","data":{"payloadSchema":"acp","acpProtocolVersion":1,"engine":"v2"}}
+{"type":"metadata","data":{"sessionId":"00000000-0000-4000-8000-000000000001","contextUsagePercentage":3.627000093460083,"reasoning":{"support":"unavailable","effortLevels":[]}}}
+{"type":"sessionUpdate","data":{"sessionId":"00000000-0000-4000-8000-000000000001","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Thinking about tools."}}}}
+{"type":"sessionUpdate","data":{"sessionId":"00000000-0000-4000-8000-000000000001","update":{"sessionUpdate":"tool_call","toolCallId":"tool-1","title":"Running: ls","kind":"execute","status":"pending","rawInput":{"command":"ls"}}}}
+{"type":"sessionUpdate","data":{"sessionId":"00000000-0000-4000-8000-000000000001","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool-1","status":"failed","content":[{"type":"content","content":{"type":"text","text":"Tool use was denied."}}]}}}
+{"type":"sessionUpdate","data":{"sessionId":"00000000-0000-4000-8000-000000000001","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Texto "}}}}
+{"type":"sessionUpdate","data":{"sessionId":"00000000-0000-4000-8000-000000000001","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"formatado."}}}}
+{"type":"runFinished","data":{"sessionId":"00000000-0000-4000-8000-000000000001","status":"success","stopReason":"end_turn","finalText":"Texto formatado.","finalTextTruncated":false}}

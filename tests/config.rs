@@ -849,7 +849,7 @@ fn example_config_loads() {
         .iter()
         .map(|entry| entry.id.as_str())
         .collect();
-    assert_eq!(ids, ["claude", "codex", "kimi"]);
+    assert_eq!(ids, ["claude", "codex", "kimi", "kiro"]);
 
     let claude = config.provider("claude").expect("claude is listed");
     assert!(claude.enabled);
@@ -858,7 +858,7 @@ fn example_config_loads() {
     assert!(claude.binary.is_none());
 
     // Every other entry ships disabled, with no model.
-    for id in ["codex", "kimi"] {
+    for id in ["codex", "kimi", "kiro"] {
         let settings = config
             .provider(id)
             .unwrap_or_else(|| panic!("{id} is listed"));
@@ -933,7 +933,7 @@ fn empty_binary_is_rejected_at_the_value() {
 
 #[test]
 fn model_starting_with_a_dash_is_rejected_at_the_value() {
-    for provider in ["claude", "codex", "kimi"] {
+    for provider in ["claude", "codex", "kimi", "kiro"] {
         let error = load_error(&format!(
             "providers:\n  - id: {provider}\n    enabled: true\n    model: -haiku\n"
         ));

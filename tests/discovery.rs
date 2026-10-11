@@ -131,11 +131,13 @@ async fn detection_covers_every_registered_provider_enabled_or_not() {
     let claude = FakeCli::new(json!({"stdout": "2.1.288 (Claude Code)"}));
     let codex = FakeCli::new(json!({"stdout": "codex-cli 0.160.0"}));
     let kimi = FakeCli::new(json!({"stdout": "2.1.1"}));
+    let kiro = FakeCli::new(json!({"stdout": "2.29.0"}));
     let config = load(&format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{0}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{1}'\n  - id: kimi\n    enabled: false\n    binary: '{2}'\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{0}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{1}'\n  - id: kimi\n    enabled: false\n    binary: '{2}'\n  - id: kiro\n    enabled: false\n    binary: '{3}'\n",
         claude.path().display(),
         codex.path().display(),
         kimi.path().display(),
+        kiro.path().display(),
     ));
     let statuses = discovery::detect(&config, providers::PROVIDERS, &ProcessRunner::new()).await;
 
@@ -152,6 +154,8 @@ async fn detection_covers_every_registered_provider_enabled_or_not() {
     // Disabled but still probed, so `doctor` can show it.
     assert!(!status("kimi").enabled);
     assert_eq!(status("kimi").version, Version::Parsed("2.1.1".into()));
+    assert!(!status("kiro").enabled);
+    assert_eq!(status("kiro").version, Version::Parsed("2.29.0".into()));
 }
 
 #[test]

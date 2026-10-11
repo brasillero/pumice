@@ -1196,12 +1196,14 @@ async fn start_missing_selected_server(
 ) -> MissingSelectedServer {
     let codex = FakeCli::new(codex_scenario);
     let kimi = FakeCli::new(json!({}));
+    let kiro = FakeCli::new(json!({}));
     let missing_dir = TempDir::new().expect("temp dir");
     let missing_binary = missing_dir.path().join("claude");
     let yaml = format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: kimi\n    enabled: false\n    binary: '{}'\n{yaml_tail}",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: kimi\n    enabled: false\n    binary: '{}'\n  - id: kiro\n    enabled: false\n    binary: '{}'\n{yaml_tail}",
         missing_binary.display(),
         kimi.path().display(),
+        kiro.path().display(),
     )
     .replace("{codex}", &codex.path().display().to_string());
     let config_dir = TempDir::new().expect("temp dir");
@@ -1381,13 +1383,19 @@ fn hermetic_serve_yaml(port: u16, claude_scenario: Value) -> (FakeCli, Vec<FakeC
         "port: {port}\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex_path}'\n",
         claude.path().display(),
     );
-    // A disabled provider, at its own fake so detection never searches PATH.
+    // Disabled providers, each at its own fake so detection never searches PATH.
     let kimi = FakeCli::new(json!({}));
     yaml.push_str(&format!(
         "  - id: kimi\n    enabled: false\n    binary: '{}'\n",
         kimi.path().display()
     ));
     fakes.push(kimi);
+    let kiro = FakeCli::new(json!({}));
+    yaml.push_str(&format!(
+        "  - id: kiro\n    enabled: false\n    binary: '{}'\n",
+        kiro.path().display()
+    ));
+    fakes.push(kiro);
     (claude, fakes, yaml)
 }
 

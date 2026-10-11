@@ -1,57 +1,47 @@
-//! Kiro adapter (`kiro-cli chat`).
+//! Kiro CLI plugin (`kiro-cli chat`).
 //!
-//! This adapter is **documentation-derived and unverified by runtime testing**:
-//! the owner has `kiro-cli` installed but it is not set up for use, so no real
-//! formatting call was made during implementation.
-//!
-//! Documented invocation (Kiro CLI headless mode, V3 engine):
+//! Verified against the installed 2.29.0 in S2.14 (real calls, see
+//! docs/research/S2.14-kiro-plugin.md). Headless mode on the pinned V2
+//! engine reads the user message from stdin and writes the run's ACP events
+//! as JSON Lines (`--output-format stream-json`):
 //!
 //! ```text
-//! kiro-cli chat --v3 --no-interactive --agent pumice-<random hex> --model <model> \
-//!     --output-format stream-json --trust-tools=
+//! {"type":"runStarted","data":{"payloadSchema":"acp","acpProtocolVersion":1,"engine":"v2"}}
+//! {"type":"metadata","data":{…}}
+//! {"type":"sessionUpdate","data":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"…"}}}}
+//! {"type":"runFinished","data":{"status":"success","stopReason":"end_turn","finalText":"…","finalTextTruncated":false}}
 //! ```
 //!
-//! The instruction is supplied through stdin (no positional argument), so the
-//! dictated text never reaches argv.
+//! A failed run ends with `{"type":"runError","data":{"stage":…,"message":…}}`
+//! and exit code 1.
 //!
-//! Tool lockdown uses the most restrictive documented mode:
+//! Kiro has no system-prompt flag. The client's system prompt goes into a
+//! one-off custom agent, `.kiro/agents/pumice.json`, written into the call's
+//! fresh working directory, the only place Kiro discovers a local agent (an
+//! owner-approved exception to the empty-workspace rule). A workspace agent
+//! wins over a global one with the same name. The agent has no tools, no MCP
+//! servers, no resources and no hooks, and `--trust-tools=` trusts none. The
+//! user's own Kiro login and settings are inherited; `~/.kiro` is never
+//! touched.
 //!
-//! * `--trust-tools=` (empty) trusts no individual tools.
-//! * No `--trust-all-tools`.
-//! * A workspace-local custom agent (`.kiro/agents/pumice-<random hex>.json`)
-//!   supplies the system prompt in its `prompt` field, exposes no tools
-//!   (`tools: []`), excludes the `knowledge` tool, disables MCP JSON / Powers
-//!   inclusion, and clears per-agent `mcpServers` and `hooks` so the user's
-//!   global MCP servers and hooks stay out of the call. The agent name is
-//!   unique per call so a user agent named `pumice` cannot collide with or
-//!   override the workspace-local file.
-//!
-//! The system prompt travels in the agent file's `prompt` field; the user
-//! message (the wrapped dictation) travels on stdin. The user's own Kiro
-//! profile (`~/.kiro`) is left untouched: the adapter does not set `KIRO_HOME`
-//! or read any credential or token file.
-//!
-//! Output parsing: `--output-format stream-json` emits ACP v2
-//! `session/update` events as JSON Lines. The parser collects
-//! `agent_message`/`agent_message_chunk` text, flags any
-//! `tool_call_update`/`tool_call_content_chunk` as unexpected tool activity,
-//! and waits for a final `state_update` with `state: idle` and
-//! `stopReason: end_turn` before accepting the result.
+//! Residual risks (recorded here and in the research note; Pumice prints no
+//! provider warnings): each run is saved in the user's own `~/.kiro/sessions`,
+//! with the dictated text; `runError` carries no structured cause, so login,
+//! quota and rate-limit failures are all `NonzeroExit`; a CLI that is not
+//! logged in starts a device-code login and waits, which ends in `Timeout`.
 
-use std::collections::hash_map::RandomState;
-use std::collections::{BTreeMap, HashMap};
-use std::hash::{BuildHasher, Hasher};
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::cli::{CliAdapter, CliProvider};
 use super::{
     FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode,
-    ProviderLocations, ProviderSettings,
+    ProviderSettings, validate_settings_noop,
 };
 use crate::config::ConfigError;
 use crate::process::{
@@ -60,44 +50,30 @@ use crate::process::{
 
 pub const ID: &str = "kiro";
 pub const DEFAULT_BINARY: &str = "kiro-cli";
+/// Provider default timeout (real calls took 2.4–5.3 s, S2.14).
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Counter mixed into every per-call agent name so two invocations made in
-/// the same nanosecond cannot collide.
-static AGENT_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// Name of the one-off agent, passed to `--agent`.
+pub const AGENT_NAME: &str = "pumice";
+/// The agent file inside the call's working directory.
+pub const AGENT_FILE: &str = ".kiro/agents/pumice.json";
 
-/// Returns a fresh agent name for each call: `pumice-<64-bit hex>`.
-///
-/// The name is derived from OS-random hash keys (`RandomState`), the process
-/// id, a per-call atomic counter and the current time. It is unique enough
-/// that no user-created global agent can plausibly share it, preventing the
-/// workspace-local agent file from being shadowed or merged with a global
-/// `~/.kiro/agents/pumice.json`.
-fn unique_agent_name() -> String {
-    let mut entropy = Vec::with_capacity(32);
-    entropy.extend_from_slice(&std::process::id().to_le_bytes());
-    entropy.extend_from_slice(&AGENT_COUNTER.fetch_add(1, Ordering::Relaxed).to_le_bytes());
-    entropy.extend_from_slice(
-        &SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-            .to_le_bytes(),
-    );
-    let mut hasher = RandomState::new().build_hasher();
-    hasher.write(&entropy);
-    format!("pumice-{:016x}", hasher.finish())
-}
+/// The line a CLI that is not logged in prints to stdout when it starts a
+/// device-code login (verified with an empty scratch `HOME`, S2.14).
+const DEVICE_LOGIN_PROMPT: &str = "Confirm the following code in the browser";
 
-// Residual risk (recorded here; not printed, owner decision 2026-10-07):
-// Enabling requires an explicit model; the invocation, output parser and
-// tool-lockdown recipe are derived from documentation only.
+/// Plugin-owned child environment: no telemetry (AGENTS.md) and no update
+/// checks from runs Pumice starts. Both names are read by the 2.29.0 binary.
+const CHILD_ENV: [(&str, &str); 2] = [
+    ("KIRO_DISABLE_TELEMETRY", "1"),
+    ("KIRO_NO_AUTO_UPDATE", "1"),
+];
 
 pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: ID,
     defaults,
     build,
-    validate_settings,
+    validate_settings: validate_settings_noop,
     probe: ProbeSpec::Version(&["--version"]),
     default_binary: DEFAULT_BINARY,
     npm_entrypoint: None,
@@ -108,47 +84,17 @@ fn defaults() -> ProviderSettings {
     ProviderSettings {
         enabled: false,
         binary: None,
+        // The configuration file sets the model on every enabled entry;
+        // nothing is built in.
         model: String::new(),
         timeout: DEFAULT_TIMEOUT,
     }
-}
-
-fn validate_settings(
-    settings: &ProviderSettings,
-    locations: &ProviderLocations,
-) -> Result<(), ConfigError> {
-    if !settings.enabled {
-        return Ok(());
-    }
-    if settings.model.is_empty() {
-        return Err(ConfigError::at(
-            locations.enabled.unwrap_or(serde_saphyr::Location::UNKNOWN),
-            format!("providers.{ID}.model is required when the provider is enabled"),
-        ));
-    }
-    if !is_valid_model(&settings.model) {
-        return Err(ConfigError::at(
-            locations.model.unwrap_or(serde_saphyr::Location::UNKNOWN),
-            format!(
-                "providers.{ID}.model must be a nonempty token without whitespace, control characters or a leading '-'"
-            ),
-        ));
-    }
-    Ok(())
-}
-
-fn is_valid_model(model: &str) -> bool {
-    if model.is_empty() || model.starts_with('-') {
-        return false;
-    }
-    model.chars().all(|c| !c.is_whitespace() && !c.is_control())
 }
 
 fn build(
     settings: &ProviderSettings,
     runner: Arc<ProcessRunner>,
 ) -> Result<Arc<dyn Provider>, ConfigError> {
-    validate_settings(settings, &ProviderLocations::default())?;
     let binary = settings
         .binary
         .clone()
@@ -160,6 +106,7 @@ fn build(
     )))
 }
 
+/// Builds restricted `kiro-cli chat` calls.
 #[derive(Clone, Debug)]
 pub struct KiroAdapter {
     binary: PathBuf,
@@ -167,6 +114,8 @@ pub struct KiroAdapter {
 }
 
 impl KiroAdapter {
+    /// `binary` is a command name looked up on PATH (normally `kiro-cli`) or
+    /// a path to the official CLI.
     pub fn new(binary: PathBuf, model: String) -> KiroAdapter {
         KiroAdapter { binary, model }
     }
@@ -178,260 +127,188 @@ impl CliAdapter for KiroAdapter {
     }
 
     fn invocation(&self, input: FormatInput<'_>) -> Result<CliInvocation, ProviderError> {
-        if !is_valid_model(&self.model) {
+        // A model that looks like a flag would change the command's meaning.
+        if self.model.is_empty() || self.model.starts_with('-') {
+            return Err(ProviderError::other(ProviderErrorCode::InvalidConfiguration));
+        }
+        // Kiro reads a `file://` agent prompt from disk; passing one through
+        // would make the CLI load a local file chosen by the request.
+        if is_file_uri(input.system_prompt) {
             return Err(ProviderError::other(
-                ProviderErrorCode::InvalidConfiguration,
+                ProviderErrorCode::UnsupportedSystemPrompt,
             ));
         }
 
-        let agent_name = unique_agent_name();
-        let agent_path = format!(".kiro/agents/{agent_name}.json");
-
-        let mut args: Vec<Argument> = ["chat", "--v3", "--no-interactive", "--agent"]
-            .into_iter()
-            .map(Argument::literal)
-            .collect();
-        args.push(Argument::literal(agent_name.as_str()));
-        args.push(Argument::literal("--model"));
+        let mut args: Vec<Argument> = [
+            "chat",
+            // Pinned: the CLI's default engine may change (V2 is "the
+            // pre-3.0 default").
+            "--agent-engine",
+            "v2",
+            "--no-interactive",
+            "--output-format",
+            "stream-json",
+            // Trust no tools: an untrusted call is denied in headless mode.
+            "--trust-tools=",
+            "--agent",
+            AGENT_NAME,
+            "--model",
+        ]
+        .into_iter()
+        .map(Argument::literal)
+        .collect();
         args.push(Argument::literal(&self.model));
-        args.push(Argument::literal("--output-format"));
-        args.push(Argument::literal("stream-json"));
-        args.push(Argument::literal("--trust-tools="));
+        // Cheapest settings (owner rule): the lowest level every reasoning
+        // model accepts. Models without levels warn on stderr and run.
+        args.push(Argument::literal("--effort"));
+        args.push(Argument::literal("low"));
 
         let user = input.user_prompt;
         let stdin = [user.before_text, input.text, user.after_text].concat();
 
+        let env: BTreeMap<OsString, OsString> = CHILD_ENV
+            .iter()
+            .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+            .collect();
+
         Ok(CliInvocation {
             program: ProgramSpec {
                 binary: self.binary.clone(),
+                // Native binary install; no npm launcher exists to translate.
                 npm_entrypoint: None,
             },
             args,
+            // With no positional argument, headless mode reads the whole of
+            // stdin as the instruction.
             stdin: stdin.into_bytes(),
-            env: BTreeMap::new(),
+            env,
             remove_env: Vec::new(),
             control_files: Vec::new(),
             workspace_files: vec![ControlFile {
-                name: agent_path,
-                contents: agent_config(input.system_prompt, &agent_name).into_bytes(),
+                name: AGENT_FILE.to_owned(),
+                contents: agent_file(input.system_prompt).into_bytes(),
             }],
             parser: parse_output,
         })
     }
 }
 
-/// Workspace-local custom agent configuration that carries the system prompt
-/// and denies tools.
-fn agent_config(system_prompt: &str, agent_name: &str) -> String {
-    serde_json::json!({
-        "name": agent_name,
-        "description": "Formats dictation without taking actions.",
-        "tools": [],
-        "excludedTools": ["knowledge"],
-        "includeMcpJson": false,
-        "includePowers": false,
-        "mcpServers": {},
-        "hooks": {},
+/// The one-off agent: the client's system prompt verbatim (empty when it
+/// sent none), no tools, no pre-approved tools, no MCP servers (its own or
+/// from `mcp.json`), no resources and no hooks.
+pub fn agent_file(system_prompt: &str) -> String {
+    json!({
+        "name": AGENT_NAME,
+        "description": "Answers one message without tools.",
         "prompt": system_prompt,
+        "tools": [],
+        "allowedTools": [],
+        "mcpServers": {},
+        "includeMcpJson": false,
+        "resources": [],
+        "hooks": {},
     })
     .to_string()
 }
 
-/// Parses the ACP v2 `stream-json` event stream.
+/// True when Kiro could read `prompt` as a `file://` URI instead of text.
+/// Leading whitespace and letter case are ignored to stay on the safe side.
+fn is_file_uri(prompt: &str) -> bool {
+    prompt
+        .trim_start()
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
+}
+
+/// Where a V2 run is, as its events arrive.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunState {
+    NotStarted,
+    Running,
+    Finished { success: bool },
+}
+
+/// Parses Kiro's V2 `--output-format stream-json` events (one JSON object
+/// per line, `{"type": …, "data": …}`).
 ///
-/// Success requires exit code 0, at least one `agent_message` or
-/// `agent_message_chunk` carrying text, and a final `state_update` with
-/// `state: idle` / `stopReason: end_turn` as the last state: text or any
-/// other state that arrives after it means the turn did not end cleanly. Any `tool_call_update` or
-/// `tool_call_content_chunk` is rejected as unexpected tool activity.
+/// A run is exactly one `runStarted` (ACP payload, V2 engine) first, then
+/// its events, then exactly one `runFinished` last. The answer is the
+/// concatenation of the `agent_message_chunk` texts inside the run; it equals
+/// `runFinished.finalText`, which is not used because it can be truncated.
+/// Every other session update (thoughts, tool calls) and every other event
+/// type inside the run (`metadata`, future types) carries no answer text and
+/// is ignored: Pumice does not police tool use in the output (owner decision
+/// 2026-10-08); the agent file switches tools off instead.
+///
+/// A `runError` (anywhere) or a nonzero exit is `NonzeroExit`: Kiro's errors
+/// carry only a free-text message, which is not matched. Any other event
+/// before `runStarted` or after `runFinished`, a second start or finish, a
+/// finish whose status is not `success`, or no answer text is invalid output.
+/// A line that is not JSON is invalid output, except the device-code login
+/// prompt, which means the CLI is not logged in.
 pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
+    let invalid = || ProviderError::other(ProviderErrorCode::InvalidOutput);
     let stdout = super::cli::stdout_text(output)?;
 
+    let mut state = RunState::NotStarted;
+    let mut run_error = false;
     let mut texts: Vec<String> = Vec::new();
-    let mut text_indexes: HashMap<String, usize> = HashMap::new();
-    let mut saw_end_turn = false;
-    let mut tool_activity = false;
-    let mut not_logged_in = false;
-    let mut stop_error = false;
 
     for line in stdout.lines() {
-        if line.is_empty() {
+        if line.trim().is_empty() {
             continue;
         }
         let Ok(event) = serde_json::from_str::<Value>(line) else {
-            return Err(ProviderError::other(ProviderErrorCode::InvalidOutput));
+            if line.trim() == DEVICE_LOGIN_PROMPT {
+                return Err(ProviderError::NotLoggedIn);
+            }
+            return Err(invalid());
         };
-
-        // The CLI may emit either the raw `params.update` object or the full
-        // JSON-RPC notification wrapper.
-        let update = if event.get("sessionUpdate").is_some() {
-            &event
-        } else if let Some(update) = event.pointer("/params/update") {
-            update
-        } else {
-            return Err(ProviderError::other(ProviderErrorCode::InvalidOutput));
+        let data = event.get("data");
+        let field = |name: &str| {
+            data.and_then(|data| data.get(name))
+                .and_then(Value::as_str)
         };
-
-        let Some(session_update) = update.get("sessionUpdate").and_then(Value::as_str) else {
-            return Err(ProviderError::other(ProviderErrorCode::InvalidOutput));
-        };
-
-        match session_update {
-            "agent_message" => {
-                saw_end_turn = false;
-                let text = text_from_content(update.get("content"))?;
-                // Like a chunk, a message without an id cannot be updated
-                // later and is kept once.
-                match update.get("messageId").and_then(Value::as_str) {
-                    Some(message_id) if !message_id.is_empty() => {
-                        upsert_text(message_id, text, &mut texts, &mut text_indexes);
+        match (event.get("type").and_then(Value::as_str), state) {
+            // A failure can be reported at any point of the run.
+            (Some("runError"), _) => run_error = true,
+            (Some("runStarted"), RunState::NotStarted) => {
+                if field("payloadSchema") != Some("acp") || field("engine") != Some("v2") {
+                    return Err(invalid());
+                }
+                state = RunState::Running;
+            }
+            (Some("sessionUpdate"), RunState::Running) => {
+                let update = data.and_then(|data| data.get("update")).ok_or_else(invalid)?;
+                if update.get("sessionUpdate").and_then(Value::as_str)
+                    == Some("agent_message_chunk")
+                {
+                    let content = update.get("content").ok_or_else(invalid)?;
+                    if content.get("type").and_then(Value::as_str) != Some("text") {
+                        return Err(invalid());
                     }
-                    _ => texts.push(text),
+                    let text = content.get("text").and_then(Value::as_str).ok_or_else(invalid)?;
+                    texts.push(text.to_owned());
                 }
             }
-            "agent_message_chunk" => {
-                saw_end_turn = false;
-                let message_id = update
-                    .get("messageId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned();
-                let text = text_from_chunk(update.get("content"))?;
-                if message_id.is_empty() {
-                    texts.push(text);
-                } else {
-                    append_text(&message_id, text, &mut texts, &mut text_indexes);
-                }
+            (Some("runFinished"), RunState::Running) => {
+                state = RunState::Finished {
+                    success: field("status") == Some("success"),
+                };
             }
-            "tool_call_update" | "tool_call_content_chunk" => {
-                tool_activity = true;
-            }
-            "state_update" => {
-                // Only the last state counts: any later state (running,
-                // requires_action, another idle) reopens the turn.
-                saw_end_turn = false;
-                if update.get("state").and_then(Value::as_str) != Some("idle") {
-                    continue;
-                }
-                match update.get("stopReason").and_then(Value::as_str) {
-                    Some("end_turn") => saw_end_turn = true,
-                    Some("error") => {
-                        stop_error = true;
-                        if is_auth_error(update.get("error")) {
-                            not_logged_in = true;
-                        }
-                    }
-                    Some(_) | None => {}
-                }
-            }
-            _ => {}
+            (Some("runStarted" | "sessionUpdate" | "runFinished"), _) => return Err(invalid()),
+            (Some(_), RunState::Running) => {}
+            _ => return Err(invalid()),
         }
     }
 
-    if tool_activity {
-        return Err(ProviderError::other(
-            ProviderErrorCode::UnexpectedToolActivity,
-        ));
-    }
-    if not_logged_in {
-        return Err(ProviderError::NotLoggedIn);
-    }
-    if stop_error {
+    if run_error || !output.status.success() {
         return Err(ProviderError::other(ProviderErrorCode::NonzeroExit));
     }
-    if !output.status.success() {
-        return Err(ProviderError::other(ProviderErrorCode::NonzeroExit));
-    }
-    if !saw_end_turn || texts.is_empty() {
-        return Err(ProviderError::other(ProviderErrorCode::InvalidOutput));
+    if state != (RunState::Finished { success: true }) || texts.is_empty() {
+        return Err(invalid());
     }
     Ok(texts.concat())
-}
-
-fn text_from_content(content: Option<&Value>) -> Result<String, ProviderError> {
-    let Some(content) = content else {
-        return Ok(String::new());
-    };
-    if let Some(array) = content.as_array() {
-        let mut text = String::new();
-        for block in array {
-            if block.get("type").and_then(Value::as_str) == Some("text") {
-                let Some(part) = block.get("text").and_then(Value::as_str) else {
-                    return Err(ProviderError::other(ProviderErrorCode::InvalidOutput));
-                };
-                text.push_str(part);
-            }
-        }
-        Ok(text)
-    } else if content.get("type").and_then(Value::as_str) == Some("text") {
-        content
-            .get("text")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| ProviderError::other(ProviderErrorCode::InvalidOutput))
-    } else {
-        Ok(String::new())
-    }
-}
-
-fn text_from_chunk(content: Option<&Value>) -> Result<String, ProviderError> {
-    let Some(content) = content else {
-        return Ok(String::new());
-    };
-    if content.get("type").and_then(Value::as_str) == Some("text") {
-        content
-            .get("text")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| ProviderError::other(ProviderErrorCode::InvalidOutput))
-    } else {
-        Ok(String::new())
-    }
-}
-
-fn upsert_text(
-    id: &str,
-    text: String,
-    texts: &mut Vec<String>,
-    indexes: &mut HashMap<String, usize>,
-) {
-    match indexes.get(id) {
-        Some(&index) => texts[index] = text,
-        None => {
-            indexes.insert(id.to_owned(), texts.len());
-            texts.push(text);
-        }
-    }
-}
-
-fn append_text(
-    id: &str,
-    text: String,
-    texts: &mut Vec<String>,
-    indexes: &mut HashMap<String, usize>,
-) {
-    match indexes.get(id) {
-        Some(&index) => texts[index].push_str(&text),
-        None => {
-            indexes.insert(id.to_owned(), texts.len());
-            texts.push(text);
-        }
-    }
-}
-
-fn is_auth_error(error: Option<&Value>) -> bool {
-    let Some(error) = error else {
-        return false;
-    };
-    if error.get("code").and_then(Value::as_i64) == Some(-32000) {
-        return true;
-    }
-    if let Some(message) = error.get("message").and_then(Value::as_str)
-        && message.to_lowercase().contains("authentication")
-    {
-        return true;
-    }
-    false
 }
 
 #[cfg(test)]
@@ -439,170 +316,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validates_models() {
-        for good in ["claude-sonnet-4.6", "amazon.nova-pro-v1:0"] {
-            assert!(is_valid_model(good), "model: {good:?}");
-        }
-        for bad in [
-            "",
-            "-model",
-            "bad model",
-            "bad\tmodel",
-            "bad\nmodel",
-            "\u{7f}",
+    fn file_uri_prompts_are_detected() {
+        for uri in [
+            "file:///etc/hostname",
+            "file://prompt.md",
+            "  FILE:///x",
+            "\nFile:relative",
         ] {
-            assert!(!is_valid_model(bad), "model: {bad:?}");
+            assert!(is_file_uri(uri), "{uri:?}");
+        }
+        for text in ["", "file", "You format speech. file:///x", "files: none", "é"] {
+            assert!(!is_file_uri(text), "{text:?}");
         }
     }
 
     #[test]
-    fn settings_require_model_when_enabled() {
-        let disabled = ProviderSettings {
-            enabled: false,
-            ..defaults()
-        };
-        assert!(validate_settings(&disabled, &ProviderLocations::default()).is_ok());
-
-        let enabled_no_model = ProviderSettings {
-            enabled: true,
-            ..defaults()
-        };
-        let err = validate_settings(&enabled_no_model, &ProviderLocations::default()).unwrap_err();
-        assert!(err.to_string().contains("providers.kiro.model is required"));
-
-        let enabled_bad_model = ProviderSettings {
-            enabled: true,
-            model: "bad model".to_owned(),
-            ..defaults()
-        };
-        let err = validate_settings(&enabled_bad_model, &ProviderLocations::default()).unwrap_err();
-        assert!(err.to_string().contains("providers.kiro.model must be"));
-    }
-
-    #[test]
-    fn agent_config_carries_prompt_and_empty_tools() {
-        let config: Value =
-            serde_json::from_str(&agent_config("the prompt", "pumice-abc123")).unwrap();
-        assert_eq!(config["name"], Value::from("pumice-abc123"));
-        assert_eq!(config["prompt"], Value::from("the prompt"));
-        assert_eq!(config["tools"], Value::Array(Vec::new()));
-        assert_eq!(config["excludedTools"], Value::from(vec!["knowledge"]));
-        assert_eq!(config["includeMcpJson"], Value::from(false));
-        assert_eq!(config["includePowers"], Value::from(false));
-        assert_eq!(config["mcpServers"], serde_json::json!({}));
-        assert_eq!(config["hooks"], serde_json::json!({}));
-    }
-
-    fn output_with(stdout: &str, exit_code: i32) -> ProcessOutput {
-        use std::process::ExitStatus;
-
-        #[cfg(unix)]
-        fn status_from_code(code: i32) -> ExitStatus {
-            use std::os::unix::process::ExitStatusExt;
-            ExitStatus::from_raw(code)
-        }
-        #[cfg(windows)]
-        fn status_from_code(code: i32) -> ExitStatus {
-            use std::os::windows::process::ExitStatusExt;
-            ExitStatus::from_raw(code as u32)
-        }
-
-        ProcessOutput {
-            status: status_from_code(exit_code),
-            stdout: stdout.as_bytes().to_vec(),
-            stderr_tail: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn parser_returns_agent_message_text() {
-        let stdout = concat!(
-            r#"{"sessionUpdate":"state_update","state":"running"}"#,
-            "\n",
-            r#"{"sessionUpdate":"agent_message","messageId":"m1","content":[{"type":"text","text":"Hello, world."}]}"#,
-            "\n",
-            r#"{"sessionUpdate":"state_update","state":"idle","stopReason":"end_turn"}"#,
-            "\n",
-        );
+    fn agent_file_carries_the_prompt_and_no_tools() {
+        let file: Value = serde_json::from_str(&agent_file("Formate. Coração 🎤 \"q\"")).unwrap();
         assert_eq!(
-            parse_output(&output_with(stdout, 0)).unwrap(),
-            "Hello, world."
-        );
-    }
-
-    #[test]
-    fn parser_collects_chunks() {
-        let stdout = concat!(
-            r#"{"sessionUpdate":"agent_message_chunk","messageId":"m1","content":{"type":"text","text":"One "}}"#,
-            "\n",
-            r#"{"sessionUpdate":"agent_message_chunk","messageId":"m1","content":{"type":"text","text":"two."}}"#,
-            "\n",
-            r#"{"sessionUpdate":"state_update","state":"idle","stopReason":"end_turn"}"#,
-            "\n",
-        );
-        assert_eq!(parse_output(&output_with(stdout, 0)).unwrap(), "One two.");
-    }
-
-    #[test]
-    fn parser_accepts_json_rpc_wrapped_events() {
-        let stdout = concat!(
-            r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message","messageId":"m1","content":[{"type":"text","text":"Wrapped"}]}}}"#,
-            "\n",
-            r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"state_update","state":"idle","stopReason":"end_turn"}}}"#,
-            "\n",
-        );
-        assert_eq!(parse_output(&output_with(stdout, 0)).unwrap(), "Wrapped");
-    }
-
-    #[test]
-    fn parser_rejects_tool_activity() {
-        let stdout = concat!(
-            r#"{"sessionUpdate":"agent_message","messageId":"m1","content":[{"type":"text","text":"I'll run a tool."}]}"#,
-            "\n",
-            r#"{"sessionUpdate":"tool_call_update","toolCallId":"c1","status":"pending"}"#,
-            "\n",
-            r#"{"sessionUpdate":"state_update","state":"idle","stopReason":"end_turn"}"#,
-            "\n",
-        );
-        assert_eq!(
-            parse_output(&output_with(stdout, 0)).unwrap_err(),
-            ProviderError::other(ProviderErrorCode::UnexpectedToolActivity)
-        );
-    }
-
-    #[test]
-    fn parser_classifies_authentication_error() {
-        let stdout = concat!(
-            r#"{"sessionUpdate":"state_update","state":"idle","stopReason":"error","error":{"code":-32000,"message":"Authentication required"}}"#,
-            "\n",
-        );
-        assert_eq!(
-            parse_output(&output_with(stdout, 1)).unwrap_err(),
-            ProviderError::NotLoggedIn
-        );
-    }
-
-    #[test]
-    fn parser_rejects_missing_end_turn() {
-        let stdout = concat!(
-            r#"{"sessionUpdate":"agent_message","messageId":"m1","content":[{"type":"text","text":"No finish."}]}"#,
-            "\n",
-        );
-        assert_eq!(
-            parse_output(&output_with(stdout, 0)).unwrap_err(),
-            ProviderError::other(ProviderErrorCode::InvalidOutput)
-        );
-    }
-
-    #[test]
-    fn parser_rejects_nonzero_exit_without_idle() {
-        let stdout = concat!(
-            r#"{"sessionUpdate":"agent_message","messageId":"m1","content":[{"type":"text","text":"Partial."}]}"#,
-            "\n",
-        );
-        assert_eq!(
-            parse_output(&output_with(stdout, 1)).unwrap_err(),
-            ProviderError::other(ProviderErrorCode::NonzeroExit)
+            file,
+            json!({
+                "name": "pumice",
+                "description": "Answers one message without tools.",
+                "prompt": "Formate. Coração 🎤 \"q\"",
+                "tools": [],
+                "allowedTools": [],
+                "mcpServers": {},
+                "includeMcpJson": false,
+                "resources": [],
+                "hooks": {},
+            })
         );
     }
 }
