@@ -1,9 +1,11 @@
 # Installing Pumice
 
-Pumice is a local dictation-formatting service. It listens on
-`http://127.0.0.1:7567/v1`, receives text transcribed by
-[Handy](https://github.com/cjpais/Handy), formats it with an AI CLI you
-already have installed and logged into, and returns the result to be pasted.
+Pumice is a small local tool that connects your dictation app to the AI
+assistants you already use. It listens on `http://127.0.0.1:7567/v1`,
+receives the prompt and the text transcribed by
+[Handy](https://github.com/cjpais/Handy), passes them unchanged to an AI CLI
+you already have installed and logged into, and returns the answer to be
+pasted. The app's prompt decides what happens to the text.
 
 > **Availability:** check
 > [GitHub Releases](https://github.com/brasillero/pumice/releases) for the

@@ -20,7 +20,7 @@ use pumice::process::ProcessRunner;
 use pumice::providers;
 
 const USAGE: &str = "\
-pumice - local dictation formatting service
+pumice - connects dictation apps to the AI assistants you already use
 
 usage:
   pumice [--config <path>] [--plain]       run the local service on 127.0.0.1 (default)

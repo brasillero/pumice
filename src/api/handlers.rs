@@ -1,5 +1,5 @@
-//! Handlers for the chat-completions, model-list and health routes, plus the
-//! OpenAI-style fallback for everything else.
+//! Handlers for the chat-completions, model-list, health and landing-page
+//! routes, plus the OpenAI-style fallback for everything else.
 //!
 //! Dictated text flows through [`chat_completions`] but never into the
 //! ordinary log: only the outcome metadata line is written. The opt-in debug
@@ -17,7 +17,7 @@ use axum::Json;
 use axum::body::{Body, HttpBody};
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use tokio::time::Instant;
 
 use crate::logging::DebugRecord;
@@ -477,7 +477,30 @@ pub async fn health() -> Json<HealthBody> {
     })
 }
 
-/// OpenAI-style JSON 404 for anything outside the three routes, so generic
+/// Static HTML landing page for GET /. No version, no route list, no request
+/// data, no scripts and no external resources: a minimal page for browsers and
+/// web-filter reviewers.
+const LANDING_PAGE: &str = "<!doctype html>\n\
+<html lang=\"en\">\n\
+<head>\n\
+<meta charset=\"utf-8\">\n\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+<title>Pumice</title>\n\
+<style>body{font-family:system-ui,sans-serif;max-width:36rem;margin:4rem auto;padding:0 1rem;line-height:1.5;color:#222}</style>\n\
+</head>\n\
+<body>\n\
+<h1>Pumice</h1>\n\
+<p>An open-source tool that connects dictation apps to the AI assistants you already use.</p>\n\
+<p>Source code: <a href=\"https://github.com/brasillero/pumice\">github.com/brasillero/pumice</a></p>\n\
+</body>\n\
+</html>";
+
+/// GET /: a tiny static HTML page. Never touches the pipeline or state.
+pub async fn landing_page() -> Html<&'static str> {
+    Html(LANDING_PAGE)
+}
+
+/// OpenAI-style JSON 404 for anything outside the four routes, so generic
 /// clients receive an envelope they already know how to read.
 pub async fn not_found() -> Response {
     openai_error(

@@ -2,7 +2,7 @@
 name = "pumice"
 version = "0.1.1"
 edition = "2024"
-description = "Local dictation formatting service"
+description = "Connects dictation apps to the AI assistants you already use"
 license = "MIT"
 default-run = "pumice"
 
