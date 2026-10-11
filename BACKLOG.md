@@ -30,6 +30,7 @@ Last updated: 2026-10-11.
 | Wispr prompt | The owner's v3 Wispr prompt lives only in Handy. Decide where an example belongs (a `docs/prompts/` file, the example config, or both). | Owner, 2026-10-07 |
 | Dictation samples (S8.1) | 10–20 real dictation samples as fixtures for prompt and cleanup tests. | Spec S8.1 |
 | Lowest effort per model | Every plugin should send each model the lowest effort it offers, and `none` when the model supports no effort setting, instead of one fixed `low` for all models (Kiro and Codex send `low` today; GPT-5.6 models in Kiro also accept `none`). Needs a source of per-model effort levels. | Owner, 2026-10-11 |
+| Model table per provider | A table of the model ids ("tags") each provider accepts, for example Claude `haiku`, Kiro `claude-haiku-4.5`, so users know what to put in `model:`. Either maintained by us, or not needed once Pumice's own CLI (the planned `pumice setup` wizard) can list the models from each provider's CLI (`kiro-cli chat --list-models`, `kimi provider list`, …). Could also carry the per-model effort levels for **Lowest effort per model**. | Owner, 2026-10-11 |
 | Contract suite coverage | Kimi and generic are tested outside the shared `adapter_contract!` macro (Kimi's argv transport differs). | Audit 2026-10-07 |
 
 ## Known limitations
