@@ -1,9 +1,9 @@
 # Pumice configuration example.
 #
-# Pumice is a local proxy: a dictation app (Handy, OpenWhispr, …) sends its
-# own prompt and the transcript to Pumice's OpenAI-compatible endpoint, and
-# Pumice hands the request to the official CLI of a subscription you are
-# logged into. Each CLI keeps its own configuration (login, gateway,
+# Pumice is a small local tool: a dictation app (Handy, OpenWhispr, …) sends
+# its own prompt and the transcript to Pumice's OpenAI-compatible address,
+# and Pumice passes the request to the official CLI of a subscription you
+# are logged into. Each CLI keeps its own configuration (login, gateway,
 # routing); Pumice inherits it and adds none of its own.
 #
 # Pumice assumes nothing: no provider is enabled by default and no model is

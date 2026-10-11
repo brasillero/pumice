@@ -2,7 +2,7 @@
 
 Polish your dictation with the AI subscriptions you already have.
 
-Pumice is a small local service that sits between a dictation app and the AI coding CLIs you already pay for. The app sends its own prompt and the text transcribed by Whisper; Pumice hands that request, unchanged, to the official CLI of a subscription you are logged into and returns the answer ready to paste. Formatting, translating or anything else is decided by the app's prompt. No separately billed API keys required.
+Pumice is a small open-source tool that runs on your computer and connects your dictation app to the AI assistants you already pay for (Claude, Codex, Kimi or Kiro), using their official command-line apps. The dictation app sends its own prompt and the text transcribed by Whisper; Pumice passes them, unchanged, to the assistant you chose and returns the answer ready to paste. Formatting, translating or anything else is decided by the app's prompt. No separately billed API keys required.
 
 ```
 Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude / Codex / Kimi / Kiro CLI

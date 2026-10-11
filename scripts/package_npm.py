@@ -99,8 +99,9 @@ def front_manifest(version: str) -> dict:
         **_repo_fields(),
         "description": (
             "Polish your dictation with the AI subscriptions you already "
-            "have. Local service that lightly formats text dictated through "
-            "Handy using the AI coding CLIs you already pay for."
+            "have. A small local tool that connects dictation apps such as "
+            "Handy to the AI assistants you already pay for, through their "
+            "official command-line apps."
         ),
         "license": "MIT",
         "type": "commonjs",
