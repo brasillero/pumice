@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **Live request view (S4.6).** When `pumice` runs in a terminal it shows an interactive view of each completion request's lifecycle with timing, provider/model metadata, filter, search and details. `--plain` keeps the old one-line-per-request stderr output. Dictated text and replies only appear in the view when the debug log is enabled.
 - **Live view: full-screen request details with Summary, Received, Parsed and Sent tabs, and an app column (S4.7).** `Enter` opens a request's details full screen, `Tab`/`1`–`4` switch tabs, `?` shows every key, and the bottom line shows the keys of the current screen. Received shows the request as it arrived (credential headers masked), Parsed the system prompt and the parts before, in and after the input, Sent the exact response; all three only with the debug log on. The app column shows the client's `X-Title` header (Handy sends one).
+- **Kiro plugin (S2.14).** `id: kiro` runs `kiro-cli` headless with no tools trusted and `--effort low`; the dictation goes in on stdin, and the app's system prompt goes into a one-off no-tools agent file in the call's temporary directory (Kiro has no system-prompt flag). A system prompt starting with `file:` is refused, because Kiro would read it as a file reference. Your `~/.kiro` login and settings are used but never changed.
 - **Parallel requests.** Up to `max_parallel` requests (default 4, at most 32) run at the same time; extra requests wait in line instead of getting an immediate busy error, and one still waiting when its time budget runs out gets HTTP 503.
 
 ### Changed
@@ -20,11 +21,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Claude, Codex and Kimi no longer reject a reply because the CLI's output shows tool activity: each plugin returns the final answer, and tools stay switched off in the invocation (owner decision).
 - **Provider `env:` and `options:` are removed.** Each CLI keeps its own configuration (gateway, routing, login) and Pumice inherits it: set Claude's `ANTHROPIC_BASE_URL` in `~/.claude/settings.json` and Codex's `openai_base_url` in `~/.codex/config.toml`. A file that still has `env:` or `options:` fails at that line. The generic local-server adapter, whose only setting was `options.base_url`, can no longer be built from a config until it returns.
 - **The `prompts:` section is removed.** The app that sends the dictation (Handy, OpenWhispr) sends its own prompt; Pumice adds none from the config. A file that still has `prompts:` fails at that line with a message saying so.
-- **Kiro, Antigravity and the generic local-server adapter are archived** until the plugin architecture settles: their code stays, but they are no longer registered, so listing one in the config fails with a message saying so, and `doctor` and `/v1/models` show only Claude, Codex and Kimi.
+- **Antigravity and the generic local-server adapter are archived** until the plugin architecture settles: their code stays, but they are no longer registered, so listing one in the config fails with a message saying so, and `doctor` and `/v1/models` no longer show them.
 - **OpenCode support is removed.** A config entry `id: opencode` now fails with a message saying so; delete the entry.
-- Cleanup is minimal: Pumice keeps the model's reply as is apart from removing a `<think>…</think>` block at the start and trimming outer whitespace. Preamble lines, wrapping quotes and code fences are no longer removed; the prompt is where formatting is controlled (owner decision, deviates from spec S3.4). Cleanup looks only at the reply, never at the dictation, and an opening `<think>` tag that never closes is kept as text. An empty reply fails the request, and the log says why (`the provider returned an empty reply`).
+- Cleanup is minimal: Pumice keeps the model's reply as is apart from removing closed `<think>…</think>` or `<thinking>…</thinking>` blocks at the start and trimming outer whitespace. Preamble lines, wrapping quotes and code fences are no longer removed; the prompt is where formatting is controlled (owner decision, deviates from spec S3.4). Cleanup looks only at the reply, never at the dictation, and an opening `<think>` tag that never closes is kept as text. An empty reply fails the request, and the log says why (`the provider returned an empty reply`).
 - Provider risk warnings are no longer printed at startup, in `check-config` or in `doctor`: every enabled provider is treated the same way (owner decision). The residual-risk notes stay in each adapter's source and research notes.
-- **Configuration format changed in 0.2.** Pumice assumes nothing anymore: no provider is enabled by default, no model is built in, and there is no fallback chain — a request runs exactly one provider and any failure returns the original text. `providers:` is now an explicit ordered list, and the client's `model` field picks the provider: a request without a model returns the original text:
+- **Configuration format changed in 0.2.** Pumice assumes nothing anymore: no provider is enabled by default, no model is built in, and there is no fallback chain: a request runs exactly one provider. `providers:` is now an explicit ordered list, and the client's `model` field picks the provider; a request without a model, like any failure, gets an HTTP error:
   ```yaml
   # before
   default_provider: claude
@@ -50,22 +51,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The temporary directory and control files of each CLI call are private (0700/0600) whatever the umask (#56).
 - A whitespace-only dictation returns the original text byte for byte instead of an empty string. A request without a valid model still logs that reason.
 - Windows line endings (`\r\n`) around the transcript are stripped like `\n`.
-- Every completion request writes exactly one log entry: HTTP errors are logged as `REJECTED` with the fixed error message, and a client that disconnects mid-request as `DROPPED`.
+- Every completion request writes exactly one log entry: requests refused before processing are logged as `REJECTED`, failed requests as `FAILED`, both with the fixed error message, and a client that disconnects mid-request as `DROPPED`.
 - Config validation: removed keys set to `null` (`default: null`, `default_provider: ~`, `fallback_order: null`) are rejected like any other value; an empty `binary`, and a `model` starting with `-` for a CLI provider, are rejected at their line; an empty `APPDATA` no longer resolves the config path relative to the current directory.
 - A command-line argument that is not valid Unicode is a usage error (exit 2) instead of a crash.
 - Kimi: a dictation full of quotes or backslashes that fits the byte cap but would overflow the Windows command line after escaping is refused as too large, instead of failing to start.
-- Adapters reject a CLI reply that is not valid UTF-8 (Codex, Kimi, Kiro, OpenCode, Antigravity) instead of returning text with `�` in it.
-- Quota errors reported with HTTP 429 are logged as quota exhausted, not rate limited (Codex, Kimi, OpenCode); Codex also recognizes OpenAI's "exceeded your current quota" wording.
-- Kimi: `tool_calls: null` or `[]` is no longer mistaken for a tool call, and an early transient retry no longer hides a later login or quota failure.
-- OpenCode: the result is the final message's text only, every step must finish and the last one with `stop`, and an error the CLI recovered from no longer fails the run.
-- Kiro: text after the end of the turn, or a later idle state without `end_turn`, is rejected; an `agent_message` without `messageId` is accepted.
+- Adapters reject a CLI reply that is not valid UTF-8 (Codex, Kimi, Antigravity) instead of returning text with `�` in it.
+- Quota errors reported with HTTP 429 are logged as quota exhausted, not rate limited (Codex, Kimi); Codex also recognizes OpenAI's "exceeded your current quota" wording.
+- Kimi: an early transient retry no longer hides a later login or quota failure.
 - Generic: a malformed `tool_calls` value or a non-string `finish_reason` is rejected, and an error status with a stalled body keeps its classification instead of becoming a timeout.
-- A CLI that exits successfully without reading its whole prompt is treated as a failure (the original text comes back) instead of answering a truncated prompt.
+- A CLI that exits successfully without reading its whole prompt is treated as a failure (HTTP 502) instead of answering a truncated prompt.
 - A cancelled call's temporary directory is still removed, in the background, with the usual retries; a directory that cannot be removed is reported on stderr.
 - An existing debug log file is made private (0600) when Pumice opens it, not only when it creates it.
 - A missing `--config` file is reported once (`<path>: the configuration file does not exist`) instead of repeating the path.
 - `doctor` rejects a flag given twice (for example two `--provider`) instead of silently using the last one.
-- Codex `openai_base_url` accepts a bracketed host only when it is a real IPv6 address.
 - The debug log never overwrites a request body field with the recorded HTTP headers.
 - "Unsupported launcher" wording is used everywhere for an unsupported CLI shim.
 
