@@ -874,6 +874,49 @@ async fn health_reports_ok_and_the_version() {
 }
 
 #[tokio::test]
+async fn landing_page_is_plain_html() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let response = raw_http(server.port, http_request("GET", "/", &[], b"")).await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    assert!(
+        response
+            .headers
+            .to_ascii_lowercase()
+            .contains("content-type: text/html"),
+        "headers: {}",
+        response.headers
+    );
+    let body = response.body_text();
+    assert!(body.contains("<h1>Pumice</h1>"), "body: {body}");
+    assert!(
+        body.contains("https://github.com/brasillero/pumice"),
+        "body: {body}"
+    );
+    assert!(
+        !server.fake.report_path().exists(),
+        "the landing page never invokes a CLI"
+    );
+}
+
+#[tokio::test]
+async fn landing_page_avoids_filter_trigger_words() {
+    // Corporate web filters scan page text for these words.
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let response = raw_http(server.port, http_request("GET", "/", &[], b"")).await;
+
+    assert_eq!(response.status, 200);
+    let body = response.body_text().to_ascii_lowercase();
+    let trigger_words = [
+        "proxy", "tunnel", "bypass", "vpn", "gateway", "relay", "forward", "api", "endpoint",
+        "unblock", "anonym",
+    ];
+    for word in &trigger_words {
+        assert!(!body.contains(word), "landing page contains '{word}'");
+    }
+}
+
+#[tokio::test]
 async fn health_answers_quickly_while_a_dictation_runs() {
     let result = "Reunião com a equipe às 9:00.";
     // The fake sleeps two seconds, so the dictation below is still running

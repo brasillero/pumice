@@ -178,6 +178,7 @@ pub async fn serve_monitored(
 
 fn router(state: ApiState) -> Router {
     Router::new()
+        .route("/", get(handlers::landing_page))
         .route("/v1/chat/completions", post(handlers::chat_completions))
         .route("/v1/models", get(handlers::list_models))
         .route("/health", get(handlers::health))
