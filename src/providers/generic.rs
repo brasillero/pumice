@@ -3,10 +3,10 @@
 //! Unlike the CLI adapters, this one implements [`Provider`] directly over
 //! HTTP: it POSTs the composed prompt to an unauthenticated
 //! OpenAI-compatible endpoint on the same machine (Ollama, LM Studio) and
-//! parses the single chat-completion choice. It stays **disabled by
-//! default**: loopback HTTP is still a direct outbound call, so this adapter
-//! ships behind the owner's pending AGENTS.md exception
-//! (docs/research/phase2-architecture.md §3.3).
+//! parses the single chat-completion choice. Loopback HTTP is
+//! still a direct outbound call; AGENTS.md allows it as an exception. The
+//! adapter is **archived** (#69): not registered, so a config entry fails
+//! with an archived message; its code and tests stay until it returns.
 //!
 //! The endpoint is restricted to `http://127.0.0.1:<port>/v1`,
 //! `http://localhost:<port>/v1` and `http://[::1]:<port>/v1` (literal

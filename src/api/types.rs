@@ -62,7 +62,8 @@ pub struct HealthBody {
     pub version: &'static str,
 }
 
-/// `GET /v1/models` body: the enabled provider IDs as models.
+/// `GET /v1/models` body: the available provider IDs, then the built-in
+/// `passthrough` and `inspect`.
 #[derive(Serialize)]
 pub struct ModelList {
     pub object: &'static str,

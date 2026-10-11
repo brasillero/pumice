@@ -4,7 +4,8 @@
 //!
 //! ```text
 //! <temporary root>/
-//! ├── workspace/     # the CLI's working directory, empty when it starts
+//! ├── workspace/     # the CLI's working directory: empty, except a config file
+//! │                  #   a plugin writes there (Kiro's agent)
 //! └── control/       # control files such as the system prompt
 //! ```
 

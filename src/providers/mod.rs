@@ -80,7 +80,7 @@ pub struct ProviderDescriptor {
     /// program exactly like a formatting call; `None` refuses shims.
     pub npm_entrypoint: Option<&'static str>,
     /// Short official installation hint for a missing provider, printed by
-    /// startup and (later) `pumice doctor`.
+    /// startup and `pumice doctor`.
     pub install_hint: &'static str,
 }
 
@@ -95,7 +95,7 @@ pub enum ProbeSpec {
     /// neither resolves nor spawns anything. The provider is reported
     /// available for listing purposes when enabled; its endpoint is a
     /// network target whose availability is only checked at call time
-    /// (`EndpointUnavailable` then returns the original text).
+    /// (`EndpointUnavailable` then fails the request).
     NotApplicable,
 }
 

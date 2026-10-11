@@ -1,6 +1,7 @@
 //! Validated configuration with built-in defaults.
 //!
-//! One YAML file controls everything ([`load`]); when it is missing or empty
+//! One YAML file configures Pumice ([`load`]); each CLI keeps its own login,
+//! routing and settings. When the file is missing or empty
 //! every setting falls back to a built-in default — which since 0.2 includes
 //! no providers at all: providers are an explicit, ordered list and nothing
 //! is enabled unless the file says so. Validation rejects problems with a
@@ -10,7 +11,6 @@ mod error;
 mod raw;
 
 use std::ffi::OsString;
-use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -32,10 +32,7 @@ const DEFAULT_DEBUG_LOG_FILE: &str = "pumice-debug.jsonl";
 const PER_USER_FILE: &str = "pumice.yaml";
 
 /// Validated settings with every default applied.
-///
-/// `Debug` is implemented by hand: environment and option values may be
-/// private, so only their shape is shown.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub port: u16,
     pub total_timeout: Duration,
@@ -62,18 +59,6 @@ impl Config {
 pub struct ProviderConfig {
     pub id: String,
     pub settings: ProviderSettings,
-}
-
-impl fmt::Debug for Config {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Config")
-            .field("port", &self.port)
-            .field("total_timeout", &self.total_timeout)
-            .field("max_parallel", &self.max_parallel)
-            .field("debug_log", &self.debug_log)
-            .field("providers", &self.providers)
-            .finish()
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,9 +132,8 @@ fn load_file(path: &Path) -> Result<Config, ConfigError> {
 /// Validates YAML `text` against an explicit provider descriptor list
 /// instead of the built-in registry, attaching `path` to errors the way a
 /// configuration file would. Relative settings have no anchor directory.
-/// Exists so tests can exercise registry-driven behavior (default-off
-/// providers, risk warnings, full-settings validation) with synthetic
-/// descriptors.
+/// Exists so tests can exercise registry-driven behavior (full-settings
+/// validation) with synthetic descriptors.
 pub fn validate_text_with_descriptors(
     text: &str,
     path: &Path,

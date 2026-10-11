@@ -1,10 +1,10 @@
 //! Pumice command-line entry point.
 //!
 //! A bare `pumice` (or the explicit `serve` alias) runs the local
-//! OpenAI-compatible dictation-formatting service on IPv4 loopback;
+//! OpenAI-compatible proxy on IPv4 loopback;
 //! `check-config` validates and summarizes the configuration; `doctor`
-//! reports which provider CLIs are installed and can run one real formatting
-//! call to check a provider's login.
+//! reports which provider CLIs are installed and can run one real call
+//! to check a provider's login.
 
 use std::io::{self, IsTerminal};
 use std::path::Path;
@@ -251,7 +251,7 @@ fn doctor_report(explicit: Option<&Path>) -> ExitCode {
     })
 }
 
-/// The quota-bearing path: one real formatting call through the selected
+/// The quota-bearing path: one real call through the selected
 /// provider's normal adapter.
 fn doctor_login_check(explicit: Option<&Path>, id: &str) -> ExitCode {
     let loaded = match load_config(explicit) {
@@ -471,8 +471,7 @@ fn config_location(source: &ConfigSource) -> String {
     }
 }
 
-/// Prints what is safe to show: never prompts, environment values or option
-/// values, which may be private.
+/// Prints where the configuration came from and a summary of its settings.
 fn print_summary(loaded: &LoadedConfig) {
     match &loaded.source {
         ConfigSource::File(path) => println!("config: {}", path.display()),

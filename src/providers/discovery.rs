@@ -3,14 +3,16 @@
 //!
 //! [`detect`] resolves every registered provider through the same
 //! [`resolve_program`] path a formatting call uses, then — except for
-//! [`ProbeSpec::PathOnly`] providers such as Antigravity, which is never
-//! spawned, and [`ProbeSpec::NotApplicable`] providers such as the generic
-//! loopback adapter, which have no CLI and are never even resolved — runs a
+//! [`ProbeSpec::PathOnly`] providers, which are never spawned (the archived
+//! Antigravity adapter), and [`ProbeSpec::NotApplicable`] providers, which
+//! have no CLI and are never even resolved (the archived generic adapter) —
+//! runs a
 //! bounded `--version`-style probe through the shared
 //! [`ProcessRunner`], so a probe gets a fresh empty workspace, no shell,
 //! closed stdin and process-tree kill on timeout. The service runs detection
 //! once at startup and caches the result in the pipeline; `/v1/models` then
-//! lists only enabled providers detection confirmed installed. Detection
+//! lists the enabled providers detection confirmed installed, followed by
+//! the built-in `passthrough` and `inspect`. Detection
 //! never spends quota, never enables a provider and never prints probe
 //! stderr. A failed or timed-out probe means "version unavailable", never
 //! "missing".

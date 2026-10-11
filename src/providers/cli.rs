@@ -60,8 +60,7 @@ impl<A: CliAdapter> Provider for CliProvider<A> {
 }
 
 /// The CLI's stdout as text. Invalid UTF-8 is invalid output: a lossy
-/// decode would put U+FFFD into a "successful" result instead of returning
-/// the original text.
+/// decode would put U+FFFD into a "successful" result instead of failing.
 pub(crate) fn stdout_text(output: &crate::process::ProcessOutput) -> Result<&str, ProviderError> {
     std::str::from_utf8(&output.stdout)
         .map_err(|_| ProviderError::other(super::ProviderErrorCode::InvalidOutput))
