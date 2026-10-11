@@ -310,6 +310,33 @@ async fn invalid_outputs_fail() {
     ]
     .join("\n");
 
+    let start = r#"{"type":"runStarted","data":{"payloadSchema":"acp","acpProtocolVersion":1,"engine":"v2"}}"#;
+    let chunk = r#"{"type":"sessionUpdate","data":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"partial"}}}}"#;
+    let finish_ok = r#"{"type":"runFinished","data":{"status":"success","stopReason":"end_turn","finalText":"partial","finalTextTruncated":false}}"#;
+    let finish_error = r#"{"type":"runFinished","data":{"status":"error"}}"#;
+    let meta = r#"{"type":"metadata","data":{}}"#;
+    // Contradictory or out-of-run streams (review round 1).
+    let contradictory = [
+        [start, chunk, finish_error, finish_ok].join("\n"),
+        [start, chunk, finish_ok, finish_ok].join("\n"),
+        [chunk, start, finish_ok].join("\n"),
+        [start, finish_ok, chunk].join("\n"),
+        [meta, start, chunk, finish_ok].join("\n"),
+        [start, chunk, finish_ok, meta].join("\n"),
+        [start, start, chunk, finish_ok].join("\n"),
+        [
+            start.replace("\"v2\"", "\"v3\""),
+            chunk.to_owned(),
+            finish_ok.to_owned(),
+        ]
+        .join("\n"),
+        [
+            start.replace("\"acp\"", "\"other\""),
+            chunk.to_owned(),
+            finish_ok.to_owned(),
+        ]
+        .join("\n"),
+    ];
     let cases: Vec<(String, i32)> = vec![
         (String::new(), 0),
         ("not json\n".to_owned(), 0),
@@ -322,6 +349,9 @@ async fn invalid_outputs_fail() {
         ("{\"data\":{}}\n".to_owned(), 0),
         (success.chars().take(40).collect::<String>(), 0),
     ];
+    let cases = cases
+        .into_iter()
+        .chain(contradictory.into_iter().map(|stdout| (stdout, 0)));
     for (stdout, exit_code) in cases {
         let fake = fake_kiro(&stdout, exit_code);
         assert_eq!(

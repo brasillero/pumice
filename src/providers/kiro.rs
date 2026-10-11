@@ -220,27 +220,37 @@ fn is_file_uri(prompt: &str) -> bool {
         .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
 }
 
+/// Where a V2 run is, as its events arrive.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunState {
+    NotStarted,
+    Running,
+    Finished { success: bool },
+}
+
 /// Parses Kiro's V2 `--output-format stream-json` events (one JSON object
 /// per line, `{"type": …, "data": …}`).
 ///
-/// The answer is the concatenation of the `agent_message_chunk` texts; it
-/// equals `runFinished.finalText`, which is not used because it can be
-/// truncated. Every other session update (thoughts, tool calls) and every
-/// other event type (`metadata`, future types) carries no answer text and is
-/// ignored: Pumice does not police tool use in the output (owner decision
+/// A run is exactly one `runStarted` (ACP payload, V2 engine) first, then
+/// its events, then exactly one `runFinished` last. The answer is the
+/// concatenation of the `agent_message_chunk` texts inside the run; it equals
+/// `runFinished.finalText`, which is not used because it can be truncated.
+/// Every other session update (thoughts, tool calls) and every other event
+/// type inside the run (`metadata`, future types) carries no answer text and
+/// is ignored: Pumice does not police tool use in the output (owner decision
 /// 2026-10-08); the agent file switches tools off instead.
 ///
-/// A `runError` or a nonzero exit is `NonzeroExit`: Kiro's errors carry only
-/// a free-text message, which is not matched. A run without `runStarted`, a
-/// `runFinished` with status `success` and some answer text is invalid
-/// output. A line that is not JSON is invalid output, except the device-code
-/// login prompt, which means the CLI is not logged in.
+/// A `runError` (anywhere) or a nonzero exit is `NonzeroExit`: Kiro's errors
+/// carry only a free-text message, which is not matched. Any other event
+/// before `runStarted` or after `runFinished`, a second start or finish, a
+/// finish whose status is not `success`, or no answer text is invalid output.
+/// A line that is not JSON is invalid output, except the device-code login
+/// prompt, which means the CLI is not logged in.
 pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
     let invalid = || ProviderError::other(ProviderErrorCode::InvalidOutput);
     let stdout = super::cli::stdout_text(output)?;
 
-    let mut started = false;
-    let mut finished = false;
+    let mut state = RunState::NotStarted;
     let mut run_error = false;
     let mut texts: Vec<String> = Vec::new();
 
@@ -255,9 +265,20 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
             return Err(invalid());
         };
         let data = event.get("data");
-        match event.get("type").and_then(Value::as_str) {
-            Some("runStarted") => started = true,
-            Some("sessionUpdate") => {
+        let field = |name: &str| {
+            data.and_then(|data| data.get(name))
+                .and_then(Value::as_str)
+        };
+        match (event.get("type").and_then(Value::as_str), state) {
+            // A failure can be reported at any point of the run.
+            (Some("runError"), _) => run_error = true,
+            (Some("runStarted"), RunState::NotStarted) => {
+                if field("payloadSchema") != Some("acp") || field("engine") != Some("v2") {
+                    return Err(invalid());
+                }
+                state = RunState::Running;
+            }
+            (Some("sessionUpdate"), RunState::Running) => {
                 let update = data.and_then(|data| data.get("update")).ok_or_else(invalid)?;
                 if update.get("sessionUpdate").and_then(Value::as_str)
                     == Some("agent_message_chunk")
@@ -270,22 +291,21 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
                     texts.push(text.to_owned());
                 }
             }
-            Some("runFinished") => {
-                finished = data
-                    .and_then(|data| data.get("status"))
-                    .and_then(Value::as_str)
-                    == Some("success");
+            (Some("runFinished"), RunState::Running) => {
+                state = RunState::Finished {
+                    success: field("status") == Some("success"),
+                };
             }
-            Some("runError") => run_error = true,
-            Some(_) => {}
-            None => return Err(invalid()),
+            (Some("runStarted" | "sessionUpdate" | "runFinished"), _) => return Err(invalid()),
+            (Some(_), RunState::Running) => {}
+            _ => return Err(invalid()),
         }
     }
 
     if run_error || !output.status.success() {
         return Err(ProviderError::other(ProviderErrorCode::NonzeroExit));
     }
-    if !started || !finished || texts.is_empty() {
+    if state != (RunState::Finished { success: true }) || texts.is_empty() {
         return Err(invalid());
     }
     Ok(texts.concat())
