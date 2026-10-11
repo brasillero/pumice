@@ -48,7 +48,7 @@ In Handy: **Settings → Advanced → Experimental Features → Post Processing*
 | Kimi adapter, auto-detection | Implemented |
 | Kiro plugin | Implemented |
 | Antigravity, generic loopback adapter | Archived; OpenCode support removed |
-| Distribution: GitHub release archives + npm package | Released (v0.1.1); 0.2.0 after local testing |
+| Distribution: GitHub release archives + npm package | Released (v0.2.0) |
 | `pumice setup` configuration wizard | Next |
 | Tauri installer, auto-update, start-with-the-system | Deferred |
 

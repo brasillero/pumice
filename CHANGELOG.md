@@ -6,10 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-10-11
+
 ### Added
 
 - **Live request view (S4.6).** When `pumice` runs in a terminal it shows an interactive view of each completion request's lifecycle with timing, provider/model metadata, filter, search and details. `--plain` keeps the old one-line-per-request stderr output. Dictated text and replies only appear in the view when the debug log is enabled.
 - **Live view: full-screen request details with Summary, Received, Parsed and Sent tabs, and an app column (S4.7).** `Enter` opens a request's details full screen, `Tab`/`1`–`4` switch tabs, `?` shows every key, and the bottom line shows the keys of the current screen. Received shows the request as it arrived (credential headers masked), Parsed the system prompt and the parts before, in and after the input, Sent the exact response; all three only with the debug log on. The app column shows the client's `X-Title` header (Handy sends one).
+- **Kimi plugin (S2.4).** `id: kimi` runs the Kimi Code CLI in print mode with a one-off no-tools agent file in the call's temporary directory; the dictation goes in as a single argument (capped at 24 KiB, larger dictations are refused), telemetry and update checks are off. Your `~/.kimi-code` login and settings are used.
 - **Kiro plugin (S2.14).** `id: kiro` runs `kiro-cli` headless with no tools trusted and `--effort low`; the dictation goes in on stdin, and the app's system prompt goes into a one-off no-tools agent file in the call's temporary directory (Kiro has no system-prompt flag). A system prompt starting with `file:` is refused, because Kiro would read it as a file reference. Your `~/.kiro` login and settings are used but never changed.
 - **A plain landing page at `/`.** Opening Pumice's address in a browser shows a short page saying what it is, with a link to the source code, instead of a JSON 404.
 - **Parallel requests.** Up to `max_parallel` requests (default 4, at most 32) run at the same time; extra requests wait in line instead of getting an immediate busy error, and one still waiting when its time budget runs out gets HTTP 503.
