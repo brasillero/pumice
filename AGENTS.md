@@ -1,14 +1,14 @@
 # AGENTS.md
 
-Rules for every AI coding agent working in this repository (Claude Code, Codex, OpenCode, Kimi and others). Read this file and [`HANDOFF.md`](HANDOFF.md) before starting any task.
+Rules for every AI coding agent working in this repository (Claude Code, Codex, OpenCode, Kimi and others). Read this file and the task notes in [`.task-decisions/`](.task-decisions/README.md) before starting any task. Task notes in `.task-decisions/` follow the task-decisions skill (`.agents/skills/task-decisions/`); do not edit them without it.
 
 ## What Pumice is
 
-Pumice lets dictation apps use the AI subscriptions the user already pays for, instead of API keys (no "bring your own key"). Apps such as [Handy](https://github.com/cjpais/Handy) and OpenWhispr send their transcript and their own prompt to an OpenAI-compatible endpoint. Pumice is that endpoint: a small local proxy on `127.0.0.1` (`/v1/chat/completions`, `/v1/models`). It hands the request to the official CLI of a subscription the user is logged into (Claude Code, Codex, Kimi, …) and returns the CLI's answer in the OpenAI format the app expects.
+Pumice lets dictation apps use the AI subscriptions the user already pays for, instead of API keys (no "bring your own key"). Apps such as [Handy](https://github.com/cjpais/Handy) and OpenWhispr send their transcript and their own prompt to an OpenAI-compatible endpoint. Pumice is that endpoint: a small local tool listening on `127.0.0.1` (`/v1/chat/completions`, `/v1/models`). It hands the request to the official CLI of a subscription the user is logged into (Claude Code, Codex, Kimi, …) and returns the CLI's answer in the OpenAI format the app expects.
 
 **Pumice is plumbing, not a formatter.** The client app owns the task: formatting, translating or anything else is decided by the prompt the app sends. Pumice adds no instructions of its own, does not rewrite the request and changes the reply as little as possible.
 
-The original product spec is in [`docs/spec.md`](docs/spec.md). It predates the proxy direction; where it conflicts with an owner decision recorded in `HANDOFF.md`, the owner decision wins.
+The original product spec is in [`docs/spec.md`](docs/spec.md). It predates the pass-through direction; where it conflicts with an owner decision recorded in `.task-decisions/`, the owner decision wins.
 
 ## Documents and who edits them
 
@@ -16,8 +16,7 @@ The original product spec is in [`docs/spec.md`](docs/spec.md). It predates the 
 | --- | --- | --- |
 | `docs/product.pt-BR.md` | Snapshot of the Portuguese product doc | No |
 | `docs/spec.md` | English translation of the product doc | No |
-| `HANDOFF.md` | Current phase, owner decisions in force, next steps and story status | Yes: the status table, the notes and the owner-decision list (only to record decisions the owner made) |
-| `BACKLOG.md` | Items to discuss, deferred work and known limitations | Yes |
+| `.task-decisions/` | Task notes: one task per branch with its backlog (open work, known limitations), decisions and reports | Yes, through the task-decisions skill only; record as decisions only what the owner made or authorized |
 | `docs/research/*.md` | Findings from investigation stories | Yes |
 | `AGENTS.md` | These rules | No, propose changes in a PR description instead |
 
@@ -75,7 +74,7 @@ Each provider is a plugin with the same contract:
 - **Conventional Commits** for every commit (`feat:`, `fix:`, `docs:`, `test:`, `chore:`, `ci:`, `refactor:`).
 - **SemVer** for releases. `CHANGELOG.md` follows Keep a Changelog and is generated from commits at release time; do not hand-edit released sections.
 - Keep PRs small and focused. Do not mix refactors with features.
-- Update the status table in `HANDOFF.md` in the same PR that finishes a story.
+- Keep the story's task notes (`.task-decisions/tasks/<branch>/`) current in the same PR, and finish them (state `Done`) before it merges.
 
 ## Scope discipline
 
@@ -93,5 +92,5 @@ Do not create a `CLAUDE.md`. This `AGENTS.md` is the single rules file for every
 
 - Anything that needs the Windows GUI (for example, configuring Handy) or a login to an AI service
 - Anything that spends paid quota beyond a few test calls
-- Any decision listed as open in the spec or in `BACKLOG.md`
-- Any finding that contradicts the spec or an owner decision in `HANDOFF.md`
+- Any decision listed as open in the spec or in `.task-decisions/`
+- Any finding that contradicts the spec or an owner decision in `.task-decisions/`
