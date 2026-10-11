@@ -2,11 +2,13 @@
 
 Polish your dictation with the AI subscriptions you already have.
 
-Pumice is a small local service that sits between a dictation app and the AI
-coding CLIs you already pay for. It receives the raw text transcribed by
-Whisper (through the [Handy](https://github.com/cjpais/Handy) app), lightly
-corrects it (transcription mistakes, punctuation, lists), and returns it ready
-to paste.
+Pumice is a small open-source tool that runs on your computer and connects
+your dictation app (such as [Handy](https://github.com/cjpais/Handy)) to the AI
+assistants you already pay for (Claude, Codex, Kimi or Kiro), using their
+official command-line apps. The app sends its own prompt and the text
+transcribed by Whisper; Pumice passes them, unchanged, to the assistant you
+chose and returns the answer ready to paste. The app's prompt decides what
+happens to the text.
 
 **Availability:** see [GitHub Releases](https://github.com/brasillero/pumice/releases)
 and the [npm registry](https://www.npmjs.com/package/@brasillero/pumice) for the current
