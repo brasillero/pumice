@@ -154,8 +154,8 @@ struct ModelSelection {
 }
 
 /// POST /v1/chat/completions accepts bodies up to 10 MiB, read within 5 s.
-/// Both bounds are enforced before parsing, so a slow or oversized client
-/// never eats the formatting budget reserved for the CLI.
+/// Both bounds are enforced before parsing. Reading counts toward the
+/// request's total time budget, which starts when the request arrives.
 const BODY_LIMIT: usize = 10 * 1024 * 1024;
 const BODY_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -447,9 +447,10 @@ async fn complete(state: ApiState, request: Request, number: u64, started: Insta
     }
 }
 
-/// Lists the enabled provider IDs as models, in configuration (list)
-/// order — the same IDs [`Pipeline::select`](crate::pipeline::Pipeline::select)
-/// resolves, so listing and selection cannot drift.
+/// Lists the enabled providers detection found, in configuration (list)
+/// order, followed by the built-in `passthrough` and `inspect`.
+/// [`Pipeline::select`](crate::pipeline::Pipeline::select) also accepts a
+/// configured provider that is disabled or undetected, to report why it fails.
 pub async fn list_models(State(state): State<ApiState>) -> Json<ModelList> {
     Json(ModelList {
         object: "list",

@@ -34,8 +34,8 @@ pub(crate) struct RawConfig {
     #[serde(default, deserialize_with = "removed_key")]
     pub default_provider: Option<Spanned<serde::de::IgnoredAny>>,
     /// Removed in 0.2 (owner decision 2026-10-07): the client's `model`
-    /// field picks the provider and a request without a model returns the
-    /// original text. Parsed only so the error can point at the key.
+    /// field picks the provider and a request without a model gets HTTP 400.
+    /// Parsed only so the error can point at the key.
     #[serde(default, deserialize_with = "removed_key")]
     pub default: Option<Spanned<serde::de::IgnoredAny>>,
     pub total_timeout_secs: Option<Spanned<u64>>,

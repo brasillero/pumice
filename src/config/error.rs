@@ -1,7 +1,6 @@
 //! Configuration errors: what is wrong and where, in a user-facing form.
 //!
-//! Messages name the setting path and the problem; they never contain
-//! prompts, environment values or option values.
+//! Messages name the setting path and the problem.
 
 use std::fmt;
 use std::path::{Path, PathBuf};

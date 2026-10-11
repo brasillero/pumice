@@ -1,6 +1,7 @@
-//! Antigravity adapter (`agy`), dormant (S2.5).
+//! Antigravity adapter (`agy`), archived (S2.5, #69).
 //!
-//! Antigravity stays disabled: no supported per-launch tool policy exists
+//! The adapter is archived: not registered, so a config entry fails at its
+//! `id` with an archived message. It would stay disabled anyway: no supported per-launch tool policy exists
 //! (docs/research/phase2-architecture.md §3.2) and third-party integration
 //! may risk account access (docs/research/S0.3-terms.md). `validate_settings`
 //! therefore refuses `enabled: true` at the `enabled:` line, and

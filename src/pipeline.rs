@@ -1,13 +1,14 @@
-//! The formatting pipeline: provider selection, deadline enforcement, up to
-//! `max_parallel` runs at once with a FIFO queue, and the raw-text guarantee.
+//! The formatting pipeline: provider selection, deadline enforcement, and up
+//! to `max_parallel` runs at once with a FIFO queue.
 //!
 //! There is no fallback (owner decision 2026-10-07): a request runs exactly
 //! one provider — the one its `model` names. A request without a model, like
-//! every failure, behaves exactly like passthrough: the dictation comes back
-//! exactly as extracted, with the reason in the log.
+//! every failure, ends in an [`OutcomeKind::Raw`] outcome with a safe reason,
+//! which the API answers with an HTTP error (S4.4); the app keeps its own
+//! transcript.
 //!
-//! Every outcome returns either formatted-and-cleaned text or the dictation
-//! exactly as extracted — never partially cleaned, never trimmed. Only
+//! A successful outcome carries formatted-and-cleaned text; a failed one
+//! keeps the dictation exactly as extracted for the debug log. Only
 //! metadata leaves this module: dictated text is never logged here; the S1.4
 //! debug log consumes these outcomes in the API layer.
 
@@ -39,7 +40,7 @@ const MIN_STARTUP: Duration = Duration::from_millis(100);
 /// The process runner enforces the deadline itself; this slack only backs up
 /// a provider that ignores it (dropping its future kills the process tree).
 /// It stays below `RESPONSE_RESERVE`, so even then the response goes out
-/// before the total timeout and Handy still receives the raw text.
+/// before the total timeout and Handy still receives the timeout error.
 const HARD_STOP_SLACK: Duration = Duration::from_millis(150);
 
 /// Observes one formatting run as it happens (S4.6). Every method has an
@@ -66,8 +67,8 @@ struct ProviderEntry {
 }
 
 /// Selects the single provider a request runs, runs it inside the request's
-/// budget and cleans the result; returns the raw dictation with the reason
-/// whenever formatting cannot deliver.
+/// budget and cleans the result; returns a failure reason whenever
+/// formatting cannot deliver.
 ///
 /// Up to `max_parallel` formatting runs are active at a time; extra requests
 /// wait in line (FIFO). A request still waiting when its total budget runs out
@@ -85,9 +86,9 @@ pub struct Pipeline {
     total_timeout: Duration,
     /// Provider IDs startup detection confirmed installed. `None` when the
     /// pipeline was built without detection (the Phase 1 behavior): then
-    /// every built provider counts as available. The generic loopback
-    /// adapter has no executable to find and counts as available whenever it
-    /// is built. Selection ignores this; only model listing filters by it.
+    /// every built provider counts as available. A provider with no
+    /// executable to find (`Found::NotApplicable`, used by the archived
+    /// generic adapter) counts as available whenever it is built. Selection ignores this; only model listing filters by it.
     available: Option<BTreeSet<String>>,
     /// Limits how many provider calls run at once; extra requests wait in line.
     busy: Semaphore,
@@ -101,8 +102,8 @@ impl Pipeline {
     /// [`new`](Self::new) with startup detection cached in the pipeline:
     /// [`model_ids`](Self::model_ids) lists only built providers detection
     /// found. An enabled provider detection missed stays built and
-    /// selectable — it fails at runtime with `NotInstalled` and the raw
-    /// dictation comes back, exactly as before detection existed.
+    /// selectable — it fails at runtime with `NotInstalled` (HTTP 502), exactly
+    /// as before detection existed.
     pub fn with_detection(
         config: &Config,
         providers: Vec<Arc<dyn Provider>>,
@@ -184,7 +185,7 @@ impl Pipeline {
     /// and matched case-insensitively against the configured provider IDs
     /// (Handy users type the field by hand), so `"Claude "` selects
     /// `claude`. A missing or blank value selects nothing — the request
-    /// returns the original text with [`RawReason::NoModel`].
+    /// fails with [`RawReason::NoModel`] (HTTP 400).
     /// `passthrough` selects the built-in unmodified transcript response.
     /// Returns the canonical configured ID — including a disabled one, which
     /// `format` reports as [`RawReason::ProviderDisabled`] — or `None` when
@@ -217,8 +218,8 @@ impl Pipeline {
     ///
     /// Outcome rule: exactly one provider runs — the selected one. On
     /// success the cleaned text returns ([`OutcomeKind::Formatted`]);
-    /// a provider error — including a timeout — or a cleanup failure returns
-    /// the raw dictation with [`RawReason::ProviderFailed`] or
+    /// a provider error — including a timeout — or a cleanup failure fails
+    /// with [`RawReason::ProviderFailed`] or
     /// [`RawReason::CleanupFailed`]. When the budget dies before the attempt
     /// starts, the reason is [`RawReason::BudgetExhausted`] instead.
     pub async fn format(&self, request: &ExtractedRequest, started: Instant) -> FormatOutcome {
@@ -244,7 +245,7 @@ impl Pipeline {
             );
         }
         // An unknown or disabled selected provider is a configuration
-        // mistake, not a transient failure: return raw text at once so the
+        // mistake, not a transient failure: fail at once (HTTP 400/404) so the
         // user notices, never silently formatting through another provider.
         let Some(selected) = self.select(request.model.as_deref()) else {
             let reason = match request.model.as_deref().map(str::trim) {
@@ -351,8 +352,8 @@ impl Pipeline {
         }
     }
 
-    /// The raw fallback: the dictation exactly as extracted, never cleaned
-    /// or trimmed.
+    /// A failed outcome: keeps the dictation exactly as extracted (for the
+    /// debug log) with the reason; the API answers it with an HTTP error.
     fn raw(
         &self,
         request: &ExtractedRequest,
@@ -394,10 +395,10 @@ async fn run_within_budget(
     }
 }
 
-/// What happened to one dictation: the text to send back and safe metadata.
+/// What happened to one dictation: its text and safe metadata.
 pub struct FormatOutcome {
-    /// Formatted and cleaned text, or the raw dictation exactly as
-    /// extracted.
+    /// Formatted and cleaned text on success; on failure the dictation
+    /// exactly as extracted, which only the debug log records.
     pub text: String,
     pub kind: OutcomeKind,
     /// The provider that produced `text`; `None` for an empty transcript
@@ -481,11 +482,11 @@ pub enum OutcomeKind {
     Inspect,
     /// The transcript held no text; no CLI was invoked.
     Empty,
-    /// The raw dictation is returned; the reason says why.
+    /// Formatting failed; the reason says why. Answered with an HTTP error.
     Raw(RawReason),
 }
 
-/// Why the raw dictation is returned instead of formatted text; safe to log.
+/// Why a request failed instead of returning formatted text; safe to log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RawReason {
     /// The requested provider ID is not in the configuration.
@@ -493,7 +494,7 @@ pub enum RawReason {
     /// The requested provider is configured but disabled.
     ProviderDisabled,
     /// The request named no provider: the `model` field was missing or
-    /// blank, so the original text returns.
+    /// blank (HTTP 400).
     NoModel,
     /// Every slot was taken and the request waited until its budget ran out
     /// (or until too little was left to start).

@@ -7,7 +7,7 @@
 //! cache) and never spends quota: only bounded version probes run.
 //!
 //! `--login-check` spends quota: it composes one fixed tiny dictation through
-//! the selected provider's normal adapter — same restrictions, fresh empty
+//! the selected provider's normal adapter — same restrictions, fresh temporary
 //! workspace and configured timeout — and it never
 //! prints the response: only `ok (<ms> ms)` or a text-free error category.
 
@@ -51,10 +51,9 @@ pub fn render(source: &ConfigSource, statuses: &[ProviderStatus]) -> String {
 }
 
 /// One doctor line for `status`: id, enabled state, found state (with the
-/// install hint when the provider is missing) and, for the dormant
-/// Antigravity adapter, the plain note that it cannot be enabled yet. The
-/// generic loopback adapter has no executable: its state names the local
-/// endpoint and defers availability to call time.
+/// install hint when the provider is missing). A provider with no
+/// executable (`Found::NotApplicable`, the archived generic adapter) names
+/// the local endpoint and defers availability to call time.
 fn provider_line(status: &ProviderStatus) -> String {
     let install_hint = providers::descriptor(status.id).map_or("", |d| d.install_hint);
     let state = match (&status.found, &status.version) {
@@ -74,9 +73,9 @@ fn provider_line(status: &ProviderStatus) -> String {
 }
 
 /// Counts `(ready, total)` over the enabled providers: an enabled provider
-/// is ready when detection found its executable; the generic loopback
-/// adapter has no executable and is ready by definition, since its endpoint
-/// is checked at call time.
+/// is ready when detection found its executable; a provider with no
+/// executable (`Found::NotApplicable`, the archived generic adapter) is ready
+/// by definition, since its endpoint is checked at call time.
 pub fn enabled_ready(statuses: &[ProviderStatus]) -> (usize, usize) {
     let mut ready = 0;
     let mut total = 0;
@@ -173,7 +172,7 @@ pub async fn prepare_login_check(
 }
 
 /// Runs exactly one formatting call through `provider`: the normal adapter
-/// with its configured restrictions and timeout inside a fresh empty
+/// with its configured restrictions and timeout inside a fresh temporary
 /// workspace. The returned text is discarded, so
 /// cleanup does not run and the response never reaches the output.
 pub async fn run_login_call(config: &Config, provider: &Arc<dyn Provider>) -> LoginCheck {

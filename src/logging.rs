@@ -3,8 +3,8 @@
 //!
 //! Disabled by default: unless `debug_log.enabled: true` in the YAML, the
 //! sink is a no-op and no file is created, opened or written. When enabled,
-//! every completion records the exchange verbatim — request body, raw text,
-//! outcome and response — because that payload is exactly what an
+//! every completion records the parsed request body, recorded headers, the
+//! transcript, the outcome and the reply (empty when the request failed) — because that payload is exactly what an
 //! investigation needs. Credential-bearing headers never reach the file:
 //! only `user-agent` and `content-type` are recorded, and only at
 //! [`DebugRecord::new`], the single point where headers enter the log.
@@ -136,7 +136,7 @@ impl fmt::Display for DebugLogOpenError {
 
 impl std::error::Error for DebugLogOpenError {}
 
-/// One JSONL line of the debug log: the full completion exchange. Only ever
+/// One JSONL line of the debug log: one completion request and its outcome. Only ever
 /// constructed when the sink is enabled.
 #[derive(Serialize)]
 pub struct DebugRecord<'a> {
@@ -204,7 +204,7 @@ fn redacted_request(mut body: Value, headers: &HeaderMap) -> Value {
 #[derive(Serialize)]
 pub struct OutcomeSummary {
     pub kind: &'static str,
-    /// The raw-fallback reason, if any.
+    /// Why the request failed, if it did.
     pub reason: Option<String>,
     pub provider: Option<&'static str>,
     pub attempts: u8,

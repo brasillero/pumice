@@ -35,8 +35,8 @@
 //! workspace is untrusted, which is what keeps them from starting); print
 //! mode persists a resumable session under the user's own `~/.kimi-code`;
 //! the agent body is rendered as a `${var}` template (unknown variables
-//! stay verbatim, so only the documented variable names in configured
-//! instructions would expand); and the argv transport caps the user
+//! stay verbatim, so only the documented variable names in the client's
+//! system prompt would expand); and the argv transport caps the user
 //! message at [`MAX_USER_MESSAGE_BYTES`] and, once quoted for a Windows
 //! command line, at [`MAX_QUOTED_MESSAGE_UNITS`].
 

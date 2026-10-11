@@ -1,8 +1,9 @@
 //! The human-readable request log: one entry per completion request on the
 //! ordinary log sink, never dictated text.
 //!
-//! A request that gets no completion (an HTTP error, or a client that
-//! disconnects) still gets one line, labelled `REJECTED` or `DROPPED`.
+//! A request that gets no completion still gets one line: `REJECTED` when it
+//! is refused before processing, `FAILED` when processing fails (both are
+//! HTTP errors), `DROPPED` when the client disconnects.
 //!
 //! An entry is a header line with the outcome, the provider and model that
 //! produced the text, the total time and the text length. When the provider

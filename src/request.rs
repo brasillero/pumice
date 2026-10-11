@@ -21,8 +21,8 @@ const CLOSE_TAG: &str = "</transcript>";
 /// are ignored.
 #[derive(Deserialize)]
 pub struct ChatCompletionRequest {
-    /// Requested model or provider ID. Absent or empty returns the original
-    /// text ([`RawReason::NoModel`](crate::pipeline::RawReason::NoModel)).
+    /// Requested model or provider ID. Absent or empty fails with HTTP 400
+    /// ([`RawReason::NoModel`](crate::pipeline::RawReason::NoModel)).
     pub model: Option<String>,
     pub messages: Vec<Message>,
     pub stream: Option<bool>,
@@ -111,8 +111,9 @@ impl fmt::Debug for ExtractedRequest {
 }
 
 impl ExtractedRequest {
-    /// True when the transcript holds no non-whitespace text. The pipeline
-    /// answers these with an empty completion without invoking a CLI.
+    /// True when the transcript holds no non-whitespace text. Once a valid
+    /// provider is selected, the pipeline returns that text unchanged without
+    /// invoking a CLI.
     pub fn is_empty(&self) -> bool {
         self.raw_text.trim().is_empty()
     }

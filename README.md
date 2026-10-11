@@ -5,7 +5,7 @@ Polish your dictation with the AI subscriptions you already have.
 Pumice is a small local service that sits between a dictation app and the AI coding CLIs you already pay for. The app sends its own prompt and the text transcribed by Whisper; Pumice hands that request, unchanged, to the official CLI of a subscription you are logged into and returns the answer ready to paste. Formatting, translating or anything else is decided by the app's prompt. No separately billed API keys required.
 
 ```
-Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude / Codex / Kimi CLI
+Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude / Codex / Kimi / Kiro CLI
                                   ◀──polished text──
 ```
 
@@ -13,11 +13,11 @@ Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude
 - **Uses the official CLIs** of your subscriptions: Claude, Codex, Kimi and Kiro.
 - **Never loses a dictation:** if the selected provider fails or times out, Pumice answers with an error and the app pastes its own transcript.
 - **Local and private:** listens on localhost only, no telemetry.
-- **Single executable** for Windows, Linux and macOS, with nothing else to install.
+- **Single executable** for Windows, Linux and macOS, with no runtime to install (you only need the provider CLIs you already use).
 
 ## Status
 
-Pumice works end to end through Claude, Codex, Kimi and Kiro. Antigravity and the local OpenAI-compatible adapter are archived for now. You choose the providers in an explicit list in the YAML config — nothing is enabled by default, and there is no fallback: a failure returns the raw dictation. Run `pumice doctor` to see which CLIs it found.
+Pumice works end to end through Claude, Codex, Kimi and Kiro. Antigravity and the local OpenAI-compatible adapter are archived for now. You choose the providers in an explicit list in the YAML config — nothing is enabled by default, and there is no fallback: a failure is answered with an HTTP error and the app pastes its own transcript. Run `pumice doctor` to see which CLIs it found.
 
 Pumice supports standalone downloads and the npm package `@brasillero/pumice` (installable with npm, pnpm, Bun or npx; the installed command is `pumice`). Check [GitHub Releases](https://github.com/brasillero/pumice/releases) and the [npm registry](https://www.npmjs.com/package/@brasillero/pumice) for published versions. See the [installation guide](docs/install.md) for installation, startup and Handy setup; building from source is also supported below.
 
@@ -29,7 +29,7 @@ With [Rust](https://rustup.rs/) installed:
 
 ```sh
 cargo build --release --locked --bin pumice
-./target/release/pumice check-config   # validates pumice.yaml or the built-in defaults
+./target/release/pumice check-config   # validates the per-user config (or --config <path>)
 ./target/release/pumice doctor         # checks which CLIs are installed
 ./target/release/pumice                # starts the service (live view; use --plain for one-line stderr logs)
 ```

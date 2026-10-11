@@ -1,10 +1,11 @@
 # Installing and running Pumice
 
-Pumice is a small local service that polishes your dictation with the AI
+Pumice is a small local service that lets your dictation app use the AI
 subscriptions you already have. It listens on `http://127.0.0.1:7567/v1`,
-receives text transcribed by [Handy](https://github.com/cjpais/Handy) (or any
-app with an OpenAI-compatible post-processing endpoint), formats it through
-the official CLI of your subscription, and returns the result to be pasted.
+receives the prompt and transcript from [Handy](https://github.com/cjpais/Handy)
+(or any app with an OpenAI-compatible post-processing endpoint), passes them
+unchanged to the official CLI of your subscription, and returns the answer to
+be pasted. The app's prompt decides what happens to the text.
 
 > **Availability:** check [GitHub Releases](https://github.com/brasillero/pumice/releases)
 > and the [npm registry](https://www.npmjs.com/package/@brasillero/pumice) for published
@@ -33,8 +34,7 @@ it anywhere. The executable inside is self-contained.
 
 ### Option 2: package manager (Node.js 22+)
 
-The npm upload is being finalized after correcting the account scope as of 2026-10-05.
-Use the standalone GitHub release for now; the commands below work after npm publication.
+The package is published on npm as `@brasillero/pumice`; the installed command is `pumice`.
 
 ```sh
 npm install -g @brasillero/pumice
@@ -116,7 +116,7 @@ pumice --version
 ```
 
 `doctor` only probes for installed CLIs, so it is free to run as often as you
-like. To verify that a provider is actually logged in and can format text,
+like. To verify that a provider is actually logged in and answers,
 run `pumice doctor --login-check --provider claude` — that one call spends a
 small amount of your plan quota, which is why it only runs when you ask for
 it.
@@ -139,8 +139,9 @@ No Handy changes are needed beyond this Custom provider configuration.
 
 ## Configuration
 
-Without a config file Pumice starts with no providers: every request
-gets an error and the app keeps its own transcript. To format dictations, create the per-user config
+Without a config file Pumice starts with no providers: every AI request
+gets an error and the app keeps its own transcript (the built-in `passthrough`
+and `inspect` still work). To format dictations, create the per-user config
 and list the providers you want:
 
 - Windows: `%APPDATA%\pumice\pumice.yaml`
