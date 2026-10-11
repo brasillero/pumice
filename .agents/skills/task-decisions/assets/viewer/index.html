@@ -1,0 +1,857 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Task decisions</title>
+<style>
+  :root {
+    --text: #37352f; --muted: #787774; --faint: #9b9a97; --border: #e9e9e7;
+    --hover: #f1f1ef; --side: #f7f7f5; --accent: #2383e2; --warn: #d9730d;
+    --gray-bg: #e3e2e0; --gray: #32302c; --brown-bg: #eee0da; --brown: #442a1e;
+    --orange-bg: #fadec9; --orange: #49290e; --yellow-bg: #fdecc8; --yellow: #402c1b;
+    --green-bg: #dbeddb; --green: #1c3829; --blue-bg: #d3e5ef; --blue: #183347;
+    --purple-bg: #e8deee; --purple: #412454; --red-bg: #ffe2dd; --red: #5d1715;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    font: 15px/1.6 ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--text); display: flex; min-height: 100vh;
+  }
+  a { color: inherit; }
+  code { font-family: var(--mono); font-size: 85%; background: rgba(135,131,120,.15); color: #eb5757; padding: .1em .35em; border-radius: 4px; }
+  pre { background: #f7f6f3; padding: 14px 16px; border-radius: 4px; overflow: auto; }
+  pre code { background: none; color: inherit; padding: 0; font-size: 13px; }
+
+  /* Sidebar */
+  aside {
+    width: 260px; flex-shrink: 0; background: var(--side); border-right: 1px solid var(--border);
+    padding: 5px 8px 12px; position: sticky; top: 0; height: 100vh; height: 100dvh; overflow: auto; font-size: 14px;
+    transition: margin-left .2s ease, transform .2s ease;
+  }
+  aside .head { display: flex; align-items: center; gap: 4px; margin-bottom: 6px; }
+  aside .brand { font-weight: 600; padding: 6px 10px; display: block; text-decoration: none; flex: 1; min-width: 0; border-radius: 4px; }
+  aside .brand:hover { background: var(--hover); }
+  body.side-closed aside { margin-left: -260px; }
+
+  /* Icon buttons (sidebar toggle) */
+  .iconbtn {
+    width: 28px; height: 28px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
+    border: 0; background: transparent; border-radius: 4px; color: var(--muted); cursor: pointer; padding: 0;
+  }
+  .iconbtn:hover { background: var(--hover); color: var(--text); }
+  .iconbtn svg { width: 16px; height: 16px; }
+  .topbar .open-side { display: none; }
+  body.side-closed .topbar .open-side { display: inline-flex; }
+  .backdrop { display: none; }
+  aside a.row { display: flex; align-items: center; gap: 8px; padding: 3px 10px; border-radius: 4px; text-decoration: none; color: #5f5e5b; }
+  aside a.row:hover { background: var(--hover); }
+  aside a.row.on { background: #ebebea; color: var(--text); font-weight: 500; }
+  aside a.task { padding-left: 28px; }
+  aside .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* Page */
+  main { flex: 1; min-width: 0; }
+  .topbar { display: flex; align-items: center; gap: 4px; padding: 8px 12px; position: sticky; top: 0; background: rgba(255,255,255,.92); backdrop-filter: blur(6px); z-index: 5; min-height: 44px; }
+  /* Breadcrumb: one line; every item has the same box, so text lines up;
+     long names truncate (earlier items give way before the current one). */
+  .crumbs { font-size: 14px; line-height: 20px; color: var(--muted); display: flex; align-items: center; flex-wrap: nowrap; min-width: 0; overflow: hidden; }
+  .crumbs .crumb { padding: 2px 6px; border-radius: 4px; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 24px; flex-shrink: 1; }
+  .crumbs a.crumb:hover { background: var(--hover); color: var(--text); }
+  .crumbs .crumb.current { color: var(--text); flex-shrink: 0; max-width: 60%; }
+  .crumbs .sep { color: var(--faint); flex-shrink: 0; padding: 0 1px; }
+  .page { max-width: 900px; margin: 0 auto; padding: 40px 48px 120px; }
+  .icon { font-size: 56px; line-height: 1; margin-bottom: 8px; }
+  h1.title { font-size: 40px; line-height: 1.2; margin: 0 0 16px; font-weight: 700; }
+  h2 { font-size: 22px; margin: 36px 0 8px; font-weight: 600; }
+  h3 { font-size: 18px; margin: 24px 0 6px; font-weight: 600; }
+  .muted { color: var(--muted); }
+
+  /* Properties */
+  .props { display: grid; grid-template-columns: 160px 1fr; gap: 2px 8px; margin: 0 0 20px; font-size: 14px; }
+  .props .k { color: var(--muted); padding: 4px 6px; display: flex; align-items: center; gap: 6px; }
+  .props .v { padding: 4px 6px; min-width: 0; overflow-wrap: anywhere; }
+  .props .empty { color: var(--faint); }
+  hr.sep { border: 0; border-top: 1px solid var(--border); margin: 8px 0 24px; }
+
+  .tag { display: inline-flex; align-items: center; gap: 4px; padding: 0 7px; border-radius: 4px; font-size: 13px; line-height: 20px; white-space: nowrap; margin-right: 4px; vertical-align: middle; }
+  svg.i { flex-shrink: 0; display: inline-block; vertical-align: -2px; }
+  .icon svg.i { width: 48px; height: 48px; color: var(--muted); }
+  .state-icon { display: inline-flex; flex-shrink: 0; }
+  .state-icon.gray { color: #9b9a97; } .state-icon.green { color: #4dab9a; } .state-icon.blue { color: #529cca; }
+  .state-icon.yellow { color: #d9a52c; } .state-icon.red { color: #e16259; }
+  .tag.gray { background: var(--gray-bg); color: var(--gray); } .tag.brown { background: var(--brown-bg); color: var(--brown); }
+  .tag.orange { background: var(--orange-bg); color: var(--orange); } .tag.yellow { background: var(--yellow-bg); color: var(--yellow); }
+  .tag.green { background: var(--green-bg); color: var(--green); } .tag.blue { background: var(--blue-bg); color: var(--blue); }
+  .tag.purple { background: var(--purple-bg); color: var(--purple); } .tag.red { background: var(--red-bg); color: var(--red); }
+
+  /* Database tables */
+  table.db { width: 100%; border-collapse: collapse; font-size: 14px; margin: 4px 0 8px; }
+  table.db th { text-align: left; font-weight: 400; color: var(--muted); border-bottom: 1px solid var(--border); padding: 6px 8px; white-space: nowrap; }
+  table.db td { border-bottom: 1px solid var(--border); padding: 6px 8px; vertical-align: top; }
+  table.db tr.link { cursor: pointer; } table.db tr.link:hover td { background: var(--hover); }
+  table.db .num { text-align: right; font-variant-numeric: tabular-nums; }
+  table.db .date { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  table.db .empty { color: var(--faint); }
+  table.db .date .empty { display: block; text-align: center; }
+  .count { color: var(--faint); font-weight: 400; font-size: 14px; margin-left: 6px; }
+
+  /* Entries (toggles) */
+  details.entry { border-radius: 4px; margin: 2px 0; }
+  details.entry > summary { list-style: none; cursor: pointer; display: flex; align-items: baseline; gap: 8px; padding: 5px 6px; border-radius: 4px; }
+  details.entry > summary::-webkit-details-marker { display: none; }
+  details.entry > summary:hover { background: var(--hover); }
+  details.entry > summary .caret { color: var(--faint); font-size: 11px; width: 12px; flex-shrink: 0; transition: transform .1s; }
+  details.entry[open] > summary .caret { transform: rotate(90deg); }
+  details.entry .id { font-family: var(--mono); font-size: 13px; color: var(--muted); flex-shrink: 0; min-width: 32px; }
+  details.entry .etitle { font-weight: 500; flex: 1; min-width: 0; }
+  details.entry .side { display: flex; gap: 4px; flex-shrink: 0; }
+  details.entry .inner { padding: 6px 6px 18px 46px; }
+  details.entry .inner .props { grid-template-columns: 120px 1fr; }
+  details.entry.flash > summary { animation: flash 1.6s ease; }
+  @keyframes flash { 0%, 40% { background: #fbf3db; } 100% { background: transparent; } }
+
+  /* Markdown */
+  .md p { margin: 4px 0 10px; }
+  .md ul, .md ol { margin: 4px 0 10px; padding-left: 24px; }
+  .md li { margin: 2px 0; }
+  .md li.check { list-style: none; margin-left: -22px; }
+  .md li.check input { margin: 0 8px 0 0; vertical-align: -1px; }
+  .md li.check.done > span { color: var(--faint); text-decoration: line-through; }
+  .md table { border-collapse: collapse; margin: 8px 0 14px; font-size: 14px; }
+  .md th, .md td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+  .md th { background: #f7f6f3; font-weight: 500; }
+  .md h1, .md h2, .md h3 { margin-top: 20px; }
+  a.ref { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(35,131,226,.35); }
+  a.ref:hover { border-bottom-color: var(--accent); }
+
+  /* Shape problems */
+  .problems { background: #fdf5ec; border-radius: 4px; padding: 10px 14px; margin: 0 0 20px; font-size: 14px; }
+  .problems summary { cursor: pointer; color: var(--warn); font-weight: 500; }
+  .problems ul { margin: 6px 0 0; padding-left: 20px; }
+  .warn { color: var(--warn); font-size: 13px; }
+  .hint { font-size: 13px; color: var(--faint); margin-top: 48px; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  aside a.row > svg.i, .brand > svg.i { color: var(--muted); }
+  .warn svg.i { vertical-align: -2px; }
+  .scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+  /* Narrow screens: the sidebar becomes a drawer over the page. */
+  @media (max-width: 800px) {
+    aside { position: fixed; left: 0; top: 0; z-index: 20; margin-left: 0 !important; transform: translateX(-100%); box-shadow: none; width: min(280px, 85vw); }
+    body.side-open aside { transform: none; box-shadow: 0 0 0 1px rgba(15,15,15,.05), 0 8px 24px rgba(15,15,15,.2); }
+    body.side-open .backdrop { display: block; position: fixed; inset: 0; background: rgba(15,15,15,.3); z-index: 15; }
+    .topbar .open-side { display: inline-flex; }
+    .crumbs .far { display: none; }
+    .page { padding: 20px 18px 80px; }
+    .icon svg.i { width: 36px; height: 36px; }
+    h1.title { font-size: 30px; }
+    h2 { font-size: 20px; margin-top: 28px; }
+    .props, details.entry .inner .props { grid-template-columns: 110px 1fr; }
+    details.entry > summary { flex-wrap: wrap; row-gap: 2px; }
+    details.entry .etitle { flex-basis: calc(100% - 64px); }
+    details.entry .side { margin-left: 52px; }
+    details.entry .inner { padding: 4px 4px 16px 18px; }
+    table.db .opt { display: none; }
+    .md table { display: block; overflow-x: auto; }
+    .hint { display: none; }
+  }
+</style>
+</head>
+<body>
+<aside id="side"></aside>
+<div class="backdrop" id="backdrop"></div>
+<main><div class="topbar"><button class="iconbtn open-side" id="open-side" title="Show sidebar (Ctrl+\)" aria-label="Show sidebar"></button><div class="crumbs" id="crumbs"></div></div><div class="page" id="page">Loading…</div></main>
+<script>
+"use strict"
+
+// ---------- Shape vocabulary (mirrors AGENTS.md) ----------
+const ITEM_SECTIONS = {
+  Active: ["To do", "In progress", "Blocked"],
+  Deferred: ["Deferred"],
+  Closed: ["Done", "Discarded", "Moved"],
+}
+const ITEM_TYPES = ["Bug", "Improvement", "Tech debt", "Alignment", "Task", "Process"]
+const ITEM_FIELDS = ["type", "area", "origin", "ticket", "created"]
+const DECISION_FIELDS = ["date", "decided by", "origin", "area", "revisit if"]
+const TASK_STATES = ["In progress", "Paused", "Done", "Abandoned"]
+const TASK_FIELDS = ["title", "state", "ticket", "branch", "mr", "start", "end"]
+const PROJECT_FIELDS = ["name", "language", "tracker", "prefix", "areas"]
+const DATE = { test: (value) => {
+  // YYYY-MM-DD and a real day of the calendar (no 2026-02-30).
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const day = new Date(value + "T00:00:00Z")
+  return !Number.isNaN(day.getTime()) && day.toISOString().slice(0, 10) === value
+} }
+
+const COLORS = {
+  "To do": "gray", "In progress": "blue", Blocked: "red", Deferred: "yellow",
+  Done: "green", Discarded: "gray", Moved: "purple",
+  Active: "green", Provisional: "orange", Revoked: "red",
+  Paused: "yellow", Abandoned: "gray",
+  Bug: "red", Improvement: "blue", "Tech debt": "orange", Alignment: "purple",
+  Task: "gray", Process: "brown",
+}
+/** Icon per state and type (Lucide names, files in icons/). Areas get none. */
+const ICON_OF = {
+  "To do": "circle", "In progress": "circle-dot", Blocked: "circle-alert", Deferred: "clock-3",
+  Done: "circle-check", Discarded: "circle-slash", Moved: "circle-arrow-right",
+  Bug: "bug", Improvement: "trending-up", "Tech debt": "wrench", Alignment: "handshake", Task: "clipboard-list", Process: "workflow",
+  Active: "circle-check", Provisional: "circle-question-mark", Superseded: "arrow-right-left", Revoked: "circle-x",
+  Paused: "circle-pause", Abandoned: "circle-slash",
+}
+const UI_ICONS = ["notebook", "folder", "file-text", "triangle-alert", "panel-left"]
+const ICONS = {}
+async function loadIcons() {
+  const names = [...new Set([...Object.values(ICON_OF), ...UI_ICONS])]
+  await Promise.all(names.map(async (name) => {
+    const res = await fetch(`/icons/${name}.svg`).catch(() => null)
+    if (res?.ok) ICONS[name] = await res.text()
+  }))
+}
+/** An inline Lucide icon (inherits the text colour), hidden from screen readers: the label next to it carries the meaning. */
+function icon(name, size = 14, cls = "") {
+  const svg = ICONS[name]
+  if (!svg) return ""
+  return svg.replace(/<svg[^>]*?width="24" height="24"/, `<svg class="i ${cls}" width="${size}" height="${size}" aria-hidden="true" focusable="false"`)
+}
+const colorOf = (value) => COLORS[value] ?? (/^Superseded/.test(value) ? "gray" : "gray")
+
+// ---------- Small helpers ----------
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c])
+/** A badge. States and types (no colour given) get their colour and icon from the value; areas pass a colour and get no icon. */
+const tag = (value, color) => {
+  const glyph = color === undefined ? icon(ICON_OF[value] ?? (/^Superseded/.test(value) ? "arrow-right-left" : "")) : ""
+  return `<span class="tag ${color ?? colorOf(value)}">${glyph}${esc(value)}</span>`
+}
+const href = (...parts) => "/" + parts.filter(Boolean).map(encodeURIComponent).join("/")
+
+function frontmatter(text) {
+  const match = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(text ?? "")
+  if (!match) return { fields: {}, body: text ?? "", ok: false }
+  const fields = {}
+  for (const line of match[1].split("\n")) {
+    const m = /^([^:]+):\s*(.*)$/.exec(line)
+    if (m) fields[m[1].trim()] = m[2].trim()
+  }
+  return { fields, body: match[2].trim(), ok: true }
+}
+
+// ---------- Parsers ----------
+/** Splits an entry's lines into `- key: value` fields (first block) and body. */
+function splitEntry(lines) {
+  const fields = {}
+  let i = 0
+  while (i < lines.length && !lines[i].trim()) i++
+  for (; i < lines.length; i++) {
+    const m = /^- ([a-z][a-z ]*):\s*(.*)$/.exec(lines[i])
+    if (!m) break
+    fields[m[1]] = m[2]
+  }
+  return { fields, body: lines.slice(i).join("\n").trim() }
+}
+
+const fence = (line) => /^\s*```/.test(line)
+const short = (line) => line.trim().length > 60 ? line.trim().slice(0, 60) + "…" : line.trim()
+
+function parseBacklog(text) {
+  const out = { title: null, sections: [], open: [], closed: [], problems: [] }
+  if (text == null) { out.problems.push("backlog.md is missing"); return out }
+  let section = null, current = null, inFence = false
+  const finish = () => {
+    if (!current) return
+    Object.assign(current, splitEntry(current.lines)); delete current.lines
+    ;(current.section === "Closed" ? out.closed : out.open).push(current); current = null
+  }
+  for (const line of text.split("\n")) {
+    if (inFence || fence(line)) {
+      if (fence(line)) inFence = !inFence
+      if (current) current.lines.push(line)
+      else out.problems.push(`backlog.md: code block outside an entry ("${short(line)}")`)
+      continue
+    }
+    let m
+    if (!section && !current && (m = /^# (.*)$/.exec(line))) { out.title = m[1]; continue }
+    if ((m = /^## (.*)$/.exec(line))) { finish(); section = m[1].trim(); out.sections.push(section); continue }
+    if ((m = /^### (.*)$/.exec(line))) {
+      finish()
+      const h = /^#(\d+) · (.+?) · (.+)$/.exec(m[1])
+      if (!h) { out.problems.push(`Heading not in shape: "### ${short(m[1])}"`); continue }
+      current = { n: +h[1], state: h[2], title: h[3], section, lines: [] }
+      continue
+    }
+    if (current) { current.lines.push(line); continue }
+    if (!line.trim()) continue
+    if (section === "Closed" && /^- \*\*#\d+\*\*/.test(line.trim())) out.problems.push(`Closed items keep their full entry, not one line: "${short(line)}"`)
+    else out.problems.push(`backlog.md: text outside an entry${section ? ` in ${section}` : ""}: "${short(line)}"`)
+  }
+  finish()
+  return out
+}
+
+function parseDecisions(text) {
+  const out = { title: null, entries: [], problems: [] }
+  if (text == null) { out.problems.push("decisions.md is missing"); return out }
+  let current = null, inFence = false
+  const finish = () => {
+    if (!current) return
+    Object.assign(current, splitEntry(current.lines)); delete current.lines
+    out.entries.push(current); current = null
+  }
+  for (const line of text.split("\n")) {
+    if (inFence || fence(line)) {
+      if (fence(line)) inFence = !inFence
+      if (current) current.lines.push(line)
+      else out.problems.push(`decisions.md: code block outside an entry ("${short(line)}")`)
+      continue
+    }
+    let m
+    if (!current && out.title == null && (m = /^# (.*)$/.exec(line))) { out.title = m[1]; continue }
+    if ((m = /^### (.*)$/.exec(line))) {
+      finish()
+      const h = /^D(\d+) · (.+?) · (.+)$/.exec(m[1])
+      if (!h) { out.problems.push(`Heading not in shape: "### ${short(m[1])}"`); continue }
+      current = { n: +h[1], state: h[2], title: h[3], lines: [] }
+      continue
+    }
+    if (/^## /.test(line)) { out.problems.push(`decisions.md has no sections: "${short(line)}"`); continue }
+    if (current) current.lines.push(line)
+    else if (line.trim()) out.problems.push(`decisions.md: text outside an entry: "${short(line)}"`)
+  }
+  finish()
+  return out
+}
+
+// ---------- Model ----------
+let DB = null
+
+/** Files written on Windows end lines with \r\n; the parsers expect \n. */
+const lf = (text) => text == null ? text : String(text).replace(/\r\n?/g, "\n")
+
+function build(raw) {
+  for (const p of raw.projects) {
+    p.readme = lf(p.readme)
+    for (const t of p.tasks) for (const k of ["readme", "backlog", "decisions"]) t[k] = lf(t[k])
+  }
+  const projects = raw.projects.map((p) => {
+    const readme = frontmatter(p.readme)
+    const project = {
+      slug: p.slug, fields: readme.fields, body: readme.body,
+      name: readme.fields.name || p.slug, problems: [],
+      areas: (readme.fields.areas ?? "").split(",").map((a) => a.trim()).filter(Boolean),
+    }
+    if (p.readme == null) project.problems.push("README.md is missing")
+    else if (!readme.ok) project.problems.push("README.md has no front matter")
+    for (const f of PROJECT_FIELDS) if (readme.ok && !readme.fields[f]) project.problems.push(`README.md: missing value for \`${f}\``)
+    project.tasks = p.tasks.map((t) => {
+      const r = frontmatter(t.readme)
+      return {
+        slug: t.slug, project, fields: r.fields, body: r.body, readmeOk: r.ok, hasReadme: t.readme != null,
+        title: r.fields.title || t.slug, state: r.fields.state || "",
+        backlog: parseBacklog(t.backlog), decisions: parseDecisions(t.decisions),
+        reports: t.reports, problems: [],
+      }
+    })
+    return project
+  })
+  DB = { projects, bySlug: Object.fromEntries(projects.map((p) => [p.slug, p])) }
+  for (const p of projects) for (const t of p.tasks) validate(t)
+}
+
+const findTask = (project, slug) => project?.tasks.find((t) => t.slug === slug)
+
+/** Resolves an `origin` or reference to { href, label } or null. */
+function resolveRef(ref, task) {
+  const value = ref.trim()
+  if (value === "conversation" || value === "—") return { label: value, plain: true }
+  let m
+  if (/(^|\/)reports\/.+\.md$/.test(value)) {
+    // reports/x.md · TASK/reports/x.md · project/TASK/reports/x.md
+    const parts = value.split("/")
+    const at = parts.indexOf("reports")
+    const file = parts.slice(at + 1).join("/"), before = parts.slice(0, at)
+    if (before.length === 2 && !DB.bySlug[before[0]]) return { label: value, plain: true } // another repository
+    const t = before.length === 0 ? task
+      : before.length === 1 ? findTask(task.project, before[0])
+      : before.length === 2 ? findTask(DB.bySlug[before[0]], before[1]) : null
+    if (!t || !t.reports.includes(file)) return null
+    return { href: href(t.project.slug, t.slug, "reports", file), label: value }
+  }
+  if ((m = /^#(\d+)$/.exec(value))) return itemRef(task, +m[1], value)
+  if ((m = /^D(\d+)$/.exec(value))) return decisionRef(task, +m[1], value)
+  if ((m = /^(?:([A-Za-z0-9][\w.-]*)\/)?([^/#\s]+)(?:#(\d+)|\/D(\d+))$/.exec(value))) {
+    // Another repository's notes are not here: shown as plain text.
+    if (m[1] && !DB.bySlug[m[1]]) return { label: value, plain: true }
+    const project = m[1] ? DB.bySlug[m[1]] : task.project
+    const t = findTask(project, m[2])
+    if (!t) return null
+    return m[3] ? itemRef(t, +m[3], value) : decisionRef(t, +m[4], value)
+  }
+  return null
+}
+function itemRef(t, n, label) {
+  const exists = t.backlog.open.some((e) => e.n === n) || t.backlog.closed.some((e) => e.n === n)
+  return exists ? { href: href(t.project.slug, t.slug) + "#" + n, label } : null
+}
+function decisionRef(t, n, label) {
+  return t.decisions.entries.some((e) => e.n === n) ? { href: href(t.project.slug, t.slug) + "#D" + n, label } : null
+}
+
+// ---------- Validation (the shape rules) ----------
+function validate(t) {
+  const P = t.problems, areas = t.project.areas
+  P.push(...t.backlog.problems, ...t.decisions.problems)
+  if (!t.hasReadme) P.push("README.md is missing")
+  else if (!t.readmeOk) P.push("README.md has no front matter")
+  else {
+    for (const f of TASK_FIELDS) if (!t.fields[f]) P.push(`README.md: missing value for \`${f}\``)
+    if (t.state && !TASK_STATES.includes(t.state)) P.push(`README.md: unknown state "${t.state}"`)
+    for (const f of ["start", "end"]) if (t.fields[f] && t.fields[f] !== "—" && !DATE.test(t.fields[f])) P.push(`README.md: \`${f}\` is not a date (YYYY-MM-DD)`)
+    if (["Done", "Abandoned"].includes(t.state) && t.backlog.open.some((e) => e.section === "Active"))
+      P.push(`Task is ${t.state} but still has Active items`)
+    if (["Done", "Abandoned"].includes(t.state) && !DATE.test(t.fields.end ?? "")) P.push(`Task is ${t.state} but \`end\` is not set`)
+    if (DATE.test(t.fields.start ?? "") && DATE.test(t.fields.end ?? "") && t.fields.end < t.fields.start) P.push("README.md: `end` is before `start`")
+  }
+
+  for (const [file, parsed, word] of [["backlog.md", t.backlog, "Backlog"], ["decisions.md", t.decisions, "Decisions"]])
+    if (!parsed.problems.some((x) => x.endsWith("is missing")) && parsed.title !== `${word} — ${t.slug}`) P.push(`${file}: the first line must be "# ${word} — ${t.slug}"`)
+
+  const want = ["Active", "Deferred", "Closed"]
+  if (t.backlog.sections.join("|") !== want.join("|")) P.push(`backlog.md: sections must be ${want.join(", ")} (found: ${t.backlog.sections.join(", ") || "none"})`)
+
+  const seen = new Set()
+  const last = {}
+  for (const e of [...t.backlog.open, ...t.backlog.closed]) {
+    const where = `#${e.n}`
+    if (seen.has(e.n)) P.push(`${where}: duplicate number`)
+    seen.add(e.n)
+    const section = e.section
+    if (!ITEM_SECTIONS[section]?.includes(e.state)) P.push(`${where}: state "${e.state}" does not belong in ${section}`)
+    if (last[section] != null && e.n < last[section]) P.push(`${where}: out of order in ${section}`)
+    last[section] = e.n
+    e.problems = []
+    if (section === "Closed") {
+      const outcome = e.fields.outcome ?? ""
+      if (!DATE.test(e.fields.closed ?? "")) e.problems.push("`closed` is missing or not a date (YYYY-MM-DD)")
+      else if (DATE.test(e.fields.created ?? "") && e.fields.closed < e.fields.created) e.problems.push("`closed` is before `created`")
+      if (!outcome) e.problems.push("missing field `outcome`")
+      else if (e.state === "Done" && !doneEvidence(outcome, t)) e.problems.push("Done needs evidence in `outcome`: a commit, an MR/PR, or an existing entry or report")
+      if (e.state === "Moved" && outcome) {
+        const target = /^→\s*(\S+#\d+)$/.exec(outcome)
+        if (!target) e.problems.push('Moved needs `outcome: → TASK#n` (an item in another task)')
+        else if (!resolveRef(target[1], t)) e.problems.push(`move target "${target[1]}" does not resolve`)
+        else {
+          // `#n`, `TASK#n` or `repo/TASK#n`: the same task when no task is named, or it is this one in this repository.
+          const [, repo, task] = /^(?:([^/]+)\/)?([^/#]*)#\d+$/.exec(target[1])
+          if (!task || (task === t.slug && (!repo || repo === t.project.slug))) e.problems.push("Moved points to this same task; a move goes to another task")
+        }
+      }
+      if (e.fields.reason) e.problems.push("closed items drop `reason` (the `outcome` says how it ended)")
+    }
+    for (const f of ITEM_FIELDS) if (!e.fields[f]) e.problems.push(`missing field \`${f}\``)
+    if (e.fields.type && !ITEM_TYPES.includes(e.fields.type)) e.problems.push(`unknown type "${e.fields.type}"`)
+    if (e.fields.area && areas.length && !areas.includes(e.fields.area)) e.problems.push(`area "${e.fields.area}" is not in the project's areas`)
+    if (e.fields.created && !DATE.test(e.fields.created)) e.problems.push("`created` is not a date (YYYY-MM-DD)")
+    if (["Blocked", "Deferred"].includes(e.state) && !e.fields.reason) e.problems.push(`${e.state} needs a \`reason\``)
+    bodySections(e.body, ["Context", "To do", "Acceptance criteria", "Where in the code"], ["Context", "To do"], e.problems)
+    if (e.fields.origin && !resolveRef(e.fields.origin, t)) e.problems.push(`origin "${e.fields.origin}" does not resolve`)
+    if (e.fields.origin === `#${e.n}`) e.problems.push("origin points to itself")
+    const od = /^D(\d+)$/.exec(e.fields.origin ?? "")
+    const cause = od && t.decisions.entries.find((d) => d.n === +od[1])
+    if (cause && cause.fields.origin === `#${e.n}`) e.problems.push(`origin loop: D${cause.n} was made about #${e.n}, so #${e.n} keeps its own origin (see "A decision that accepts debt")`)
+    for (const msg of e.problems) P.push(`${where}: ${msg}`)
+  }
+
+  let prev = 0
+  const dseen = new Set()
+  for (const d of t.decisions.entries) {
+    const where = `D${d.n}`
+    d.problems = []
+    if (dseen.has(d.n)) d.problems.push("duplicate number")
+    dseen.add(d.n)
+    if (d.n < prev) d.problems.push("out of order")
+    prev = d.n
+    const sup = /^Superseded by D(\d+)$/.exec(d.state)
+    if (!["Active", "Provisional", "Revoked"].includes(d.state) && !sup) d.problems.push(`unknown state "${d.state}"`)
+    if (sup && !t.decisions.entries.some((x) => x.n === +sup[1])) d.problems.push(`superseded by D${sup[1]}, which does not exist`)
+    if (sup && +sup[1] === d.n) d.problems.push("superseded by itself")
+    if (sup && +sup[1] < d.n) d.problems.push(`superseded by D${sup[1]}, an earlier decision; the one that supersedes is always newer`)
+    if (d.state === "Revoked" && !t.decisions.entries.some((x) => x.n > d.n && x.fields.origin === `D${d.n}`)) d.problems.push(`Revoked needs a later decision with \`origin: D${d.n}\` that says why`)
+    const successor = sup && t.decisions.entries.find((x) => x.n === +sup[1])
+    if (successor && successor.n !== d.n && successor.fields.origin !== `D${d.n}`) d.problems.push(`superseded by D${successor.n}, whose \`origin\` should be D${d.n}`)
+    if (/\b(for now|later|yet)\b/i.test(d.title)) d.problems.push('title is not timeless ("for now", "later", "yet")')
+    for (const f of DECISION_FIELDS) if (!d.fields[f]) d.problems.push(`missing field \`${f}\``)
+    if (d.state === "Provisional" && (!d.fields["revisit if"] || d.fields["revisit if"] === "—")) d.problems.push("Provisional needs a `revisit if` condition")
+    if (d.fields.area && areas.length && !areas.includes(d.fields.area)) d.problems.push(`area "${d.fields.area}" is not in the project's areas`)
+    if (d.fields.date && !DATE.test(d.fields.date)) d.problems.push("`date` is not a date (YYYY-MM-DD)")
+    bodySections(d.body, ["Decision", "Why", "Rejected", "Consequences"], ["Decision", "Why", "Rejected"], d.problems)
+    if (d.fields.origin && !resolveRef(d.fields.origin, t)) d.problems.push(`origin "${d.fields.origin}" does not resolve`)
+    if (d.fields.origin === `D${d.n}`) d.problems.push("origin points to itself")
+    for (const msg of d.problems) P.push(`${where}: ${msg}`)
+  }
+}
+
+/** A reference to another entry or report: #2, D3, TASK#2, TASK/D3, project/TASK#2, …/reports/x.md. */
+const REF = /(?<![\w#/.-])((?:[\w.-]+\/){0,2}reports\/[\w.-]+\.md|(?:[A-Za-z0-9][\w.-]*\/)?[A-Za-z0-9][\w-]*(?:#\d+|\/D\d+)|#\d+|D\d+)(?![\w/#-])/g
+
+/** A Done note names a commit, an MR/PR (`!42`, `PR #42`, a URL), or an entry/report that resolves. */
+function doneEvidence(note, t) {
+  if (/\b[0-9a-f]{7,40}\b/.test(note) || /(^|\s)!\d+\b/.test(note) || /\b(PR|MR) #\d+\b/.test(note) || /https?:\/\//.test(note)) return true
+  return (note.match(REF) ?? []).some((ref) => { const r = resolveRef(ref, t); return r && !r.plain })
+}
+
+/** Checks the bold section labels (`**Context.**`…): required ones present, all in order. */
+function bodySections(body, order, required, problems) {
+  const found = [...body.matchAll(/^\*\*([^*]+)\.\*\*/gm)].map((m) => m[1]).filter((name) => order.includes(name))
+  for (const name of required) if (!found.includes(name)) problems.push(`body has no **${name}.**`)
+  const positions = found.map((name) => order.indexOf(name))
+  if (positions.some((p, i) => i > 0 && p < positions[i - 1])) problems.push(`body sections out of order (expected ${order.join(", ")})`)
+}
+
+// ---------- Markdown (the subset the notes use) ----------
+
+/** A link target that is safe to put in href, or null. */
+function safeHref(url, task) {
+  const note = task && resolveRef(url, task)
+  if (note && !note.plain) return note.href
+  if (/^(https?:|mailto:)/i.test(url) || /^\/(?!\/)/.test(url) || url.startsWith("#")) return url
+  return null
+}
+
+function inline(text, task) {
+  // Opaque tokens (code, links, references) are swapped for placeholders
+  // first, so formatting never runs inside them and no regex touches markup.
+  const tokens = []
+  const hold = (html) => `\u0000${tokens.push(html) - 1}\u0000`
+  let s = String(text)
+  s = s.replace(/`([^`]+)`/g, (_, code) => hold(`<code>${esc(code)}</code>`))
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (all, label, url) => {
+    const target = safeHref(url, task)
+    return hold(target ? `<a class="ref" href="${esc(target)}">${esc(label)}</a>` : esc(label))
+  })
+  if (task) s = s.replace(REF, (ref) => {
+    const r = resolveRef(ref, task)
+    return r && !r.plain ? hold(`<a class="ref" href="${esc(r.href)}">${esc(ref)}</a>`) : ref
+  })
+  s = esc(s)
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+  s = s.replace(/(^|[^*\w])\*([^*\s][^*]*)\*(?!\w)/g, "$1<em>$2</em>")
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => tokens[+i])
+}
+
+function markdown(src, task) {
+  const lines = String(src ?? "").replace(/\r/g, "").split("\n")
+  const out = []
+  let para = []
+  const flush = () => { if (para.length) { out.push(`<p>${inline(para.join(" "), task)}</p>`); para = [] } }
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    let m
+    if (/^```/.test(line)) {
+      flush(); const code = []
+      for (i++; i < lines.length && !/^```/.test(lines[i]); i++) code.push(lines[i])
+      out.push(`<pre><code>${esc(code.join("\n"))}</code></pre>`); continue
+    }
+    if ((m = /^(#{1,6})\s+(.*)$/.exec(line))) { flush(); const n = Math.min(m[1].length + 1, 4); out.push(`<h${n}>${inline(m[2], task)}</h${n}>`); continue }
+    if (/^\s*\|/.test(line) && /^\s*\|?\s*:?-{2,}/.test(lines[i + 1] ?? "")) {
+      flush()
+      const cells = (l) => l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim())
+      const head = cells(line); i += 2; const rows = []
+      for (; i < lines.length && /^\s*\|/.test(lines[i]); i++) rows.push(cells(lines[i]))
+      i--
+      out.push(`<table><thead><tr>${head.map((c) => `<th>${inline(c, task)}</th>`).join("")}</tr></thead><tbody>${
+        rows.map((r) => `<tr>${r.map((c) => `<td>${inline(c, task)}</td>`).join("")}</tr>`).join("")}</tbody></table>`)
+      continue
+    }
+    if (/^\s*([-*]|\d+\.)\s+/.test(line)) {
+      flush(); const items = []
+      for (; i < lines.length; i++) {
+        const lm = /^(\s*)([-*]|\d+\.)\s+(.*)$/.exec(lines[i])
+        if (lm) items.push({ indent: lm[1].length, ordered: /\d/.test(lm[2]), text: lm[3] })
+        else if (/^\s{2,}\S/.test(lines[i]) && items.length) items[items.length - 1].text += " " + lines[i].trim()
+        else break
+      }
+      i--
+      out.push(list(items, task)); continue
+    }
+    if (!line.trim()) { flush(); continue }
+    para.push(line.trim())
+  }
+  flush()
+  return out.join("\n")
+}
+
+function list(items, task) {
+  let html = "", stack = []
+  for (const item of items) {
+    while (stack.length && item.indent < stack[stack.length - 1].indent) html += `</li></${stack.pop().tag}>`
+    const tag = item.ordered ? "ol" : "ul"
+    const top = stack[stack.length - 1]
+    if (top && item.indent === top.indent && top.tag !== tag) { html += `</li></${stack.pop().tag}>` }
+    if (!stack.length || item.indent > stack[stack.length - 1].indent) {
+      stack.push({ indent: item.indent, tag }); html += `<${tag}>`
+    } else html += "</li>"
+    const c = /^\[( |x)\]\s+(.*)$/.exec(item.text)
+    html += c
+      ? `<li class="check${c[1] === "x" ? " done" : ""}"><input type="checkbox" disabled${c[1] === "x" ? " checked" : ""}><span>${inline(c[2], task)}</span>`
+      : `<li>${inline(item.text, task)}`
+  }
+  while (stack.length) html += `</li></${stack.pop().tag}>`
+  return html
+}
+
+// ---------- Views ----------
+const counts = (t) => ({
+  active: t.backlog.open.filter((e) => e.section === "Active").length,
+  deferred: t.backlog.open.filter((e) => e.section === "Deferred").length,
+  closed: t.backlog.closed.length,
+  decisions: t.decisions.entries.filter((d) => d.state === "Active" || d.state === "Provisional").length,
+})
+const taskDot = (state) => ({ "In progress": "blue", Paused: "yellow", Done: "green", Abandoned: "gray" })[state] ?? "red"
+
+function props(rows) {
+  return `<div class="props">${rows.map(([k, v]) =>
+    `<div class="k">${esc(k)}</div><div class="v">${v === "" || v == null || v === "—" ? '<span class="empty">Empty</span>' : v}</div>`).join("")}</div>`
+}
+
+function problemsBox(problems) {
+  if (!problems.length) return ""
+  return `<details class="problems"><summary>${icon("triangle-alert")} ${problems.length} shape problem${problems.length > 1 ? "s" : ""}</summary><ul>${
+    problems.map((p) => `<li>${inline(p)}</li>`).join("")}</ul></details>`
+}
+
+function sidebar(path) {
+  const [ps, ts] = path
+  let html = `<div class="head"><a class="brand" href="/" data-nav>${icon("notebook", 16)} Task decisions</a><button class="iconbtn" id="close-side" title="Hide sidebar (Ctrl+\\)" aria-label="Hide sidebar">${icon("panel-left", 16)}</button></div>`
+  for (const p of DB.projects) {
+    html += `<a class="row${ps === p.slug && !ts ? " on" : ""}" href="${href(p.slug)}" data-nav>${icon("folder", 16)}<span class="label">${esc(p.name)}</span></a>`
+    if (ps !== p.slug) continue
+    for (const t of p.tasks) html += `<a class="row task${ts === t.slug ? " on" : ""}" href="${href(p.slug, t.slug)}" data-nav title="${esc(t.title)}"><span class="state-icon ${taskDot(t.state)}">${icon(ICON_OF[t.state] ?? "circle-alert")}</span><span class="label">${esc(t.slug)}<span class="sr-only"> (${esc(t.state || "no state")})</span></span></a>`
+  }
+  document.getElementById("side").innerHTML = html
+}
+
+function crumbs(items) {
+  const all = [["Task decisions", "/"], ...items]
+  const last = all.length - 1
+  // Items further up than the parent are marked `far`, with the separator
+  // that follows them, so narrow screens can show just "parent / current".
+  document.getElementById("crumbs").innerHTML = all.map(([label, url], i) =>
+    i === last
+      ? `<span class="crumb current" title="${esc(label)}">${esc(label)}</span>`
+      : `<a class="crumb${i < last - 1 ? " far" : ""}" href="${esc(url)}" data-nav title="${esc(label)}">${esc(label)}</a><span class="sep${i < last - 1 ? " far" : ""}">/</span>`
+  ).join("")
+}
+
+function homePage() {
+  crumbs([])
+  const rows = DB.projects.map((p) => {
+    const c = p.tasks.map(counts).reduce((a, b) => ({ active: a.active + b.active, deferred: a.deferred + b.deferred, decisions: a.decisions + b.decisions }), { active: 0, deferred: 0, decisions: 0 })
+    const problems = p.problems.length + p.tasks.reduce((n, t) => n + t.problems.length, 0)
+    return `<tr class="link" data-href="${href(p.slug)}"><td>${icon("folder", 16)} <strong>${esc(p.name)}</strong> <span class="muted">${esc(p.slug)}</span></td>
+      <td class="num">${p.tasks.length}</td><td class="num">${c.active}</td><td class="num">${c.deferred}</td><td class="num">${c.decisions}</td>
+      <td>${problems ? `<span class="warn">${icon("triangle-alert")} ${problems}</span>` : ""}</td></tr>`
+  }).join("")
+  return `<div class="icon">${icon("notebook", 48)}</div><h1 class="title">Task decisions</h1>
+    <p class="muted">Backlog and decisions per task, read from <code>.task-decisions/</code> on every refresh.</p>
+    <div class="scroll"><table class="db"><thead><tr><th>Project</th><th class="num">Tasks</th><th class="num">Active</th><th class="num">Deferred</th><th class="num">Decisions in force</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+}
+
+/** A date for a table cell; empty and `—` show as a faint dash. */
+const dateCell = (value) => value && value !== "—" ? esc(value) : '<span class="empty">—</span>'
+
+function projectPage(p) {
+  crumbs([[p.name]])
+  const f = p.fields
+  const head = props([
+    ["Language", esc(f.language)], ["Tracker", esc(f.tracker)], ["Prefix", f.prefix && f.prefix !== "—" ? `<code>${esc(f.prefix)}</code>` : ""],
+    ["Areas", p.areas.map((a) => tag(a, "brown")).join("")],
+  ])
+  const rows = p.tasks.map((t) => {
+    const c = counts(t)
+    return `<tr class="link" data-href="${href(p.slug, t.slug)}"><td><strong>${esc(t.title)}</strong><br><span class="muted">${esc(t.slug)}</span></td>
+      <td>${t.state ? tag(t.state) : ""}</td><td class="num">${c.active}</td><td class="num">${c.deferred}</td><td class="num opt">${c.closed}</td><td class="num opt">${c.decisions}</td>
+      <td class="muted opt date">${dateCell(t.fields.start)}</td><td class="muted opt date">${dateCell(t.fields.end)}</td>
+      <td>${t.problems.length ? `<span class="warn">${icon("triangle-alert")} ${t.problems.length}</span>` : ""}</td></tr>`
+  }).join("")
+  const open = p.tasks.flatMap((t) => t.backlog.open.map((e) => ({ e, t })))
+  const openRows = open.sort((a, b) => (a.e.section === b.e.section ? 0 : a.e.section === "Active" ? -1 : 1)).map(({ e, t }) =>
+    `<tr class="link" data-href="${href(p.slug, t.slug)}#${e.n}"><td class="muted" style="white-space:nowrap">${esc(t.slug)}#${e.n}</td><td>${esc(e.title)}</td>
+      <td>${tag(e.state)}</td><td class="opt">${e.fields.type ? tag(e.fields.type) : ""}</td><td class="opt">${e.fields.area ? tag(e.fields.area, "brown") : ""}</td></tr>`).join("")
+  return `<div class="icon">${icon("folder", 48)}</div><h1 class="title">${esc(p.name)}</h1>${head}${problemsBox(p.problems)}<hr class="sep">
+    <div class="md">${markdown(p.body)}</div>
+    <h2>Tasks<span class="count">${p.tasks.length}</span></h2>
+    <div class="scroll"><table class="db"><thead><tr><th>Task</th><th>State</th><th class="num">Active</th><th class="num">Deferred</th><th class="num opt">Closed</th><th class="num opt">Decisions</th><th class="opt">Start</th><th class="opt">End</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+    <h2>Open items<span class="count">${open.length}</span></h2>
+    <div class="scroll"><table class="db"><thead><tr><th>Ref</th><th>Item</th><th>State</th><th class="opt">Type</th><th class="opt">Area</th></tr></thead><tbody>${openRows}</tbody></table></div>`
+}
+
+function originHtml(value, task) {
+  if (!value) return ""
+  const r = resolveRef(value, task)
+  if (!r) return `${esc(value)} <span class="warn">${icon("triangle-alert")} does not resolve</span>`
+  return r.plain ? `<span class="muted">${esc(value)}</span>` : `<a class="ref" href="${r.href}">${esc(value)}</a>`
+}
+
+function itemEntry(e, t) {
+  const f = e.fields
+  const rows = [
+    ["State", tag(e.state)], ["Type", f.type ? tag(f.type) : ""], ["Area", f.area ? tag(f.area, "brown") : ""],
+    ["Origin", originHtml(f.origin, t)], ["Ticket", esc(f.ticket)], ["Created", esc(f.created)],
+  ]
+  if (f.reason) rows.push(["Reason", inline(f.reason, t)])
+  if (f.closed) rows.push(["Closed", esc(f.closed)])
+  if (f.outcome) rows.push(["Outcome", inline(f.outcome, t)])
+  const known = [...ITEM_FIELDS, "reason", "closed", "outcome"]
+  for (const [k, v] of Object.entries(f)) if (!known.includes(k)) rows.push([k, inline(v, t)])
+  const warn = e.problems?.length ? `<span class="warn" title="${esc(e.problems.join("\n"))}">${icon("triangle-alert")}<span class="sr-only">Shape problem</span></span>` : ""
+  const done = e.section === "Closed"
+  return `<details class="entry" id="${e.n}"><summary><span class="caret">▶</span><span class="id">#${e.n}</span>
+    <span class="etitle"${done ? ' style="color:var(--muted)"' : ""}>${inline(e.title, t)}</span><span class="side">${warn}${f.type ? tag(f.type) : ""}${tag(e.state)}</span></summary>
+    <div class="inner">${props(rows)}<div class="md">${markdown(e.body, t)}</div></div></details>`
+}
+
+function decisionEntry(d, t) {
+  const f = d.fields
+  const sup = /^Superseded by (D\d+)$/.exec(d.state)
+  const state = sup ? `${tag("Superseded")} by ${originHtml(sup[1], t)}` : tag(d.state)
+  const rows = [
+    ["State", state], ["Date", esc(f.date)], ["Decided by", esc(f["decided by"])], ["Area", f.area ? tag(f.area, "brown") : ""],
+    ["Origin", originHtml(f.origin, t)], ["Revisit if", f["revisit if"] && f["revisit if"] !== "—" ? inline(f["revisit if"], t) : ""],
+  ]
+  const warn = d.problems?.length ? `<span class="warn" title="${esc(d.problems.join("\n"))}">${icon("triangle-alert")}<span class="sr-only">Shape problem</span></span>` : ""
+  return `<details class="entry" id="D${d.n}"><summary><span class="caret">▶</span><span class="id">D${d.n}</span>
+    <span class="etitle"${sup || d.state === "Revoked" ? ' style="color:var(--muted)"' : ""}>${inline(d.title, t)}</span><span class="side">${warn}${tag(sup ? "Superseded" : d.state)}</span></summary>
+    <div class="inner">${props(rows)}<div class="md">${markdown(d.body, t)}</div></div></details>`
+}
+
+function taskPage(p, t) {
+  crumbs([[p.name, href(p.slug)], [t.slug]])
+  const f = t.fields
+  const head = props([
+    ["State", t.state ? tag(t.state) : ""], ["Ticket", esc(f.ticket)], ["Branch", f.branch && f.branch !== "—" ? `<code>${esc(f.branch)}</code>` : ""],
+    ["MR", esc(f.mr)], ["Start", esc(f.start)], ["End", esc(f.end)],
+  ])
+  const section = (name) => {
+    const entries = t.backlog.open.filter((e) => e.section === name)
+    return `<h3>${name}<span class="count">${entries.length}</span></h3>${entries.map((e) => itemEntry(e, t)).join("") || '<p class="muted">Nothing here.</p>'}`
+  }
+  const closed = t.backlog.closed.map((e) => itemEntry(e, t)).join("") || '<p class="muted">Nothing here.</p>'
+  const reports = t.reports.length
+    ? `<ul>${t.reports.map((r) => `<li><a class="ref" href="${href(p.slug, t.slug, "reports", r)}" data-nav>${icon("file-text", 16)} ${esc(r)}</a></li>`).join("")}</ul>`
+    : '<p class="muted">No reports.</p>'
+  return `<div class="icon">${icon("file-text", 48)}</div><h1 class="title">${esc(t.title)}</h1>${head}${problemsBox(t.problems)}<hr class="sep">
+    <div class="md">${markdown(t.body, t)}</div>
+    <h2>Backlog<span class="count">${t.backlog.open.length + t.backlog.closed.length}</span></h2>
+    ${section("Active")}${section("Deferred")}<h3>Closed<span class="count">${t.backlog.closed.length}</span></h3>${closed}
+    <h2>Decisions<span class="count">${t.decisions.entries.length}</span></h2>
+    ${t.decisions.entries.map((d) => decisionEntry(d, t)).join("") || '<p class="muted">No decisions yet.</p>'}
+    <h2>Reports<span class="count">${t.reports.length}</span></h2><div class="md">${reports}</div>`
+}
+
+async function reportPage(p, t, file) {
+  crumbs([[p.name, href(p.slug)], [t.slug, href(p.slug, t.slug)], [file]])
+  const res = await fetch(`/api/file?path=${encodeURIComponent(`tasks/${t.slug}/reports/${file}`)}`, { cache: "no-store" }).catch(() => null)
+  if (!res?.ok) return notFound()
+  return `<div class="icon">${icon("file-text", 48)}</div><div class="md">${markdown(await res.text(), t)}</div>`
+}
+
+function notFound() {
+  crumbs([["Not found"]])
+  return `<h1 class="title">Not found</h1><p class="muted">Nothing at <code>${esc(location.pathname)}</code>.</p><p><a class="ref" href="/" data-nav>Back to all projects</a></p>`
+}
+
+// ---------- Router ----------
+let generation = 0
+const decode = (part) => { try { return decodeURIComponent(part) } catch { return null } }
+
+async function render() {
+  const mine = ++generation
+  document.body.classList.remove("side-open")
+  const path = location.pathname.split("/").filter(Boolean).map(decode)
+  if (path.includes(null)) { sidebar([]); return show(notFound(), []) }
+  sidebar(path)
+  const [ps, ts, kind, file] = path
+  const p = ps ? DB.bySlug[ps] : null
+  const t = p && ts ? findTask(p, ts) : null
+  let html
+  if (!ps) html = homePage()
+  else if (!p) html = notFound()
+  else if (!ts) html = projectPage(p)
+  else if (!t) html = notFound()
+  else if (!kind) html = taskPage(p, t)
+  else if (kind === "reports" && file && path.length === 4) {
+    html = await reportPage(p, t, file)
+    if (mine !== generation) return // a newer navigation already rendered
+  }
+  else html = notFound()
+  show(html, path)
+}
+
+function show(html, path) {
+  document.getElementById("page").innerHTML = html + `<p class="hint">Press F5 to reload from the files.</p>`
+  document.title = [path[path.length - 1], "Task decisions"].filter(Boolean).join(" · ")
+  focusHash()
+}
+
+function focusHash() {
+  const id = decode(location.hash.slice(1))
+  if (!id) return window.scrollTo(0, 0)
+  const el = document.getElementById(id)
+  if (!el) return
+  if (el.tagName === "DETAILS") { el.open = true; el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash") }
+  el.scrollIntoView({ block: "center" })
+}
+
+document.addEventListener("click", (event) => {
+  const row = event.target.closest("tr[data-href]")
+  const link = event.target.closest("a[href]")
+  const target = link?.getAttribute("href") ?? row?.dataset.href
+  if (!target || !target.startsWith("/") || event.metaKey || event.ctrlKey) return
+  event.preventDefault()
+  const url = new URL(target, location.origin)
+  if (url.pathname === location.pathname) { history.pushState(null, "", url); return focusHash() }
+  history.pushState(null, "", url)
+  render()
+})
+window.addEventListener("popstate", render)
+
+// ---------- Sidebar toggle ----------
+// Wide screens: the sidebar sits beside the page and its state is remembered.
+// Narrow screens: it is a drawer over the page, closed by default and after
+// every navigation.
+const narrow = window.matchMedia("(max-width: 800px)")
+const body = document.body
+function setSide(open) {
+  if (narrow.matches) body.classList.toggle("side-open", open)
+  else {
+    body.classList.toggle("side-closed", !open)
+    localStorage.setItem("notes.sidebar", open ? "open" : "closed")
+  }
+}
+const sideIsOpen = () => narrow.matches ? body.classList.contains("side-open") : !body.classList.contains("side-closed")
+body.classList.toggle("side-closed", localStorage.getItem("notes.sidebar") === "closed")
+narrow.addEventListener("change", () => body.classList.remove("side-open"))
+document.addEventListener("click", (event) => {
+  if (event.target.closest("#open-side")) setSide(true)
+  else if (event.target.closest("#close-side") || event.target.closest("#backdrop")) setSide(false)
+  else if (narrow.matches && event.target.closest("aside a[href]")) setSide(false)
+})
+document.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key === "\\") { event.preventDefault(); setSide(!sideIsOpen()) }
+  else if (event.key === "Escape" && body.classList.contains("side-open")) setSide(false)
+})
+window.addEventListener("hashchange", focusHash)
+
+Promise.all([fetch("/api/data", { cache: "no-store" }).then((res) => res.json()), loadIcons()])
+  .then(([raw]) => {
+    document.getElementById("open-side").innerHTML = icon("panel-left", 16)
+    build(raw)
+    return render()
+  })
+  .catch((error) => { document.getElementById("page").textContent = "Could not load the notes: " + error })
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "task-decisions": {
+      "source": "brasillero/task-decisions",
+      "sourceType": "github",
+      "skillPath": "skills/task-decisions/SKILL.md",
+      "computedHash": "61ef60be9596cd9003f74acf0c262508e3c2c1b143727e7ea207f2843c5f073b"
+    }
+  }
+}
