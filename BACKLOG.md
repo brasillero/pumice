@@ -2,7 +2,7 @@
 
 Things we decided to revisit, defer or keep an eye on. Each item says where it came from. When an item becomes work, it gets a story ID, a branch and a PR, and moves out of here. The owner decides priorities.
 
-Last updated: 2026-10-10.
+Last updated: 2026-10-11.
 
 ## To discuss (owner decision needed)
 
@@ -29,6 +29,8 @@ Last updated: 2026-10-10.
 | `pumice setup` wizard | List installed CLIs, pick which to enable, pick a model each. "Dumb easy, frictionless, robust." | Owner, audit item 11 |
 | Wispr prompt | The owner's v3 Wispr prompt lives only in Handy. Decide where an example belongs (a `docs/prompts/` file, the example config, or both). | Owner, 2026-10-07 |
 | Dictation samples (S8.1) | 10–20 real dictation samples as fixtures for prompt and cleanup tests. | Spec S8.1 |
+| Lowest effort per model | Every plugin should send each model the lowest effort it offers, and `none` when the model supports no effort setting, instead of one fixed `low` for all models (Kiro and Codex send `low` today; GPT-5.6 models in Kiro also accept `none`). Needs a source of per-model effort levels. | Owner, 2026-10-11 |
+| Model table per provider | A table of the model ids ("tags") each provider accepts, for example Claude `haiku`, Kiro `claude-haiku-4.5`, so users know what to put in `model:`. Either maintained by us, or not needed once Pumice's own CLI (the planned `pumice setup` wizard) can list the models from each provider's CLI (`kiro-cli chat --list-models`, `kimi provider list`, …). Could also carry the per-model effort levels for **Lowest effort per model**. | Owner, 2026-10-11 |
 | Contract suite coverage | Kimi and generic are tested outside the shared `adapter_contract!` macro (Kimi's argv transport differs). | Audit 2026-10-07 |
 
 ## Known limitations
@@ -41,7 +43,7 @@ Last updated: 2026-10-10.
 | Kiro session history | Kiro V2 saves every run, dictation included, under the user's own `~/.kiro/sessions/cli/`. Pumice does not touch `~/.kiro`; deleting its own session after each run is an open question in `docs/research/S2.14-kiro-plugin.md`. |
 | Kiro engine pin | The plugin pins `--agent-engine v2`, which `--help` calls "the pre-3.0 default". If Kiro CLI 3.0 drops V2, the plugin needs a V3 recipe. |
 | Kiro base instructions | Kiro's built-in assistant instructions sit under the client's system prompt. In the S2.14 end-to-end check (`claude-haiku-4.5`, Handy's request) Kiro answered the dictation instead of formatting it. |
-| Kiro effort | `--effort low` for every model. GPT-5.6 models also offer `none`, which Claude models do not accept; models without effort levels print a warning and run normally. |
+| Kiro effort | `--effort low` for every model (owner decision 2026-10-11: stays the default for now). GPT-5.6 models also offer `none`, which Claude models do not accept; models without effort levels print a warning and run normally. See **Lowest effort per model** under Deferred work. |
 | Partial-stdin check | A CLI that exits cleanly without reading all of its stdin is treated as a failure (#62), but the OS pipe buffer (about 64 KB) absorbs normal-size dictations, so in practice only very long dictations are caught. |
 | Kimi thinking off | Pumice forces `KIMI_MODEL_THINKING_EFFORT=off` (S2.14). Kimi 2.1.1 sends it even for models that must think; such a backend could reject every call (an HTTP error, logged; the app keeps its transcript). The owner's models (k2.7-code-highspeed, k2.8) offer thinking off. If a thinking-required model is ever used, pin its lowest effort instead. Routes through non-Kimi providers ignore the override. |
 | Kimi argv transport | The dictation travels as a command-line argument (visible to other local processes while the call runs), capped at 24 KiB and at the Windows command-line limit. |
