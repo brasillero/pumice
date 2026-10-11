@@ -15,9 +15,10 @@ the official CLI of your subscription, and returns the result to be pasted.
 - One of the supported platforms: **Windows x64, Linux x64, macOS x64 (Intel)
   or macOS ARM64 (Apple Silicon)**.
 - The **official CLI of at least one AI provider**, installed and logged into
-  in the *same* environment where Pumice runs — for example `claude` or
-  `codex` on your PATH. Pumice never installs or logs into these for you, and
-  it never reads their credentials: it only invokes the CLI you already use.
+  in the *same* environment where Pumice runs — for example `claude`,
+  `codex`, `kimi` or `kiro-cli` on your PATH. Pumice never installs or logs
+  into these for you, and it never reads their credentials: it only invokes
+  the CLI you already use.
 - **Node.js 22 or newer**, only if you install through npm/pnpm/Bun. The npm
   package ships a tiny launcher, but the Pumice service itself is a
   standalone native executable with nothing else to install.
@@ -128,9 +129,9 @@ then:
 - Provider: **Custom**
 - Base URL: `http://127.0.0.1:7567/v1`
 - API key: leave **empty**
-- Model: `claude` or `codex` (the CLIs you installed above), `passthrough`
-  to get the raw transcript back exactly as dictated, or `inspect` to echo
-  the full JSON request body for diagnostics. `inspect` includes Handy's
+- Model: `claude`, `codex`, `kimi` or `kiro` (the CLIs you installed
+  above), `passthrough` to get the raw transcript back exactly as dictated,
+  or `inspect` to echo the full JSON request body for diagnostics. `inspect` includes Handy's
   attached prompt and pastes the result as JSON; neither `passthrough` nor
   `inspect` spends quota or calls an AI.
 
@@ -177,7 +178,7 @@ Nothing is on until you list it with `enabled: true` and a `model` (the
 example config shows how). Then set the model in Handy to the provider's
 id to pick it.
 
-- **Claude**, **Codex** and **Kimi** — supported and tested with real calls.
+- **Claude**, **Codex**, **Kimi** and **Kiro** — supported and tested with real calls.
 - **Antigravity** and the **local-model adapter** (Ollama, LM Studio) —
   archived for now; listing them in the config is an error.
 - **OpenCode** — support was removed.

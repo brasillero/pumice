@@ -58,6 +58,7 @@ fn full_fake_yaml() -> (Vec<FakeCli>, String) {
         ("claude", Some("haiku"), "2.1.288 (Claude Code)\n"),
         ("codex", Some("gpt-6.1-sol"), "codex-cli 0.160.0\n"),
         ("kimi", None, "2.1.1\n"),
+        ("kiro", None, "2.29.0\n"),
     ] {
         let fake = FakeCli::new(json!({"stdout": stdout, "exit_code": 0}));
         yaml.push_str(&format!("  - id: {id}\n    enabled: {}\n", model.is_some()));
@@ -98,6 +99,10 @@ fn all_enabled_found_lists_every_provider_and_the_summary() {
     );
     assert!(
         stdout.contains("kimi: disabled, found 2.1.1\n"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("kiro: disabled, found 2.29.0\n"),
         "stdout: {stdout}"
     );
     assert!(

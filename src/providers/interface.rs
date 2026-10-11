@@ -103,6 +103,9 @@ pub enum ProviderErrorCode {
     InvalidOutput,
     OutputTooLarge,
     InputTooLarge,
+    /// The client's system prompt has a form the CLI would not take as
+    /// plain text (Kiro reads a `file://` agent prompt from disk).
+    UnsupportedSystemPrompt,
     UnexpectedToolActivity,
     NonzeroExit,
     /// An HTTP endpoint refused the connection or is unreachable (the generic
@@ -150,6 +153,9 @@ impl fmt::Display for ProviderErrorCode {
             }
             ProviderErrorCode::OutputTooLarge => "the provider returned too much output",
             ProviderErrorCode::InputTooLarge => "the dictation is too large for the provider",
+            ProviderErrorCode::UnsupportedSystemPrompt => {
+                "the provider cannot take this system prompt"
+            }
             ProviderErrorCode::UnexpectedToolActivity => "the provider tried to use a tool",
             ProviderErrorCode::NonzeroExit => "the provider reported a failure",
             ProviderErrorCode::EndpointUnavailable => "the endpoint is unavailable",

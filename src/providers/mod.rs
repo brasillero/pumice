@@ -117,7 +117,7 @@ macro_rules! register_providers {
     };
 }
 
-register_providers!(claude, codex, kimi);
+register_providers!(claude, codex, kimi, kiro);
 
 // Archived providers (owner decision 2026-10-08): their code and tests stay,
 // but they are not registered, so configuration, detection, `doctor` and
@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn registry_ids_are_unique_and_found() {
-        assert_eq!(PROVIDERS.len(), 3, "three providers are registered");
+        assert_eq!(PROVIDERS.len(), 4, "four providers are registered");
         for (i, d) in PROVIDERS.iter().enumerate() {
             assert!(PROVIDERS[..i].iter().all(|other| other.id != d.id));
             assert!(std::ptr::eq(descriptor(d.id).unwrap(), d));

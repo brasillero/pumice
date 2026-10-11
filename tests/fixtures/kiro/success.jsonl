@@ -1,0 +1,10 @@
+{"type":"runStarted","data":{"payloadSchema":"acp","acpProtocolVersion":1,"engine":"v2"}}
+{"type":"metadata","data":{"sessionId":"00000000-0000-4000-8000-000000000001","contextUsagePercentage":3.627000093460083,"reasoning":{"support":"unavailable","effortLevels":[]}}}
+{"type":"metadata","data":{"sessionId":"00000000-0000-4000-8000-000000000001","contextUsagePercentage":0.001999999862164259,"reasoning":{"support":"unavailable","effortLevels":[]}}}
+{"type":"metadata","data":{"sessionId":"00000000-0000-4000-8000-000000000001","contextUsagePercentage":0.001999999862164259,"reasoning":{"support":"unavailable","effortLevels":[]}}}
+{"type":"sessionUpdate","data":{"sessionId":"00000000-0000-4000-8000-000000000001","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Bonjour ! Comment"}}}}
+{"type":"sessionUpdate","data":{"sessionId":"00000000-0000-4000-8000-000000000001","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" "}}}}
+{"type":"sessionUpdate","data":{"sessionId":"00000000-0000-4000-8000-000000000001","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ça va ?"}}}}
+{"type":"metadata","data":{"sessionId":"00000000-0000-4000-8000-000000000001","contextUsagePercentage":2.1010000705718994,"reasoning":{"support":"unavailable","effortLevels":[]}}}
+{"type":"metadata","data":{"sessionId":"00000000-0000-4000-8000-000000000001","contextUsagePercentage":2.1010000705718994,"meteringUsage":[{"value":0.005854166567164179,"unit":"credit","unitPlural":"credits"}],"turnDurationMs":1180,"reasoning":{"support":"unavailable","effortLevels":[]}}}
+{"type":"runFinished","data":{"sessionId":"00000000-0000-4000-8000-000000000001","status":"success","stopReason":"end_turn","finalText":"Bonjour ! Comment ça va ?","finalTextTruncated":false}}

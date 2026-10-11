@@ -222,6 +222,7 @@ pub fn error_category(error: ProviderError) -> String {
             ProviderErrorCode::InvalidOutput => "the CLI returned unparseable output".to_owned(),
             ProviderErrorCode::OutputTooLarge => "the CLI returned too much output".to_owned(),
             ProviderErrorCode::InputTooLarge => "input too large".to_owned(),
+            ProviderErrorCode::UnsupportedSystemPrompt => "unsupported system prompt".to_owned(),
             ProviderErrorCode::UnexpectedToolActivity => "the CLI tried to use a tool".to_owned(),
             ProviderErrorCode::NonzeroExit => "the CLI reported a failure".to_owned(),
             ProviderErrorCode::EndpointUnavailable => "endpoint unavailable".to_owned(),
