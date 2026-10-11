@@ -3,7 +3,7 @@ title: Move HANDOFF and BACKLOG into task notes
 state: In progress
 ticket: —
 branch: chore-task-decisions-import
-mr: —
+mr: PR #88
 start: 2026-10-11
 end: —
 ---
