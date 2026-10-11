@@ -75,8 +75,8 @@ providers:
     enabled: false
     # model: kimi-k2.7-code-highspeed
 
-  # Kiro, Antigravity and the generic local-server adapter are archived for
-  # now, and OpenCode support was removed: listing any of them is an error.
+  # Antigravity and the generic local-server adapter are archived for now,
+  # and OpenCode support was removed: listing any of them is an error.
 
 # Dictated text is written to a log only when debug logging is enabled.
 debug_log:

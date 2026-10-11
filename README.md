@@ -17,7 +17,7 @@ Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude
 
 ## Status
 
-Pumice works end to end through Claude, Codex and Kimi. Kiro, Antigravity and the local OpenAI-compatible adapter are archived for now. You choose the providers in an explicit list in the YAML config — nothing is enabled by default, and there is no fallback: a failure returns the raw dictation. Run `pumice doctor` to see which CLIs it found.
+Pumice works end to end through Claude, Codex and Kimi. Antigravity and the local OpenAI-compatible adapter are archived for now. You choose the providers in an explicit list in the YAML config — nothing is enabled by default, and there is no fallback: a failure returns the raw dictation. Run `pumice doctor` to see which CLIs it found.
 
 Pumice supports standalone downloads and the npm package `@brasillero/pumice` (installable with npm, pnpm, Bun or npx; the installed command is `pumice`). Check [GitHub Releases](https://github.com/brasillero/pumice/releases) and the [npm registry](https://www.npmjs.com/package/@brasillero/pumice) for published versions. See the [installation guide](docs/install.md) for installation, startup and Handy setup; building from source is also supported below.
 
@@ -46,7 +46,7 @@ In Handy: **Settings → Advanced → Experimental Features → Post Processing*
 | --- | --- |
 | Local pass-through service (Claude, Codex, explicit provider list) | Implemented |
 | Kimi adapter, auto-detection | Implemented |
-| Kiro, Antigravity, generic loopback adapter | Archived; OpenCode support removed |
+| Antigravity, generic loopback adapter | Archived; OpenCode support removed |
 | Distribution: GitHub release archives + npm package | Released (v0.1.1); 0.2.0 after local testing |
 | `pumice setup` configuration wizard | Next |
 | Tauri installer, auto-update, start-with-the-system | Deferred |

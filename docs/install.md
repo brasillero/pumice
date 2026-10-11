@@ -178,8 +178,8 @@ example config shows how). Then set the model in Handy to the provider's
 id to pick it.
 
 - **Claude**, **Codex** and **Kimi** — supported and tested with real calls.
-- **Kiro**, **Antigravity** and the **local-model adapter** (Ollama, LM
-  Studio) — archived for now; listing them in the config is an error.
+- **Antigravity** and the **local-model adapter** (Ollama, LM Studio) —
+  archived for now; listing them in the config is an error.
 - **OpenCode** — support was removed.
 
 ## Upgrade and remove

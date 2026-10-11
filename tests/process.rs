@@ -122,24 +122,24 @@ async fn workspace_is_empty_and_control_file_is_outside_it() {
 
 #[tokio::test]
 async fn workspace_files_are_written_inside_workspace() {
-    let fake = FakeCli::new(json!({"report_files": [".kiro/agents/pumice.json"]}));
+    let fake = FakeCli::new(json!({"report_files": [".cli/agents/pumice.json"]}));
     let mut inv = invocation(fake.path());
     inv.workspace_files = vec![ControlFile {
-        name: ".kiro/agents/pumice.json".to_owned(),
+        name: ".cli/agents/pumice.json".to_owned(),
         contents: br#"{"name":"pumice","tools":[]}"#.to_vec(),
     }];
 
     run(inv).await.expect("run succeeds");
     let report = fake.report();
-    assert_eq!(report["cwd_entries"], json!([".kiro"]));
+    assert_eq!(report["cwd_entries"], json!([".cli"]));
 
-    let file = &report["report_files"][".kiro/agents/pumice.json"];
+    let file = &report["report_files"][".cli/agents/pumice.json"];
     assert_eq!(file["contents"], json!(r#"{"name":"pumice","tools":[]}"#));
     let path = PathBuf::from(file["path"].as_str().unwrap());
     assert!(path.is_absolute(), "{}", path.display());
     let cwd = Path::new(report["cwd"].as_str().unwrap());
     assert!(path.starts_with(cwd), "workspace file should be inside cwd");
-    assert_eq!(path, cwd.join(".kiro/agents/pumice.json"));
+    assert_eq!(path, cwd.join(".cli/agents/pumice.json"));
     assert!(!path.exists(), "removed with the temporary root");
 }
 
@@ -440,9 +440,9 @@ async fn temp_root_and_control_files_are_private() {
             "../control",
             "../control/system.txt",
             "../control/pumice-agent.md",
-            ".kiro",
-            ".kiro/agents",
-            ".kiro/agents/pumice-abc123.json"
+            ".cli",
+            ".cli/agents",
+            ".cli/agents/pumice-abc123.json"
         ]
     }));
     let mut inv = invocation(fake.path());
@@ -457,9 +457,9 @@ async fn temp_root_and_control_files_are_private() {
             contents: b"agent body".to_vec(),
         },
     ];
-    // Kiro uses a workspace-local agent file like this.
+    // A workspace-local agent file, for a CLI that only reads it from there.
     inv.workspace_files = vec![ControlFile {
-        name: ".kiro/agents/pumice-abc123.json".to_owned(),
+        name: ".cli/agents/pumice-abc123.json".to_owned(),
         contents: br#"{"name":"pumice","tools":[]}"#.to_vec(),
     }];
 
@@ -487,15 +487,15 @@ async fn temp_root_and_control_files_are_private() {
         file_mode,
         "kimi agent file"
     );
-    assert_eq!(modes[".kiro"].as_u64().unwrap(), dir_mode, ".kiro dir");
+    assert_eq!(modes[".cli"].as_u64().unwrap(), dir_mode, ".cli dir");
     assert_eq!(
-        modes[".kiro/agents"].as_u64().unwrap(),
+        modes[".cli/agents"].as_u64().unwrap(),
         dir_mode,
         "agents dir"
     );
     assert_eq!(
-        modes[".kiro/agents/pumice-abc123.json"].as_u64().unwrap(),
+        modes[".cli/agents/pumice-abc123.json"].as_u64().unwrap(),
         file_mode,
-        "kiro agent file"
+        "workspace agent file"
     );
 }

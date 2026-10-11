@@ -125,7 +125,6 @@ register_providers!(claude, codex, kimi);
 // settles.
 pub mod antigravity;
 pub mod generic;
-pub mod kiro;
 
 /// Provider IDs that are archived or removed, with what the configuration
 /// loader says when a file still lists one.
@@ -136,10 +135,6 @@ pub const RETIRED: &[(&str, &str)] = &[
     ),
     (
         "generic",
-        "is archived for now and cannot be used; delete this entry",
-    ),
-    (
-        "kiro",
         "is archived for now and cannot be used; delete this entry",
     ),
     ("opencode", "support was removed; delete this entry"),
