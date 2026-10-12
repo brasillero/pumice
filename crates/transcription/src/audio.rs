@@ -5,22 +5,16 @@ use rubato::{
     WindowFunction,
 };
 use std::io::Read;
+use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoderOptions};
+use symphonia::core::errors::Error as SymphoniaError;
+use symphonia::core::formats::{FormatOptions, FormatReader};
+use symphonia::core::io::{MediaSourceStream, ReadOnlySource};
 
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;
 pub const MAX_FILE_BYTES: u64 = 25_000_000;
 pub const MAX_AUDIO_SECONDS: f64 = 120.0;
 pub const MIN_SAMPLE_RATE: u32 = 8_000;
 pub const MAX_SAMPLE_RATE: u32 = 192_000;
-
-const WAVE_FORMAT_PCM: u16 = 0x0001;
-const WAVE_FORMAT_IEEE_FLOAT: u16 = 0x0003;
-const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
-const KSDATAFORMAT_SUBTYPE_PCM: [u8; 16] = [
-    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
-];
-const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: [u8; 16] = [
-    0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
-];
 
 #[derive(Debug)]
 pub struct DecodedAudio {
@@ -29,242 +23,159 @@ pub struct DecodedAudio {
     pub channels: u16,
 }
 
-/// Minimal bounded RIFF/WAVE parser.
+/// Decode a RIFF/WAVE file using Symphonia.
 ///
-/// Reads only the `fmt ` and `data` chunks, skipping all others and honoring the
-/// pad byte after odd-sized chunks. Supports PCM, IEEE float and WAVE_FORMAT_EXTENSIBLE
-/// with PCM/float subformats. hound 3.5.1 mishandles odd-sized chunks (e.g. a 1-byte
-/// JUNK chunk with its pad byte), so we decode ourselves instead of relying on it.
-pub fn decode_wav<R: Read>(mut reader: R) -> Result<DecodedAudio, Error> {
+/// The input is read through the provided reader (already bounded by our own
+/// byte budget). Decoding proceeds one packet at a time; the duration limit is
+/// enforced per-packet before any downmix or resample buffer is allocated, and
+/// no up-front reservation is made from header-declared lengths.
+pub fn decode_wav<R: Read + Send + Sync>(mut reader: R) -> Result<DecodedAudio, Error> {
+    // Pre-validate the RIFF/WAVE signature so non-WAV files produce InvalidInput rather
+    // than Symphonia's Unsupported error.
     let mut header = [0u8; 12];
-    reader.read_exact(&mut header).map_err(|e| {
-        Error::new(
-            ErrorCode::InvalidInput,
-            format!("failed to read WAV header: {e}"),
-        )
-    })?;
-
+    reader
+        .read_exact(&mut header)
+        .map_err(|e| Error::invalid_input(format!("failed to read WAV header: {e}")))?;
     if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
         return Err(Error::invalid_input("not a RIFF/WAVE file"));
     }
 
-    let riff_size = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as u64;
-    // The RIFF size covers everything after the size field itself.
-    let budget = riff_size.saturating_add(4).min(MAX_FILE_BYTES);
+    let source = ReadOnlySource::new(std::io::Cursor::new(header).chain(reader));
+    let mss = MediaSourceStream::new(Box::new(source), Default::default());
 
-    let mut fmt: Option<WavFmt> = None;
-    let mut data: Option<Vec<u8>> = None;
-    let mut bytes_read: u64 = 0;
+    let mut format = symphonia::default::formats::WavReader::try_new(mss, FormatOptions::default())
+        .map_err(map_symphonia_error)?;
 
-    loop {
-        if data.is_some() {
-            // We have everything we need; stop reading.
-            break;
-        }
-
-        let mut id = [0u8; 4];
-        match reader.read_exact(&mut id) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(e) => {
-                return Err(Error::invalid_input(format!(
-                    "failed to read chunk id: {e}"
-                )));
-            }
-        }
-        bytes_read += 4;
-
-        let size = read_u32(&mut reader, &mut bytes_read)?;
-
-        if &id == b"fmt " {
-            let mut buf = vec![0u8; size as usize];
-            reader
-                .read_exact(&mut buf)
-                .map_err(|e| Error::invalid_input(format!("failed to read fmt chunk: {e}")))?;
-            bytes_read += size as u64;
-            fmt = Some(parse_fmt(&buf)?);
-        } else if &id == b"data" {
-            if size as u64 > budget.saturating_sub(bytes_read) {
-                return Err(Error::input_too_large(size as u64 + bytes_read));
-            }
-            let mut buf = vec![0u8; size as usize];
-            reader
-                .read_exact(&mut buf)
-                .map_err(|e| Error::invalid_input(format!("failed to read data chunk: {e}")))?;
-            bytes_read += size as u64;
-            data = Some(buf);
-        } else {
-            // Skip unknown chunk body; pad byte is handled below.
-            let to_skip = (size as u64).min(budget.saturating_sub(bytes_read));
-            if to_skip > 0 {
-                let skipped =
-                    std::io::copy(&mut reader.by_ref().take(to_skip), &mut std::io::sink())
-                        .map_err(|e| Error::invalid_input(format!("failed to skip chunk: {e}")))?;
-                bytes_read += skipped;
-            }
-        }
-
-        // RIFF requires a pad byte after any odd-sized chunk.
-        if size % 2 == 1 && bytes_read < budget {
-            let mut pad = [0u8; 1];
-            match reader.read_exact(&mut pad) {
-                Ok(()) => bytes_read += 1,
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {}
-                Err(e) => {
-                    return Err(Error::invalid_input(format!(
-                        "failed to read pad byte: {e}"
-                    )));
-                }
-            }
-        }
-    }
-
-    let fmt = fmt.ok_or_else(|| Error::invalid_input("WAV file has no fmt chunk"))?;
-    let data = data.ok_or_else(|| Error::invalid_input("WAV file has no data chunk"))?;
-
-    validate_format(&fmt)?;
-
-    let interleaved = decode_samples(&fmt, &data)?;
-    let mono = downmix_to_mono(interleaved, fmt.channels)?;
-
-    Ok(DecodedAudio {
-        sample_rate: fmt.sample_rate,
-        channels: fmt.channels,
-        samples: mono,
-    })
-}
-
-#[derive(Debug, Clone, Copy)]
-struct WavFmt {
-    format_tag: u16,
-    channels: u16,
-    sample_rate: u32,
-    bits_per_sample: u16,
-}
-
-fn read_u32<R: Read>(reader: &mut R, counter: &mut u64) -> Result<u32, Error> {
-    let mut buf = [0u8; 4];
-    reader
-        .read_exact(&mut buf)
-        .map_err(|e| Error::invalid_input(format!("failed to read chunk size: {e}")))?;
-    *counter += 4;
-    Ok(u32::from_le_bytes(buf))
-}
-
-fn parse_fmt(buf: &[u8]) -> Result<WavFmt, Error> {
-    if buf.len() < 16 {
-        return Err(Error::unsupported_format("fmt chunk too short"));
-    }
-
-    let format_tag = u16::from_le_bytes([buf[0], buf[1]]);
-    let channels = u16::from_le_bytes([buf[2], buf[3]]);
-    let sample_rate = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
-    let bits_per_sample = u16::from_le_bytes([buf[14], buf[15]]);
-
-    let mut resolved_tag = format_tag;
-
-    if format_tag == WAVE_FORMAT_EXTENSIBLE {
-        if buf.len() < 40 {
-            return Err(Error::unsupported_format("extensible fmt chunk too short"));
-        }
-        // buf[16..18] = extension size, buf[18..20] = valid bits, buf[20..24] = channel mask
-        let subformat = &buf[24..40];
-        if subformat == KSDATAFORMAT_SUBTYPE_PCM {
-            resolved_tag = WAVE_FORMAT_PCM;
-        } else if subformat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT {
-            resolved_tag = WAVE_FORMAT_IEEE_FLOAT;
-        } else {
-            return Err(Error::unsupported_format(
-                "unsupported extensible subformat",
-            ));
-        }
-    }
-
-    Ok(WavFmt {
-        format_tag: resolved_tag,
-        channels,
-        sample_rate,
-        bits_per_sample,
-    })
-}
-
-fn validate_format(fmt: &WavFmt) -> Result<(), Error> {
-    if fmt.channels == 0 || fmt.channels > 2 {
-        return Err(Error::unsupported_format(format!(
-            "unsupported channel count: {} (expected 1 or 2)",
-            fmt.channels
-        )));
-    }
-
-    if fmt.sample_rate < MIN_SAMPLE_RATE || fmt.sample_rate > MAX_SAMPLE_RATE {
-        return Err(Error::unsupported_format(format!(
-            "unsupported sample rate: {} Hz (expected {}-{} Hz)",
-            fmt.sample_rate, MIN_SAMPLE_RATE, MAX_SAMPLE_RATE
-        )));
-    }
-
-    match (fmt.format_tag, fmt.bits_per_sample) {
-        (WAVE_FORMAT_PCM, 8 | 16 | 24 | 32) | (WAVE_FORMAT_IEEE_FLOAT, 32) => Ok(()),
-        _ => Err(Error::unsupported_format(format!(
-            "unsupported WAV format: format_tag={:#06x} {}-bit",
-            fmt.format_tag, fmt.bits_per_sample
-        ))),
-    }
-}
-
-fn decode_samples(fmt: &WavFmt, data: &[u8]) -> Result<Vec<f32>, Error> {
-    let bytes_per_sample = fmt.bits_per_sample as usize / 8;
-    let bytes_per_frame = bytes_per_sample * fmt.channels as usize;
-    if !data.len().is_multiple_of(bytes_per_frame) {
-        return Err(Error::invalid_input(
-            "data chunk size is not aligned to frame size",
+    // Require exactly one audio track.
+    let audio_track_count = format
+        .tracks()
+        .iter()
+        .filter(|t| {
+            t.codec_params
+                .as_ref()
+                .map(|p| p.is_audio())
+                .unwrap_or(false)
+        })
+        .count();
+    if audio_track_count != 1 {
+        return Err(Error::unsupported_format(
+            "WAV file must contain exactly one audio track",
         ));
     }
 
-    let frame_count = data.len() / bytes_per_frame;
-    let mut out = Vec::with_capacity(frame_count * fmt.channels as usize);
+    let track = &format.tracks()[0];
+    let codec_params = track
+        .codec_params
+        .as_ref()
+        .and_then(|p| p.audio())
+        .cloned()
+        .ok_or_else(|| Error::invalid_input("WAV track has no audio codec parameters"))?;
 
-    for (frame_idx, frame_bytes) in data.chunks_exact(bytes_per_frame).enumerate() {
-        // Enforce the duration limit while decoding so a long file is rejected
-        // before any downmix or resample buffer is allocated.
-        let seconds = (frame_idx + 1) as f64 / fmt.sample_rate as f64;
+    validate_format(&codec_params)?;
+
+    let sample_rate = codec_params
+        .sample_rate
+        .ok_or_else(|| Error::invalid_input("WAV file has no sample rate"))?;
+    let channels = codec_params
+        .channels
+        .as_ref()
+        .map(|c| c.count() as u16)
+        .unwrap_or(0);
+
+    let decoder_opts = AudioDecoderOptions::default();
+    let mut decoder = symphonia::default::get_codecs()
+        .make_audio_decoder(&codec_params, &decoder_opts)
+        .map_err(map_symphonia_error)?;
+
+    let mut samples = Vec::new();
+    let mut decoded_frames: usize = 0;
+
+    loop {
+        // Enforce the duration limit before decoding the next packet.
+        let seconds = decoded_frames as f64 / sample_rate as f64;
         if seconds > MAX_AUDIO_SECONDS {
             return Err(Error::audio_too_long(seconds));
         }
 
-        for ch in 0..fmt.channels as usize {
-            let start = ch * bytes_per_sample;
-            let sample = decode_sample(fmt, &frame_bytes[start..start + bytes_per_sample])?;
-            out.push(sample);
+        let packet = match format.next_packet() {
+            Ok(Some(p)) => p,
+            Ok(None) => break,
+            Err(e) => return Err(map_symphonia_error(e)),
+        };
+
+        let decoded = decoder.decode(&packet).map_err(map_symphonia_error)?;
+        let frames = decoded.frames();
+        decoded_frames += frames;
+
+        // Enforce again after this packet's frames are known.
+        let seconds = decoded_frames as f64 / sample_rate as f64;
+        if seconds > MAX_AUDIO_SECONDS {
+            return Err(Error::audio_too_long(seconds));
         }
+
+        let plane_count = decoded.spec().channels().count();
+        let packet_samples_count = frames * plane_count;
+        let mut packet_samples = Vec::with_capacity(packet_samples_count);
+        decoded.copy_to_vec_interleaved::<f32>(&mut packet_samples);
+
+        // Reject non-finite samples before clamping.
+        if packet_samples.iter().any(|s| !s.is_finite()) {
+            return Err(Error::invalid_input("audio contains non-finite samples"));
+        }
+
+        // Clamp float samples to [-1, 1]; integer conversions already produce
+        // values in this range.
+        for s in &mut packet_samples {
+            *s = s.clamp(-1.0, 1.0);
+        }
+
+        samples.extend(packet_samples);
     }
 
-    Ok(out)
+    let mono = downmix_to_mono(samples, channels)?;
+
+    Ok(DecodedAudio {
+        sample_rate,
+        channels,
+        samples: mono,
+    })
 }
 
-fn decode_sample(fmt: &WavFmt, bytes: &[u8]) -> Result<f32, Error> {
-    match (fmt.format_tag, fmt.bits_per_sample) {
-        (WAVE_FORMAT_PCM, 8) => Ok((bytes[0] as f32 - 128.0) / 128.0),
-        (WAVE_FORMAT_PCM, 16) => {
-            let v = i16::from_le_bytes([bytes[0], bytes[1]]);
-            Ok((v as f32) / 32_768.0)
+fn validate_format(params: &AudioCodecParameters) -> Result<(), Error> {
+    let channels = params
+        .channels
+        .as_ref()
+        .map(|c| c.count() as u16)
+        .unwrap_or(0);
+    if channels == 0 || channels > 2 {
+        return Err(Error::unsupported_format(format!(
+            "unsupported channel count: {} (expected 1 or 2)",
+            channels
+        )));
+    }
+
+    let sample_rate = params.sample_rate.unwrap_or(0);
+    if !(MIN_SAMPLE_RATE..=MAX_SAMPLE_RATE).contains(&sample_rate) {
+        return Err(Error::unsupported_format(format!(
+            "unsupported sample rate: {} Hz (expected {}-{} Hz)",
+            sample_rate, MIN_SAMPLE_RATE, MAX_SAMPLE_RATE
+        )));
+    }
+
+    Ok(())
+}
+
+fn map_symphonia_error(err: SymphoniaError) -> Error {
+    let msg = err.to_string();
+    match err {
+        SymphoniaError::Unsupported(_) => Error::unsupported_format(msg),
+        SymphoniaError::IoError(_) if msg.contains("byte budget exceeded") => {
+            Error::input_too_large(MAX_FILE_BYTES)
         }
-        (WAVE_FORMAT_PCM, 24) => {
-            let v = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0]) << 8 >> 8;
-            Ok((v as f32) / 8_388_608.0)
-        }
-        (WAVE_FORMAT_PCM, 32) => {
-            let v = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-            Ok((v as f32) / 2_147_483_648.0)
-        }
-        (WAVE_FORMAT_IEEE_FLOAT, 32) => {
-            let v = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-            if !v.is_finite() {
-                return Err(Error::invalid_input("audio contains non-finite samples"));
-            }
-            Ok(v.clamp(-1.0, 1.0))
-        }
-        _ => Err(Error::unsupported_format("unsupported WAV sample format")),
+        SymphoniaError::IoError(_)
+        | SymphoniaError::DecodeError(_)
+        | SymphoniaError::LimitError(_) => Error::invalid_input(msg),
+        _ => Error::internal(msg),
     }
 }
 
@@ -432,7 +343,7 @@ mod tests {
         let data_bytes = samples.len() * bytes_per_sample;
 
         let mut fmt = Vec::new();
-        fmt.extend_from_slice(&WAVE_FORMAT_PCM.to_le_bytes());
+        fmt.extend_from_slice(&0x0001u16.to_le_bytes()); // WAVE_FORMAT_PCM
         fmt.extend_from_slice(&channels.to_le_bytes());
         fmt.extend_from_slice(&sample_rate.to_le_bytes());
         fmt.extend_from_slice(&byte_rate.to_le_bytes());
@@ -476,7 +387,7 @@ mod tests {
         let data_bytes = samples.len() * bytes_per_sample;
 
         let mut fmt = Vec::new();
-        fmt.extend_from_slice(&WAVE_FORMAT_EXTENSIBLE.to_le_bytes());
+        fmt.extend_from_slice(&0xFFFEu16.to_le_bytes()); // WAVE_FORMAT_EXTENSIBLE
         fmt.extend_from_slice(&channels.to_le_bytes());
         fmt.extend_from_slice(&sample_rate.to_le_bytes());
         fmt.extend_from_slice(&byte_rate.to_le_bytes());
@@ -485,7 +396,10 @@ mod tests {
         fmt.extend_from_slice(&22u16.to_le_bytes()); // extension size
         fmt.extend_from_slice(&16u16.to_le_bytes()); // valid bits
         fmt.extend_from_slice(&0u32.to_le_bytes()); // channel mask
-        fmt.extend_from_slice(&KSDATAFORMAT_SUBTYPE_PCM);
+        fmt.extend_from_slice(&[
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38,
+            0x9b, 0x71,
+        ]); // PCM subformat GUID
 
         let mut data = Vec::with_capacity(data_bytes);
         for &s in samples {
@@ -516,7 +430,7 @@ mod tests {
         let data_bytes = samples.len() * bytes_per_sample;
 
         let mut fmt = Vec::new();
-        fmt.extend_from_slice(&WAVE_FORMAT_EXTENSIBLE.to_le_bytes());
+        fmt.extend_from_slice(&0xFFFEu16.to_le_bytes()); // WAVE_FORMAT_EXTENSIBLE
         fmt.extend_from_slice(&channels.to_le_bytes());
         fmt.extend_from_slice(&sample_rate.to_le_bytes());
         fmt.extend_from_slice(&byte_rate.to_le_bytes());
@@ -525,7 +439,10 @@ mod tests {
         fmt.extend_from_slice(&22u16.to_le_bytes()); // extension size
         fmt.extend_from_slice(&32u16.to_le_bytes()); // valid bits
         fmt.extend_from_slice(&0u32.to_le_bytes()); // channel mask
-        fmt.extend_from_slice(&KSDATAFORMAT_SUBTYPE_IEEE_FLOAT);
+        fmt.extend_from_slice(&[
+            0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38,
+            0x9b, 0x71,
+        ]); // IEEE float subformat GUID
 
         let mut data = Vec::with_capacity(data_bytes);
         for &s in samples {
@@ -547,6 +464,105 @@ mod tests {
         out.extend_from_slice(&data);
 
         out
+    }
+
+    fn write_wav_24bit_in_32bit_container(
+        samples: &[i32],
+        sample_rate: u32,
+        channels: u16,
+    ) -> Vec<u8> {
+        // 24-bit samples stored in the most-significant bits of a 32-bit container
+        // via WAVE_FORMAT_EXTENSIBLE (lower 8 bits are zero padding).
+        let bytes_per_sample = 4usize;
+        let block_align = (channels as usize * bytes_per_sample) as u16;
+        let byte_rate = sample_rate * block_align as u32;
+        let data_bytes = samples.len() * bytes_per_sample;
+
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&0xFFFEu16.to_le_bytes()); // WAVE_FORMAT_EXTENSIBLE
+        fmt.extend_from_slice(&channels.to_le_bytes());
+        fmt.extend_from_slice(&sample_rate.to_le_bytes());
+        fmt.extend_from_slice(&byte_rate.to_le_bytes());
+        fmt.extend_from_slice(&block_align.to_le_bytes());
+        fmt.extend_from_slice(&32u16.to_le_bytes()); // bits per sample (container)
+        fmt.extend_from_slice(&22u16.to_le_bytes()); // extension size
+        fmt.extend_from_slice(&24u16.to_le_bytes()); // valid bits per sample
+        fmt.extend_from_slice(&0u32.to_le_bytes()); // channel mask
+        fmt.extend_from_slice(&[
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38,
+            0x9b, 0x71,
+        ]); // PCM subformat GUID
+
+        let mut data = Vec::with_capacity(data_bytes);
+        for &s in samples {
+            // Shift 24-bit sample into the most-significant bits of the 32-bit container.
+            let padded = s << 8;
+            data.extend_from_slice(&padded.to_le_bytes());
+        }
+
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        let riff_size = 4 + 8 + fmt.len() as u32 + 8 + data.len() as u32;
+        out.extend_from_slice(&riff_size.to_le_bytes());
+        out.extend_from_slice(b"WAVE");
+
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        out.extend_from_slice(&fmt);
+
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&data);
+
+        out
+    }
+
+    fn write_wav_wrong_subformat_guid(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<u8> {
+        let bytes_per_sample = 2usize;
+        let block_align = (channels as usize * bytes_per_sample) as u16;
+        let byte_rate = sample_rate * block_align as u32;
+        let data_bytes = samples.len() * bytes_per_sample;
+
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        fmt.extend_from_slice(&channels.to_le_bytes());
+        fmt.extend_from_slice(&sample_rate.to_le_bytes());
+        fmt.extend_from_slice(&byte_rate.to_le_bytes());
+        fmt.extend_from_slice(&block_align.to_le_bytes());
+        fmt.extend_from_slice(&16u16.to_le_bytes());
+        fmt.extend_from_slice(&22u16.to_le_bytes());
+        fmt.extend_from_slice(&16u16.to_le_bytes());
+        fmt.extend_from_slice(&0u32.to_le_bytes());
+        // Random GUID that is neither PCM nor IEEE float.
+        fmt.extend_from_slice(&[0xde; 16]);
+
+        let mut data = Vec::with_capacity(data_bytes);
+        for &s in samples {
+            data.extend_from_slice(&s.to_le_bytes());
+        }
+
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        let riff_size = 4 + 8 + fmt.len() as u32 + 8 + data.len() as u32;
+        out.extend_from_slice(&riff_size.to_le_bytes());
+        out.extend_from_slice(b"WAVE");
+
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        out.extend_from_slice(&fmt);
+
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&data);
+
+        out
+    }
+
+    fn write_wav_riff_size_too_small(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<u8> {
+        let mut wav = write_wav_extensible_pcm(samples, sample_rate, channels);
+        // RIFF size is at bytes 4..8. Make it smaller than the actual chunks.
+        wav[4..8].copy_from_slice(&16u32.to_le_bytes());
+        wav
     }
 
     fn silence(samples: usize) -> Vec<f32> {
@@ -655,8 +671,7 @@ mod tests {
 
     #[test]
     fn decode_odd_sized_junk_chunk() {
-        // Regression: hound 3.5.1 fails to parse WAVs with odd-sized chunks
-        // because it does not honor the mandatory pad byte.
+        // Regression: odd-sized chunks must have their mandatory pad byte honored.
         let samples: Vec<i16> = (0..16000).map(|i| (i as i16).wrapping_mul(2)).collect();
         let wav = write_wav_with_odd_junk(&samples, 16_000, 1);
         let decoded = decode_wav(Cursor::new(&wav)).unwrap();
@@ -680,6 +695,56 @@ mod tests {
         let decoded = decode_wav(Cursor::new(&wav)).unwrap();
         assert!((decoded.samples[0] - 1.0).abs() < 1e-6);
         assert!((decoded.samples[1] - (-1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn decode_24bit_in_32bit_container() {
+        // Samples are stored as 24-bit values in a 32-bit container.
+        let wav = write_wav_24bit_in_32bit_container(&[8_388_607, -8_388_608, 0], 16_000, 1);
+        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        assert_eq!(decoded.samples.len(), 3);
+        assert!(
+            (decoded.samples[0] - 8_388_607.0 / 8_388_608.0).abs() < 1e-6,
+            "24-in-32 max scaled to {}",
+            decoded.samples[0]
+        );
+        assert!(
+            (decoded.samples[1] - (-1.0)).abs() < 1e-6,
+            "24-in-32 min scaled to {}",
+            decoded.samples[1]
+        );
+        assert!(decoded.samples[2].abs() < 1e-6);
+    }
+
+    #[test]
+    fn wrong_subformat_guid_rejected() {
+        let wav = write_wav_wrong_subformat_guid(&[0, 0], 16_000, 1);
+        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::UnsupportedFormat);
+    }
+
+    #[test]
+    fn riff_size_smaller_than_data_rejected() {
+        let wav = write_wav_riff_size_too_small(&[0; 10], 16_000, 1);
+        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        assert!(matches!(
+            err.code,
+            ErrorCode::InvalidInput | ErrorCode::UnsupportedFormat
+        ));
+    }
+
+    #[test]
+    fn fmt_size_all_ones_rejected_cleanly() {
+        // 20-byte file: RIFF header + WAVE form + fmt chunk header with size 0xffffffff.
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&12u32.to_le_bytes()); // RIFF size: just enough for WAVE + fmt header
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&0xffffffffu32.to_le_bytes());
+
+        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
     #[test]
