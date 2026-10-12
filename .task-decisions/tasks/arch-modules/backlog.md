@@ -14,7 +14,7 @@
 **To do.**
 - [x] Codex analysis written to `docs/research/architecture-modules.md`.
 - [x] Owner review of the first four choices: D6–D10.
-- [ ] Revise the phased plan to D6–D10 (bare `pumice` as orchestrator, `relay.yml`, CPU + runtime CPU + GPU, downloader).
+- [x] Revise the phased plan to D6–D10 (`docs/research/architecture-plan.md`) (bare `pumice` as orchestrator, `relay.yml`, CPU + runtime CPU + GPU, downloader).
 - [ ] Remaining owner questions from the analysis (formatter, combined API, limits, network), when those phases start.
 
 ## Deferred
