@@ -1,0 +1,134 @@
+name: STT standalone executable experiment
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'spikes/stt/**'
+      - '.github/workflows/stt-spike.yml'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  stt:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/spikes/stt/target
+      MODEL_SHA256: 325b9c7997cd1eff81ef709d55766565e71be696130cc3a3d444713798706834
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Show runner CMake
+        run: cmake --version
+
+      - name: Install pinned musl C/C++ toolchain
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          archive="$RUNNER_TEMP/musl-cross.tar.xz"
+          curl -fL --retry 3 https://github.com/cross-tools/musl-cross/releases/download/20261001/x86_64-unknown-linux-musl.tar.xz -o "$archive"
+          printf '%s  %s\n' faeaf3c7c377cb4351490988d9a1c8fed7d403a5b8066e5103af5d4dd96450fe "$archive" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/musl-cross"
+          tar -xf "$archive" -C "$RUNNER_TEMP/musl-cross"
+          echo "MUSL_TOOLCHAIN=$RUNNER_TEMP/musl-cross/x86_64-unknown-linux-musl" >> "$GITHUB_ENV"
+
+      - name: Configure CPU flags
+        run: |
+          flags='-DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF'
+          if [[ '${{ matrix.target }}' == x86_64-* ]]; then
+            flags="$flags -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_F16C=ON -DGGML_FMA=ON -DGGML_BMI2=ON"
+          fi
+          echo "TRANSCRIBE_CMAKE_ARGS=$flags" >> "$GITHUB_ENV"
+
+      - name: Build fully static musl executable
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: bash spikes/stt/ci/build-musl.sh
+
+      - name: Build Windows and macOS executable
+        if: matrix.target != 'x86_64-unknown-linux-musl'
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: '-C target-feature=+crt-static'
+        run: cargo build --manifest-path spikes/stt/Cargo.toml --release --locked --target ${{ matrix.target }}
+
+      # Mirror release.yml's vswhere discovery; avoid actions with old Node runtimes.
+      - name: Verify Windows imports are system DLLs only
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find '**\dumpbin.exe' | Select-Object -First 1
+          if (-not $dumpbin) { Write-Error 'FAIL: dumpbin.exe not found via vswhere'; exit 1 }
+          $output = & $dumpbin /dependents "spikes\stt\target\${{ matrix.target }}\release\stt-spike.exe"
+          if ($LASTEXITCODE -ne 0) { Write-Error "FAIL: dumpbin exited with $LASTEXITCODE"; exit 1 }
+          $output | ForEach-Object { Write-Host $_ }
+          $text = ($output | Out-String).ToLowerInvariant()
+          foreach ($name in @('vcruntime', 'msvcp', 'ucrtbase', 'api-ms-win-crt', 'ggml', 'transcribe')) {
+            if ($text.Contains($name)) { Write-Error "FAIL: prohibited DLL import '$name'"; exit 1 }
+          }
+          # An allowlist rejects other third-party DLLs, even if installed on the runner.
+          $allowed = @('kernel32.dll', 'advapi32.dll', 'bcrypt.dll', 'ntdll.dll', 'userenv.dll', 'ws2_32.dll', 'synchronization.dll', 'kernelbase.dll')
+          $dlls = @($output | ForEach-Object {
+            if ($_ -match '^\s+([\w.-]+\.dll)\s*$') { $Matches[1].ToLowerInvariant() }
+          })
+          if ($dlls.Count -eq 0) { Write-Error 'FAIL: no DLL imports parsed'; exit 1 }
+          foreach ($dll in $dlls) {
+            if ($dll -notin $allowed) { Write-Error "FAIL: unexpected DLL import '$dll'"; exit 1 }
+          }
+          Write-Host 'OK: system DLL imports only'
+
+      - name: Verify Linux or macOS linkage
+        if: matrix.target != 'x86_64-pc-windows-msvc'
+        run: python3 spikes/stt/ci/verify-unix.py "spikes/stt/target/${{ matrix.target }}/release/stt-spike" '${{ matrix.target }}'
+
+      - uses: actions/cache@v5
+        id: model-cache
+        with:
+          path: spikes/stt/models/whisper-tiny-Q8_0.gguf
+          key: stt-model-${{ env.MODEL_SHA256 }}
+          enableCrossOsArchive: true
+
+      - name: Download pinned tiny model
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p spikes/stt/models
+          curl -fL --retry 3 'https://huggingface.co/handy-computer/whisper-tiny-gguf/resolve/6687f30c99641ee265df421e582354adbc8848fc/whisper-tiny-Q8_0.gguf' -o spikes/stt/models/whisper-tiny-Q8_0.gguf
+
+      - name: Transcribe Portuguese fixture and summarize
+        run: |
+          bin="spikes/stt/target/${{ matrix.target }}/release/stt-spike"
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          python3 spikes/stt/ci/smoke.py "$bin" spikes/stt/models/whisper-tiny-Q8_0.gguf spikes/stt/fixtures/sample-pt.wav
+
+      - name: Upload single executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: stt-spike-${{ matrix.target }}
+          path: spikes/stt/target/${{ matrix.target }}/release/stt-spike${{ matrix.target == 'x86_64-pc-windows-msvc' && '.exe' || '' }}
+          if-no-files-found: error
+          retention-days: 3
