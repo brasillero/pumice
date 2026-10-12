@@ -3,7 +3,7 @@ title: S10.1: speech-to-text transcription layer
 state: In progress
 ticket: —
 branch: s10.1-transcription
-mr: —
+mr: PR #91
 start: 2026-10-12
 end: —
 ---
