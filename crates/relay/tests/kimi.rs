@@ -9,11 +9,13 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pumice::config::{self, Config};
-use pumice::process::ProcessRunner;
-use pumice::providers::cli::CliProvider;
-use pumice::providers::kimi::{DESCRIPTOR, ID, KimiAdapter};
-use pumice::providers::{FormatInput, Provider, ProviderError, ProviderErrorCode, UserPrompt};
+use pumice_relay::config::{self, Config};
+use pumice_relay::process::ProcessRunner;
+use pumice_relay::providers::cli::CliProvider;
+use pumice_relay::providers::kimi::{DESCRIPTOR, ID, KimiAdapter};
+use pumice_relay::providers::{
+    FormatInput, Provider, ProviderError, ProviderErrorCode, UserPrompt,
+};
 use serde_json::{Value, json};
 use support::{FakeCli, fixture};
 use tokio::time::Instant;
@@ -338,7 +340,7 @@ async fn errors_never_contain_captured_output() {
 #[tokio::test]
 async fn oversize_dictation_is_refused_before_spawn() {
     let fake = fake_kimi("", 0);
-    let text = "x".repeat(pumice::providers::kimi::MAX_USER_MESSAGE_BYTES + 1);
+    let text = "x".repeat(pumice_relay::providers::kimi::MAX_USER_MESSAGE_BYTES + 1);
     assert_eq!(
         format(&fake, &text).await.unwrap_err(),
         ProviderError::other(ProviderErrorCode::InputTooLarge)
@@ -563,7 +565,10 @@ async fn an_empty_client_system_prompt_becomes_the_neutral_line() {
         .expect("success");
     let file = agent_file(&fake.report());
     assert!(
-        file.ends_with(&format!("{}\n", pumice::providers::NEUTRAL_SYSTEM_PROMPT)),
+        file.ends_with(&format!(
+            "{}\n",
+            pumice_relay::providers::NEUTRAL_SYSTEM_PROMPT
+        )),
         "{file}"
     );
 }

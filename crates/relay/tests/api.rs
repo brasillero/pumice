@@ -18,12 +18,12 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use pumice::api::{self, RequestLog};
-use pumice::config;
-use pumice::logging::DebugLog;
-use pumice::pipeline::Pipeline;
-use pumice::process::ProcessRunner;
-use pumice::providers::{self, discovery};
+use pumice_relay::api::{self, RequestLog};
+use pumice_relay::config;
+use pumice_relay::logging::DebugLog;
+use pumice_relay::pipeline::Pipeline;
+use pumice_relay::process::ProcessRunner;
+use pumice_relay::providers::{self, discovery};
 use serde_json::{Value, json};
 use support::FakeCli;
 use tempfile::TempDir;
@@ -1459,7 +1459,7 @@ fn occupied_port_exits_1_naming_port() {
     let (_claude, _fakes, yaml) = hermetic_serve_yaml(port, json!({}));
     let (_dir, config_path) = write_config(&yaml);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_pumice"))
+    let output = Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
         .arg("serve")
         .arg("--config")
         .arg(&config_path)
@@ -1498,7 +1498,7 @@ fn grab_free_port() -> u16 {
 /// Spawns `pumice serve` and returns the child plus a receiver holding the
 /// first stdout line, read on a helper thread.
 fn spawn_serve(config_path: &std::path::Path) -> (Child, mpsc::Receiver<Option<String>>) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_pumice"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
         .arg("serve")
         .arg("--config")
         .arg(config_path)
@@ -1589,7 +1589,7 @@ fn spawn_serve_with_stderr(
     mpsc::Receiver<Option<String>>,
     mpsc::Receiver<String>,
 ) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_pumice"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
         .arg("serve")
         .arg("--config")
         .arg(config_path)

@@ -9,13 +9,13 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use pumice::api;
-use pumice::config;
-use pumice::logging::DebugLog;
-use pumice::monitor::{Event, EventKind};
-use pumice::pipeline::{OutcomeKind, Pipeline};
-use pumice::process::ProcessRunner;
-use pumice::providers;
+use pumice_relay::api;
+use pumice_relay::config;
+use pumice_relay::logging::DebugLog;
+use pumice_relay::monitor::{Event, EventKind};
+use pumice_relay::pipeline::{OutcomeKind, Pipeline};
+use pumice_relay::process::ProcessRunner;
+use pumice_relay::providers;
 use serde_json::{Value, json};
 use support::FakeCli;
 use tempfile::TempDir;
@@ -45,7 +45,7 @@ struct EventCapture {
     events: Mutex<Vec<Event>>,
 }
 
-impl pumice::monitor::Monitor for EventCapture {
+impl pumice_relay::monitor::Monitor for EventCapture {
     fn event(&self, event: Event) {
         self.events.lock().unwrap().push(event);
     }
@@ -632,8 +632,8 @@ async fn provider_failure_emits_error_status_and_no_reply_even_with_debug_log() 
         Some((
             502,
             Some(OutcomeKind::Raw(
-                pumice::pipeline::RawReason::ProviderFailed(
-                    pumice::providers::ProviderError::NotLoggedIn
+                pumice_relay::pipeline::RawReason::ProviderFailed(
+                    pumice_relay::providers::ProviderError::NotLoggedIn
                 )
             )),
             None

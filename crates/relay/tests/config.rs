@@ -7,9 +7,9 @@ use std::process::Output;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pumice::config::{self, Config, ConfigSource, DEFAULT_PORT};
-use pumice::process::ProcessRunner;
-use pumice::providers::{self, ProviderDescriptor, ProviderSettings};
+use pumice_relay::config::{self, Config, ConfigSource, DEFAULT_PORT};
+use pumice_relay::process::ProcessRunner;
+use pumice_relay::providers::{self, ProviderDescriptor, ProviderSettings};
 use tempfile::TempDir;
 
 const CONFIG_NAME: &str = "pumice.yaml";
@@ -61,9 +61,9 @@ mod capability_probe {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use pumice::config::ConfigError;
-    use pumice::process::ProcessRunner;
-    use pumice::providers::{
+    use pumice_relay::config::ConfigError;
+    use pumice_relay::process::ProcessRunner;
+    use pumice_relay::providers::{
         ProbeSpec, Provider, ProviderDescriptor, ProviderSettings, validate_settings_noop,
     };
 
@@ -679,7 +679,7 @@ fn enabled_without_a_model_is_rejected_at_the_id() {
 
 /// Runs the real `pumice` binary with `args`.
 fn run_pumice(args: &[&str]) -> Output {
-    std::process::Command::new(env!("CARGO_BIN_EXE_pumice"))
+    std::process::Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
         .args(args)
         .output()
         .expect("pumice runs")
@@ -791,7 +791,7 @@ fn serve_rejects_bad_arguments() {
     let output = run_pumice(&["serve", "--bogus"]);
     assert_eq!(output.status.code(), Some(2));
     assert!(
-        stderr(&output).contains("usage: pumice serve"),
+        stderr(&output).contains("usage: pumice-relay serve"),
         "{}",
         stderr(&output)
     );
@@ -821,7 +821,7 @@ fn serve_reports_config_errors_like_check_config() {
 
 /// Path to the shipped `pumice.example.yaml` at the repository root.
 fn example_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("pumice.example.yaml")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../pumice.example.yaml")
 }
 
 #[test]

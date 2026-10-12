@@ -18,12 +18,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use pumice::config::{Config, DebugLogSettings, ProviderConfig};
-use pumice::pipeline::{OutcomeKind, Pipeline};
-use pumice::providers::{
+use pumice_relay::config::{Config, DebugLogSettings, ProviderConfig};
+use pumice_relay::pipeline::{OutcomeKind, Pipeline};
+use pumice_relay::providers::{
     self, FormatInput, Provider, ProviderError, ProviderErrorCode, ProviderSettings, UserPrompt,
 };
-use pumice::request::{ChatCompletionRequest, Content, ExtractedRequest, Message, extract_request};
+use pumice_relay::request::{
+    ChatCompletionRequest, Content, ExtractedRequest, Message, extract_request,
+};
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
@@ -551,7 +553,7 @@ pub async fn privacy<A: ContractAdapter>() {
 /// failing, the original text comes back raw and a scripted double is never
 /// invoked; the double's failure never reaches this adapter either.
 pub async fn failure_is_terminal<A: ContractAdapter>() {
-    use pumice::pipeline::RawReason;
+    use pumice_relay::pipeline::RawReason;
 
     // Selected and failing: raw text, the double never runs.
     let (stdout, exit_code) = A::not_logged_in("contract-suite");

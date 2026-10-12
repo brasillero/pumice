@@ -17,11 +17,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pumice::process::ProcessRunner;
-use pumice::providers::claude::ClaudeAdapter;
-use pumice::providers::cli::CliProvider;
-use pumice::providers::codex::CodexAdapter;
-use pumice::providers::{FormatInput, Provider, ProviderError, UserPrompt};
+use pumice_relay::process::ProcessRunner;
+use pumice_relay::providers::claude::ClaudeAdapter;
+use pumice_relay::providers::cli::CliProvider;
+use pumice_relay::providers::codex::CodexAdapter;
+use pumice_relay::providers::{FormatInput, Provider, ProviderError, UserPrompt};
 use serde_json::{Value, json};
 use support::{FakeCli, fixture};
 use tokio::time::Instant;
@@ -261,7 +261,7 @@ async fn windows_hostile_shim_is_refused_without_running() {
     assert_eq!(
         format_with(&provider, "hello").await.unwrap_err(),
         ProviderError::Other {
-            code: pumice::providers::ProviderErrorCode::UnsupportedShim
+            code: pumice_relay::providers::ProviderErrorCode::UnsupportedShim
         }
     );
     assert!(!report_path.exists(), "the fake must not run");

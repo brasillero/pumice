@@ -10,11 +10,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pumice::config::{self, Config};
-use pumice::process::ProcessRunner;
-use pumice::providers::cli::CliProvider;
-use pumice::providers::kiro::{self as kiro_plugin, AGENT_FILE, DESCRIPTOR, ID, KiroAdapter};
-use pumice::providers::{FormatInput, Provider, ProviderError, ProviderErrorCode, UserPrompt};
+use pumice_relay::config::{self, Config};
+use pumice_relay::process::ProcessRunner;
+use pumice_relay::providers::cli::CliProvider;
+use pumice_relay::providers::kiro::{self as kiro_plugin, AGENT_FILE, DESCRIPTOR, ID, KiroAdapter};
+use pumice_relay::providers::{
+    FormatInput, Provider, ProviderError, ProviderErrorCode, UserPrompt,
+};
 use serde_json::{Value, json};
 use support::{FakeCli, fixture};
 use tokio::time::Instant;

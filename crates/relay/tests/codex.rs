@@ -6,10 +6,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pumice::process::{ProcessRunner, toml_basic_string};
-use pumice::providers::cli::CliProvider;
-use pumice::providers::codex::CodexAdapter;
-use pumice::providers::{FormatInput, Provider, ProviderError, ProviderErrorCode, UserPrompt};
+use pumice_relay::process::{ProcessRunner, toml_basic_string};
+use pumice_relay::providers::cli::CliProvider;
+use pumice_relay::providers::codex::CodexAdapter;
+use pumice_relay::providers::{
+    FormatInput, Provider, ProviderError, ProviderErrorCode, UserPrompt,
+};
 use serde_json::json;
 use support::{FakeCli, fixture};
 use tokio::time::Instant;
@@ -475,6 +477,6 @@ async fn an_empty_client_system_prompt_becomes_the_neutral_line() {
     let file = &fake.report()["config_files"]["model_instructions_file"];
     assert_eq!(
         file["contents"],
-        json!(pumice::providers::NEUTRAL_SYSTEM_PROMPT)
+        json!(pumice_relay::providers::NEUTRAL_SYSTEM_PROMPT)
     );
 }

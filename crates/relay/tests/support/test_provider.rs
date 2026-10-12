@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use pumice::providers::{FormatInput, Provider, ProviderError, ProviderFuture};
+use pumice_relay::providers::{FormatInput, Provider, ProviderError, ProviderFuture};
 use tokio::time::Instant;
 
 /// One scripted reaction of a [`TestProvider`].

@@ -10,10 +10,10 @@ mod support;
 use std::path::Path;
 use std::time::Duration;
 
-use pumice::config::{self, Config};
-use pumice::process::ProcessRunner;
-use pumice::providers::discovery::{self, Found, Version};
-use pumice::providers::{self, ProbeSpec, ProviderDescriptor};
+use pumice_relay::config::{self, Config};
+use pumice_relay::process::ProcessRunner;
+use pumice_relay::providers::discovery::{self, Found, Version};
+use pumice_relay::providers::{self, ProbeSpec, ProviderDescriptor};
 use serde_json::json;
 use support::FakeCli;
 use tempfile::TempDir;

@@ -7,7 +7,9 @@
 //! conversation histories, multimodal content, malformed envelopes — is
 //! rejected with a specific, text-free error.
 
-use pumice::request::{ChatCompletionRequest, ExtractedRequest, RequestError, extract_request};
+use pumice_relay::request::{
+    ChatCompletionRequest, ExtractedRequest, RequestError, extract_request,
+};
 
 const HANDY_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),

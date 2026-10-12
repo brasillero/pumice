@@ -6,10 +6,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use pumice::process::ProcessRunner;
-use pumice::providers::claude::ClaudeAdapter;
-use pumice::providers::cli::CliProvider;
-use pumice::providers::{FormatInput, Provider, ProviderError, ProviderErrorCode, UserPrompt};
+use pumice_relay::process::ProcessRunner;
+use pumice_relay::providers::claude::ClaudeAdapter;
+use pumice_relay::providers::cli::CliProvider;
+use pumice_relay::providers::{
+    FormatInput, Provider, ProviderError, ProviderErrorCode, UserPrompt,
+};
 use serde_json::json;
 use support::{FakeCli, fixture};
 use tokio::time::Instant;

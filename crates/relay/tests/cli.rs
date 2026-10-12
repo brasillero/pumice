@@ -102,7 +102,7 @@ fn try_start(
     cwd: &Path,
     port: u16,
 ) -> Result<Server, String> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pumice"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pumice-relay"));
     command
         .args(args)
         .current_dir(cwd)
@@ -180,7 +180,7 @@ fn assert_port_race(error: &str, attempt: usize) {
 
 /// Runs `pumice` with `args` to completion in `cwd` and returns its output.
 fn run(args: &[&str], cwd: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_pumice"))
+    Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -377,7 +377,7 @@ fn help_and_version_print_without_starting_the_service() {
         assert_eq!(output.status.code(), Some(0), "stderr: {:?}", output.stderr);
         assert!(stdout.contains("usage:"), "help must print usage: {stdout}");
         assert!(
-            stdout.contains("pumice [--config <path>]"),
+            stdout.contains("pumice-relay [--config <path>]"),
             "help must show the primary bare command: {stdout}"
         );
     }
@@ -386,7 +386,7 @@ fn help_and_version_print_without_starting_the_service() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert_eq!(output.status.code(), Some(0), "stderr: {:?}", output.stderr);
         assert!(
-            stdout.contains(&format!("pumice {}", env!("CARGO_PKG_VERSION"))),
+            stdout.contains(&format!("pumice-relay {}", env!("CARGO_PKG_VERSION"))),
             "version must print the crate version: {stdout}"
         );
     }
@@ -505,7 +505,7 @@ fn startup_prints_the_route_line_naming_the_enabled_providers() {
         claude.path().display(),
         codex.path().display()
     ));
-    let mut child = Command::new(env!("CARGO_BIN_EXE_pumice"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
         .args(["--config", path.to_str().expect("UTF-8 path")])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -525,7 +525,7 @@ fn startup_with_no_enabled_providers_prints_one_clear_line() {
     let (_dir, path) = write_config(&format!(
         "port: {port}\nproviders:\n  - id: claude\n    enabled: false\n"
     ));
-    let mut child = Command::new(env!("CARGO_BIN_EXE_pumice"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
         .args(["--config", path.to_str().expect("UTF-8 path")])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -549,7 +549,7 @@ fn non_unicode_argument_is_a_usage_error_not_a_panic() {
     use std::os::unix::ffi::OsStrExt;
 
     let dir = TempDir::new().expect("temp dir");
-    let output = Command::new(env!("CARGO_BIN_EXE_pumice"))
+    let output = Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
         .arg("check-config")
         .arg("--config")
         .arg(OsStr::from_bytes(b"bad-\xff.yaml"))

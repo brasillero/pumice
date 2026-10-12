@@ -3,8 +3,8 @@
 //! client's own `system`/`developer` texts, and the user message is sent
 //! unchanged.
 
-use pumice::prompts::{ComposedPrompts, compose_prompts};
-use pumice::request::{ChatCompletionRequest, ExtractedRequest, extract_request};
+use pumice_relay::prompts::{ComposedPrompts, compose_prompts};
+use pumice_relay::request::{ChatCompletionRequest, ExtractedRequest, extract_request};
 
 const HANDY_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),

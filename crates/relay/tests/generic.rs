@@ -40,13 +40,17 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pumice::config::{self, Config, DebugLogSettings};
-use pumice::pipeline::{OutcomeKind, Pipeline, RawReason};
-use pumice::providers::generic::{
+use pumice_relay::config::{self, Config, DebugLogSettings};
+use pumice_relay::pipeline::{OutcomeKind, Pipeline, RawReason};
+use pumice_relay::providers::generic::{
     DESCRIPTOR, EndpointError, GenericProvider, LoopbackEndpoint, parse_endpoint,
 };
-use pumice::providers::{FormatInput, Provider, ProviderError, ProviderErrorCode, UserPrompt};
-use pumice::request::{ChatCompletionRequest, Content, ExtractedRequest, Message, extract_request};
+use pumice_relay::providers::{
+    FormatInput, Provider, ProviderError, ProviderErrorCode, UserPrompt,
+};
+use pumice_relay::request::{
+    ChatCompletionRequest, Content, ExtractedRequest, Message, extract_request,
+};
 use serde_json::{Value, json};
 use support::adapter_contract::{AFTER, BEFORE, HOSTILE_TEXT, SYSTEM_PROMPT, UNICODE_TEXT};
 use support::fake_http::{Behavior, FakeHttp, Reply};
@@ -935,14 +939,14 @@ async fn failure_returns_raw_text_and_never_runs_another_provider() {
 
 /// Pipeline-level settings for a generic provider built directly with
 /// [`GenericProvider::new`]; the endpoint lives in the provider itself.
-fn generic_settings(_endpoint: &LoopbackEndpoint) -> pumice::providers::ProviderSettings {
+fn generic_settings(_endpoint: &LoopbackEndpoint) -> pumice_relay::providers::ProviderSettings {
     let mut settings = (DESCRIPTOR.defaults)();
     settings.enabled = true;
     settings.model = MODEL.to_owned();
     settings
 }
 
-fn chain_config(entries: Vec<(&str, pumice::providers::ProviderSettings)>) -> Config {
+fn chain_config(entries: Vec<(&str, pumice_relay::providers::ProviderSettings)>) -> Config {
     Config {
         port: 7567,
         total_timeout: Duration::from_secs(30),
@@ -953,7 +957,7 @@ fn chain_config(entries: Vec<(&str, pumice::providers::ProviderSettings)>) -> Co
         },
         providers: entries
             .into_iter()
-            .map(|(id, settings)| pumice::config::ProviderConfig {
+            .map(|(id, settings)| pumice_relay::config::ProviderConfig {
                 id: id.to_owned(),
                 settings,
             })
@@ -988,9 +992,9 @@ fn nothing_is_enabled_without_an_entry() {
 
     // Building the default configuration yields no provider at all, so a
     // default-config service makes zero connections.
-    let built = pumice::providers::build_from_config(
+    let built = pumice_relay::providers::build_from_config(
         &loaded.config,
-        Arc::new(pumice::process::ProcessRunner::new()),
+        Arc::new(pumice_relay::process::ProcessRunner::new()),
     )
     .expect("defaults build");
     assert!(built.is_empty(), "without entries nothing is built or run");
@@ -1021,6 +1025,9 @@ fn the_archived_descriptor_refuses_enablement_and_never_builds() {
         error.to_string().contains("providers.generic is archived"),
         "{error}"
     );
-    let built = (DESCRIPTOR.build)(&settings, Arc::new(pumice::process::ProcessRunner::new()));
+    let built = (DESCRIPTOR.build)(
+        &settings,
+        Arc::new(pumice_relay::process::ProcessRunner::new()),
+    );
     assert!(built.is_err(), "the archived descriptor never builds");
 }
