@@ -1,0 +1,11 @@
+[package]
+name = "stt-spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+transcribe-cpp = { version = "=0.3.1", default-features = false, features = ["serde"] }
+hound = "3.5"
