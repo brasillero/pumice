@@ -103,7 +103,9 @@ jobs:
           })
           if ($dlls.Count -eq 0) { Write-Error 'FAIL: no DLL imports parsed'; exit 1 }
           foreach ($dll in $dlls) {
-            if ($dll -notin $allowed) { Write-Error "FAIL: unexpected DLL import '$dll'"; exit 1 }
+            # api-ms-win-core-* are Windows API sets (part of the OS; Rust's std
+            # imports the synch set). The CRT sets (api-ms-win-crt-*) fail above.
+            if ($dll -notin $allowed -and -not $dll.StartsWith('api-ms-win-core-')) { Write-Error "FAIL: unexpected DLL import '$dll'"; exit 1 }
           }
           Write-Host 'OK: system DLL imports only'
 
