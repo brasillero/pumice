@@ -141,3 +141,59 @@
 **Why.** Owner: "always keep in mind that one day we will have a UI".
 
 **Rejected.** —
+
+### D11 · Active · Transcription comes right after the workspace, before the relay migration
+- date: 2026-10-12
+- decided by: brasillero
+- origin: #1
+- area: process
+- revisit if: —
+
+**Decision.** Work order: the Cargo workspace with the relay as its own crate first, then the CPU transcription CLI, then `relay.yml` and the `pumice` orchestrator entry point, then the remaining phases of `docs/research/architecture-plan.md`.
+
+**Why.** Usable transcription sooner; the transcription crate does not depend on the relay migration.
+
+**Rejected.** The plan's order, with the relay config and orchestrator migration (P2, P3) before transcription (P4).
+
+### D12 · Active · No backward compatibility for the command and config changes
+- date: 2026-10-12
+- decided by: brasillero
+- origin: #1
+- area: config
+- revisit if: Pumice gets users beyond the owner's own setup
+
+**Decision.** The move to `pumice` as orchestrator and `relay.yml` ships without a compatibility window, legacy aliases or a `config migrate` command: nobody but the owner uses the configuration yet.
+
+**Why.** Owner: no one is using it yet, so compatibility code is wasted effort.
+
+**Rejected.** The plan's 0.3–0.4 compatibility window with removal in 0.5, and `pumice config migrate`.
+
+**Consequences.** The server-1 service unit and its `pumice.yaml` are updated by hand when the new version is deployed there. Handy's URL and port 7567 still have to keep working for the owner's friends.
+
+### D13 · Active · `pumice` runs relay and formatter in-process and transcription as a separate program
+- date: 2026-10-12
+- decided by: brasillero
+- origin: #1
+- area: architecture
+- revisit if: —
+
+**Decision.** Hybrid dispatch: the relay and formatter are libraries built into the `pumice` executable, which stays one static file; transcription is a separate program (`pumice-transcribe` with its native libraries and GPU backends) that `pumice transcribe` launches.
+
+**Why.** Keeps the core a single static file and npm unchanged, while transcription's native code and DLLs stay isolated from the relay.
+
+**Rejected.** Every module as a separate program launched by `pumice`: the core would no longer be one file.
+
+### D14 · Provisional · Modules talk to each other over loopback only
+- date: 2026-10-12
+- decided by: brasillero
+- origin: #1
+- area: architecture
+- revisit if: the first iteration is done and remote modules are taken up
+
+**Decision.** In the first iteration, modules communicate only over `127.0.0.1`. The final goal is to allow remote modules (for example transcription on another machine).
+
+**Why.** Remote modules need a network and authentication policy first.
+
+**Rejected.** Remote modules in the first iteration.
+
+**Consequences.** `AGENTS.md`'s network rule needs a loopback allowance between modules.
