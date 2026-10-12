@@ -12,7 +12,8 @@
 **Context.** The engine must be built into the Rust binary and run on the CPU (D3). Leading candidate: the `transcribe-cpp` crate (0.3.1, MIT, from `handy-computer/transcribe.cpp` on ggml), which Handy itself uses for Whisper-family GGUF models, per Handy's `src-tauri/Cargo.toml`. On Windows x64 Handy ships extra DLLs (runtime CPU modules, Vulkan), so a single static executable is not proven.
 
 **To do.**
-- [ ] Build a CPU-only `transcribe-cpp` spike on Linux and transcribe the sample.
+- [x] Build a CPU-only `transcribe-cpp` spike on Linux and transcribe the sample (glibc; see `docs/research/S10.1-transcription.md`).
+- [ ] Build it as a fully static `x86_64-unknown-linux-musl` executable, like the Linux release.
 - [ ] Check that a CPU-only build links into one executable on Windows (MSVC, `+crt-static`) and macOS, through CI.
 - [ ] Compare with alternatives only if it fails (for example `whisper-rs`).
 
@@ -29,8 +30,9 @@
 **Context.** The owner's 14 s sample (16 kHz mono WAV) is the first test input. server-1 has an i5-14500T (20 threads); the owner's Windows machine will differ. The model should be the one the owner already uses in Handy (#3).
 
 **To do.**
-- [ ] Time a transcription of the sample per model/quantization tried.
+- [x] Time a transcription of the sample per model/quantization tried (turbo Q8_0: 5.9 s native, 7.1 s AVX2, 20.5 s plain x86-64).
 - [ ] Compare the text with what Handy produces for the same audio.
+- [ ] Owner decides the x86-64 CPU baseline for releases (AVX2 or plain x86-64).
 
 **Acceptance criteria.**
 - Timings and transcripts recorded in a research note.
