@@ -13,7 +13,7 @@
 
 **To do.**
 - [x] Build a CPU-only `transcribe-cpp` spike on Linux and transcribe the sample (glibc; see `docs/research/S10.1-transcription.md`).
-- [ ] Build it as a fully static `x86_64-unknown-linux-musl` executable, like the Linux release.
+- [x] Build it as a fully static `x86_64-unknown-linux-musl` executable, like the Linux release (works with a musl C++ toolchain and a linker wrapper; not yet tried in CI).
 - [ ] Check that a CPU-only build links into one executable on Windows (MSVC, `+crt-static`) and macOS, through CI.
 - [ ] Compare with alternatives only if it fails (for example `whisper-rs`).
 
