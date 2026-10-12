@@ -13,7 +13,7 @@
 
 **To do.**
 - [x] Build a CPU-only `transcribe-cpp` spike on Linux and transcribe the sample (glibc; see `docs/research/S10.1-transcription.md`).
-- [x] Build it as a fully static `x86_64-unknown-linux-musl` executable, like the Linux release (works with a musl C++ toolchain and a linker wrapper; not yet tried in CI).
+- [x] Build it as a fully static `x86_64-unknown-linux-musl` executable, like the Linux release (works with a musl C++ toolchain and a linker wrapper; passes in CI on PR #91).
 - [x] Check that a CPU-only build links into one executable on Windows (MSVC, `+crt-static`) and macOS, through CI (all four release targets pass on PR #91; Windows needs `-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`).
 - [ ] Compare with alternatives only if it fails (for example `whisper-rs`).
 
@@ -59,7 +59,7 @@
 **Context.** Accept OpenAI's multipart upload (`file`, `model`, optional `language`, `response_format`) and return `{"text": "..."}`. Explicitly enabled in the YAML, like providers.
 
 **To do.**
-- [ ] Check OpenAI's current request and response shape.
+- [x] Check OpenAI's current request and response shape (design proposal: `reports/2026-10-12-endpoint-design.md`).
 - [ ] Implement it behind the chosen engine (#1).
 
 ### #5 · To do · Test transcription in CI without a real model
