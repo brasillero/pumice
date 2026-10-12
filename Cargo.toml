@@ -1,6 +1,6 @@
 [workspace]
-members = [".", "crates/relay"]
-default-members = [".", "crates/relay"]
+members = [".", "crates/relay", "crates/transcription"]
+default-members = [".", "crates/relay", "crates/transcription"]
 resolver = "3"
 
 [workspace.package]
@@ -9,6 +9,9 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
+clap = { version = "4.5", features = ["derive"] }
+hound = "3.5"
+rubato = { version = "5.0.1", default-features = false }
 axum = { version = "0.8.9", default-features = false, features = [
     "http1", "json", "tokio",
 ] }
