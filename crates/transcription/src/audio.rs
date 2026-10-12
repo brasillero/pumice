@@ -135,14 +135,27 @@ fn read_samples<R: Read>(spec: &WavSpec, mut wav: WavReader<R>) -> Result<Vec<f3
             .map(|s| s.map(|v| (v as f32) / 32_768.0))
             .collect::<Result<Vec<_>, _>>()
             .map_err(sample_error),
-        (SampleFormat::Int, 24) | (SampleFormat::Int, 32) => wav
+        (SampleFormat::Int, 24) => wav
+            .samples::<i32>()
+            .map(|s| s.map(|v| (v as f32) / 8_388_608.0))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sample_error),
+        (SampleFormat::Int, 32) => wav
             .samples::<i32>()
             .map(|s| s.map(|v| (v as f32) / 2_147_483_648.0))
             .collect::<Result<Vec<_>, _>>()
             .map_err(sample_error),
         (SampleFormat::Float, 32) => wav
             .samples::<f32>()
-            .map(|s| s.map(|v| v.clamp(-1.0, 1.0)))
+            .map(|s| {
+                s.and_then(|v| {
+                    if v.is_finite() {
+                        Ok(v.clamp(-1.0, 1.0))
+                    } else {
+                        Err(hound::Error::Unsupported)
+                    }
+                })
+            })
             .collect::<Result<Vec<_>, _>>()
             .map_err(sample_error),
         _ => Err(Error::unsupported_format("unsupported WAV sample format")),
@@ -189,12 +202,60 @@ mod tests {
         buf.into_inner()
     }
 
+    fn write_wav_i8(samples: &[i8], sample_rate: u32, channels: u16) -> Vec<u8> {
+        let mut buf = Cursor::new(Vec::new());
+        let spec = WavSpec {
+            channels,
+            sample_rate,
+            bits_per_sample: 8,
+            sample_format: SampleFormat::Int,
+        };
+        let mut writer = WavWriter::new(&mut buf, spec).unwrap();
+        for &s in samples {
+            writer.write_sample(s).unwrap();
+        }
+        writer.finalize().unwrap();
+        buf.into_inner()
+    }
+
     fn write_wav_i16(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<u8> {
         let mut buf = Cursor::new(Vec::new());
         let spec = WavSpec {
             channels,
             sample_rate,
             bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        };
+        let mut writer = WavWriter::new(&mut buf, spec).unwrap();
+        for &s in samples {
+            writer.write_sample(s).unwrap();
+        }
+        writer.finalize().unwrap();
+        buf.into_inner()
+    }
+
+    fn write_wav_i24(samples: &[i32], sample_rate: u32, channels: u16) -> Vec<u8> {
+        let mut buf = Cursor::new(Vec::new());
+        let spec = WavSpec {
+            channels,
+            sample_rate,
+            bits_per_sample: 24,
+            sample_format: SampleFormat::Int,
+        };
+        let mut writer = WavWriter::new(&mut buf, spec).unwrap();
+        for &s in samples {
+            writer.write_sample(s).unwrap();
+        }
+        writer.finalize().unwrap();
+        buf.into_inner()
+    }
+
+    fn write_wav_i32(samples: &[i32], sample_rate: u32, channels: u16) -> Vec<u8> {
+        let mut buf = Cursor::new(Vec::new());
+        let spec = WavSpec {
+            channels,
+            sample_rate,
+            bits_per_sample: 32,
             sample_format: SampleFormat::Int,
         };
         let mut writer = WavWriter::new(&mut buf, spec).unwrap();
@@ -218,6 +279,46 @@ mod tests {
         assert_eq!(decoded.channels, 1);
         assert_eq!(decoded.samples.len(), 16_000);
         assert!(decoded.samples.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn decode_8bit_full_scale() {
+        let wav = write_wav_i8(&[i8::MAX, i8::MIN], 16_000, 1);
+        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        assert!((decoded.samples[0] - 127.0 / 128.0).abs() < 1e-6, "8-bit max scaled to {}", decoded.samples[0]);
+        assert!((decoded.samples[1] - (-1.0)).abs() < 1e-6, "8-bit min scaled to {}", decoded.samples[1]);
+    }
+
+    #[test]
+    fn decode_16bit_full_scale() {
+        let wav = write_wav_i16(&[i16::MAX, i16::MIN], 16_000, 1);
+        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        assert!((decoded.samples[0] - 32_767.0 / 32_768.0).abs() < 1e-6, "16-bit max scaled to {}", decoded.samples[0]);
+        assert!((decoded.samples[1] - (-1.0)).abs() < 1e-6, "16-bit min scaled to {}", decoded.samples[1]);
+    }
+
+    #[test]
+    fn decode_24bit_full_scale() {
+        let wav = write_wav_i24(&[8_388_607, -8_388_608], 16_000, 1);
+        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        assert!((decoded.samples[0] - 8_388_607.0 / 8_388_608.0).abs() < 1e-6, "24-bit max scaled to {}", decoded.samples[0]);
+        assert!((decoded.samples[1] - (-1.0)).abs() < 1e-6, "24-bit min scaled to {}", decoded.samples[1]);
+    }
+
+    #[test]
+    fn decode_32bit_full_scale() {
+        let wav = write_wav_i32(&[i32::MAX, i32::MIN], 16_000, 1);
+        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        assert!((decoded.samples[0] - 2_147_483_647.0 / 2_147_483_648.0).abs() < 1e-7, "32-bit max scaled to {}", decoded.samples[0]);
+        assert!((decoded.samples[1] - (-1.0)).abs() < 1e-7, "32-bit min scaled to {}", decoded.samples[1]);
+    }
+
+    #[test]
+    fn decode_float_full_scale() {
+        let wav = write_wav_f32(&[1.0, -1.0], 16_000, 1);
+        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        assert!((decoded.samples[0] - 1.0).abs() < 1e-6);
+        assert!((decoded.samples[1] - (-1.0)).abs() < 1e-6);
     }
 
     #[test]
@@ -308,12 +409,29 @@ mod tests {
     }
 
     #[test]
-    fn non_finite_float_rejected() {
+    fn nan_float_rejected() {
         let mut samples = silence(16_000);
         samples[0] = f32::NAN;
         let wav = write_wav_f32(&samples, 16_000, 1);
-        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
-        let err = normalize_and_validate(decoded.samples).unwrap_err();
+        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn positive_infinity_float_rejected() {
+        let mut samples = silence(16_000);
+        samples[0] = f32::INFINITY;
+        let wav = write_wav_f32(&samples, 16_000, 1);
+        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn negative_infinity_float_rejected() {
+        let mut samples = silence(16_000);
+        samples[0] = f32::NEG_INFINITY;
+        let wav = write_wav_f32(&samples, 16_000, 1);
+        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
