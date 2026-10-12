@@ -68,3 +68,76 @@
 **Why.** Owner instruction.
 
 **Rejected.** —
+
+### D6 · Active · The bare `pumice` command is the orchestrator and runs any part or the whole stack
+- date: 2026-10-12
+- decided by: brasillero
+- origin: #1
+- area: cli
+- revisit if: —
+
+**Decision.** `pumice` becomes the orchestrator now. Its CLI runs a single module (relay, transcription, formatter) or the whole stack.
+
+**Why.** Owner choice: one entry point for the product, with each part still runnable on its own.
+
+**Rejected.** Keeping bare `pumice` as the relay with the orchestrator under `pumice orchestrate` (the analysis' recommendation): it protects today's commands but does not match the product the owner wants.
+
+**Consequences.** Today's users (the server-1 service running `pumice --plain`, npm installs, docs) need a migration path to the relay subcommand; Handy's URL and port 7567 keep working.
+
+### D7 · Active · Each module has its own config file, the relay's is `relay.yml`
+- date: 2026-10-12
+- decided by: brasillero
+- origin: #1
+- area: config
+- revisit if: —
+
+**Decision.** Configuration is one YAML file per module: `relay.yml` for the relay, plus files for transcription, the formatter and the orchestrator, which refers to the others.
+
+**Why.** Each module stays usable alone and owns its settings.
+
+**Rejected.** One big file with a section per module.
+
+**Consequences.** Today's `pumice.yaml` becomes the relay's `relay.yml`; existing installs need a migration (for example reading the old name with a warning).
+
+### D8 · Active · Transcription ships CPU, runtime CPU selection and GPU
+- date: 2026-10-12
+- decided by: brasillero
+- origin: #1
+- area: transcription
+- revisit if: —
+
+**Decision.** The transcription module supports a plain CPU build, automatic runtime selection of the best CPU variant, and GPU backends.
+
+**Why.** D2 allows multiple files; the owner wants the best possible solution rather than one fixed CPU level.
+
+**Rejected.** A single AVX2-only build (`s10.1-transcription/D5`), and GPU-only work that skips the CPU path.
+
+**Consequences.** Supersedes `s10.1-transcription/D5` (AVX2-only releases); that task's notes must be updated to match.
+
+### D9 · Active · Transcription may download models
+- date: 2026-10-12
+- decided by: brasillero
+- origin: #1
+- area: transcription
+- revisit if: —
+
+**Decision.** The transcription module may download models, as an exception to the rule that Pumice makes no outbound calls besides the AI CLIs. Local model files stay supported.
+
+**Why.** Easier setup, and a future UI will need to offer model choice and download.
+
+**Rejected.** Local model files only.
+
+**Consequences.** `AGENTS.md`'s network rule needs this exception written in. Downloads should be explicit, pinned (revision and sha256) and never happen implicitly at startup.
+
+### D10 · Active · Module CLIs and contracts are designed for a future UI
+- date: 2026-10-12
+- decided by: brasillero
+- origin: D4
+- area: architecture
+- revisit if: —
+
+**Decision.** Every module's CLI and API is designed so a UI can drive it later: machine-readable output, progress and status, model listing and downloads, without the UI duplicating module logic.
+
+**Why.** Owner: "always keep in mind that one day we will have a UI".
+
+**Rejected.** —
