@@ -2,6 +2,7 @@ pub mod audio;
 pub mod cli;
 pub mod engine;
 pub mod error;
+mod riff;
 
 pub use engine::{Engine, FakeEngine};
 pub use error::{Error, ErrorCode, JsonError};

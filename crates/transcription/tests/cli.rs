@@ -81,6 +81,22 @@ impl Engine for RecordingFakeEngine {
 }
 
 #[derive(Debug, Clone)]
+struct NoLanguageFakeEngine;
+
+impl Engine for NoLanguageFakeEngine {
+    fn transcribe(
+        &self,
+        _pcm_16khz_mono: &[f32],
+        _options: &TranscriptionOptions,
+    ) -> Result<Transcript, EngineError> {
+        Ok(Transcript {
+            text: "hello".to_string(),
+            language: None,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
 struct FailingFakeEngine;
 
 impl Engine for FailingFakeEngine {
@@ -601,6 +617,33 @@ fn threads_validation_rejects_zero() {
     .unwrap_err();
 
     assert_eq!(err.code, ErrorCode::InvalidArguments);
+}
+
+#[test]
+fn explicit_language_overrides_engine_none() {
+    // Regression: when --language is given and the engine returns no
+    // detected language, the envelope must still report the explicit hint.
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
+    let model_path = tmp.path().join("model.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+
+    let result = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            model_path.to_str().unwrap(),
+            "--language",
+            "pt",
+        ],
+        Box::new(NoLanguageFakeEngine),
+    )
+    .unwrap();
+
+    assert_eq!(result.language, Some("pt".to_string()));
 }
 
 #[test]

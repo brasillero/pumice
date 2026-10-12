@@ -32,7 +32,9 @@ pub enum Command {
         #[arg(long, value_name = "PATH.gguf")]
         model: PathBuf,
 
-        /// Optional language hint (ISO-639-1 two-letter code).
+        /// Optional language hint (ISO-639-1 two-letter code). When given, this
+        /// value is reported in the result; otherwise the engine-detected language
+        /// is reported.
         #[arg(long, value_name = "xx")]
         language: Option<String>,
 
@@ -217,7 +219,10 @@ where
             }
 
             let budgeted = BudgetReader::new(file, MAX_FILE_BYTES);
-            let decoded = decode_wav(budgeted).map_err(map_budget_error)?;
+            let decoded =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decode_wav(budgeted)))
+                    .map_err(|_| Error::invalid_input("audio decoding panicked"))?
+                    .map_err(map_budget_error)?;
             let resampled = resample_to_target(&decoded.samples, decoded.sample_rate)?;
             let pcm = normalize_and_validate(resampled)?;
             let audio_seconds = pcm.len() as f64 / 16_000.0;
@@ -231,12 +236,17 @@ where
             let model_load_ms = start.elapsed().as_millis() as u64;
 
             let start = Instant::now();
-            let transcript = engine.transcribe(&pcm, &TranscriptionOptions { language })?;
+            let transcript = engine.transcribe(
+                &pcm,
+                &TranscriptionOptions {
+                    language: language.clone(),
+                },
+            )?;
             let transcription_ms = start.elapsed().as_millis() as u64;
 
             Ok(SuccessOutput {
                 text: transcript.text,
-                language: transcript.language,
+                language: language.or(transcript.language),
                 audio_seconds,
                 model_load_ms,
                 transcription_ms,

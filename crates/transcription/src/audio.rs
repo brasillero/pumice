@@ -5,7 +5,7 @@ use rubato::{
     WindowFunction,
 };
 use std::io::Read;
-use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoderOptions};
+use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::{MediaSourceStream, ReadOnlySource};
@@ -30,17 +30,19 @@ pub struct DecodedAudio {
 /// enforced per-packet before any downmix or resample buffer is allocated, and
 /// no up-front reservation is made from header-declared lengths.
 pub fn decode_wav<R: Read + Send + Sync>(mut reader: R) -> Result<DecodedAudio, Error> {
-    // Pre-validate the RIFF/WAVE signature so non-WAV files produce InvalidInput rather
-    // than Symphonia's Unsupported error.
-    let mut header = [0u8; 12];
+    // Read the whole file into memory. The caller wraps the reader in a
+    // BudgetReader so this is bounded by MAX_FILE_BYTES.
+    let mut bytes = Vec::new();
     reader
-        .read_exact(&mut header)
-        .map_err(|e| Error::invalid_input(format!("failed to read WAV header: {e}")))?;
-    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
-        return Err(Error::invalid_input("not a RIFF/WAVE file"));
-    }
+        .read_to_end(&mut bytes)
+        .map_err(|e| Error::invalid_input(format!("failed to read audio data: {e}")))?;
 
-    let source = ReadOnlySource::new(std::io::Cursor::new(header).chain(reader));
+    // Strict pre-validation: catch malformed RIFF/WAVE headers before Symphonia
+    // sees them, so invalid input always maps to a safe typed error instead of a
+    // decoder panic.
+    let format_info = crate::riff::validate_wav(&bytes)?;
+
+    let source = ReadOnlySource::new(std::io::Cursor::new(bytes));
     let mss = MediaSourceStream::new(Box::new(source), Default::default());
 
     let mut format = symphonia::default::formats::WavReader::try_new(mss, FormatOptions::default())
@@ -70,8 +72,6 @@ pub fn decode_wav<R: Read + Send + Sync>(mut reader: R) -> Result<DecodedAudio, 
         .and_then(|p| p.audio())
         .cloned()
         .ok_or_else(|| Error::invalid_input("WAV track has no audio codec parameters"))?;
-
-    validate_format(&codec_params)?;
 
     let sample_rate = codec_params
         .sample_rate
@@ -132,6 +132,15 @@ pub fn decode_wav<R: Read + Send + Sync>(mut reader: R) -> Result<DecodedAudio, 
         samples.extend(packet_samples);
     }
 
+    // P1: decoded frame count must match the header-declared data size.
+    let expected_frames = (format_info.data_bytes / u32::from(format_info.block_align)) as usize;
+    if decoded_frames != expected_frames {
+        return Err(Error::invalid_input(format!(
+            "decoded {} frames, expected {} (truncated or partial audio data)",
+            decoded_frames, expected_frames
+        )));
+    }
+
     let mono = downmix_to_mono(samples, channels)?;
 
     Ok(DecodedAudio {
@@ -139,30 +148,6 @@ pub fn decode_wav<R: Read + Send + Sync>(mut reader: R) -> Result<DecodedAudio, 
         channels,
         samples: mono,
     })
-}
-
-fn validate_format(params: &AudioCodecParameters) -> Result<(), Error> {
-    let channels = params
-        .channels
-        .as_ref()
-        .map(|c| c.count() as u16)
-        .unwrap_or(0);
-    if channels == 0 || channels > 2 {
-        return Err(Error::unsupported_format(format!(
-            "unsupported channel count: {} (expected 1 or 2)",
-            channels
-        )));
-    }
-
-    let sample_rate = params.sample_rate.unwrap_or(0);
-    if !(MIN_SAMPLE_RATE..=MAX_SAMPLE_RATE).contains(&sample_rate) {
-        return Err(Error::unsupported_format(format!(
-            "unsupported sample rate: {} Hz (expected {}-{} Hz)",
-            sample_rate, MIN_SAMPLE_RATE, MAX_SAMPLE_RATE
-        )));
-    }
-
-    Ok(())
 }
 
 fn map_symphonia_error(err: SymphoniaError) -> Error {
@@ -796,7 +781,7 @@ mod tests {
         let samples = silence(16_000 * 4); // 4 channels, 1 second
         let wav = write_wav_f32(&samples, 16_000, 4);
         let err = decode_wav(Cursor::new(&wav)).unwrap_err();
-        assert_eq!(err.code, ErrorCode::UnsupportedFormat);
+        assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
     #[test]
@@ -849,5 +834,299 @@ mod tests {
         let decoded = decode_wav(Cursor::new(&wav)).unwrap();
         let resampled = resample_to_target(&decoded.samples, decoded.sample_rate).unwrap();
         assert_eq!(resampled.len(), decoded.samples.len());
+    }
+
+    // --- Round 3 reproducer tests: strict RIFF/WAVE pre-validation ---
+
+    const KSDATAFORMAT_SUBTYPE_PCM: [u8; 16] = [
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b,
+        0x71,
+    ];
+    const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: [u8; 16] = [
+        0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b,
+        0x71,
+    ];
+
+    fn build_wav_raw(
+        format_tag: u16,
+        channels: u16,
+        sample_rate: u32,
+        block_align: u16,
+        bits_per_sample: u16,
+        extra_fmt: Option<&[u8]>,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&format_tag.to_le_bytes());
+        fmt.extend_from_slice(&channels.to_le_bytes());
+        fmt.extend_from_slice(&sample_rate.to_le_bytes());
+        let avg_bytes_per_sec = sample_rate * u32::from(block_align);
+        fmt.extend_from_slice(&avg_bytes_per_sec.to_le_bytes());
+        fmt.extend_from_slice(&block_align.to_le_bytes());
+        fmt.extend_from_slice(&bits_per_sample.to_le_bytes());
+        if let Some(extra) = extra_fmt {
+            fmt.extend_from_slice(extra);
+        }
+
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        let riff_size = 4 + 8 + fmt.len() as u32 + 8 + data.len() as u32;
+        out.extend_from_slice(&riff_size.to_le_bytes());
+        out.extend_from_slice(b"WAVE");
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        out.extend_from_slice(&fmt);
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(data);
+        out
+    }
+
+    fn build_extensible_wav(
+        channels: u16,
+        channel_mask: u32,
+        bits_per_sample: u16,
+        valid_bits: u16,
+        float: bool,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let block_align = channels as u32 * (bits_per_sample as u32 / 8);
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&22u16.to_le_bytes());
+        extra.extend_from_slice(&valid_bits.to_le_bytes());
+        extra.extend_from_slice(&channel_mask.to_le_bytes());
+        extra.extend_from_slice(if float {
+            &KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
+        } else {
+            &KSDATAFORMAT_SUBTYPE_PCM
+        });
+        build_wav_raw(
+            0xFFFE,
+            channels,
+            16_000,
+            block_align as u16,
+            bits_per_sample,
+            Some(&extra),
+            data,
+        )
+    }
+
+    #[test]
+    fn reject_extensible_channels_33_mask_zero() {
+        // channels=33 with mask=0 must still be rejected (channels must be 1 or 2).
+        let data = vec![0u8; 33 * 2 * 3]; // 33 channels * 2 bytes * 3 frames
+        let wav = build_extensible_wav(33, 0, 16, 16, false, &data);
+        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn reject_extensible_reserved_channel_mask_bit() {
+        // channels=2 with reserved bit 0x80000000 set in the mask.
+        let data = vec![0u8; 2 * 2 * 3];
+        let wav = build_extensible_wav(2, 0x8000_0000, 16, 16, false, &data);
+        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn reject_pcm_channels_65535() {
+        let mut wav = build_wav_raw(1, 1, 16_000, 2, 16, None, &[0u8; 6]);
+        wav[22..24].copy_from_slice(&65_535u16.to_le_bytes());
+        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn reject_riff_size_larger_than_physical_file() {
+        let mut wav = build_wav_raw(1, 1, 16_000, 2, 16, None, &[0u8; 6]);
+        let size = u32::from_le_bytes([wav[4], wav[5], wav[6], wav[7]]);
+        wav[4..8].copy_from_slice(&(size + 100).to_le_bytes());
+        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn reject_truncated_data_chunk_body() {
+        let mut wav = build_wav_raw(1, 1, 16_000, 2, 16, None, &[0u8; 6]);
+        // Declare data chunk size larger than the bytes that follow.
+        wav[40..44].copy_from_slice(&100u32.to_le_bytes());
+        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn reject_missing_odd_chunk_pad_byte() {
+        // Build a WAV with an odd-sized JUNK chunk but do not include its pad byte.
+        let data = vec![0u8; 6];
+        let fmt = {
+            let mut f = Vec::new();
+            f.extend_from_slice(&1u16.to_le_bytes());
+            f.extend_from_slice(&1u16.to_le_bytes());
+            f.extend_from_slice(&16_000u32.to_le_bytes());
+            f.extend_from_slice(&(16_000u32 * 2).to_le_bytes());
+            f.extend_from_slice(&2u16.to_le_bytes());
+            f.extend_from_slice(&16u16.to_le_bytes());
+            f
+        };
+        let junk = b"x"; // odd size, requires pad byte
+        let riff_size = 4 + 8 + fmt.len() as u32 + 8 + junk.len() as u32 + 8 + data.len() as u32;
+
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&riff_size.to_le_bytes());
+        out.extend_from_slice(b"WAVE");
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        out.extend_from_slice(&fmt);
+        out.extend_from_slice(b"JUNK");
+        out.extend_from_slice(&(junk.len() as u32).to_le_bytes());
+        out.extend_from_slice(junk);
+        // Missing pad byte: the odd-size pad is not present, so chunk sizes no
+        // longer line up with RIFF size.
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&data);
+
+        let err = decode_wav(Cursor::new(&out)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn reject_second_fmt_chunk() {
+        let data = vec![0u8; 6];
+        let mut wav = build_wav_raw(1, 1, 16_000, 2, 16, None, &data);
+        let second_fmt = vec![0u8; 16];
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&(second_fmt.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&second_fmt);
+        let size = u32::from_le_bytes([wav[4], wav[5], wav[6], wav[7]]);
+        wav[4..8].copy_from_slice(&(size + 8 + second_fmt.len() as u32).to_le_bytes());
+        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn reject_second_data_chunk() {
+        let data = vec![0u8; 6];
+        let mut wav = build_wav_raw(1, 1, 16_000, 2, 16, None, &data);
+        let second_data = vec![0u8; 4];
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(second_data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&second_data);
+        let size = u32::from_le_bytes([wav[4], wav[5], wav[6], wav[7]]);
+        wav[4..8].copy_from_slice(&(size + 8 + second_data.len() as u32).to_le_bytes());
+        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn reject_data_size_not_multiple_of_block_align() {
+        let mut wav = build_wav_raw(1, 1, 16_000, 2, 16, None, &[0u8; 5]);
+        wav[40..44].copy_from_slice(&5u32.to_le_bytes());
+        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn reject_truncated_audio_data() {
+        // Data chunk declares 6 bytes (3 frames) but only 4 bytes are present.
+        // RIFF size is kept consistent with the actual bytes.
+        let mut wav = build_wav_raw(1, 1, 16_000, 2, 16, None, &[0u8; 4]);
+        wav[40..44].copy_from_slice(&6u32.to_le_bytes());
+        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn reject_pcm_24bit_block_align_4() {
+        // Classic malformed 24-bit PCM with block_align=4 instead of 3.
+        let wav = build_wav_raw(1, 1, 16_000, 4, 24, None, &[0u8; 12]);
+        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn extensible_24_in_32_container_still_works() {
+        let samples: Vec<i32> = vec![8_388_607, -8_388_608, 0];
+        let mut data = Vec::new();
+        for &s in &samples {
+            data.extend_from_slice(&(s << 8).to_le_bytes());
+        }
+        let wav = build_extensible_wav(1, 0, 32, 24, false, &data);
+        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        assert_eq!(decoded.samples.len(), 3);
+        assert!((decoded.samples[0] - 8_388_607.0 / 8_388_608.0).abs() < 1e-6);
+        assert!((decoded.samples[1] - (-1.0)).abs() < 1e-6);
+        assert!(decoded.samples[2].abs() < 1e-6);
+    }
+
+    #[test]
+    fn deterministic_fuzz_does_not_panic() {
+        // Generate a small valid WAV and deterministically mutate it. Every
+        // outcome must be either success or a clean error; panics fail the test.
+        let base = build_wav_raw(1, 1, 16_000, 2, 16, None, &[0u8; 6 * 2]);
+        let mut rng = DeterministicRng::new(3811);
+
+        for i in 0..500 {
+            let mut wav = base.clone();
+            let rounds = 1 + (rng.next() % 8);
+            for _ in 0..rounds {
+                if wav.is_empty() {
+                    break;
+                }
+                let pos = rng.next() as usize % wav.len();
+                let mode = rng.next() % 4;
+                match mode {
+                    0 => {
+                        let bit = rng.next() % 8;
+                        wav[pos] ^= 1 << bit;
+                    }
+                    1 => {
+                        let len = (rng.next() as usize % 4).min(wav.len() - pos);
+                        for j in 0..len {
+                            wav[pos + j] = rng.next() as u8;
+                        }
+                    }
+                    2 => {
+                        wav.truncate(pos);
+                    }
+                    _ => {
+                        let insert_len = rng.next() % 8;
+                        for _ in 0..insert_len {
+                            wav.insert(pos, rng.next() as u8);
+                        }
+                    }
+                }
+            }
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = decode_wav(Cursor::new(&wav));
+            }));
+            assert!(
+                result.is_ok(),
+                "panic on iteration {} with mutated wav {:?}",
+                i,
+                wav
+            );
+        }
+    }
+
+    struct DeterministicRng {
+        state: u64,
+    }
+
+    impl DeterministicRng {
+        fn new(seed: u64) -> Self {
+            Self { state: seed }
+        }
+
+        fn next(&mut self) -> u64 {
+            // xorshift64*: simple deterministic PRNG.
+            self.state ^= self.state >> 12;
+            self.state ^= self.state << 25;
+            self.state ^= self.state >> 27;
+            self.state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
     }
 }

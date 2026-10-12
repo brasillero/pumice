@@ -55,3 +55,7 @@ cargo build -p pumice-transcription --features engine
 ```
 
 This is a documented limitation; Windows native builds come in a later phase.
+
+## Third-party licenses
+
+This crate uses [Symphonia](https://github.com/pdelbarrio/symphonia) to decode RIFF/WAVE files. Symphonia is licensed under the MPL-2.0. Distributing binaries that include Symphonia requires shipping its notice and pointing to its exact source; this is enforced in the release-packaging phase.
