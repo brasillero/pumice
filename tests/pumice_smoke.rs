@@ -40,6 +40,7 @@ fn check_config_with_defaults_succeeds() {
     let output = Command::new(env!("CARGO_BIN_EXE_pumice"))
         .arg("check-config")
         .env("XDG_CONFIG_HOME", config_home.path())
+        .env("APPDATA", config_home.path())
         .output()
         .expect("pumice binary runs");
     assert!(
