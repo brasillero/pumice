@@ -38,7 +38,10 @@ pub struct DecodedAudio {
 pub fn decode_wav<R: Read>(mut reader: R) -> Result<DecodedAudio, Error> {
     let mut header = [0u8; 12];
     reader.read_exact(&mut header).map_err(|e| {
-        Error::new(ErrorCode::InvalidInput, format!("failed to read WAV header: {e}"))
+        Error::new(
+            ErrorCode::InvalidInput,
+            format!("failed to read WAV header: {e}"),
+        )
     })?;
 
     if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
@@ -63,7 +66,11 @@ pub fn decode_wav<R: Read>(mut reader: R) -> Result<DecodedAudio, Error> {
         match reader.read_exact(&mut id) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(Error::invalid_input(format!("failed to read chunk id: {e}"))),
+            Err(e) => {
+                return Err(Error::invalid_input(format!(
+                    "failed to read chunk id: {e}"
+                )));
+            }
         }
         bytes_read += 4;
 
@@ -71,9 +78,9 @@ pub fn decode_wav<R: Read>(mut reader: R) -> Result<DecodedAudio, Error> {
 
         if &id == b"fmt " {
             let mut buf = vec![0u8; size as usize];
-            reader.read_exact(&mut buf).map_err(|e| {
-                Error::invalid_input(format!("failed to read fmt chunk: {e}"))
-            })?;
+            reader
+                .read_exact(&mut buf)
+                .map_err(|e| Error::invalid_input(format!("failed to read fmt chunk: {e}")))?;
             bytes_read += size as u64;
             fmt = Some(parse_fmt(&buf)?);
         } else if &id == b"data" {
@@ -81,17 +88,18 @@ pub fn decode_wav<R: Read>(mut reader: R) -> Result<DecodedAudio, Error> {
                 return Err(Error::input_too_large(size as u64 + bytes_read));
             }
             let mut buf = vec![0u8; size as usize];
-            reader.read_exact(&mut buf).map_err(|e| {
-                Error::invalid_input(format!("failed to read data chunk: {e}"))
-            })?;
+            reader
+                .read_exact(&mut buf)
+                .map_err(|e| Error::invalid_input(format!("failed to read data chunk: {e}")))?;
             bytes_read += size as u64;
             data = Some(buf);
         } else {
             // Skip unknown chunk body; pad byte is handled below.
             let to_skip = (size as u64).min(budget.saturating_sub(bytes_read));
             if to_skip > 0 {
-                let skipped = std::io::copy(&mut reader.by_ref().take(to_skip), &mut std::io::sink())
-                    .map_err(|e| Error::invalid_input(format!("failed to skip chunk: {e}")))?;
+                let skipped =
+                    std::io::copy(&mut reader.by_ref().take(to_skip), &mut std::io::sink())
+                        .map_err(|e| Error::invalid_input(format!("failed to skip chunk: {e}")))?;
                 bytes_read += skipped;
             }
         }
@@ -102,7 +110,11 @@ pub fn decode_wav<R: Read>(mut reader: R) -> Result<DecodedAudio, Error> {
             match reader.read_exact(&mut pad) {
                 Ok(()) => bytes_read += 1,
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {}
-                Err(e) => return Err(Error::invalid_input(format!("failed to read pad byte: {e}"))),
+                Err(e) => {
+                    return Err(Error::invalid_input(format!(
+                        "failed to read pad byte: {e}"
+                    )));
+                }
             }
         }
     }
@@ -132,9 +144,9 @@ struct WavFmt {
 
 fn read_u32<R: Read>(reader: &mut R, counter: &mut u64) -> Result<u32, Error> {
     let mut buf = [0u8; 4];
-    reader.read_exact(&mut buf).map_err(|e| {
-        Error::invalid_input(format!("failed to read chunk size: {e}"))
-    })?;
+    reader
+        .read_exact(&mut buf)
+        .map_err(|e| Error::invalid_input(format!("failed to read chunk size: {e}")))?;
     *counter += 4;
     Ok(u32::from_le_bytes(buf))
 }
@@ -162,7 +174,9 @@ fn parse_fmt(buf: &[u8]) -> Result<WavFmt, Error> {
         } else if subformat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT {
             resolved_tag = WAVE_FORMAT_IEEE_FLOAT;
         } else {
-            return Err(Error::unsupported_format("unsupported extensible subformat"));
+            return Err(Error::unsupported_format(
+                "unsupported extensible subformat",
+            ));
         }
     }
 
@@ -200,55 +214,58 @@ fn validate_format(fmt: &WavFmt) -> Result<(), Error> {
 
 fn decode_samples(fmt: &WavFmt, data: &[u8]) -> Result<Vec<f32>, Error> {
     let bytes_per_sample = fmt.bits_per_sample as usize / 8;
-    let sample_count = data.len() / bytes_per_sample;
-    let expected = sample_count * fmt.channels as usize;
-    if sample_count * bytes_per_sample != data.len() {
-        return Err(Error::invalid_input("data chunk size is not aligned to sample width"));
+    let bytes_per_frame = bytes_per_sample * fmt.channels as usize;
+    if !data.len().is_multiple_of(bytes_per_frame) {
+        return Err(Error::invalid_input(
+            "data chunk size is not aligned to frame size",
+        ));
     }
 
-    let mut out = Vec::with_capacity(expected);
+    let frame_count = data.len() / bytes_per_frame;
+    let mut out = Vec::with_capacity(frame_count * fmt.channels as usize);
 
-    match (fmt.format_tag, fmt.bits_per_sample) {
-        (WAVE_FORMAT_PCM, 8) => {
-            for &b in data {
-                out.push((b as f32 - 128.0) / 128.0);
-            }
+    for (frame_idx, frame_bytes) in data.chunks_exact(bytes_per_frame).enumerate() {
+        // Enforce the duration limit while decoding so a long file is rejected
+        // before any downmix or resample buffer is allocated.
+        let seconds = (frame_idx + 1) as f64 / fmt.sample_rate as f64;
+        if seconds > MAX_AUDIO_SECONDS {
+            return Err(Error::audio_too_long(seconds));
         }
-        (WAVE_FORMAT_PCM, 16) => {
-            let (chunks, _) = data.as_chunks::<2>();
-            for &[lo, hi] in chunks {
-                let v = i16::from_le_bytes([lo, hi]);
-                out.push((v as f32) / 32_768.0);
-            }
+
+        for ch in 0..fmt.channels as usize {
+            let start = ch * bytes_per_sample;
+            let sample = decode_sample(fmt, &frame_bytes[start..start + bytes_per_sample])?;
+            out.push(sample);
         }
-        (WAVE_FORMAT_PCM, 24) => {
-            let (chunks, _) = data.as_chunks::<3>();
-            for &[b0, b1, b2] in chunks {
-                let v = i32::from_le_bytes([b0, b1, b2, 0]) << 8 >> 8;
-                out.push((v as f32) / 8_388_608.0);
-            }
-        }
-        (WAVE_FORMAT_PCM, 32) => {
-            let (chunks, _) = data.as_chunks::<4>();
-            for &[b0, b1, b2, b3] in chunks {
-                let v = i32::from_le_bytes([b0, b1, b2, b3]);
-                out.push((v as f32) / 2_147_483_648.0);
-            }
-        }
-        (WAVE_FORMAT_IEEE_FLOAT, 32) => {
-            let (chunks, _) = data.as_chunks::<4>();
-            for &[b0, b1, b2, b3] in chunks {
-                let v = f32::from_le_bytes([b0, b1, b2, b3]);
-                if !v.is_finite() {
-                    return Err(Error::invalid_input("audio contains non-finite samples"));
-                }
-                out.push(v.clamp(-1.0, 1.0));
-            }
-        }
-        _ => return Err(Error::unsupported_format("unsupported WAV sample format")),
     }
 
     Ok(out)
+}
+
+fn decode_sample(fmt: &WavFmt, bytes: &[u8]) -> Result<f32, Error> {
+    match (fmt.format_tag, fmt.bits_per_sample) {
+        (WAVE_FORMAT_PCM, 8) => Ok((bytes[0] as f32 - 128.0) / 128.0),
+        (WAVE_FORMAT_PCM, 16) => {
+            let v = i16::from_le_bytes([bytes[0], bytes[1]]);
+            Ok((v as f32) / 32_768.0)
+        }
+        (WAVE_FORMAT_PCM, 24) => {
+            let v = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0]) << 8 >> 8;
+            Ok((v as f32) / 8_388_608.0)
+        }
+        (WAVE_FORMAT_PCM, 32) => {
+            let v = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            Ok((v as f32) / 2_147_483_648.0)
+        }
+        (WAVE_FORMAT_IEEE_FLOAT, 32) => {
+            let v = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            if !v.is_finite() {
+                return Err(Error::invalid_input("audio contains non-finite samples"));
+            }
+            Ok(v.clamp(-1.0, 1.0))
+        }
+        _ => Err(Error::unsupported_format("unsupported WAV sample format")),
+    }
 }
 
 pub fn resample_to_target(input: &[f32], input_rate: u32) -> Result<Vec<f32>, Error> {
@@ -411,7 +428,7 @@ mod tests {
         // 1-byte JUNK chunk (plus its mandatory pad byte) before the data chunk.
         let bytes_per_sample = 2usize;
         let block_align = (channels as usize * bytes_per_sample) as u16;
-        let byte_rate = sample_rate as u32 * block_align as u32;
+        let byte_rate = sample_rate * block_align as u32;
         let data_bytes = samples.len() * bytes_per_sample;
 
         let mut fmt = Vec::new();
@@ -455,7 +472,7 @@ mod tests {
     fn write_wav_extensible_pcm(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<u8> {
         let bytes_per_sample = 2usize;
         let block_align = (channels as usize * bytes_per_sample) as u16;
-        let byte_rate = sample_rate as u32 * block_align as u32;
+        let byte_rate = sample_rate * block_align as u32;
         let data_bytes = samples.len() * bytes_per_sample;
 
         let mut fmt = Vec::new();
@@ -495,7 +512,7 @@ mod tests {
     fn write_wav_extensible_float(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
         let bytes_per_sample = 4usize;
         let block_align = (channels as usize * bytes_per_sample) as u16;
-        let byte_rate = sample_rate as u32 * block_align as u32;
+        let byte_rate = sample_rate * block_align as u32;
         let data_bytes = samples.len() * bytes_per_sample;
 
         let mut fmt = Vec::new();
@@ -551,32 +568,64 @@ mod tests {
     fn decode_8bit_full_scale() {
         let wav = write_wav_i8(&[i8::MAX, i8::MIN], 16_000, 1);
         let decoded = decode_wav(Cursor::new(&wav)).unwrap();
-        assert!((decoded.samples[0] - 127.0 / 128.0).abs() < 1e-6, "8-bit max scaled to {}", decoded.samples[0]);
-        assert!((decoded.samples[1] - (-1.0)).abs() < 1e-6, "8-bit min scaled to {}", decoded.samples[1]);
+        assert!(
+            (decoded.samples[0] - 127.0 / 128.0).abs() < 1e-6,
+            "8-bit max scaled to {}",
+            decoded.samples[0]
+        );
+        assert!(
+            (decoded.samples[1] - (-1.0)).abs() < 1e-6,
+            "8-bit min scaled to {}",
+            decoded.samples[1]
+        );
     }
 
     #[test]
     fn decode_16bit_full_scale() {
         let wav = write_wav_i16(&[i16::MAX, i16::MIN], 16_000, 1);
         let decoded = decode_wav(Cursor::new(&wav)).unwrap();
-        assert!((decoded.samples[0] - 32_767.0 / 32_768.0).abs() < 1e-6, "16-bit max scaled to {}", decoded.samples[0]);
-        assert!((decoded.samples[1] - (-1.0)).abs() < 1e-6, "16-bit min scaled to {}", decoded.samples[1]);
+        assert!(
+            (decoded.samples[0] - 32_767.0 / 32_768.0).abs() < 1e-6,
+            "16-bit max scaled to {}",
+            decoded.samples[0]
+        );
+        assert!(
+            (decoded.samples[1] - (-1.0)).abs() < 1e-6,
+            "16-bit min scaled to {}",
+            decoded.samples[1]
+        );
     }
 
     #[test]
     fn decode_24bit_full_scale() {
         let wav = write_wav_i24(&[8_388_607, -8_388_608], 16_000, 1);
         let decoded = decode_wav(Cursor::new(&wav)).unwrap();
-        assert!((decoded.samples[0] - 8_388_607.0 / 8_388_608.0).abs() < 1e-6, "24-bit max scaled to {}", decoded.samples[0]);
-        assert!((decoded.samples[1] - (-1.0)).abs() < 1e-6, "24-bit min scaled to {}", decoded.samples[1]);
+        assert!(
+            (decoded.samples[0] - 8_388_607.0 / 8_388_608.0).abs() < 1e-6,
+            "24-bit max scaled to {}",
+            decoded.samples[0]
+        );
+        assert!(
+            (decoded.samples[1] - (-1.0)).abs() < 1e-6,
+            "24-bit min scaled to {}",
+            decoded.samples[1]
+        );
     }
 
     #[test]
     fn decode_32bit_full_scale() {
         let wav = write_wav_i32(&[i32::MAX, i32::MIN], 16_000, 1);
         let decoded = decode_wav(Cursor::new(&wav)).unwrap();
-        assert!((decoded.samples[0] - 2_147_483_647.0 / 2_147_483_648.0).abs() < 1e-7, "32-bit max scaled to {}", decoded.samples[0]);
-        assert!((decoded.samples[1] - (-1.0)).abs() < 1e-7, "32-bit min scaled to {}", decoded.samples[1]);
+        assert!(
+            (decoded.samples[0] - 2_147_483_647.0 / 2_147_483_648.0).abs() < 1e-7,
+            "32-bit max scaled to {}",
+            decoded.samples[0]
+        );
+        assert!(
+            (decoded.samples[1] - (-1.0)).abs() < 1e-7,
+            "32-bit min scaled to {}",
+            decoded.samples[1]
+        );
     }
 
     #[test]
@@ -673,9 +722,7 @@ mod tests {
     fn audio_longer_than_120_seconds_rejected() {
         let samples = silence(16_000 * 121);
         let wav = write_wav_f32(&samples, 16_000, 1);
-        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
-        let resampled = resample_to_target(&decoded.samples, decoded.sample_rate).unwrap();
-        let err = normalize_and_validate(resampled).unwrap_err();
+        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
         assert_eq!(err.code, ErrorCode::AudioTooLong);
     }
 
