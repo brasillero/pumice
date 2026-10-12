@@ -152,7 +152,10 @@ where
 fn handle_clap_error(err: clap::Error, wants_json: bool) -> ExitCode {
     match err.kind() {
         ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
-            err.print().ok();
+            if err.print().is_err() {
+                let _ = io::stderr().write_all(b"failed to write output\n");
+                return ExitCode::from(1);
+            }
             ExitCode::SUCCESS
         }
         _ if wants_json => {
@@ -167,11 +170,17 @@ fn handle_clap_error(err: clap::Error, wants_json: bool) -> ExitCode {
                 }),
             };
             // Clap errors may include newlines; emit exactly one JSON object followed by a newline.
-            let _ = writeln!(stdout, "{}", serde_json::to_string(&envelope).unwrap());
+            if writeln!(stdout, "{}", serde_json::to_string(&envelope).unwrap()).is_err() {
+                let _ = io::stderr().write_all(b"failed to write output\n");
+                return ExitCode::from(1);
+            }
             ExitCode::from(2)
         }
         _ => {
-            err.print().ok();
+            if err.print().is_err() {
+                let _ = io::stderr().write_all(b"failed to write output\n");
+                return ExitCode::from(1);
+            }
             ExitCode::from(2)
         }
     }
@@ -237,15 +246,42 @@ where
 }
 
 fn open_regular_file(path: &Path) -> Result<std::fs::File, Error> {
-    let file = std::fs::File::open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.file_type().is_file() {
+    // Check the path before opening so FIFOs and other special files are rejected without
+    // blocking. Re-check on the descriptor to cover races.
+    let pre_metadata = std::fs::metadata(path)?;
+    if !pre_metadata.file_type().is_file() {
         return Err(Error::invalid_input(format!(
             "audio path is not a regular file: {}",
             path.display()
         )));
     }
+
+    let file = open_with_nonblock_on_unix(path)?;
+
+    let post_metadata = file.metadata()?;
+    if !post_metadata.file_type().is_file() {
+        return Err(Error::invalid_input(format!(
+            "audio path is not a regular file: {}",
+            path.display()
+        )));
+    }
+
     Ok(file)
+}
+
+#[cfg(unix)]
+fn open_with_nonblock_on_unix(path: &Path) -> Result<std::fs::File, Error> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .map_err(Error::from)
+}
+
+#[cfg(not(unix))]
+fn open_with_nonblock_on_unix(path: &Path) -> Result<std::fs::File, Error> {
+    std::fs::File::open(path).map_err(Error::from)
 }
 
 /// Reader that enforces a hard byte budget while reading.

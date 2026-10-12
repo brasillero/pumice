@@ -248,6 +248,68 @@ fn non_regular_file_returns_invalid_input() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn fifo_without_writer_returns_invalid_input_with_timeout() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fifo_path = tmp.path().join("no_writer.fifo");
+
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo_path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "mkfifo failed");
+
+    let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
+    let mut child = std::process::Command::new(bin)
+        .args([
+            "file",
+            fifo_path.to_str().unwrap(),
+            "--model",
+            "/dev/null",
+            "--json",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let timeout = std::time::Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("pumice-transcribe blocked on FIFO without a writer");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+
+    let mut output = std::process::Output {
+        status,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    };
+    if let Some(mut stdout) = child.stdout.take() {
+        use std::io::Read;
+        stdout.read_to_end(&mut output.stdout).unwrap();
+    }
+    if let Some(mut stderr) = child.stderr.take() {
+        use std::io::Read;
+        stderr.read_to_end(&mut output.stderr).unwrap();
+    }
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "invalid_input");
+}
+
+#[test]
 fn too_large_file_returns_input_too_large() {
     let tmp = tempfile::tempdir().unwrap();
     let audio_path = tmp.path().join("audio.wav");
@@ -661,6 +723,48 @@ fn output_failure_on_dev_full_reports_exit_1() {
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
     let out = Command::new(bin)
         .args(["file", "audio.wav", "--model", "/dev/null", "--json"])
+        .stdout(std::process::Stdio::from(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .unwrap(),
+        ))
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("failed to write output"));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn help_output_failure_on_dev_full_reports_exit_1() {
+    let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
+    let out = Command::new(bin)
+        .arg("--help")
+        .stdout(std::process::Stdio::from(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .unwrap(),
+        ))
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("failed to write output"));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn version_output_failure_on_dev_full_reports_exit_1() {
+    let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
+    let out = Command::new(bin)
+        .arg("--version")
         .stdout(std::process::Stdio::from(
             std::fs::OpenOptions::new()
                 .write(true)
