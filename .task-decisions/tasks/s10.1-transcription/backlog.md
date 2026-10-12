@@ -42,10 +42,9 @@
 - ticket: —
 - created: 2026-10-12
 
-**Context.** Models are 44 MB to 6 GB and cannot be bundled. `AGENTS.md` allows no outbound calls other than the AI CLIs, so a Pumice download would need an owner exception. Handy's catalog pins Hugging Face repos (`handy-computer/*-gguf`) with sha256 per file. Which model the owner uses in Handy is not confirmed yet.
-
+**Context.** Models are 44 MB to 6 GB and cannot be bundled. `AGENTS.md` allows no outbound calls other than the AI CLIs, so a Pumice download would need an owner exception. Handy's catalog pins Hugging Face repos (`handy-computer/*-gguf`) with sha256 per file.
 **To do.**
-- [ ] Confirm the owner's current Handy model.
+- [x] Confirm the owner's current Handy model: Whisper Large v3 Turbo Q8_0 (`whisper-large-v3-turbo-Q8_0.gguf`, 886 MB). For research it is in `~/pumice-models/` on server-1, downloaded at Handy's pinned revision `5eaf945c` with the sha256 checked, plus `whisper-tiny-Q8_0.gguf` for quick tests.
 - [ ] Owner decides: the user supplies the file, or Pumice downloads it (exception to the network rule).
 
 ### #4 · To do · Minimal `/v1/audio/transcriptions` endpoint
