@@ -1,10 +1,11 @@
 use crate::audio::{MAX_FILE_BYTES, decode_wav, normalize_and_validate, resample_to_target};
 use crate::engine::Engine;
 use crate::{Error, ErrorCode, JsonError, TranscriptionOptions};
+use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use std::ffi::OsString;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -35,7 +36,7 @@ pub enum Command {
         #[arg(long, value_name = "xx")]
         language: Option<String>,
 
-        /// Number of threads to use for inference (default: available parallelism).
+        /// Number of threads to use for inference (default: available parallelism, capped at 32).
         #[arg(long, value_name = "N")]
         threads: Option<usize>,
 
@@ -85,14 +86,31 @@ impl From<SuccessOutput> for ResultJson {
     }
 }
 
+/// Whisper's supported ISO-639-1 language codes.
+const SUPPORTED_LANGUAGES: &[&str] = &[
+    "af", "am", "ar", "as", "az", "ba", "be", "bg", "bn", "bo", "br", "bs", "ca", "cs", "cy", "da",
+    "de", "el", "en", "es", "et", "eu", "fa", "fi", "fo", "fr", "gl", "gu", "ha", "haw", "he",
+    "hi", "hr", "ht", "hu", "hy", "id", "is", "it", "ja", "jw", "ka", "km", "kn", "ko", "la", "lb",
+    "ln", "lo", "lt", "lv", "mg", "mi", "mk", "ml", "mn", "mr", "ms", "mt", "my", "ne", "nl", "nn",
+    "no", "oc", "pa", "pl", "ps", "pt", "ro", "ru", "sa", "sd", "si", "sk", "sl", "sn", "so", "sq",
+    "sr", "su", "sv", "sw", "ta", "te", "tg", "th", "tk", "tl", "tr", "tt", "uk", "ur", "uz", "vi",
+    "yi", "yo", "zh",
+];
+
 pub fn run<I, T>(args: I) -> ExitCode
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let args = match Args::try_parse_from(args) {
+    let raw: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let wants_json = raw.iter().any(|a| a.as_encoded_bytes() == b"--json");
+
+    let parsed = Args::try_parse_from(&raw);
+    let args = match parsed {
         Ok(a) => a,
-        Err(e) => e.exit(),
+        Err(e) => {
+            return handle_clap_error(e, wants_json);
+        }
     };
 
     let make_engine = |path: &Path, threads: i32| -> Result<Box<dyn Engine>, Error> {
@@ -110,14 +128,51 @@ where
     };
 
     let json = json_flag(&args);
+    let mut stdout = io::stdout();
+    let mut stderr = io::stderr();
+
     match run_with_factory(args, make_engine) {
-        Ok(output) => {
-            let _ = print_success(&output, json, &mut io::stdout());
+        Ok(output) => match print_success(&output, json, &mut stdout) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => {
+                let _ = stderr.write_all(b"failed to write output\n");
+                ExitCode::from(1)
+            }
+        },
+        Err(e) => match print_error(&e, json, &mut stdout, &mut stderr) {
+            Ok(()) => exit_code(&e),
+            Err(_) => {
+                let _ = stderr.write_all(b"failed to write output\n");
+                ExitCode::from(1)
+            }
+        },
+    }
+}
+
+fn handle_clap_error(err: clap::Error, wants_json: bool) -> ExitCode {
+    match err.kind() {
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
+            err.print().ok();
             ExitCode::SUCCESS
         }
-        Err(e) => {
-            let _ = print_error(&e, json, &mut io::stdout(), &mut io::stderr());
-            exit_code(&e)
+        _ if wants_json => {
+            let mut stdout = io::stdout();
+            let envelope = Envelope {
+                schema_version: 1,
+                ok: false,
+                result: None,
+                error: Some(JsonError {
+                    code: ErrorCode::InvalidArguments.as_str().to_string(),
+                    message: err.to_string().trim().to_string(),
+                }),
+            };
+            // Clap errors may include newlines; emit exactly one JSON object followed by a newline.
+            let _ = writeln!(stdout, "{}", serde_json::to_string(&envelope).unwrap());
+            ExitCode::from(2)
+        }
+        _ => {
+            err.print().ok();
+            ExitCode::from(2)
         }
     }
 }
@@ -141,19 +196,19 @@ where
             model,
             language,
             threads,
-            json,
+            json: _,
         } => {
-            let _ = json; // JSON flag affects printing, not computation.
-            let language = normalize_language(language);
+            let language = normalize_language(language)?;
             let threads = normalize_threads(threads)?;
 
-            let file = std::fs::File::open(&audio)?;
+            let file = open_regular_file(&audio)?;
             let metadata = file.metadata()?;
             if metadata.len() > MAX_FILE_BYTES {
                 return Err(Error::input_too_large(metadata.len()));
             }
 
-            let decoded = decode_wav(file)?;
+            let budgeted = BudgetReader::new(file, MAX_FILE_BYTES);
+            let decoded = decode_wav(budgeted).map_err(map_budget_error)?;
             let resampled = resample_to_target(&decoded.samples, decoded.sample_rate)?;
             let pcm = normalize_and_validate(resampled)?;
             let audio_seconds = pcm.len() as f64 / 16_000.0;
@@ -181,6 +236,55 @@ where
     }
 }
 
+fn open_regular_file(path: &Path) -> Result<std::fs::File, Error> {
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(Error::invalid_input(format!(
+            "audio path is not a regular file: {}",
+            path.display()
+        )));
+    }
+    Ok(file)
+}
+
+/// Reader that enforces a hard byte budget while reading.
+struct BudgetReader<R> {
+    inner: R,
+    budget: u64,
+    read: u64,
+}
+
+impl<R> BudgetReader<R> {
+    fn new(inner: R, budget: u64) -> Self {
+        Self {
+            inner,
+            budget,
+            read: 0,
+        }
+    }
+}
+
+impl<R: Read> Read for BudgetReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.read >= self.budget {
+            return Err(io::Error::other("byte budget exceeded"));
+        }
+        let max = ((self.budget - self.read) as usize).min(buf.len());
+        let n = self.inner.read(&mut buf[..max])?;
+        self.read += n as u64;
+        Ok(n)
+    }
+}
+
+fn map_budget_error(err: Error) -> Error {
+    if err.code == ErrorCode::InvalidInput && err.message.contains("byte budget exceeded") {
+        Error::input_too_large(MAX_FILE_BYTES)
+    } else {
+        err
+    }
+}
+
 pub fn print_success(output: &SuccessOutput, json: bool, stdout: &mut dyn Write) -> io::Result<()> {
     if json {
         let envelope = Envelope {
@@ -191,7 +295,11 @@ pub fn print_success(output: &SuccessOutput, json: bool, stdout: &mut dyn Write)
         };
         writeln!(stdout, "{}", serde_json::to_string(&envelope).unwrap())
     } else {
-        writeln!(stdout, "{}", output.text)
+        if output.text.ends_with('\n') {
+            write!(stdout, "{}", output.text)
+        } else {
+            writeln!(stdout, "{}", output.text)
+        }
     }
 }
 
@@ -234,20 +342,148 @@ fn json_flag(args: &Args) -> bool {
     matches!(args.command, Command::File { json: true, .. })
 }
 
-fn normalize_language(language: Option<String>) -> Option<String> {
-    let trimmed = language
-        .map(|s| s.trim().to_lowercase())
-        .filter(|s| !s.is_empty());
-    trimmed.filter(|s| s.len() == 2 && s.bytes().all(|b| b.is_ascii_lowercase()))
+fn normalize_language(language: Option<String>) -> Result<Option<String>, Error> {
+    let Some(lang) = language else {
+        return Ok(None);
+    };
+    let lang = lang.trim().to_lowercase();
+    if lang.len() != 2 || !lang.bytes().all(|b| b.is_ascii_lowercase()) {
+        return Err(Error::invalid_arguments(
+            "--language must be a 2-letter ISO-639-1 code",
+        ));
+    }
+    if !SUPPORTED_LANGUAGES.contains(&lang.as_str()) {
+        return Err(Error::invalid_arguments(format!(
+            "unsupported language code: {lang}"
+        )));
+    }
+    Ok(Some(lang))
 }
 
 fn normalize_threads(threads: Option<usize>) -> Result<i32, Error> {
+    const MAX_THREADS: i32 = 32;
     match threads {
         Some(0) => Err(Error::invalid_arguments("--threads must be at least 1")),
-        Some(n) if n > 256 => Err(Error::invalid_arguments("--threads must be at most 256")),
+        Some(n) if n > MAX_THREADS as usize => {
+            Err(Error::invalid_arguments("--threads must be at most 32"))
+        }
         Some(n) => Ok(n as i32),
         None => Ok(std::thread::available_parallelism()
-            .map(|p| p.get() as i32)
+            .map(|p| (p.get() as i32).min(MAX_THREADS))
             .unwrap_or(1)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("boom"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn print_success_plain_does_not_duplicate_trailing_newline() {
+        let output = SuccessOutput {
+            text: "hello\n".to_string(),
+            language: None,
+            audio_seconds: 1.0,
+            model_load_ms: 0,
+            transcription_ms: 0,
+        };
+        let mut buf = Vec::new();
+        print_success(&output, false, &mut buf).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "hello\n");
+    }
+
+    #[test]
+    fn print_success_plain_adds_newline_when_missing() {
+        let output = SuccessOutput {
+            text: "hello".to_string(),
+            language: None,
+            audio_seconds: 1.0,
+            model_load_ms: 0,
+            transcription_ms: 0,
+        };
+        let mut buf = Vec::new();
+        print_success(&output, false, &mut buf).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "hello\n");
+    }
+
+    #[test]
+    fn print_success_returns_error_on_failed_write() {
+        let output = SuccessOutput {
+            text: "hello".to_string(),
+            language: None,
+            audio_seconds: 1.0,
+            model_load_ms: 0,
+            transcription_ms: 0,
+        };
+        let mut writer = FailingWriter;
+        assert!(print_success(&output, false, &mut writer).is_err());
+    }
+
+    #[test]
+    fn print_error_returns_error_on_failed_write() {
+        let error = Error::engine_failed();
+        let mut stdout = FailingWriter;
+        let mut stderr = Vec::new();
+        assert!(print_error(&error, true, &mut stdout, &mut stderr).is_err());
+    }
+
+    #[test]
+    fn normalize_language_accepts_supported_code() {
+        assert_eq!(
+            normalize_language(Some("pt".to_string())).unwrap(),
+            Some("pt".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_language_uppercase_is_normalized() {
+        assert_eq!(
+            normalize_language(Some("PT".to_string())).unwrap(),
+            Some("pt".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_language_rejects_non_iso_code() {
+        assert_eq!(
+            normalize_language(Some("portuguese".to_string()))
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArguments
+        );
+    }
+
+    #[test]
+    fn normalize_language_rejects_unknown_code() {
+        assert_eq!(
+            normalize_language(Some("zz".to_string())).unwrap_err().code,
+            ErrorCode::InvalidArguments
+        );
+    }
+
+    #[test]
+    fn normalize_threads_caps_default() {
+        let threads = normalize_threads(None).unwrap();
+        assert!((1..=32).contains(&threads));
+    }
+
+    #[test]
+    fn normalize_threads_rejects_too_large() {
+        assert_eq!(
+            normalize_threads(Some(33)).unwrap_err().code,
+            ErrorCode::InvalidArguments
+        );
     }
 }

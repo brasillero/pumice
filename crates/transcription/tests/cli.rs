@@ -5,7 +5,7 @@ use pumice_transcription::{
 use std::io::Cursor;
 use std::process::Command;
 
-fn write_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
+fn write_wav_f32(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
     let mut buf = Cursor::new(Vec::new());
     let spec = hound::WavSpec {
         channels,
@@ -21,9 +21,25 @@ fn write_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
     buf.into_inner()
 }
 
+fn write_wav_i8(samples: &[i8], sample_rate: u32, channels: u16) -> Vec<u8> {
+    let mut buf = Cursor::new(Vec::new());
+    let spec = hound::WavSpec {
+        channels,
+        sample_rate,
+        bits_per_sample: 8,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::new(&mut buf, spec).unwrap();
+    for &s in samples {
+        writer.write_sample(s).unwrap();
+    }
+    writer.finalize().unwrap();
+    buf.into_inner()
+}
+
 fn write_silence_wav(duration_secs: f64, sample_rate: u32, channels: u16) -> Vec<u8> {
     let samples = vec![0.0f32; (duration_secs * sample_rate as f64) as usize * channels as usize];
-    write_wav(&samples, sample_rate, channels)
+    write_wav_f32(&samples, sample_rate, channels)
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +80,19 @@ impl Engine for RecordingFakeEngine {
     }
 }
 
+#[derive(Debug, Clone)]
+struct FailingFakeEngine;
+
+impl Engine for FailingFakeEngine {
+    fn transcribe(
+        &self,
+        _pcm_16khz_mono: &[f32],
+        _options: &TranscriptionOptions,
+    ) -> Result<Transcript, EngineError> {
+        Err(EngineError::Failed)
+    }
+}
+
 #[test]
 fn fake_engine_full_path() {
     let tmp = tempfile::tempdir().unwrap();
@@ -92,6 +121,53 @@ fn fake_engine_full_path() {
     assert!((result.audio_seconds - 1.0).abs() < 0.01);
     assert_eq!(engine.pcm_len(), 16_000);
     assert_eq!(engine.language(), Some("pt".to_string()));
+}
+
+#[test]
+fn fake_engine_failure_returns_engine_failed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
+    let model_path = tmp.path().join("model.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+
+    let err = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            model_path.to_str().unwrap(),
+        ],
+        Box::new(FailingFakeEngine),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::EngineFailed);
+}
+
+#[test]
+fn utf8_transcript_is_preserved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
+    let model_path = tmp.path().join("model.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+
+    let accented = "Olá, como vai você?";
+    let result = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            model_path.to_str().unwrap(),
+        ],
+        Box::new(FakeEngine::new(accented, Some("pt"))),
+    )
+    .unwrap();
+
+    assert_eq!(result.text, accented);
 }
 
 #[test]
@@ -154,6 +230,24 @@ fn non_wav_file_returns_invalid_input() {
 }
 
 #[test]
+fn non_regular_file_returns_invalid_input() {
+    // /dev/null is a character device, not a regular file.
+    let err = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            "/dev/null",
+            "--model",
+            "/dev/null",
+        ],
+        Box::new(FakeEngine::new("x", None::<String>)),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::InvalidInput);
+}
+
+#[test]
 fn too_large_file_returns_input_too_large() {
     let tmp = tempfile::tempdir().unwrap();
     let audio_path = tmp.path().join("audio.wav");
@@ -179,6 +273,30 @@ fn too_long_audio_returns_audio_too_long() {
     let tmp = tempfile::tempdir().unwrap();
     let audio_path = tmp.path().join("audio.wav");
     std::fs::write(&audio_path, write_silence_wav(121.0, 16_000, 1)).unwrap();
+
+    let err = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            "/dev/null",
+        ],
+        Box::new(FakeEngine::new("x", None::<String>)),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::AudioTooLong);
+}
+
+#[test]
+fn long_8khz_8bit_under_size_over_duration_rejected_before_resample() {
+    // 121 seconds of 8 kHz 8-bit mono = 968,000 bytes, well under 25 MB.
+    // The decoder must reject it before any resampled buffer is allocated.
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    let silence = vec![0i8; 8_000 * 121];
+    std::fs::write(&audio_path, write_wav_i8(&silence, 8_000, 1)).unwrap();
 
     let err = run_with_engine(
         vec![
@@ -297,7 +415,33 @@ fn binary_help_and_version() {
 }
 
 #[test]
-fn language_validation_accepts_two_letter_code() {
+fn language_validation_accepts_pt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
+    let model_path = tmp.path().join("model.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+
+    let engine = RecordingFakeEngine::new();
+    run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            model_path.to_str().unwrap(),
+            "--language",
+            "pt",
+        ],
+        Box::new(engine.clone()),
+    )
+    .unwrap();
+
+    assert_eq!(engine.language(), Some("pt".to_string()));
+}
+
+#[test]
+fn language_validation_normalizes_pt_uppercase() {
     let tmp = tempfile::tempdir().unwrap();
     let audio_path = tmp.path().join("audio.wav");
     std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
@@ -323,15 +467,14 @@ fn language_validation_accepts_two_letter_code() {
 }
 
 #[test]
-fn invalid_language_is_rejected() {
+fn language_validation_rejects_portuguese() {
     let tmp = tempfile::tempdir().unwrap();
     let audio_path = tmp.path().join("audio.wav");
     std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
     let model_path = tmp.path().join("model.gguf");
     std::fs::write(&model_path, b"").unwrap();
 
-    let engine = RecordingFakeEngine::new();
-    run_with_engine(
+    let err = run_with_engine(
         vec![
             "pumice-transcribe",
             "file",
@@ -341,11 +484,36 @@ fn invalid_language_is_rejected() {
             "--language",
             "portuguese",
         ],
-        Box::new(engine.clone()),
+        Box::new(FakeEngine::new("x", None::<String>)),
     )
-    .unwrap();
+    .unwrap_err();
 
-    assert_eq!(engine.language(), None);
+    assert_eq!(err.code, ErrorCode::InvalidArguments);
+}
+
+#[test]
+fn language_validation_rejects_zz() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
+    let model_path = tmp.path().join("model.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+
+    let err = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            model_path.to_str().unwrap(),
+            "--language",
+            "zz",
+        ],
+        Box::new(FakeEngine::new("x", None::<String>)),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::InvalidArguments);
 }
 
 #[test]
@@ -389,11 +557,121 @@ fn threads_validation_rejects_too_large() {
             "--model",
             model_path.to_str().unwrap(),
             "--threads",
-            "257",
+            "33",
         ],
         Box::new(FakeEngine::new("x", None::<String>)),
     )
     .unwrap_err();
 
     assert_eq!(err.code, ErrorCode::InvalidArguments);
+}
+
+#[test]
+fn json_parse_error_missing_model_with_json() {
+    let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
+    let out = Command::new(bin)
+        .args(["file", "audio.wav", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "invalid_arguments");
+    assert!(
+        out.stderr.is_empty(),
+        "stderr should be empty: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn json_parse_error_bad_threads_with_json() {
+    let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
+    let out = Command::new(bin)
+        .args(["file", "audio.wav", "--threads", "abc", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "invalid_arguments");
+    assert!(out.stderr.is_empty());
+}
+
+#[test]
+fn json_parse_error_unknown_flag_with_json() {
+    let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
+    let out = Command::new(bin)
+        .args([
+            "file",
+            "audio.wav",
+            "--model",
+            "/dev/null",
+            "--unknown-flag",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "invalid_arguments");
+    assert!(out.stderr.is_empty());
+}
+
+#[test]
+fn parse_error_unknown_flag_without_json_goes_to_stderr() {
+    let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
+    let out = Command::new(bin)
+        .args([
+            "file",
+            "audio.wav",
+            "--model",
+            "/dev/null",
+            "--unknown-flag",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        out.stdout.is_empty(),
+        "stdout should be empty for human errors"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("--unknown-flag"));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn output_failure_on_dev_full_reports_exit_1() {
+    let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
+    let out = Command::new(bin)
+        .args(["file", "audio.wav", "--model", "/dev/null", "--json"])
+        .stdout(std::process::Stdio::from(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .unwrap(),
+        ))
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("failed to write output"));
 }
