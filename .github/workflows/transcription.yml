@@ -7,12 +7,14 @@ on:
       - 'crates/transcription/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
+      - '.cargo/config.toml'
       - '.github/workflows/transcription.yml'
   pull_request:
     paths:
       - 'crates/transcription/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
+      - '.cargo/config.toml'
       - '.github/workflows/transcription.yml'
   workflow_dispatch:
 
