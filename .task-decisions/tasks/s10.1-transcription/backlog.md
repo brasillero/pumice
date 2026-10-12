@@ -32,7 +32,7 @@
 **To do.**
 - [x] Time a transcription of the sample per model/quantization tried (turbo Q8_0: 5.9 s native, 7.1 s AVX2, 20.5 s plain x86-64).
 - [ ] Compare the text with what Handy produces for the same audio.
-- [ ] Owner decides the x86-64 CPU baseline for releases (AVX2 or plain x86-64).
+- [x] Owner decides the x86-64 CPU baseline for releases: AVX2 (D5).
 
 **Acceptance criteria.**
 - Timings and transcripts recorded in a research note.
@@ -75,5 +75,32 @@
 - [ ] Define the engine interface so it can be faked.
 
 ## Deferred
+
+### #6 · Deferred · More CPU builds and building from source
+- type: Improvement
+- area: distribution
+- origin: D5
+- ticket: —
+- created: 2026-10-12
+- reason: lower priority than GPU support (#7), by owner direction on 2026-10-12
+
+**Context.** D5 ships one AVX2 build for x86-64. The owner wants to consider precompiled builds for other CPU levels later, and an easy way for users to build Pumice themselves (a native build was about 20% faster than AVX2 on server-1).
+
+**To do.**
+- [ ] Decide which extra CPU levels to publish.
+- [ ] Document and support building from source with native CPU flags.
+
+### #7 · Deferred · GPU acceleration
+- type: Improvement
+- area: transcription
+- origin: D3
+- ticket: —
+- created: 2026-10-12
+- reason: waits until the CPU path works (D3); the owner ranks it above more CPU builds (#6)
+
+**Context.** `transcribe-cpp` has Vulkan, Metal and CUDA backends. Handy ships Vulkan on Windows x64 and Metal on macOS. GPU backends add runtime libraries or build variants, which conflicts with the single executable and must be worked out.
+
+**To do.**
+- [ ] Check which GPU backends can be built into one executable per platform.
 
 ## Closed

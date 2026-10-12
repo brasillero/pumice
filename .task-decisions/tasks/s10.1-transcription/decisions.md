@@ -53,3 +53,18 @@
 **Rejected.** Debugging OpenWhispr's request format first.
 
 **Consequences.** `openwhispr-support` stays Paused. `plugin-contract` still matters for a future formatter.
+
+### D5 · Provisional · x86-64 releases target the AVX2 baseline
+- date: 2026-10-12
+- decided by: brasillero
+- origin: #2
+- area: distribution
+- revisit if: users need CPUs without AVX2, or GPU support (#7) is in place and other CPU builds (#6) are taken up
+
+**Decision.** x86-64 release builds of the transcription engine use the AVX2 instruction set (`GGML_NATIVE=OFF` with SSE4.2, AVX, AVX2, F16C, FMA and BMI2 turned on explicitly).
+
+**Why.** On the owner's sample, AVX2 took 7.1 s against 20.5 s for plain x86-64, which is slower than real time; AVX2 covers nearly every x86-64 PC from about 2013 onward.
+
+**Rejected.** Plain x86-64: about 3 times slower for every user. Native builds: cannot be distributed. Per-CPU runtime modules as Handy ships them: they break the single executable.
+
+**Consequences.** CPUs without AVX2 cannot run the release build; a clear startup error is wanted instead of a crash.
