@@ -946,6 +946,14 @@ dependencies = [
 name = "pumice"
 version = "0.2.0"
 dependencies = [
+ "pumice-relay",
+ "tempfile",
+]
+
+[[package]]
+name = "pumice-relay"
+version = "0.2.0"
+dependencies = [
  "axum",
  "bytes",
  "http-body-util",

@@ -1,0 +1,43 @@
+[package]
+name = "pumice-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pumice relay: OpenAI-compatible endpoint that hands requests to installed AI CLIs"
+
+[lib]
+name = "pumice_relay"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pumice-relay"
+path = "src/main.rs"
+
+# Portable fake AI CLI used only by the test suite. It is never released.
+[[bin]]
+name = "pumice-test-cli"
+path = "tests/support/fake_cli.rs"
+test = false
+bench = false
+
+[dependencies]
+axum = { workspace = true }
+process-wrap = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde-saphyr = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+jiff = { workspace = true }
+ratatui = { workspace = true }
+toml = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
