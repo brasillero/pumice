@@ -1,0 +1,399 @@
+use pumice_transcription::cli::{SuccessOutput, print_error, print_success, run_with_engine};
+use pumice_transcription::{
+    Engine, EngineError, ErrorCode, FakeEngine, Transcript, TranscriptionOptions,
+};
+use std::io::Cursor;
+use std::process::Command;
+
+fn write_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
+    let mut buf = Cursor::new(Vec::new());
+    let spec = hound::WavSpec {
+        channels,
+        sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+    let mut writer = hound::WavWriter::new(&mut buf, spec).unwrap();
+    for &s in samples {
+        writer.write_sample(s).unwrap();
+    }
+    writer.finalize().unwrap();
+    buf.into_inner()
+}
+
+fn write_silence_wav(duration_secs: f64, sample_rate: u32, channels: u16) -> Vec<u8> {
+    let samples = vec![0.0f32; (duration_secs * sample_rate as f64) as usize * channels as usize];
+    write_wav(&samples, sample_rate, channels)
+}
+
+#[derive(Debug, Clone)]
+struct RecordingFakeEngine {
+    pcm_len: std::sync::Arc<std::sync::Mutex<usize>>,
+    language: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl RecordingFakeEngine {
+    fn new() -> Self {
+        Self {
+            pcm_len: std::sync::Arc::new(std::sync::Mutex::new(0)),
+            language: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    fn pcm_len(&self) -> usize {
+        *self.pcm_len.lock().unwrap()
+    }
+
+    fn language(&self) -> Option<String> {
+        self.language.lock().unwrap().clone()
+    }
+}
+
+impl Engine for RecordingFakeEngine {
+    fn transcribe(
+        &self,
+        pcm_16khz_mono: &[f32],
+        options: &TranscriptionOptions,
+    ) -> Result<Transcript, EngineError> {
+        *self.pcm_len.lock().unwrap() = pcm_16khz_mono.len();
+        *self.language.lock().unwrap() = options.language.clone();
+        Ok(Transcript {
+            text: "hello world".to_string(),
+            language: Some("pt".to_string()),
+        })
+    }
+}
+
+#[test]
+fn fake_engine_full_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
+    let model_path = tmp.path().join("model.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+
+    let engine = RecordingFakeEngine::new();
+    let result = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            model_path.to_str().unwrap(),
+            "--language",
+            "pt",
+        ],
+        Box::new(engine.clone()),
+    )
+    .unwrap();
+
+    assert_eq!(result.text, "hello world");
+    assert_eq!(result.language, Some("pt".to_string()));
+    assert!((result.audio_seconds - 1.0).abs() < 0.01);
+    assert_eq!(engine.pcm_len(), 16_000);
+    assert_eq!(engine.language(), Some("pt".to_string()));
+}
+
+#[test]
+fn missing_model_returns_model_not_found() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
+
+    let err = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            "/does/not/exist.gguf",
+        ],
+        Box::new(FakeEngine::new("x", None::<String>)),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::ModelNotFound);
+}
+
+#[test]
+fn missing_audio_file_returns_invalid_input() {
+    let err = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            "/does/not/exist.wav",
+            "--model",
+            "/dev/null",
+        ],
+        Box::new(FakeEngine::new("x", None::<String>)),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::InvalidInput);
+}
+
+#[test]
+fn non_wav_file_returns_invalid_input() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.txt");
+    std::fs::write(&audio_path, b"not a wav file").unwrap();
+
+    let err = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            "/dev/null",
+        ],
+        Box::new(FakeEngine::new("x", None::<String>)),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::InvalidInput);
+}
+
+#[test]
+fn too_large_file_returns_input_too_large() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, vec![0u8; 25_000_001]).unwrap();
+
+    let err = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            "/dev/null",
+        ],
+        Box::new(FakeEngine::new("x", None::<String>)),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::InputTooLarge);
+}
+
+#[test]
+fn too_long_audio_returns_audio_too_long() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(121.0, 16_000, 1)).unwrap();
+
+    let err = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            "/dev/null",
+        ],
+        Box::new(FakeEngine::new("x", None::<String>)),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::AudioTooLong);
+}
+
+#[test]
+fn missing_model_flag_returns_invalid_arguments() {
+    let err = run_with_engine(
+        vec!["pumice-transcribe", "file", "audio.wav"],
+        Box::new(FakeEngine::new("x", None::<String>)),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::InvalidArguments);
+}
+
+#[test]
+fn json_success_envelope_shape() {
+    let output = SuccessOutput {
+        text: "hello".to_string(),
+        language: Some("pt".to_string()),
+        audio_seconds: 1.5,
+        model_load_ms: 100,
+        transcription_ms: 200,
+    };
+    let mut buf = Vec::new();
+    print_success(&output, true, &mut buf).unwrap();
+    let s = String::from_utf8(buf).unwrap();
+    let json: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["result"]["text"], "hello");
+    assert_eq!(json["result"]["language"], "pt");
+    assert_eq!(json["result"]["audio_seconds"], 1.5);
+    assert_eq!(json["result"]["model_load_ms"], 100);
+    assert_eq!(json["result"]["transcription_ms"], 200);
+    assert!(json["error"].is_null());
+}
+
+#[test]
+fn json_error_envelope_shape() {
+    let error = pumice_transcription::Error::model_not_found(std::path::Path::new("/missing"));
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    print_error(&error, true, &mut out, &mut err).unwrap();
+    let s = String::from_utf8(out).unwrap();
+    let json: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["ok"], false);
+    assert!(json["result"].is_null());
+    assert_eq!(json["error"]["code"], "model_not_found");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("/missing")
+    );
+    assert!(err.is_empty());
+}
+
+#[test]
+fn plain_error_goes_to_stderr() {
+    let error = pumice_transcription::Error::engine_failed();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    print_error(&error, false, &mut out, &mut err).unwrap();
+    assert!(out.is_empty());
+    let s = String::from_utf8(err).unwrap();
+    assert!(s.contains("transcription engine failed"));
+}
+
+#[test]
+fn binary_help_and_version() {
+    let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
+    let help = Command::new(bin).arg("--help").output().unwrap();
+    assert!(
+        help.status.success(),
+        "--help failed: stdout={:?}, stderr={:?}",
+        String::from_utf8_lossy(&help.stdout),
+        String::from_utf8_lossy(&help.stderr)
+    );
+    let stdout = String::from_utf8(help.stdout).unwrap();
+    assert!(stdout.contains("pumice-transcribe"));
+    assert!(stdout.contains("file"));
+
+    let file_help = Command::new(bin).args(["file", "--help"]).output().unwrap();
+    assert!(
+        file_help.status.success(),
+        "file --help failed: stdout={:?}, stderr={:?}",
+        String::from_utf8_lossy(&file_help.stdout),
+        String::from_utf8_lossy(&file_help.stderr)
+    );
+    let file_stdout = String::from_utf8(file_help.stdout).unwrap();
+    assert!(file_stdout.contains("--model"));
+
+    let version = Command::new(bin).arg("--version").output().unwrap();
+    assert!(
+        version.status.success(),
+        "--version failed: stdout={:?}, stderr={:?}",
+        String::from_utf8_lossy(&version.stdout),
+        String::from_utf8_lossy(&version.stderr)
+    );
+    let stdout = String::from_utf8(version.stdout).unwrap();
+    assert!(stdout.contains("pumice-transcribe"));
+}
+
+#[test]
+fn language_validation_accepts_two_letter_code() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
+    let model_path = tmp.path().join("model.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+
+    let engine = RecordingFakeEngine::new();
+    run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            model_path.to_str().unwrap(),
+            "--language",
+            "PT",
+        ],
+        Box::new(engine.clone()),
+    )
+    .unwrap();
+
+    assert_eq!(engine.language(), Some("pt".to_string()));
+}
+
+#[test]
+fn invalid_language_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
+    let model_path = tmp.path().join("model.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+
+    let engine = RecordingFakeEngine::new();
+    run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            model_path.to_str().unwrap(),
+            "--language",
+            "portuguese",
+        ],
+        Box::new(engine.clone()),
+    )
+    .unwrap();
+
+    assert_eq!(engine.language(), None);
+}
+
+#[test]
+fn threads_validation_rejects_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
+    let model_path = tmp.path().join("model.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+
+    let err = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            model_path.to_str().unwrap(),
+            "--threads",
+            "0",
+        ],
+        Box::new(FakeEngine::new("x", None::<String>)),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::InvalidArguments);
+}
+
+#[test]
+fn threads_validation_rejects_too_large() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
+    let model_path = tmp.path().join("model.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+
+    let err = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            model_path.to_str().unwrap(),
+            "--threads",
+            "257",
+        ],
+        Box::new(FakeEngine::new("x", None::<String>)),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::InvalidArguments);
+}
