@@ -64,6 +64,11 @@ jobs:
           if [[ '${{ matrix.target }}' == x86_64-* ]]; then
             flags="$flags -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_F16C=ON -DGGML_FMA=ON -DGGML_BMI2=ON"
           fi
+          # The cmake crate does not pass +crt-static on to CMake: without this
+          # the C/C++ objects use the DLL runtime (/MD) and fail to link.
+          if [[ '${{ matrix.target }}' == *-windows-msvc ]]; then
+            flags="$flags -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded"
+          fi
           echo "TRANSCRIBE_CMAKE_ARGS=$flags" >> "$GITHUB_ENV"
 
       - name: Build fully static musl executable
