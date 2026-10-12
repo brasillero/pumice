@@ -2,7 +2,7 @@
 
 ## Active
 
-### #1 · To do · Choose the transcription engine
+### #1 · In progress · Choose the transcription engine
 - type: Task
 - area: transcription
 - origin: D1
@@ -20,7 +20,7 @@
 **Acceptance criteria.**
 - An engine choice with its evidence, recorded as a decision by the owner.
 
-### #2 · To do · Measure speed and quality on the CPU
+### #2 · In progress · Measure speed and quality on the CPU
 - type: Task
 - area: transcription
 - origin: D3
