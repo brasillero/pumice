@@ -821,7 +821,12 @@ fn serve_reports_config_errors_like_check_config() {
 
 /// Path to the shipped `pumice.example.yaml` at the repository root.
 fn example_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../pumice.example.yaml")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("manifest dir has a parent")
+        .parent()
+        .expect("manifest dir has a grandparent")
+        .join("pumice.example.yaml")
 }
 
 #[test]
