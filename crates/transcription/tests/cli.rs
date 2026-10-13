@@ -42,6 +42,49 @@ fn write_silence_wav(duration_secs: f64, sample_rate: u32, channels: u16) -> Vec
     write_wav_f32(&samples, sample_rate, channels)
 }
 
+/// Build a valid PCM WAV of exactly `total_size` bytes with a short silent
+/// audio data chunk and a trailing JUNK chunk that pads the file to the
+/// requested size. The JUNK size is chosen to be even so no pad byte is needed.
+fn write_wav_with_trailing_junk(total_size: usize, audio_bytes: usize) -> Vec<u8> {
+    assert!(audio_bytes.is_multiple_of(2), "audio_bytes must be even");
+    let junk_size = total_size - 52 - audio_bytes;
+    assert!(
+        junk_size.is_multiple_of(2),
+        "computed junk_size must be even"
+    );
+
+    let sample_rate = 16_000u32;
+    let channels = 1u16;
+    let bits_per_sample = 16u16;
+    let block_align = channels * (bits_per_sample / 8);
+    let byte_rate = sample_rate * block_align as u32;
+
+    let mut out = Vec::with_capacity(total_size);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&((total_size - 8) as u32).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // WAVE_FORMAT_PCM
+    out.extend_from_slice(&channels.to_le_bytes());
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&byte_rate.to_le_bytes());
+    out.extend_from_slice(&block_align.to_le_bytes());
+    out.extend_from_slice(&bits_per_sample.to_le_bytes());
+
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&(audio_bytes as u32).to_le_bytes());
+    out.extend_from_slice(&vec![0u8; audio_bytes]);
+
+    out.extend_from_slice(b"JUNK");
+    out.extend_from_slice(&(junk_size as u32).to_le_bytes());
+    out.extend_from_slice(&vec![0u8; junk_size]);
+
+    assert_eq!(out.len(), total_size);
+    out
+}
+
 #[derive(Debug, Clone)]
 struct RecordingFakeEngine {
     pcm_len: std::sync::Arc<std::sync::Mutex<usize>>,
@@ -344,6 +387,35 @@ fn too_large_file_returns_input_too_large() {
     .unwrap_err();
 
     assert_eq!(err.code, ErrorCode::InputTooLarge);
+}
+
+#[test]
+fn exact_size_limit_file_is_accepted() {
+    // A valid 1-second 16 kHz 16-bit mono WAV padded with a trailing JUNK
+    // chunk to exactly 25 MB must pass the byte-budget check and decode.
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(
+        &audio_path,
+        write_wav_with_trailing_junk(25_000_000, 32_000),
+    )
+    .unwrap();
+    let model_path = tmp.path().join("model.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+
+    let result = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            model_path.to_str().unwrap(),
+        ],
+        Box::new(FakeEngine::new("x", None::<String>)),
+    )
+    .unwrap();
+
+    assert!((result.audio_seconds - 1.0).abs() < 0.01);
 }
 
 #[test]

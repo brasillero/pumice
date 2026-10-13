@@ -299,6 +299,7 @@ struct BudgetReader<R> {
     inner: R,
     budget: u64,
     read: u64,
+    overshot: bool,
 }
 
 impl<R> BudgetReader<R> {
@@ -307,13 +308,25 @@ impl<R> BudgetReader<R> {
             inner,
             budget,
             read: 0,
+            overshot: false,
         }
     }
 }
 
 impl<R: Read> Read for BudgetReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.overshot {
+            return Err(io::Error::other("byte budget exceeded"));
+        }
         if self.read >= self.budget {
+            // Budget is exhausted. We must distinguish EOF at the limit from
+            // data beyond the limit without consuming useful bytes.
+            let mut probe = [0u8; 1];
+            let n = self.inner.read(&mut probe)?;
+            if n == 0 {
+                return Ok(0);
+            }
+            self.overshot = true;
             return Err(io::Error::other("byte budget exceeded"));
         }
         let max = ((self.budget - self.read) as usize).min(buf.len());
@@ -523,6 +536,33 @@ mod tests {
     fn normalize_threads_caps_default() {
         let threads = normalize_threads(None).unwrap();
         assert!((1..=32).contains(&threads));
+    }
+
+    #[test]
+    fn budget_reader_one_under_limit_reads_all() {
+        let data = vec![0u8; MAX_FILE_BYTES as usize - 1];
+        let mut reader = BudgetReader::new(std::io::Cursor::new(&data), MAX_FILE_BYTES);
+        let mut out = Vec::new();
+        reader.read_to_end(&mut out).unwrap();
+        assert_eq!(out.len(), data.len());
+    }
+
+    #[test]
+    fn budget_reader_exact_limit_reads_all() {
+        let data = vec![0u8; MAX_FILE_BYTES as usize];
+        let mut reader = BudgetReader::new(std::io::Cursor::new(&data), MAX_FILE_BYTES);
+        let mut out = Vec::new();
+        reader.read_to_end(&mut out).unwrap();
+        assert_eq!(out.len(), data.len());
+    }
+
+    #[test]
+    fn budget_reader_one_over_limit_rejects() {
+        let data = vec![0u8; MAX_FILE_BYTES as usize + 1];
+        let mut reader = BudgetReader::new(std::io::Cursor::new(&data), MAX_FILE_BYTES);
+        let mut out = Vec::new();
+        let err = reader.read_to_end(&mut out).unwrap_err();
+        assert!(err.to_string().contains("byte budget exceeded"));
     }
 
     #[test]
