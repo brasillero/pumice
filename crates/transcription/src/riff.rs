@@ -27,6 +27,12 @@ pub struct WavFormatInfo {
     pub bits_per_sample: u16,
     /// Size of the `data` chunk body in bytes.
     pub data_bytes: u32,
+    /// Valid bits per sample (EXTENSIBLE only).
+    pub valid_bits: u16,
+    /// Channel mask (EXTENSIBLE only).
+    pub channel_mask: u32,
+    /// Subformat GUID (EXTENSIBLE only).
+    pub subformat: [u8; 16],
 }
 
 /// Validate a RIFF/WAVE file in memory before handing it to a decoder.
@@ -35,7 +41,12 @@ pub struct WavFormatInfo {
 /// RIFF size with correct odd-size padding, requires exactly one `fmt ` chunk
 /// before exactly one `data` chunk, validates channel and block-align fields,
 /// and computes the expected frame count from the `data` chunk size.
-pub fn validate_wav(data: &[u8]) -> Result<WavFormatInfo, Error> {
+///
+/// Returns the validated format info together with a canonical WAV built from
+/// only the validated `fmt ` and `data` chunks. Decoders must use the canonical
+/// bytes so that any trailing or embedded chunks cannot be reinterpreted as
+/// audio data.
+pub fn validate_wav(data: &[u8]) -> Result<(WavFormatInfo, Vec<u8>), Error> {
     if data.len() < 12 {
         return Err(Error::invalid_input("WAV file too small"));
     }
@@ -63,6 +74,7 @@ pub fn validate_wav(data: &[u8]) -> Result<WavFormatInfo, Error> {
     let mut fmt_seen = false;
     let mut data_seen = false;
     let mut format_info: Option<WavFormatInfo> = None;
+    let mut data_body: &[u8] = &[];
 
     while remaining >= 8 {
         let chunk_id = &data[offset..offset + 4];
@@ -108,6 +120,7 @@ pub fn validate_wav(data: &[u8]) -> Result<WavFormatInfo, Error> {
                     chunk_size, info.block_align
                 )));
             }
+            data_body = &data[body_start..body_end];
             format_info = Some(WavFormatInfo {
                 data_bytes: chunk_size as u32,
                 ..info
@@ -133,7 +146,62 @@ pub fn validate_wav(data: &[u8]) -> Result<WavFormatInfo, Error> {
         return Err(Error::invalid_input("missing data chunk"));
     }
 
-    Ok(format_info.unwrap())
+    let info = format_info.unwrap();
+    let canonical = build_canonical_wav(&info, data_body);
+    Ok((info, canonical))
+}
+
+fn build_canonical_wav(info: &WavFormatInfo, data_body: &[u8]) -> Vec<u8> {
+    let fmt_body = match info.format_tag {
+        WAVE_FORMAT_PCM | WAVE_FORMAT_IEEE_FLOAT => {
+            let mut fmt = Vec::with_capacity(16);
+            fmt.extend_from_slice(&info.format_tag.to_le_bytes());
+            fmt.extend_from_slice(&info.channels.to_le_bytes());
+            fmt.extend_from_slice(&info.sample_rate.to_le_bytes());
+            let avg_bytes_per_sec = info.sample_rate * u32::from(info.block_align);
+            fmt.extend_from_slice(&avg_bytes_per_sec.to_le_bytes());
+            fmt.extend_from_slice(&info.block_align.to_le_bytes());
+            fmt.extend_from_slice(&info.bits_per_sample.to_le_bytes());
+            fmt
+        }
+        WAVE_FORMAT_EXTENSIBLE => {
+            let mut fmt = Vec::with_capacity(40);
+            fmt.extend_from_slice(&info.format_tag.to_le_bytes());
+            fmt.extend_from_slice(&info.channels.to_le_bytes());
+            fmt.extend_from_slice(&info.sample_rate.to_le_bytes());
+            let avg_bytes_per_sec = info.sample_rate * u32::from(info.block_align);
+            fmt.extend_from_slice(&avg_bytes_per_sec.to_le_bytes());
+            fmt.extend_from_slice(&info.block_align.to_le_bytes());
+            fmt.extend_from_slice(&info.bits_per_sample.to_le_bytes());
+            fmt.extend_from_slice(&22u16.to_le_bytes());
+            fmt.extend_from_slice(&info.valid_bits.to_le_bytes());
+            fmt.extend_from_slice(&info.channel_mask.to_le_bytes());
+            fmt.extend_from_slice(&info.subformat);
+            fmt
+        }
+        _ => unreachable!(),
+    };
+
+    let data_pad = if data_body.len() % 2 == 1 { 1 } else { 0 };
+    let riff_size = 4 + 8 + fmt_body.len() + 8 + data_body.len() + data_pad;
+
+    let mut out = Vec::with_capacity(8 + riff_size);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(riff_size as u32).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&(fmt_body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&fmt_body);
+
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&(data_body.len() as u32).to_le_bytes());
+    out.extend_from_slice(data_body);
+    if data_pad == 1 {
+        out.push(0);
+    }
+
+    out
 }
 
 fn parse_fmt(body: &[u8]) -> Result<WavFormatInfo, Error> {
@@ -167,6 +235,17 @@ fn parse_fmt(body: &[u8]) -> Result<WavFormatInfo, Error> {
 
     match format_tag {
         WAVE_FORMAT_PCM | WAVE_FORMAT_IEEE_FLOAT => {
+            if body.len() != 16 && body.len() != 18 {
+                return Err(Error::invalid_input(
+                    "fmt chunk body must be 16 or 18 bytes for PCM/IEEE_FLOAT",
+                ));
+            }
+            if body.len() == 18 && read_u16(body, 16) != 0 {
+                return Err(Error::invalid_input(
+                    "fmt chunk cbSize must be 0 for 18-byte PCM/IEEE_FLOAT body",
+                ));
+            }
+
             // P2: for PCM/IEEE_FLOAT block_align must match channels * ceil(bits/8).
             let bytes_per_sample = bits_per_sample.div_ceil(8);
             let expected_block_align = (channels as u32) * (bytes_per_sample as u32);
@@ -185,8 +264,10 @@ fn parse_fmt(body: &[u8]) -> Result<WavFormatInfo, Error> {
             }
         }
         WAVE_FORMAT_EXTENSIBLE => {
-            if body.len() < 40 {
-                return Err(Error::invalid_input("EXTENSIBLE fmt chunk body too small"));
+            if body.len() != 40 {
+                return Err(Error::invalid_input(
+                    "EXTENSIBLE fmt chunk body must be exactly 40 bytes",
+                ));
             }
             let extension_size = read_u16(body, 16);
             if extension_size != 22 {
@@ -254,6 +335,18 @@ fn parse_fmt(body: &[u8]) -> Result<WavFormatInfo, Error> {
                     "unsupported EXTENSIBLE subformat",
                 ));
             }
+
+            return Ok(WavFormatInfo {
+                format_tag,
+                channels,
+                sample_rate,
+                block_align,
+                bits_per_sample,
+                data_bytes: 0,
+                valid_bits,
+                channel_mask,
+                subformat: subformat.try_into().unwrap(),
+            });
         }
         _ => {
             return Err(Error::unsupported_format(format!(
@@ -270,6 +363,9 @@ fn parse_fmt(body: &[u8]) -> Result<WavFormatInfo, Error> {
         block_align,
         bits_per_sample,
         data_bytes: 0,
+        valid_bits: 0,
+        channel_mask: 0,
+        subformat: [0; 16],
     })
 }
 

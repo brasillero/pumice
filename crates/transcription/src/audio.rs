@@ -39,10 +39,11 @@ pub fn decode_wav<R: Read + Send + Sync>(mut reader: R) -> Result<DecodedAudio, 
 
     // Strict pre-validation: catch malformed RIFF/WAVE headers before Symphonia
     // sees them, so invalid input always maps to a safe typed error instead of a
-    // decoder panic.
-    let format_info = crate::riff::validate_wav(&bytes)?;
+    // decoder panic. Use only the canonical WAV built from validated chunks so
+    // that embedded or trailing chunks cannot be reinterpreted as audio data.
+    let (format_info, canonical) = crate::riff::validate_wav(&bytes)?;
 
-    let source = ReadOnlySource::new(std::io::Cursor::new(bytes));
+    let source = ReadOnlySource::new(std::io::Cursor::new(canonical));
     let mss = MediaSourceStream::new(Box::new(source), Default::default());
 
     let mut format = symphonia::default::formats::WavReader::try_new(mss, FormatOptions::default())
@@ -1059,6 +1060,54 @@ mod tests {
         assert!((decoded.samples[0] - 8_388_607.0 / 8_388_608.0).abs() < 1e-6);
         assert!((decoded.samples[1] - (-1.0)).abs() < 1e-6);
         assert!(decoded.samples[2].abs() < 1e-6);
+    }
+
+    #[test]
+    fn reject_extensible_fmt_with_embedded_data_chunk() {
+        // Regression: a malformed EXTENSIBLE `fmt ` body longer than 40 bytes
+        // can contain an embedded `data` chunk header. Symphonia reads only 40
+        // bytes of the `fmt ` body and may parse the remainder as chunks,
+        // decoding the embedded audio instead of the real top-level `data`
+        // chunk. We require exactly 40-byte EXTENSIBLE `fmt ` bodies so this
+        // file is rejected instead of decoding the hidden audio.
+        let hidden_audio = vec![0xabu8; 16]; // would decode to non-silence if used
+        let real_audio = vec![0u8; 16]; // real top-level data is silence
+
+        let block_align = 2; // mono 16-bit
+        let mut fmt_body = Vec::new();
+        fmt_body.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        fmt_body.extend_from_slice(&1u16.to_le_bytes());
+        fmt_body.extend_from_slice(&16_000u32.to_le_bytes());
+        fmt_body.extend_from_slice(&(16_000u32 * block_align as u32).to_le_bytes());
+        fmt_body.extend_from_slice(&(block_align as u16).to_le_bytes());
+        fmt_body.extend_from_slice(&16u16.to_le_bytes());
+        fmt_body.extend_from_slice(&22u16.to_le_bytes());
+        fmt_body.extend_from_slice(&16u16.to_le_bytes());
+        fmt_body.extend_from_slice(&0u32.to_le_bytes());
+        fmt_body.extend_from_slice(&KSDATAFORMAT_SUBTYPE_PCM);
+        assert_eq!(fmt_body.len(), 40);
+
+        // Append an embedded `data` chunk header + hidden audio inside the fmt body.
+        fmt_body.extend_from_slice(b"data");
+        fmt_body.extend_from_slice(&(hidden_audio.len() as u32).to_le_bytes());
+        fmt_body.extend_from_slice(&hidden_audio);
+
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        let riff_size = 4 + 8 + fmt_body.len() as u32 + 8 + real_audio.len() as u32;
+        wav.extend_from_slice(&riff_size.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&(fmt_body.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&fmt_body);
+
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(real_audio.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&real_audio);
+
+        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
     #[test]
