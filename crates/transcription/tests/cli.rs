@@ -37,6 +37,10 @@ fn write_wav_i8(samples: &[i8], sample_rate: u32, channels: u16) -> Vec<u8> {
     buf.into_inner()
 }
 
+fn fixture_path(name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures")).join(name)
+}
+
 fn write_silence_wav(duration_secs: f64, sample_rate: u32, channels: u16) -> Vec<u8> {
     let samples = vec![0.0f32; (duration_secs * sample_rate as f64) as usize * channels as usize];
     write_wav_f32(&samples, sample_rate, channels)
@@ -268,7 +272,7 @@ fn missing_audio_file_returns_invalid_input() {
 }
 
 #[test]
-fn non_wav_file_returns_invalid_input() {
+fn non_audio_file_returns_unsupported_format() {
     let tmp = tempfile::tempdir().unwrap();
     let audio_path = tmp.path().join("audio.txt");
     std::fs::write(&audio_path, b"not a wav file").unwrap();
@@ -285,7 +289,7 @@ fn non_wav_file_returns_invalid_input() {
     )
     .unwrap_err();
 
-    assert_eq!(err.code, ErrorCode::InvalidInput);
+    assert_eq!(err.code, ErrorCode::UnsupportedFormat);
 }
 
 #[test]
@@ -893,4 +897,210 @@ fn version_output_failure_on_dev_full_reports_exit_1() {
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("failed to write output"));
+}
+
+#[test]
+fn each_compressed_format_decodes_to_plausible_duration() {
+    let tmp = tempfile::tempdir().unwrap();
+    let model_path = tmp.path().join("model.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+
+    for (name, expected) in [
+        ("sample-pt.mp3", 14.19),
+        ("sample-pt.flac", 14.19),
+        ("sample-pt.ogg", 14.19),
+    ] {
+        let engine = RecordingFakeEngine::new();
+        let result = run_with_engine(
+            vec![
+                "pumice-transcribe",
+                "file",
+                fixture_path(name).to_str().unwrap(),
+                "--model",
+                model_path.to_str().unwrap(),
+            ],
+            Box::new(engine.clone()),
+        )
+        .unwrap();
+
+        assert!(
+            (result.audio_seconds - expected).abs() < 1.5,
+            "{name}: audio_seconds {} too far from {expected}",
+            result.audio_seconds
+        );
+        let expected_samples = (result.audio_seconds * 16_000.0) as usize;
+        assert!(
+            (engine.pcm_len() as isize - expected_samples as isize).abs() <= 2,
+            "{name}: resampled length {} too far from {expected_samples}",
+            engine.pcm_len()
+        );
+    }
+}
+
+#[test]
+fn detection_ignores_file_extension() {
+    let tmp = tempfile::tempdir().unwrap();
+    let model_path = tmp.path().join("model.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+
+    // MP3 bytes stored with a .wav extension.
+    let mp3_as_wav = tmp.path().join("mp3-as-wav.wav");
+    std::fs::copy(fixture_path("sample-pt.mp3"), &mp3_as_wav).unwrap();
+
+    // WAV bytes stored with a .mp3 extension.
+    let wav_as_mp3 = tmp.path().join("wav-as-mp3.mp3");
+    std::fs::copy(fixture_path("sample-pt.wav"), &wav_as_mp3).unwrap();
+
+    for path in [&mp3_as_wav, &wav_as_mp3] {
+        let engine = RecordingFakeEngine::new();
+        let result = run_with_engine(
+            vec![
+                "pumice-transcribe",
+                "file",
+                path.to_str().unwrap(),
+                "--model",
+                model_path.to_str().unwrap(),
+            ],
+            Box::new(engine),
+        )
+        .unwrap();
+        assert!((result.audio_seconds - 14.19).abs() < 1.5);
+    }
+}
+
+#[test]
+fn truncated_compressed_files_return_typed_errors() {
+    let model_tmp = tempfile::tempdir().unwrap();
+    let model_path = model_tmp.path().join("model.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+
+    for name in ["sample-pt.mp3", "sample-pt.flac", "sample-pt.ogg"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let bytes = std::fs::read(fixture_path(name)).unwrap();
+        let truncated = &bytes[..64.min(bytes.len())];
+        let path = tmp.path().join(name);
+        std::fs::write(&path, truncated).unwrap();
+
+        let err = run_with_engine(
+            vec![
+                "pumice-transcribe",
+                "file",
+                path.to_str().unwrap(),
+                "--model",
+                model_path.to_str().unwrap(),
+            ],
+            Box::new(FakeEngine::new("x", None::<String>)),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(
+                err.code,
+                ErrorCode::InvalidInput | ErrorCode::UnsupportedFormat
+            ),
+            "{name}: expected typed error, got {:?}",
+            err.code
+        );
+    }
+}
+
+#[test]
+fn empty_audio_file_returns_unsupported_format() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("empty.wav");
+    std::fs::write(&path, b"").unwrap();
+
+    let err = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            path.to_str().unwrap(),
+            "--model",
+            "/dev/null",
+        ],
+        Box::new(FakeEngine::new("x", None::<String>)),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::UnsupportedFormat);
+}
+
+#[test]
+fn ogg_opus_returns_unsupported_format() {
+    let err = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            fixture_path("sample-pt.opus").to_str().unwrap(),
+            "--model",
+            "/dev/null",
+        ],
+        Box::new(FakeEngine::new("x", None::<String>)),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::UnsupportedFormat);
+}
+
+#[test]
+fn long_compressed_audio_returns_audio_too_long() {
+    let err = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            fixture_path("long-silence.ogg").to_str().unwrap(),
+            "--model",
+            "/dev/null",
+        ],
+        Box::new(FakeEngine::new("x", None::<String>)),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::AudioTooLong);
+}
+
+#[test]
+fn json_error_envelope_for_unsupported_format() {
+    let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
+    let out = Command::new(bin)
+        .args([
+            "file",
+            fixture_path("sample-pt.opus").to_str().unwrap(),
+            "--model",
+            "/dev/null",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "unsupported_format");
+}
+
+#[test]
+fn json_error_envelope_for_audio_too_long() {
+    let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
+    let out = Command::new(bin)
+        .args([
+            "file",
+            fixture_path("long-silence.mp3").to_str().unwrap(),
+            "--model",
+            "/dev/null",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "audio_too_long");
 }
