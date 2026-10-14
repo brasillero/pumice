@@ -72,9 +72,9 @@ Formats are detected by content (magic bytes), not by file extension.
 | Format | Container/codec | Limits |
 | --- | --- | --- |
 | WAV | RIFF/WAVE PCM / IEEE float / extensible | Max file 25 MB, max audio 120 s, sample rate 8–192 kHz, mono or stereo |
-| MP3 | MPEG-1/2 Audio Layer III | Same limits |
+| MP3 | MPEG Audio Layer III | Same limits |
 | FLAC | Free Lossless Audio Codec | Same limits |
-| Ogg Vorbis | Ogg + Vorbis | Same limits |
+| Ogg Vorbis | Ogg + Vorbis (one logical stream) | Same limits |
 | Ogg Opus | Ogg + Opus | Rejected (`unsupported_format`) — no Opus decoder yet |
 
 ## Third-party licenses

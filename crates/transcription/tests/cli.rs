@@ -1043,6 +1043,30 @@ fn ogg_opus_returns_unsupported_format() {
 }
 
 #[test]
+fn chained_ogg_returns_unsupported_format_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("chained.ogg");
+    let mut bytes = std::fs::read(fixture_path("sample-pt.ogg")).unwrap();
+    bytes.extend(std::fs::read(fixture_path("sample-pt.ogg")).unwrap());
+    std::fs::write(&path, bytes).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_pumice-transcribe"))
+        .args([
+            "file",
+            path.to_str().unwrap(),
+            "--model",
+            "/dev/null",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(2));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["error"]["code"], "unsupported_format");
+}
+
+#[test]
 fn long_compressed_audio_returns_audio_too_long() {
     let err = run_with_engine(
         vec![

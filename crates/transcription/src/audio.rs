@@ -126,8 +126,8 @@ fn decode_wav_bytes(bytes: Vec<u8>) -> Result<DecodedAudio, Error> {
 
 /// Decode a single audio track from any Symphonia format reader.
 ///
-/// `expected_frames` is only supplied for WAV, whose header declares the exact
-/// number of frames and where a mismatch indicates truncation or corruption.
+/// `expected_frames` is supplied by strict WAV validation. Compressed streams
+/// may also declare an exact frame count in their headers.
 fn decode_track(
     format: &mut dyn FormatReader,
     expected_frames: Option<usize>,
@@ -149,6 +149,8 @@ fn decode_track(
     }
 
     let track = &format.tracks()[0];
+    let track_id = track.id;
+    let expected_frames = expected_frames.map(|n| n as u64).or(track.num_frames);
     let codec_params = track
         .codec_params
         .as_ref()
@@ -164,6 +166,13 @@ fn decode_track(
         .as_ref()
         .map(|c| c.count() as u16)
         .unwrap_or(0);
+
+    if !matches!(channels, 1 | 2) {
+        return Err(Error::unsupported_format(format!(
+            "cannot downmix {} channels to mono",
+            channels
+        )));
+    }
 
     if !(MIN_SAMPLE_RATE..=MAX_SAMPLE_RATE).contains(&sample_rate) {
         return Err(Error::unsupported_format(format!(
@@ -193,9 +202,30 @@ fn decode_track(
             Err(e) => return Err(map_symphonia_error(e)),
         };
 
+        if packet.track_id != track_id {
+            return Err(Error::unsupported_format(
+                "audio file switched to a different track",
+            ));
+        }
+
+        // A packet may contain many decoded frames. Reject a declared duration
+        // over the limit before the decoder allocates its output buffer. The
+        // decoded frame count is checked below as well, since headers are untrusted.
+        let declared_frames = packet.block_dur().get();
+        if declared_frames
+            > (MAX_AUDIO_SECONDS as u64 * u64::from(sample_rate))
+                .saturating_sub(decoded_frames as u64)
+        {
+            return Err(Error::audio_too_long(
+                (decoded_frames as u64).saturating_add(declared_frames) as f64 / sample_rate as f64,
+            ));
+        }
+
         let decoded = decoder.decode(&packet).map_err(map_symphonia_error)?;
         let frames = decoded.frames();
-        decoded_frames += frames;
+        decoded_frames = decoded_frames
+            .checked_add(frames)
+            .ok_or_else(|| Error::audio_too_long(MAX_AUDIO_SECONDS + 1.0))?;
 
         // Enforce again after this packet's frames are known.
         let seconds = decoded_frames as f64 / sample_rate as f64;
@@ -204,6 +234,11 @@ fn decode_track(
         }
 
         let plane_count = decoded.spec().channels().count();
+        if decoded.spec().rate() != sample_rate || plane_count != usize::from(channels) {
+            return Err(Error::unsupported_format(
+                "audio stream changed sample rate or channel layout",
+            ));
+        }
         let packet_samples_count = frames * plane_count;
         let mut packet_samples = Vec::with_capacity(packet_samples_count);
         decoded.copy_to_vec_interleaved::<f32>(&mut packet_samples);
@@ -223,7 +258,7 @@ fn decode_track(
     }
 
     if let Some(expected) = expected_frames
-        && decoded_frames != expected
+        && decoded_frames as u64 != expected
     {
         return Err(Error::invalid_input(format!(
             "decoded {} frames, expected {} (truncated or partial audio data)",
@@ -253,6 +288,9 @@ fn map_symphonia_error(err: SymphoniaError) -> Error {
         SymphoniaError::IoError(_)
         | SymphoniaError::DecodeError(_)
         | SymphoniaError::LimitError(_) => Error::invalid_input(msg),
+        SymphoniaError::ResetRequired => {
+            Error::unsupported_format("chained audio streams are not supported")
+        }
         _ => Error::internal(msg),
     }
 }
@@ -1327,6 +1365,40 @@ mod tests {
     fn ogg_opus_rejected_as_unsupported() {
         let err = decode_audio(std::io::Cursor::new(read_fixture("sample-pt.opus"))).unwrap_err();
         assert_eq!(err.code, ErrorCode::UnsupportedFormat);
+    }
+
+    #[test]
+    fn chained_ogg_streams_rejected_as_unsupported() {
+        let mut bytes = read_fixture("sample-pt.ogg");
+        bytes.extend(read_fixture("sample-pt.ogg"));
+        let err = decode_audio(std::io::Cursor::new(bytes)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::UnsupportedFormat);
+    }
+
+    #[test]
+    fn multichannel_flac_rejected() {
+        let err =
+            decode_audio(std::io::Cursor::new(read_fixture("three-channel.flac"))).unwrap_err();
+        assert_eq!(err.code, ErrorCode::UnsupportedFormat);
+        assert!(err.message.contains("3 channels"));
+    }
+
+    #[test]
+    fn mp3_magic_without_valid_frames_returns_typed_error() {
+        for bytes in [b"ID3garbage".as_slice(), &[0xff, 0xfb, 0, 0][..]] {
+            let err = decode_audio(std::io::Cursor::new(bytes)).unwrap_err();
+            assert!(matches!(
+                err.code,
+                ErrorCode::InvalidInput | ErrorCode::UnsupportedFormat
+            ));
+        }
+    }
+
+    #[test]
+    fn mp3_with_declared_frame_count_rejects_truncation() {
+        let bytes = read_fixture("sample-pt.mp3");
+        let err = decode_audio(std::io::Cursor::new(&bytes[..bytes.len() / 2])).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
     #[test]
