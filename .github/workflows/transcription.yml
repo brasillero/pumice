@@ -1,0 +1,81 @@
+name: Transcription engine
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/transcription/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - '.cargo/config.toml'
+      - '.github/workflows/transcription.yml'
+  pull_request:
+    paths:
+      - 'crates/transcription/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - '.cargo/config.toml'
+      - '.github/workflows/transcription.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MODEL_URL: https://huggingface.co/handy-computer/whisper-tiny-gguf/resolve/6687f30c99641ee265df421e582354adbc8848fc/whisper-tiny-Q8_0.gguf
+  MODEL_SHA256: 325b9c7997cd1eff81ef709d55766565e71be696130cc3a3d444713798706834
+  MODEL_DIR: ${{ github.workspace }}/.pumice-models
+
+jobs:
+  transcription-engine:
+    name: Transcription CPU engine smoke (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo clippy -p pumice-transcription --features engine
+        run: cargo clippy -p pumice-transcription --features engine --all-targets --locked -- -D warnings
+
+      - name: cargo build --release -p pumice-transcription --features engine
+        run: cargo build --release -p pumice-transcription --features engine --locked
+
+      - name: Cache Whisper tiny Q8_0 model
+        id: cache-model
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.MODEL_DIR }}
+          key: whisper-tiny-q8_0-native-${{ env.MODEL_SHA256 }}
+
+      - name: Download and verify model
+        if: steps.cache-model.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$MODEL_DIR"
+          curl -L --fail -o "$MODEL_DIR/whisper-tiny-Q8_0.gguf" "$MODEL_URL"
+          echo "$MODEL_SHA256  $MODEL_DIR/whisper-tiny-Q8_0.gguf" | sha256sum -c -
+
+      - name: Verify cached model
+        if: steps.cache-model.outputs.cache-hit == 'true'
+        run: echo "$MODEL_SHA256  $MODEL_DIR/whisper-tiny-Q8_0.gguf" | sha256sum -c -
+
+      - name: Smoke test transcription with tiny model
+        run: |
+          bin="target/release/pumice-transcribe"
+          out_file="${RUNNER_TEMP}/transcribe-out.json"
+          "$bin" file crates/transcription/tests/fixtures/sample-pt.wav \
+            --model "$MODEL_DIR/whisper-tiny-Q8_0.gguf" --json > "$out_file"
+          python3 -c "
+          import json, sys
+          with open(sys.argv[1]) as f:
+              data = json.load(f)
+          assert data.get('schema_version') == 1, data
+          assert data.get('ok') is True, data
+          assert data['result']['language'] == 'pt', data
+          assert data['result']['text'], data
+          print('smoke ok')
+          " "$out_file"

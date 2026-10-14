@@ -1,0 +1,31 @@
+[package]
+name = "pumice-transcription"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pumice transcription: local speech-to-text CLI"
+
+[lib]
+name = "pumice_transcription"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pumice-transcribe"
+path = "src/main.rs"
+
+[features]
+default = []
+engine = ["dep:transcribe-cpp"]
+
+[dependencies]
+clap = { workspace = true }
+libc = { workspace = true }
+rubato = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+symphonia = { version = "=0.6.1", default-features = false, features = ["wav", "pcm"] }
+transcribe-cpp = { version = "=0.3.1", optional = true, default-features = false }
+
+[dev-dependencies]
+hound = { workspace = true }
+tempfile = { workspace = true }
