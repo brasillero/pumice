@@ -77,6 +77,11 @@ Formats are detected by content (magic bytes), not by file extension.
 | Ogg Vorbis | Ogg + Vorbis (one logical stream) | Same limits |
 | Ogg Opus | Ogg + Opus | Rejected (`unsupported_format`) — no Opus decoder yet |
 
+Known limit: a truncated file is rejected only when its header declares a
+frame count (WAV, FLAC, and MP3 with a Xing/Info or VBRI header). A plain MP3
+without such a header has no reliable end marker, so a cut-off file decodes as
+a shorter recording instead of failing.
+
 ## Third-party licenses
 
 This crate uses [Symphonia](https://github.com/pdelbarrio/symphonia) to decode
