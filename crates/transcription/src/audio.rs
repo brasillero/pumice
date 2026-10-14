@@ -23,13 +23,55 @@ pub struct DecodedAudio {
     pub channels: u16,
 }
 
-/// Decode a RIFF/WAVE file using Symphonia.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioFormat {
+    Wav,
+    Mp3,
+    Flac,
+    Ogg,
+    Unknown,
+}
+
+impl AudioFormat {
+    /// Detect the container format by inspecting the first bytes of the file.
+    /// File extensions are never consulted.
+    fn detect(bytes: &[u8]) -> Self {
+        if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
+            return Self::Wav;
+        }
+        if bytes.starts_with(b"fLaC") {
+            return Self::Flac;
+        }
+        if bytes.len() >= 4 && &bytes[0..4] == b"OggS" {
+            return Self::Ogg;
+        }
+        // MP3: an ID3 tag at the start, or an MPEG audio frame sync word (11 set bits).
+        if bytes.starts_with(b"ID3") {
+            return Self::Mp3;
+        }
+        if bytes.len() >= 2 && (u16::from_be_bytes([bytes[0], bytes[1]]) & 0xFFE0) == 0xFFE0 {
+            return Self::Mp3;
+        }
+        Self::Unknown
+    }
+}
+
+fn make_media_source(bytes: Vec<u8>) -> MediaSourceStream<'static> {
+    let source = ReadOnlySource::new(std::io::Cursor::new(bytes));
+    MediaSourceStream::new(Box::new(source), Default::default())
+}
+
+/// Decode an audio file using Symphonia.
 ///
 /// The input is read through the provided reader (already bounded by our own
 /// byte budget). Decoding proceeds one packet at a time; the duration limit is
 /// enforced per-packet before any downmix or resample buffer is allocated, and
 /// no up-front reservation is made from header-declared lengths.
-pub fn decode_wav<R: Read + Send + Sync>(mut reader: R) -> Result<DecodedAudio, Error> {
+///
+/// Supported formats: RIFF/WAVE, MP3, FLAC and Ogg Vorbis. Ogg Opus is detected
+/// as an Ogg container but rejected with `UnsupportedFormat` because Symphonia
+/// has no Opus decoder.
+pub fn decode_audio<R: Read + Send + Sync>(mut reader: R) -> Result<DecodedAudio, Error> {
     // Read the whole file into memory. The caller wraps the reader in a
     // BudgetReader so this is bounded by MAX_FILE_BYTES.
     let mut bytes = Vec::new();
@@ -37,19 +79,59 @@ pub fn decode_wav<R: Read + Send + Sync>(mut reader: R) -> Result<DecodedAudio, 
         .read_to_end(&mut bytes)
         .map_err(|e| Error::invalid_input(format!("failed to read audio data: {e}")))?;
 
+    match AudioFormat::detect(&bytes) {
+        AudioFormat::Wav => decode_wav_bytes(bytes),
+        AudioFormat::Mp3 => {
+            let mss = make_media_source(bytes);
+            let mut format =
+                symphonia::default::formats::MpaReader::try_new(mss, FormatOptions::default())
+                    .map_err(map_symphonia_error)?;
+            decode_track(&mut format, None)
+        }
+        AudioFormat::Flac => {
+            let mss = make_media_source(bytes);
+            let mut format =
+                symphonia::default::formats::FlacReader::try_new(mss, FormatOptions::default())
+                    .map_err(map_symphonia_error)?;
+            decode_track(&mut format, None)
+        }
+        AudioFormat::Ogg => {
+            let mss = make_media_source(bytes);
+            let mut format =
+                symphonia::default::formats::OggReader::try_new(mss, FormatOptions::default())
+                    .map_err(map_symphonia_error)?;
+            decode_track(&mut format, None)
+        }
+        AudioFormat::Unknown => Err(Error::unsupported_format(
+            "unknown or unsupported audio format",
+        )),
+    }
+}
+
+/// Decode a RIFF/WAVE file that has already passed strict pre-validation.
+fn decode_wav_bytes(bytes: Vec<u8>) -> Result<DecodedAudio, Error> {
     // Strict pre-validation: catch malformed RIFF/WAVE headers before Symphonia
     // sees them, so invalid input always maps to a safe typed error instead of a
     // decoder panic. Use only the canonical WAV built from validated chunks so
     // that embedded or trailing chunks cannot be reinterpreted as audio data.
     let (format_info, canonical) = crate::riff::validate_wav(&bytes)?;
 
-    let source = ReadOnlySource::new(std::io::Cursor::new(canonical));
-    let mss = MediaSourceStream::new(Box::new(source), Default::default());
-
+    let mss = make_media_source(canonical);
     let mut format = symphonia::default::formats::WavReader::try_new(mss, FormatOptions::default())
         .map_err(map_symphonia_error)?;
 
-    // Require exactly one audio track.
+    let expected_frames = (format_info.data_bytes / u32::from(format_info.block_align)) as usize;
+    decode_track(&mut format, Some(expected_frames))
+}
+
+/// Decode a single audio track from any Symphonia format reader.
+///
+/// `expected_frames` is supplied by strict WAV validation. Compressed streams
+/// may also declare an exact frame count in their headers.
+fn decode_track(
+    format: &mut dyn FormatReader,
+    expected_frames: Option<usize>,
+) -> Result<DecodedAudio, Error> {
     let audio_track_count = format
         .tracks()
         .iter()
@@ -62,26 +144,42 @@ pub fn decode_wav<R: Read + Send + Sync>(mut reader: R) -> Result<DecodedAudio, 
         .count();
     if audio_track_count != 1 {
         return Err(Error::unsupported_format(
-            "WAV file must contain exactly one audio track",
+            "audio file must contain exactly one audio track",
         ));
     }
 
     let track = &format.tracks()[0];
+    let track_id = track.id;
+    let expected_frames = expected_frames.map(|n| n as u64).or(track.num_frames);
     let codec_params = track
         .codec_params
         .as_ref()
         .and_then(|p| p.audio())
         .cloned()
-        .ok_or_else(|| Error::invalid_input("WAV track has no audio codec parameters"))?;
+        .ok_or_else(|| Error::invalid_input("audio track has no codec parameters"))?;
 
     let sample_rate = codec_params
         .sample_rate
-        .ok_or_else(|| Error::invalid_input("WAV file has no sample rate"))?;
+        .ok_or_else(|| Error::invalid_input("audio file has no sample rate"))?;
     let channels = codec_params
         .channels
         .as_ref()
         .map(|c| c.count() as u16)
         .unwrap_or(0);
+
+    if !matches!(channels, 1 | 2) {
+        return Err(Error::unsupported_format(format!(
+            "cannot downmix {} channels to mono",
+            channels
+        )));
+    }
+
+    if !(MIN_SAMPLE_RATE..=MAX_SAMPLE_RATE).contains(&sample_rate) {
+        return Err(Error::unsupported_format(format!(
+            "unsupported sample rate: {} Hz (expected {}-{} Hz)",
+            sample_rate, MIN_SAMPLE_RATE, MAX_SAMPLE_RATE
+        )));
+    }
 
     let decoder_opts = AudioDecoderOptions::default();
     let mut decoder = symphonia::default::get_codecs()
@@ -104,9 +202,30 @@ pub fn decode_wav<R: Read + Send + Sync>(mut reader: R) -> Result<DecodedAudio, 
             Err(e) => return Err(map_symphonia_error(e)),
         };
 
+        if packet.track_id != track_id {
+            return Err(Error::unsupported_format(
+                "audio file switched to a different track",
+            ));
+        }
+
+        // A packet may contain many decoded frames. Reject a declared duration
+        // over the limit before the decoder allocates its output buffer. The
+        // decoded frame count is checked below as well, since headers are untrusted.
+        let declared_frames = packet.block_dur().get();
+        if declared_frames
+            > (MAX_AUDIO_SECONDS as u64 * u64::from(sample_rate))
+                .saturating_sub(decoded_frames as u64)
+        {
+            return Err(Error::audio_too_long(
+                (decoded_frames as u64).saturating_add(declared_frames) as f64 / sample_rate as f64,
+            ));
+        }
+
         let decoded = decoder.decode(&packet).map_err(map_symphonia_error)?;
         let frames = decoded.frames();
-        decoded_frames += frames;
+        decoded_frames = decoded_frames
+            .checked_add(frames)
+            .ok_or_else(|| Error::audio_too_long(MAX_AUDIO_SECONDS + 1.0))?;
 
         // Enforce again after this packet's frames are known.
         let seconds = decoded_frames as f64 / sample_rate as f64;
@@ -115,6 +234,11 @@ pub fn decode_wav<R: Read + Send + Sync>(mut reader: R) -> Result<DecodedAudio, 
         }
 
         let plane_count = decoded.spec().channels().count();
+        if decoded.spec().rate() != sample_rate || plane_count != usize::from(channels) {
+            return Err(Error::unsupported_format(
+                "audio stream changed sample rate or channel layout",
+            ));
+        }
         let packet_samples_count = frames * plane_count;
         let mut packet_samples = Vec::with_capacity(packet_samples_count);
         decoded.copy_to_vec_interleaved::<f32>(&mut packet_samples);
@@ -133,12 +257,12 @@ pub fn decode_wav<R: Read + Send + Sync>(mut reader: R) -> Result<DecodedAudio, 
         samples.extend(packet_samples);
     }
 
-    // P1: decoded frame count must match the header-declared data size.
-    let expected_frames = (format_info.data_bytes / u32::from(format_info.block_align)) as usize;
-    if decoded_frames != expected_frames {
+    if let Some(expected) = expected_frames
+        && decoded_frames as u64 != expected
+    {
         return Err(Error::invalid_input(format!(
             "decoded {} frames, expected {} (truncated or partial audio data)",
-            decoded_frames, expected_frames
+            decoded_frames, expected
         )));
     }
 
@@ -158,9 +282,15 @@ fn map_symphonia_error(err: SymphoniaError) -> Error {
         SymphoniaError::IoError(_) if msg.contains("byte budget exceeded") => {
             Error::input_too_large(MAX_FILE_BYTES)
         }
+        // Decode errors are mapped to invalid_input. We fail the file on the
+        // first decode error instead of trying to skip packets; this keeps the
+        // policy simple and prevents a corrupt stream from looping forever.
         SymphoniaError::IoError(_)
         | SymphoniaError::DecodeError(_)
         | SymphoniaError::LimitError(_) => Error::invalid_input(msg),
+        SymphoniaError::ResetRequired => {
+            Error::unsupported_format("chained audio streams are not supported")
+        }
         _ => Error::internal(msg),
     }
 }
@@ -559,7 +689,7 @@ mod tests {
     fn decode_16bit_mono() {
         let samples: Vec<i16> = (0..16000).map(|i| (i as i16).wrapping_mul(2)).collect();
         let wav = write_wav_i16(&samples, 16_000, 1);
-        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        let decoded = decode_audio(Cursor::new(&wav)).unwrap();
         assert_eq!(decoded.sample_rate, 16_000);
         assert_eq!(decoded.channels, 1);
         assert_eq!(decoded.samples.len(), 16_000);
@@ -569,7 +699,7 @@ mod tests {
     #[test]
     fn decode_8bit_full_scale() {
         let wav = write_wav_i8(&[i8::MAX, i8::MIN], 16_000, 1);
-        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        let decoded = decode_audio(Cursor::new(&wav)).unwrap();
         assert!(
             (decoded.samples[0] - 127.0 / 128.0).abs() < 1e-6,
             "8-bit max scaled to {}",
@@ -585,7 +715,7 @@ mod tests {
     #[test]
     fn decode_16bit_full_scale() {
         let wav = write_wav_i16(&[i16::MAX, i16::MIN], 16_000, 1);
-        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        let decoded = decode_audio(Cursor::new(&wav)).unwrap();
         assert!(
             (decoded.samples[0] - 32_767.0 / 32_768.0).abs() < 1e-6,
             "16-bit max scaled to {}",
@@ -601,7 +731,7 @@ mod tests {
     #[test]
     fn decode_24bit_full_scale() {
         let wav = write_wav_i24(&[8_388_607, -8_388_608], 16_000, 1);
-        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        let decoded = decode_audio(Cursor::new(&wav)).unwrap();
         assert!(
             (decoded.samples[0] - 8_388_607.0 / 8_388_608.0).abs() < 1e-6,
             "24-bit max scaled to {}",
@@ -617,7 +747,7 @@ mod tests {
     #[test]
     fn decode_32bit_full_scale() {
         let wav = write_wav_i32(&[i32::MAX, i32::MIN], 16_000, 1);
-        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        let decoded = decode_audio(Cursor::new(&wav)).unwrap();
         assert!(
             (decoded.samples[0] - 2_147_483_647.0 / 2_147_483_648.0).abs() < 1e-7,
             "32-bit max scaled to {}",
@@ -633,7 +763,7 @@ mod tests {
     #[test]
     fn decode_float_full_scale() {
         let wav = write_wav_f32(&[1.0, -1.0], 16_000, 1);
-        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        let decoded = decode_audio(Cursor::new(&wav)).unwrap();
         assert!((decoded.samples[0] - 1.0).abs() < 1e-6);
         assert!((decoded.samples[1] - (-1.0)).abs() < 1e-6);
     }
@@ -648,7 +778,7 @@ mod tests {
             .flat_map(|(&l, &r)| [l, r])
             .collect();
         let wav = write_wav_f32(&interleaved, 16_000, 2);
-        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        let decoded = decode_audio(Cursor::new(&wav)).unwrap();
         assert_eq!(decoded.channels, 2);
         assert_eq!(decoded.samples.len(), 16_000);
         // Downmix of [0, 1] repeated should average to 0.5.
@@ -660,7 +790,7 @@ mod tests {
         // Regression: odd-sized chunks must have their mandatory pad byte honored.
         let samples: Vec<i16> = (0..16000).map(|i| (i as i16).wrapping_mul(2)).collect();
         let wav = write_wav_with_odd_junk(&samples, 16_000, 1);
-        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        let decoded = decode_audio(Cursor::new(&wav)).unwrap();
         assert_eq!(decoded.sample_rate, 16_000);
         assert_eq!(decoded.channels, 1);
         assert_eq!(decoded.samples.len(), 16_000);
@@ -670,7 +800,7 @@ mod tests {
     #[test]
     fn decode_extensible_pcm() {
         let wav = write_wav_extensible_pcm(&[i16::MAX, i16::MIN], 16_000, 1);
-        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        let decoded = decode_audio(Cursor::new(&wav)).unwrap();
         assert!((decoded.samples[0] - 32_767.0 / 32_768.0).abs() < 1e-6);
         assert!((decoded.samples[1] - (-1.0)).abs() < 1e-6);
     }
@@ -678,7 +808,7 @@ mod tests {
     #[test]
     fn decode_extensible_float() {
         let wav = write_wav_extensible_float(&[1.0, -1.0], 16_000, 1);
-        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        let decoded = decode_audio(Cursor::new(&wav)).unwrap();
         assert!((decoded.samples[0] - 1.0).abs() < 1e-6);
         assert!((decoded.samples[1] - (-1.0)).abs() < 1e-6);
     }
@@ -687,7 +817,7 @@ mod tests {
     fn decode_24bit_in_32bit_container() {
         // Samples are stored as 24-bit values in a 32-bit container.
         let wav = write_wav_24bit_in_32bit_container(&[8_388_607, -8_388_608, 0], 16_000, 1);
-        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        let decoded = decode_audio(Cursor::new(&wav)).unwrap();
         assert_eq!(decoded.samples.len(), 3);
         assert!(
             (decoded.samples[0] - 8_388_607.0 / 8_388_608.0).abs() < 1e-6,
@@ -705,14 +835,14 @@ mod tests {
     #[test]
     fn wrong_subformat_guid_rejected() {
         let wav = write_wav_wrong_subformat_guid(&[0, 0], 16_000, 1);
-        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        let err = decode_audio(Cursor::new(&wav)).unwrap_err();
         assert_eq!(err.code, ErrorCode::UnsupportedFormat);
     }
 
     #[test]
     fn riff_size_smaller_than_data_rejected() {
         let wav = write_wav_riff_size_too_small(&[0; 10], 16_000, 1);
-        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        let err = decode_audio(Cursor::new(&wav)).unwrap_err();
         assert!(matches!(
             err.code,
             ErrorCode::InvalidInput | ErrorCode::UnsupportedFormat
@@ -729,7 +859,7 @@ mod tests {
         wav.extend_from_slice(b"fmt ");
         wav.extend_from_slice(&0xffffffffu32.to_le_bytes());
 
-        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        let err = decode_audio(Cursor::new(&wav)).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
@@ -744,7 +874,7 @@ mod tests {
             })
             .collect();
         let wav = write_wav_f32(&samples, sample_rate, 1);
-        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        let decoded = decode_audio(Cursor::new(&wav)).unwrap();
         let resampled = resample_to_target(&decoded.samples, decoded.sample_rate).unwrap();
         let expected_len =
             (samples.len() as f64 * TARGET_SAMPLE_RATE as f64 / sample_rate as f64).ceil() as usize;
@@ -755,7 +885,7 @@ mod tests {
     fn resample_8k_to_16k_doubles_length() {
         let samples = silence(8_000);
         let wav = write_wav_f32(&samples, 8_000, 1);
-        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        let decoded = decode_audio(Cursor::new(&wav)).unwrap();
         let resampled = resample_to_target(&decoded.samples, decoded.sample_rate).unwrap();
         assert!((resampled.len() as isize - 16_000_isize).abs() <= 2);
     }
@@ -764,7 +894,7 @@ mod tests {
     fn resample_192k_to_16k_reduces_length() {
         let samples = silence(192_000);
         let wav = write_wav_f32(&samples, 192_000, 1);
-        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        let decoded = decode_audio(Cursor::new(&wav)).unwrap();
         let resampled = resample_to_target(&decoded.samples, decoded.sample_rate).unwrap();
         assert!((resampled.len() as isize - 16_000_isize).abs() <= 2);
     }
@@ -773,7 +903,7 @@ mod tests {
     fn audio_longer_than_120_seconds_rejected() {
         let samples = silence(16_000 * 121);
         let wav = write_wav_f32(&samples, 16_000, 1);
-        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        let err = decode_audio(Cursor::new(&wav)).unwrap_err();
         assert_eq!(err.code, ErrorCode::AudioTooLong);
     }
 
@@ -781,7 +911,7 @@ mod tests {
     fn unsupported_channel_count_rejected() {
         let samples = silence(16_000 * 4); // 4 channels, 1 second
         let wav = write_wav_f32(&samples, 16_000, 4);
-        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        let err = decode_audio(Cursor::new(&wav)).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
@@ -789,14 +919,14 @@ mod tests {
     fn unsupported_sample_rate_rejected() {
         let samples = silence(2_000);
         let wav = write_wav_f32(&samples, 2_000, 1);
-        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        let err = decode_audio(Cursor::new(&wav)).unwrap_err();
         assert_eq!(err.code, ErrorCode::UnsupportedFormat);
     }
 
     #[test]
     fn empty_audio_rejected() {
         let wav = write_wav_f32(&[], 16_000, 1);
-        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        let decoded = decode_audio(Cursor::new(&wav)).unwrap();
         let err = normalize_and_validate(decoded.samples).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidInput);
     }
@@ -806,7 +936,7 @@ mod tests {
         let mut samples = silence(16_000);
         samples[0] = f32::NAN;
         let wav = write_wav_f32(&samples, 16_000, 1);
-        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        let err = decode_audio(Cursor::new(&wav)).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
@@ -815,7 +945,7 @@ mod tests {
         let mut samples = silence(16_000);
         samples[0] = f32::INFINITY;
         let wav = write_wav_f32(&samples, 16_000, 1);
-        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        let err = decode_audio(Cursor::new(&wav)).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
@@ -824,7 +954,7 @@ mod tests {
         let mut samples = silence(16_000);
         samples[0] = f32::NEG_INFINITY;
         let wav = write_wav_f32(&samples, 16_000, 1);
-        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        let err = decode_audio(Cursor::new(&wav)).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
@@ -832,7 +962,7 @@ mod tests {
     fn no_resampling_for_16k_input() {
         let samples = silence(16_000);
         let wav = write_wav_f32(&samples, 16_000, 1);
-        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        let decoded = decode_audio(Cursor::new(&wav)).unwrap();
         let resampled = resample_to_target(&decoded.samples, decoded.sample_rate).unwrap();
         assert_eq!(resampled.len(), decoded.samples.len());
     }
@@ -917,7 +1047,7 @@ mod tests {
         // channels=33 with mask=0 must still be rejected (channels must be 1 or 2).
         let data = vec![0u8; 33 * 2 * 3]; // 33 channels * 2 bytes * 3 frames
         let wav = build_extensible_wav(33, 0, 16, 16, false, &data);
-        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        let err = decode_audio(Cursor::new(&wav)).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
@@ -926,7 +1056,7 @@ mod tests {
         // channels=2 with reserved bit 0x80000000 set in the mask.
         let data = vec![0u8; 2 * 2 * 3];
         let wav = build_extensible_wav(2, 0x8000_0000, 16, 16, false, &data);
-        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        let err = decode_audio(Cursor::new(&wav)).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
@@ -934,7 +1064,7 @@ mod tests {
     fn reject_pcm_channels_65535() {
         let mut wav = build_wav_raw(1, 1, 16_000, 2, 16, None, &[0u8; 6]);
         wav[22..24].copy_from_slice(&65_535u16.to_le_bytes());
-        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        let err = decode_audio(Cursor::new(&wav)).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
@@ -943,7 +1073,7 @@ mod tests {
         let mut wav = build_wav_raw(1, 1, 16_000, 2, 16, None, &[0u8; 6]);
         let size = u32::from_le_bytes([wav[4], wav[5], wav[6], wav[7]]);
         wav[4..8].copy_from_slice(&(size + 100).to_le_bytes());
-        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        let err = decode_audio(Cursor::new(&wav)).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
@@ -952,7 +1082,7 @@ mod tests {
         let mut wav = build_wav_raw(1, 1, 16_000, 2, 16, None, &[0u8; 6]);
         // Declare data chunk size larger than the bytes that follow.
         wav[40..44].copy_from_slice(&100u32.to_le_bytes());
-        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        let err = decode_audio(Cursor::new(&wav)).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
@@ -989,7 +1119,7 @@ mod tests {
         out.extend_from_slice(&(data.len() as u32).to_le_bytes());
         out.extend_from_slice(&data);
 
-        let err = decode_wav(Cursor::new(&out)).unwrap_err();
+        let err = decode_audio(Cursor::new(&out)).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
@@ -1003,7 +1133,7 @@ mod tests {
         wav.extend_from_slice(&second_fmt);
         let size = u32::from_le_bytes([wav[4], wav[5], wav[6], wav[7]]);
         wav[4..8].copy_from_slice(&(size + 8 + second_fmt.len() as u32).to_le_bytes());
-        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        let err = decode_audio(Cursor::new(&wav)).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
@@ -1017,7 +1147,7 @@ mod tests {
         wav.extend_from_slice(&second_data);
         let size = u32::from_le_bytes([wav[4], wav[5], wav[6], wav[7]]);
         wav[4..8].copy_from_slice(&(size + 8 + second_data.len() as u32).to_le_bytes());
-        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        let err = decode_audio(Cursor::new(&wav)).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
@@ -1025,7 +1155,7 @@ mod tests {
     fn reject_data_size_not_multiple_of_block_align() {
         let mut wav = build_wav_raw(1, 1, 16_000, 2, 16, None, &[0u8; 5]);
         wav[40..44].copy_from_slice(&5u32.to_le_bytes());
-        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        let err = decode_audio(Cursor::new(&wav)).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
@@ -1035,7 +1165,7 @@ mod tests {
         // RIFF size is kept consistent with the actual bytes.
         let mut wav = build_wav_raw(1, 1, 16_000, 2, 16, None, &[0u8; 4]);
         wav[40..44].copy_from_slice(&6u32.to_le_bytes());
-        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        let err = decode_audio(Cursor::new(&wav)).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
@@ -1043,7 +1173,7 @@ mod tests {
     fn reject_pcm_24bit_block_align_4() {
         // Classic malformed 24-bit PCM with block_align=4 instead of 3.
         let wav = build_wav_raw(1, 1, 16_000, 4, 24, None, &[0u8; 12]);
-        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        let err = decode_audio(Cursor::new(&wav)).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
@@ -1055,7 +1185,7 @@ mod tests {
             data.extend_from_slice(&(s << 8).to_le_bytes());
         }
         let wav = build_extensible_wav(1, 0, 32, 24, false, &data);
-        let decoded = decode_wav(Cursor::new(&wav)).unwrap();
+        let decoded = decode_audio(Cursor::new(&wav)).unwrap();
         assert_eq!(decoded.samples.len(), 3);
         assert!((decoded.samples[0] - 8_388_607.0 / 8_388_608.0).abs() < 1e-6);
         assert!((decoded.samples[1] - (-1.0)).abs() < 1e-6);
@@ -1106,7 +1236,7 @@ mod tests {
         wav.extend_from_slice(&(real_audio.len() as u32).to_le_bytes());
         wav.extend_from_slice(&real_audio);
 
-        let err = decode_wav(Cursor::new(&wav)).unwrap_err();
+        let err = decode_audio(Cursor::new(&wav)).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
@@ -1150,7 +1280,7 @@ mod tests {
             }
 
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = decode_wav(Cursor::new(&wav));
+                let _ = decode_audio(Cursor::new(&wav));
             }));
             assert!(
                 result.is_ok(),
@@ -1159,6 +1289,164 @@ mod tests {
                 wav
             );
         }
+    }
+
+    fn fixture_path(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures")).join(name)
+    }
+
+    fn read_fixture(name: &str) -> Vec<u8> {
+        std::fs::read(fixture_path(name)).unwrap()
+    }
+
+    #[test]
+    fn detect_wav_by_content() {
+        assert_eq!(AudioFormat::detect(b"RIFF\0\0\0\0WAVE"), AudioFormat::Wav);
+    }
+
+    #[test]
+    fn detect_mp3_by_content() {
+        assert_eq!(AudioFormat::detect(b"ID3"), AudioFormat::Mp3);
+        assert_eq!(AudioFormat::detect(&[0xFF, 0xFB]), AudioFormat::Mp3);
+    }
+
+    #[test]
+    fn detect_flac_by_content() {
+        assert_eq!(AudioFormat::detect(b"fLaC"), AudioFormat::Flac);
+    }
+
+    #[test]
+    fn detect_ogg_by_content() {
+        assert_eq!(AudioFormat::detect(b"OggS"), AudioFormat::Ogg);
+    }
+
+    #[test]
+    fn detect_unknown_content() {
+        assert_eq!(AudioFormat::detect(b"not audio"), AudioFormat::Unknown);
+        assert_eq!(AudioFormat::detect(b""), AudioFormat::Unknown);
+    }
+
+    #[test]
+    fn decode_fixture_mp3() {
+        let decoded = decode_audio(std::io::Cursor::new(read_fixture("sample-pt.mp3"))).unwrap();
+        assert_eq!(decoded.sample_rate, 16_000);
+        assert_eq!(decoded.channels, 1);
+        // Duration is ~14.2 s; allow a wide tolerance for encoder delay/padding.
+        assert!((decoded.samples.len() as f64 / 16_000.0 - 14.19).abs() < 1.0);
+    }
+
+    #[test]
+    fn decode_fixture_flac() {
+        let decoded = decode_audio(std::io::Cursor::new(read_fixture("sample-pt.flac"))).unwrap();
+        assert_eq!(decoded.sample_rate, 16_000);
+        assert_eq!(decoded.channels, 1);
+        assert!((decoded.samples.len() as f64 / 16_000.0 - 14.19).abs() < 0.5);
+    }
+
+    #[test]
+    fn decode_fixture_ogg_vorbis() {
+        let decoded = decode_audio(std::io::Cursor::new(read_fixture("sample-pt.ogg"))).unwrap();
+        assert_eq!(decoded.sample_rate, 16_000);
+        assert_eq!(decoded.channels, 1);
+        assert!((decoded.samples.len() as f64 / 16_000.0 - 14.19).abs() < 1.0);
+    }
+
+    #[test]
+    fn decode_fixture_wav_ignores_extension() {
+        // Decoding is by content; the file extension is irrelevant.
+        let bytes = read_fixture("sample-pt.wav");
+        let decoded = decode_audio(std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(decoded.sample_rate, 16_000);
+        assert_eq!(decoded.channels, 1);
+        assert!((decoded.samples.len() as f64 / 16_000.0 - 14.19).abs() < 0.5);
+    }
+
+    #[test]
+    fn ogg_opus_rejected_as_unsupported() {
+        let err = decode_audio(std::io::Cursor::new(read_fixture("sample-pt.opus"))).unwrap_err();
+        assert_eq!(err.code, ErrorCode::UnsupportedFormat);
+    }
+
+    #[test]
+    fn chained_ogg_streams_rejected_as_unsupported() {
+        let mut bytes = read_fixture("sample-pt.ogg");
+        bytes.extend(read_fixture("sample-pt.ogg"));
+        let err = decode_audio(std::io::Cursor::new(bytes)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::UnsupportedFormat);
+    }
+
+    #[test]
+    fn multichannel_flac_rejected() {
+        let err =
+            decode_audio(std::io::Cursor::new(read_fixture("three-channel.flac"))).unwrap_err();
+        assert_eq!(err.code, ErrorCode::UnsupportedFormat);
+        assert!(err.message.contains("3 channels"));
+    }
+
+    #[test]
+    fn mp3_magic_without_valid_frames_returns_typed_error() {
+        for bytes in [b"ID3garbage".as_slice(), &[0xff, 0xfb, 0, 0][..]] {
+            let err = decode_audio(std::io::Cursor::new(bytes)).unwrap_err();
+            assert!(matches!(
+                err.code,
+                ErrorCode::InvalidInput | ErrorCode::UnsupportedFormat
+            ));
+        }
+    }
+
+    #[test]
+    fn mp3_with_declared_frame_count_rejects_truncation() {
+        let bytes = read_fixture("sample-pt.mp3");
+        let err = decode_audio(std::io::Cursor::new(&bytes[..bytes.len() / 2])).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn empty_file_rejected_as_unsupported() {
+        let err = decode_audio(std::io::Cursor::new(&[])).unwrap_err();
+        assert_eq!(err.code, ErrorCode::UnsupportedFormat);
+    }
+
+    #[test]
+    fn random_bytes_rejected_as_unsupported() {
+        let mut rng = DeterministicRng::new(7723);
+        let mut bytes = vec![0u8; 2048];
+        for b in &mut bytes {
+            *b = rng.next() as u8;
+        }
+        let err = decode_audio(std::io::Cursor::new(bytes)).unwrap_err();
+        assert!(matches!(
+            err.code,
+            ErrorCode::UnsupportedFormat | ErrorCode::InvalidInput
+        ));
+    }
+
+    #[test]
+    fn truncated_files_rejected_cleanly() {
+        for name in [
+            "sample-pt.wav",
+            "sample-pt.mp3",
+            "sample-pt.flac",
+            "sample-pt.ogg",
+        ] {
+            let bytes = read_fixture(name);
+            let truncated = &bytes[..64.min(bytes.len())];
+            let err = decode_audio(std::io::Cursor::new(truncated)).unwrap_err();
+            assert!(
+                matches!(
+                    err.code,
+                    ErrorCode::InvalidInput | ErrorCode::UnsupportedFormat
+                ),
+                "{name} truncated file should error, got {:?}",
+                err.code
+            );
+        }
+    }
+
+    #[test]
+    fn long_compressed_audio_rejected_as_too_long() {
+        let err = decode_audio(std::io::Cursor::new(read_fixture("long-silence.ogg"))).unwrap_err();
+        assert_eq!(err.code, ErrorCode::AudioTooLong);
     }
 
     struct DeterministicRng {
