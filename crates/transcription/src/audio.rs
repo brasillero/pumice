@@ -80,7 +80,7 @@ pub fn decode_audio<R: Read + Send + Sync>(mut reader: R) -> Result<DecodedAudio
         .map_err(|e| Error::invalid_input(format!("failed to read audio data: {e}")))?;
 
     match AudioFormat::detect(&bytes) {
-        AudioFormat::Wav => decode_audio_bytes(bytes),
+        AudioFormat::Wav => decode_wav_bytes(bytes),
         AudioFormat::Mp3 => {
             let mss = make_media_source(bytes);
             let mut format =
@@ -109,7 +109,7 @@ pub fn decode_audio<R: Read + Send + Sync>(mut reader: R) -> Result<DecodedAudio
 }
 
 /// Decode a RIFF/WAVE file that has already passed strict pre-validation.
-fn decode_audio_bytes(bytes: Vec<u8>) -> Result<DecodedAudio, Error> {
+fn decode_wav_bytes(bytes: Vec<u8>) -> Result<DecodedAudio, Error> {
     // Strict pre-validation: catch malformed RIFF/WAVE headers before Symphonia
     // sees them, so invalid input always maps to a safe typed error instead of a
     // decoder panic. Use only the canonical WAV built from validated chunks so
