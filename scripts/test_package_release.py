@@ -106,6 +106,13 @@ class PackageReleaseTests(unittest.TestCase):
             package_release.crate_version(), manifest["package"]["version"]
         )
 
+    def test_root_package_version_matches_workspace_version(self):
+        manifest = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text())
+        self.assertEqual(
+            manifest["package"]["version"],
+            manifest["workspace"]["package"]["version"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

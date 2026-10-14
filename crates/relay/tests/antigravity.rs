@@ -15,12 +15,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pumice::config;
-use pumice::pipeline::Pipeline;
-use pumice::process::{Argument, ProcessRunner};
-use pumice::providers::antigravity::{self, AntigravityAdapter};
-use pumice::providers::cli::{CliAdapter, CliProvider};
-use pumice::providers::{
+use pumice_relay::config;
+use pumice_relay::pipeline::Pipeline;
+use pumice_relay::process::{Argument, ProcessRunner};
+use pumice_relay::providers::antigravity::{self, AntigravityAdapter};
+use pumice_relay::providers::cli::{CliAdapter, CliProvider};
+use pumice_relay::providers::{
     FormatInput, Provider, ProviderError, ProviderErrorCode, ProviderSettings, UserPrompt,
     build_from_config,
 };
@@ -50,7 +50,7 @@ fn fake_provider(fake: &FakeCli, timeout: Duration) -> Arc<dyn Provider> {
     ))
 }
 
-fn argv_of(invocation: &pumice::process::CliInvocation) -> Vec<String> {
+fn argv_of(invocation: &pumice_relay::process::CliInvocation) -> Vec<String> {
     invocation
         .args
         .iter()
@@ -284,7 +284,7 @@ fn a_config_entry_is_refused_as_archived() {
 
 #[test]
 fn build_fails_even_when_called_directly() {
-    let descriptor = &pumice::providers::antigravity::DESCRIPTOR;
+    let descriptor = &pumice_relay::providers::antigravity::DESCRIPTOR;
     let settings = ProviderSettings {
         enabled: false,
         ..(descriptor.defaults)()
@@ -352,7 +352,7 @@ fn enabled_true_is_refused_at_the_enabled_line() {
     let error = config::validate_text_with_descriptors(
         "providers:\n  - id: antigravity\n    enabled: true\n",
         std::path::Path::new("pumice.yaml"),
-        &[pumice::providers::antigravity::DESCRIPTOR],
+        &[pumice_relay::providers::antigravity::DESCRIPTOR],
     )
     .expect_err("enablement is refused")
     .to_string();

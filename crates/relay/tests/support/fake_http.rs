@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use pumice::providers::generic::{LoopbackEndpoint, parse_endpoint};
+use pumice_relay::providers::generic::{LoopbackEndpoint, parse_endpoint};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;

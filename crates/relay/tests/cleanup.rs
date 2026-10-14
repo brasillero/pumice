@@ -5,7 +5,7 @@
 //! and empty replies are handled, looking at the reply alone. Everything
 //! else the model returns is kept as is.
 
-use pumice::cleanup::{CleanupError, cleanup};
+use pumice_relay::cleanup::{CleanupError, cleanup};
 
 /// Runs cleanup and panics with context when it fails.
 fn ok(output: &str) -> String {

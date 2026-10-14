@@ -6,17 +6,19 @@
 
 mod support;
 
-use pumice::cleanup::CleanupError;
+use pumice_relay::cleanup::CleanupError;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pumice::config::{self, Config, DebugLogSettings, ProviderConfig};
-use pumice::pipeline::{FormatOutcome, OutcomeKind, Pipeline, ProviderErrorKind, RawReason};
-use pumice::process::ProcessRunner;
-use pumice::providers::{self, Provider, ProviderError, ProviderErrorCode, ProviderSettings};
-use pumice::request::{ChatCompletionRequest, Content, ExtractedRequest, Message, extract_request};
+use pumice_relay::config::{self, Config, DebugLogSettings, ProviderConfig};
+use pumice_relay::pipeline::{FormatOutcome, OutcomeKind, Pipeline, ProviderErrorKind, RawReason};
+use pumice_relay::process::ProcessRunner;
+use pumice_relay::providers::{self, Provider, ProviderError, ProviderErrorCode, ProviderSettings};
+use pumice_relay::request::{
+    ChatCompletionRequest, Content, ExtractedRequest, Message, extract_request,
+};
 use serde_json::{Value, json};
 use support::FakeCli;
 use support::test_provider::{Step, TestProvider};
@@ -942,7 +944,7 @@ impl RecordingProgress {
     }
 }
 
-impl pumice::pipeline::Progress for RecordingProgress {
+impl pumice_relay::pipeline::Progress for RecordingProgress {
     fn queued(&self) {
         self.steps.lock().unwrap().push("queued".to_owned());
     }
@@ -954,11 +956,11 @@ impl pumice::pipeline::Progress for RecordingProgress {
             .push(format!("started:{provider}"));
     }
 
-    fn attempt_ended(&self, attempt: &pumice::pipeline::Attempt) {
+    fn attempt_ended(&self, attempt: &pumice_relay::pipeline::Attempt) {
         let label = match attempt.result {
-            pumice::pipeline::AttemptResult::Formatted => "formatted",
-            pumice::pipeline::AttemptResult::Failed(_) => "failed",
-            pumice::pipeline::AttemptResult::CleanupRejected(_) => "cleanup_rejected",
+            pumice_relay::pipeline::AttemptResult::Formatted => "formatted",
+            pumice_relay::pipeline::AttemptResult::Failed(_) => "failed",
+            pumice_relay::pipeline::AttemptResult::CleanupRejected(_) => "cleanup_rejected",
         };
         self.steps
             .lock()

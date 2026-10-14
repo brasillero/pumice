@@ -10,14 +10,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use pumice::process::ProcessRunner;
-use pumice::providers::Provider;
-use pumice::providers::antigravity::AntigravityAdapter;
-use pumice::providers::claude::ClaudeAdapter;
-use pumice::providers::cli::CliProvider;
-use pumice::providers::codex::CodexAdapter;
-use pumice::providers::kimi::KimiAdapter;
-use pumice::providers::kiro::KiroAdapter;
+use pumice_relay::process::ProcessRunner;
+use pumice_relay::providers::Provider;
+use pumice_relay::providers::antigravity::AntigravityAdapter;
+use pumice_relay::providers::claude::ClaudeAdapter;
+use pumice_relay::providers::cli::CliProvider;
+use pumice_relay::providers::codex::CodexAdapter;
+use pumice_relay::providers::kimi::KimiAdapter;
+use pumice_relay::providers::kiro::KiroAdapter;
 use serde_json::{Value, json};
 use support::adapter_contract::{
     AFTER, BEFORE, ContractAdapter, HOSTILE_TEXT, SYSTEM_PROMPT, has_pair, report_argv,
@@ -36,8 +36,8 @@ adapter_contract!(antigravity, AntigravityContract);
 mod kimi {
     use std::time::Duration;
 
-    use pumice::providers::kimi::MAX_USER_MESSAGE_BYTES;
-    use pumice::providers::{ProviderError, ProviderErrorCode};
+    use pumice_relay::providers::kimi::MAX_USER_MESSAGE_BYTES;
+    use pumice_relay::providers::{ProviderError, ProviderErrorCode};
     use support::adapter_contract::{UNICODE_TEXT, format_with};
 
     use super::*;

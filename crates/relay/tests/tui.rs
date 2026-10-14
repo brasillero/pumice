@@ -6,14 +6,14 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use pumice::monitor::{EventKind, ParsedText};
-use pumice::pipeline::{AttemptResult, OutcomeKind, RawReason};
-use pumice::providers::ProviderError;
-use pumice::tui::app::{Action, App, State, Tab};
-use pumice::tui::view;
+use pumice_relay::monitor::{EventKind, ParsedText};
+use pumice_relay::pipeline::{AttemptResult, OutcomeKind, RawReason};
+use pumice_relay::providers::ProviderError;
+use pumice_relay::tui::app::{Action, App, State, Tab};
+use pumice_relay::tui::view;
 
-fn info(text_allowed: bool) -> pumice::tui::Info {
-    pumice::tui::Info {
+fn info(text_allowed: bool) -> pumice_relay::tui::Info {
+    pumice_relay::tui::Info {
         version: "0.1.1",
         url: "http://127.0.0.1:7567/v1".to_owned(),
         max_parallel: 4,
@@ -38,8 +38,8 @@ fn arrived(
     base: Instant,
     offset_ms: u64,
     client: Option<&str>,
-) -> pumice::monitor::Event {
-    pumice::monitor::Event {
+) -> pumice_relay::monitor::Event {
+    pumice_relay::monitor::Event {
         number,
         at: base + Duration::from_millis(offset_ms),
         kind: EventKind::Arrived {
@@ -54,7 +54,7 @@ fn parsed(
     offset_ms: u64,
     model: &str,
     input: &str,
-) -> pumice::monitor::Event {
+) -> pumice_relay::monitor::Event {
     parsed_full(
         number,
         base,
@@ -75,8 +75,8 @@ fn parsed_full(
     offset_ms: u64,
     model: &str,
     text: ParsedText,
-) -> pumice::monitor::Event {
-    pumice::monitor::Event {
+) -> pumice_relay::monitor::Event {
+    pumice_relay::monitor::Event {
         number,
         at: base + Duration::from_millis(offset_ms),
         kind: EventKind::Parsed {
@@ -92,8 +92,8 @@ fn received(
     offset_ms: u64,
     headers: Vec<(&str, &str)>,
     body: &str,
-) -> pumice::monitor::Event {
-    pumice::monitor::Event {
+) -> pumice_relay::monitor::Event {
+    pumice_relay::monitor::Event {
         number,
         at: base + Duration::from_millis(offset_ms),
         kind: EventKind::Received {
@@ -113,8 +113,8 @@ fn sent(
     status: u16,
     headers: Vec<(&str, &str)>,
     body: &str,
-) -> pumice::monitor::Event {
-    pumice::monitor::Event {
+) -> pumice_relay::monitor::Event {
+    pumice_relay::monitor::Event {
         number,
         at: base + Duration::from_millis(offset_ms),
         kind: EventKind::Sent {
@@ -128,8 +128,8 @@ fn sent(
     }
 }
 
-fn started(number: u64, base: Instant, offset_ms: u64) -> pumice::monitor::Event {
-    pumice::monitor::Event {
+fn started(number: u64, base: Instant, offset_ms: u64) -> pumice_relay::monitor::Event {
+    pumice_relay::monitor::Event {
         number,
         at: base + Duration::from_millis(offset_ms),
         kind: EventKind::Started {
@@ -144,8 +144,8 @@ fn attempt_ended(
     base: Instant,
     offset_ms: u64,
     result: AttemptResult,
-) -> pumice::monitor::Event {
-    pumice::monitor::Event {
+) -> pumice_relay::monitor::Event {
+    pumice_relay::monitor::Event {
         number,
         at: base + Duration::from_millis(offset_ms),
         kind: EventKind::AttemptEnded {
@@ -162,8 +162,8 @@ fn responded(
     status: u16,
     detail: &str,
     reply: Option<&str>,
-) -> pumice::monitor::Event {
-    pumice::monitor::Event {
+) -> pumice_relay::monitor::Event {
+    pumice_relay::monitor::Event {
         number,
         at: base + Duration::from_millis(offset_ms),
         kind: EventKind::Responded {
@@ -179,16 +179,16 @@ fn responded(
     }
 }
 
-fn dropped(number: u64, base: Instant, offset_ms: u64) -> pumice::monitor::Event {
-    pumice::monitor::Event {
+fn dropped(number: u64, base: Instant, offset_ms: u64) -> pumice_relay::monitor::Event {
+    pumice_relay::monitor::Event {
         number,
         at: base + Duration::from_millis(offset_ms),
         kind: EventKind::Dropped,
     }
 }
 
-fn queued(number: u64, base: Instant, offset_ms: u64) -> pumice::monitor::Event {
-    pumice::monitor::Event {
+fn queued(number: u64, base: Instant, offset_ms: u64) -> pumice_relay::monitor::Event {
+    pumice_relay::monitor::Event {
         number,
         at: base + Duration::from_millis(offset_ms),
         kind: EventKind::Queued,
@@ -632,7 +632,7 @@ fn details_scroll_clamps_at_bottom() {
     app.key(key(KeyCode::Enter));
 
     // Simulate a details area of 10 lines with content of 100 rendered lines.
-    app.set_details_bounds(Some(pumice::tui::app::ScrollBounds {
+    app.set_details_bounds(Some(pumice_relay::tui::app::ScrollBounds {
         max_scroll: 90,
         page: 9,
     }));

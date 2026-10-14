@@ -22,6 +22,7 @@ on:
       - scripts/npm/**
       - scripts/INSTALL.md
       - src/**
+      - crates/**
       - .cargo/config.toml
       - LICENSE
       - pumice.example.yaml
@@ -93,6 +94,9 @@ jobs:
       - name: cargo build --release --locked --bin pumice
         run: cargo build --release --locked --bin pumice --target ${{ matrix.target }}
 
+      - name: cargo build --release --locked --bin pumice-relay
+        run: cargo build --release --locked --workspace --bin pumice-relay --target ${{ matrix.target }}
+
       - name: Smoke test binary --version
         shell: bash
         run: |
@@ -101,6 +105,15 @@ jobs:
           out="$("$bin" --version)"
           echo "$out"
           test "$out" = "pumice ${{ steps.meta.outputs.version }}"
+
+      - name: Smoke test pumice-relay --version
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/pumice-relay"
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          out="$("$bin" --version)"
+          echo "$out"
+          test "$out" = "pumice-relay ${{ steps.meta.outputs.version }}"
 
       # Locate dumpbin through vswhere instead of ilammy/msvc-dev-cmd (which
       # still pins an old Node runtime). A static CRT means no vcruntime /

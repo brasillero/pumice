@@ -7,11 +7,11 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use pumice::process::{
+use pumice_relay::process::{
     Argument, CliInvocation, ControlFile, MAX_STDOUT_BYTES, ProcessOutput, ProcessRunner,
     ProgramSpec,
 };
-use pumice::providers::{ProviderError, ProviderErrorCode};
+use pumice_relay::providers::{ProviderError, ProviderErrorCode};
 use serde_json::{Value, json};
 use support::FakeCli;
 use tokio::time::Instant;

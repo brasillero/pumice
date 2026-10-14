@@ -30,7 +30,7 @@ fn write_config(yaml: &str) -> (TempDir, PathBuf) {
 
 /// Runs `pumice doctor --config <path> <extra...>` and captures the output.
 fn run_doctor(config_path: &Path, extra: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_pumice"))
+    Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
         .arg("doctor")
         .arg("--config")
         .arg(config_path)

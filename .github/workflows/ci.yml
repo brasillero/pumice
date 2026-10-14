@@ -31,16 +31,19 @@ jobs:
         run: cargo fmt --check
 
       - name: cargo clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --workspace --locked --all-targets -- -D warnings
 
       # Tests only ever run the fake CLI (`pumice-test-cli`); no real AI CLI
       # is installed on the runners, so a test that reached one would fail.
       - name: cargo test
-        run: cargo test --locked
+        run: cargo test --workspace --locked
 
       # Only the product executable; the fake CLI is a test-only binary.
       - name: cargo build --release --bin pumice
         run: cargo build --release --locked --bin pumice
+
+      - name: cargo build --release --bin pumice-relay
+        run: cargo build --release --locked --workspace --bin pumice-relay
 
       - name: Report release binary size
         shell: bash
