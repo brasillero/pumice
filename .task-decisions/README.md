@@ -3,7 +3,7 @@ name: Pumice
 language: en-US
 tracker: —
 prefix: —
-areas: api, pipeline, providers, config, cli, distribution, process, docs
+areas: architecture, api, pipeline, providers, transcription, config, cli, distribution, process, docs
 ---
 
 Pumice lets dictation apps (Handy, OpenWhispr) use the AI subscriptions the user already pays for. It is a small local tool on `127.0.0.1` with an OpenAI-compatible interface: it passes the app's request, unchanged, to the official CLI of a subscription the user is logged into (Claude Code, Codex, Kimi, Kiro) and returns the answer in the OpenAI format the app expects.
