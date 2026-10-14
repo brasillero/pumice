@@ -65,6 +65,22 @@ pumice-transcribe file audio.wav --model model.gguf [--language pt] [--json]
 `--language` is an optional hint. When given, the JSON result reports that
 language; otherwise it reports the language detected by the engine.
 
+## Supported formats
+
+Formats are detected by content (magic bytes), not by file extension.
+
+| Format | Container/codec | Limits |
+| --- | --- | --- |
+| WAV | RIFF/WAVE PCM / IEEE float / extensible | Max file 25 MB, max audio 120 s, sample rate 8–192 kHz, mono or stereo |
+| MP3 | MPEG-1/2 Audio Layer III | Same limits |
+| FLAC | Free Lossless Audio Codec | Same limits |
+| Ogg Vorbis | Ogg + Vorbis | Same limits |
+| Ogg Opus | Ogg + Opus | Rejected (`unsupported_format`) — no Opus decoder yet |
+
 ## Third-party licenses
 
-This crate uses [Symphonia](https://github.com/pdelbarrio/symphonia) to decode RIFF/WAVE files. Symphonia is licensed under the MPL-2.0. Distributing binaries that include Symphonia requires shipping its notice and pointing to its exact source; this is enforced in the release-packaging phase.
+This crate uses [Symphonia](https://github.com/pdelbarrio/symphonia) to decode
+RIFF/WAVE, MP3, FLAC and Ogg Vorbis files. Symphonia is licensed under the
+MPL-2.0. Distributing binaries that include Symphonia requires shipping its
+notice and pointing to its exact source; this is enforced in the
+release-packaging phase.

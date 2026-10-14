@@ -1,4 +1,4 @@
-use crate::audio::{MAX_FILE_BYTES, decode_wav, normalize_and_validate, resample_to_target};
+use crate::audio::{MAX_FILE_BYTES, decode_audio, normalize_and_validate, resample_to_target};
 use crate::engine::Engine;
 use crate::{Error, ErrorCode, JsonError, TranscriptionOptions};
 use clap::error::ErrorKind;
@@ -25,7 +25,7 @@ pub struct Args {
 pub enum Command {
     /// Transcribe an audio file.
     File {
-        /// Path to the audio file (WAV).
+        /// Path to the audio file (WAV, MP3, FLAC, Ogg Vorbis).
         audio: PathBuf,
 
         /// Path to the GGUF model file.
@@ -220,7 +220,7 @@ where
 
             let budgeted = BudgetReader::new(file, MAX_FILE_BYTES);
             let decoded =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decode_wav(budgeted)))
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decode_audio(budgeted)))
                     .map_err(|_| Error::invalid_input("audio decoding panicked"))?
                     .map_err(map_budget_error)?;
             let resampled = resample_to_target(&decoded.samples, decoded.sample_rate)?;
