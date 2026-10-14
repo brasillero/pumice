@@ -222,7 +222,9 @@ fn decode_track(
         samples.extend(packet_samples);
     }
 
-    if let Some(expected) = expected_frames && decoded_frames != expected {
+    if let Some(expected) = expected_frames
+        && decoded_frames != expected
+    {
         return Err(Error::invalid_input(format!(
             "decoded {} frames, expected {} (truncated or partial audio data)",
             decoded_frames, expected
