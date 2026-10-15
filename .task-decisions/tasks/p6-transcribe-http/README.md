@@ -8,4 +8,4 @@ start: 2026-10-15
 end: —
 ---
 
-`pumice-transcribe serve`: an OpenAI-compatible `POST /v1/audio/transcriptions` (plus `/v1/models` and `/health`) on `127.0.0.1`, with one model loaded at startup and one transcription at a time. The order of the remaining work and the first PR's scope are in `reports/2026-10-15-implementation-order.md`. Implementation by Kimi has not started yet.
+`pumice-transcribe serve`: an OpenAI-compatible `POST /v1/audio/transcriptions` (plus `GET /v1/models`, `GET /v1/models/{model}` and `/health`) on `127.0.0.1`, with one model loaded at startup and one transcription at a time. First version by Kimi; three Codex review rounds, with the supervisor fixing rounds 1 and 2 directly at the owner's request; round 3 approved with nits. Checked with the official OpenAI Python SDK against the real Turbo model. Waiting for the owner's review of the PR; the browser test page (#1) comes next.

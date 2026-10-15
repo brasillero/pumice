@@ -17,4 +17,43 @@
 
 ## Deferred
 
+### #2 · Deferred · Test that serve() drains an active worker on shutdown
+- type: Tech debt
+- area: transcription
+- origin: reports/2026-10-15-implementation-order.md
+- ticket: —
+- created: 2026-10-15
+- reason: review round 3 follow-up; the drain was verified externally, the committed test covers only an idle shutdown
+
+**Context.** `serve()` waits for the admission permit after axum stops, so a worker still running after a disconnect or deadline finishes before the process exits. Codex confirmed this with an external harness, but `serve()` does not expose its bound port or admission, so the in-repo test only shuts down an idle server.
+
+**To do.**
+- [ ] Let tests bind a given listener (or read the bound address) and hold a gated worker through shutdown.
+
+### #3 · Deferred · Fewer copies of the uploaded audio
+- type: Improvement
+- area: transcription
+- origin: reports/2026-10-15-implementation-order.md
+- ticket: —
+- created: 2026-10-15
+- reason: review round 3 follow-up; 131 MiB peak for a 25 MB WAV is acceptable next to the ~1 GB model
+
+**Context.** The body is buffered, then decoded into samples, resampled and normalized; each stage keeps its own buffer. With Turbo loaded the process peaked at about 1,034 MiB.
+
+**To do.**
+- [ ] Measure where the peak comes from and drop buffers as soon as the next stage has its data.
+
+### #4 · Deferred · Accept WebM/Opus uploads
+- type: Improvement
+- area: transcription
+- origin: conversation
+- ticket: —
+- created: 2026-10-15
+- reason: waits for the owner's decision on audio formats and on replacing Symphonia
+
+**Context.** Browsers' `MediaRecorder` produces WebM/Opus (or MP4/AAC), which the server rejects, so an app like T3 recording in the browser could not send its audio as is. The test page works around it by building a WAV itself. Symphonia 0.6.1 has no Opus decoder.
+
+**To do.**
+- [ ] Owner decides whether Opus is needed and how (a pure-Rust decoder, or with the Symphonia replacement).
+
 ## Closed
