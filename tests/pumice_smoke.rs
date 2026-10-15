@@ -184,6 +184,36 @@ fn format_show_builtin_prints_an_editable_definition() {
 }
 
 #[test]
+fn format_show_output_reloads_to_the_exact_same_definition() {
+    // The in-process entry point, like the standalone binary: `show` stdout
+    // must be a definition file that reloads to the exact same text, with no
+    // added or dropped trailing newline.
+    let home = HermeticHome::new();
+    let dir = home.pumice_dir();
+    fs::create_dir_all(&dir).expect("create per-user config dir");
+    fs::write(
+        dir.join("notes.yml"),
+        "schema_version: 1\nid: notes\ndescription: Test\nsystem: \"Rule\\n\\n\"\n",
+    )
+    .expect("write definition");
+    fs::write(
+        dir.join("formatter.yml"),
+        "schema_version: 1\nformatters:\n  - path: notes.yml\n",
+    )
+    .expect("write formatter.yml");
+
+    let output = run(&mut home.command(&["format", "show", "notes"]));
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let tmp = TempDir::new().expect("temp dir");
+    let path = tmp.path().join("show.yml");
+    fs::write(&path, &output.stdout).expect("write show output");
+    let loaded =
+        pumice_formatter::load_definition_file(&path).expect("show output is a definition");
+    assert_eq!(loaded.id, "notes");
+    assert_eq!(loaded.system, "Rule\n\n");
+}
+
+#[test]
 fn format_apply_transforms_a_request_and_names_the_program_in_errors() {
     let home = HermeticHome::new();
     let request =

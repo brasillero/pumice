@@ -169,6 +169,66 @@ fn show_builtin_prints_an_editable_definition_with_a_new_id() {
 }
 
 #[test]
+fn show_output_reloads_to_the_exact_same_system_text() {
+    // The CLI path, not just the renderer: `show` stdout must be a
+    // definition file that reloads to the exact same text — no added or
+    // dropped trailing newlines, whatever the block style.
+    for (id, system) in [
+        ("trail-blank", "Rule\n\n"),
+        ("trail-one", "Rule\n"),
+        ("no-trailing", "Rule"),
+        ("indented", "  first\nsecond"),
+        ("crlf", "Rule\r\nSecond\rline"),
+    ] {
+        let home = HermeticHome::new();
+        let dir = home.pumice_dir();
+        fs::create_dir_all(&dir).expect("create per-user config dir");
+        fs::write(
+            dir.join(format!("{id}.yml")),
+            format!(
+                "schema_version: 1\nid: {id}\ndescription: Test\nsystem: {}\n",
+                yaml_double_quoted(system)
+            ),
+        )
+        .expect("write definition");
+        fs::write(
+            dir.join("formatter.yml"),
+            format!("schema_version: 1\nformatters:\n  - path: {id}.yml\n"),
+        )
+        .expect("write formatter.yml");
+
+        let output = run(&mut home.command(&["show", id]));
+        assert_eq!(output.status.code(), Some(0), "{id}: {}", stderr(&output));
+        let tmp = TempDir::new().expect("temp dir");
+        let path = tmp.path().join("show.yml");
+        fs::write(&path, &output.stdout).expect("write show output");
+        let loaded =
+            pumice_formatter::load_definition_file(&path).expect("show output is a definition");
+        assert_eq!(loaded.id, id, "{id}");
+        assert_eq!(loaded.system, system, "{id}: stdout must reload exactly");
+    }
+}
+
+/// Renders text as a YAML double-quoted scalar, so a definition file can
+/// carry any exact `system` string (newlines, CR, leading whitespace).
+fn yaml_double_quoted(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[test]
 fn show_json_describes_the_builtin() {
     let home = HermeticHome::new();
     let output = run(&mut home.command(&["show", "builtin:clean", "--json"]));

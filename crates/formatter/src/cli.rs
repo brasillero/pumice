@@ -180,7 +180,10 @@ pub fn run_with(name: &str, args: impl IntoIterator<Item = OsString>) -> ExitCod
                     Err(_) => write_failure(&mut stderr),
                 }
             } else {
-                match writeln!(stdout, "{text}") {
+                // `text` is already the exact definition file: an added
+                // trailing newline would become part of a `|+` block scalar
+                // and corrupt the round-trip.
+                match stdout.write_all(text.as_bytes()) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(_) => write_failure(&mut stderr),
                 }
