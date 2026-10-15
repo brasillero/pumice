@@ -662,6 +662,9 @@ where
     let threads = normalize_threads(config.threads)?;
     let (served_model_id, model_path) =
         resolve_model_id(config, serve_args.model.as_deref(), None)?;
+    if lifecycle.is_some() {
+        managed::validate_model_id(&served_model_id)?;
+    }
 
     if !model_path.is_file() {
         return Err(missing_model_error(

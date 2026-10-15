@@ -195,9 +195,14 @@ fn router(state: ServerState) -> Router {
         .route("/v1/models/{model}", get(retrieve_model))
         .route("/health", get(health));
     if state.managed.is_some() {
+        // Their own method fallback, so an unsupported method also meets the
+        // managed guards and gets a stable code.
         router = router
-            .route("/ready", get(ready))
-            .route("/pumice/v1/transcriptions", post(detailed_transcriptions));
+            .route("/ready", get(ready).fallback(managed_method_not_allowed))
+            .route(
+                "/pumice/v1/transcriptions",
+                post(detailed_transcriptions).fallback(managed_method_not_allowed),
+            );
     }
     router
         .fallback(not_found)
@@ -1029,6 +1034,18 @@ async fn not_found() -> Response {
 
 async fn method_not_allowed() -> Response {
     METHOD_NOT_ALLOWED.into_response()
+}
+
+/// An unsupported method on a managed route: the managed guards first, then a
+/// 405 with its stable code. The router adds the `Allow` header.
+async fn managed_method_not_allowed(
+    State(state): State<ServerState>,
+    request: Request,
+) -> Response {
+    match check_managed_request(&state, &request) {
+        Ok(()) => METHOD_NOT_ALLOWED.managed_response(),
+        Err(error) => error.managed_response(),
+    }
 }
 
 /// Wait for shutdown via Ctrl-C or SIGTERM.

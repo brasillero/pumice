@@ -944,6 +944,12 @@ async fn public_routes_answer_byte_identically_in_managed_mode() {
         || get("/health"),
         || get("/unknown"),
         || Request::delete("/health").body(Body::empty()).unwrap(),
+        || {
+            Request::put("/v1/audio/transcriptions")
+                .header(header::ORIGIN, "http://example.com")
+                .body(Body::empty())
+                .unwrap()
+        },
     ];
     for make in requests {
         let plain = state(TestEngine::returning("same words"));
@@ -1265,6 +1271,67 @@ async fn managed_routes_accept_only_the_literal_loopback_host_and_no_origin() {
             .insert(header::ORIGIN, header::HeaderValue::from_static(origin));
         managed_error(
             send(&state, request).await,
+            StatusCode::FORBIDDEN,
+            "origin_not_allowed",
+        )
+        .await;
+    }
+    assert!(
+        engine.options.lock().unwrap().is_none(),
+        "the engine never ran"
+    );
+    assert_eq!(state.admission.available_permits(), 1);
+}
+
+#[tokio::test]
+async fn unsupported_methods_on_managed_routes_meet_the_guards_first() {
+    let engine = Arc::new(TestEngine {
+        text: "x".to_string(),
+        ..Default::default()
+    });
+    let state = managed(state(Arc::clone(&engine)));
+    let request = |method: &str, path: &str| {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .body(Body::from(basic_body(&wav(1.0))))
+            .unwrap()
+    };
+    for (method, path, allow) in [
+        ("PUT", "/pumice/v1/transcriptions", "POST"),
+        ("GET", "/pumice/v1/transcriptions", "POST"),
+        ("POST", "/ready", "GET,HEAD"),
+        ("DELETE", "/ready", "GET,HEAD"),
+    ] {
+        let response = send(&state, with_host(request(method, path))).await;
+        assert_eq!(response.headers()[header::ALLOW], allow, "{method} {path}");
+        let error = managed_error(
+            response,
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method_not_allowed",
+        )
+        .await;
+        assert_eq!(error["type"], "invalid_request_error");
+
+        let mut hostile = request(method, path);
+        hostile.headers_mut().insert(
+            header::HOST,
+            header::HeaderValue::from_static("attacker.example:40123"),
+        );
+        managed_error(
+            send(&state, hostile).await,
+            StatusCode::FORBIDDEN,
+            "host_not_allowed",
+        )
+        .await;
+
+        let mut cross_origin = with_host(request(method, path));
+        cross_origin.headers_mut().insert(
+            header::ORIGIN,
+            header::HeaderValue::from_static("http://attacker.example"),
+        );
+        managed_error(
+            send(&state, cross_origin).await,
             StatusCode::FORBIDDEN,
             "origin_not_allowed",
         )

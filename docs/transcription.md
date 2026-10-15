@@ -478,7 +478,9 @@ pumice-transcribe --config ./transcribe.yml serve --model turbo --port 0 \
 ```
 
 `--managed` and `--instance-id` go together. The id comes from the owner and
-must be 1 to 64 characters from `A-Z a-z 0-9 . _ -`. Everything else, including
+must be 1 to 64 characters from `A-Z a-z 0-9 . _ -`. The served model id
+must be at most 512 bytes, so `ready` can carry it unchanged; a longer one
+fails before loading with `invalid_config`. Everything else, including
 the OpenAI routes above, behaves exactly as without `--managed`.
 
 **stdout** carries only lifecycle records, one JSON object per line, each
@@ -505,17 +507,21 @@ before the model loads. A shutdown (from stdin or Ctrl-C/SIGTERM) stops new
 work, answers a running request with 503 and cancels its transcription. If
 the server has not drained 2 seconds after the request, for example because
 the engine is between cancellation checks or the model is still loading, the
-process exits at once with status 3. Otherwise it writes `stopped` and exits
-with status 0. Ctrl-C/SIGTERM are handled this way once the model is loaded;
-during loading they end the process at once, as without `--managed`.
+process exits at once with status 3; if the thread that enforces this cannot
+be started, it exits with status 3 right away, without `stopping`. Otherwise
+it writes `stopped` and exits with status 0. Ctrl-C/SIGTERM are handled this
+way once the model is loaded; during loading they end the process at once, as
+without `--managed`.
 
 Two more routes exist only in managed mode (404 otherwise). Both accept only
 the `Host` `127.0.0.1:<port>` (no `localhost` or other names) and refuse any
 request with an `Origin` header, with 403 `host_not_allowed` or
-`origin_not_allowed`. Their errors use the OpenAI error object with `code`
-always set (for example `rate_limit_exceeded`, `missing_model`,
-`unsupported_format`, `audio_too_long`, `body_too_large`, `shutting_down`,
-`deadline_exceeded`, `transcription_failed`).
+`origin_not_allowed`, whatever the method; past those checks, an unsupported
+method gets 405 `method_not_allowed` with an `Allow` header. Their errors use
+the OpenAI error object with `code` always set (for example
+`rate_limit_exceeded`, `missing_model`, `unsupported_format`,
+`audio_too_long`, `body_too_large`, `shutting_down`, `deadline_exceeded`,
+`transcription_failed`).
 
 - `GET /ready` — `200` while the instance accepts work (a running
   transcription does not change that); `503` `shutting_down` once stopping:

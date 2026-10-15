@@ -24,6 +24,10 @@ pub const CAPABILITIES: [&str; 3] = [
 ];
 pub const MAX_RECORD_BYTES: usize = 4096;
 pub const MAX_INSTANCE_ID_BYTES: usize = 64;
+/// Longest model id a managed instance serves. Model ids are plain ASCII (see
+/// the config rules), so with this bound a `ready` record always fits in
+/// [`MAX_RECORD_BYTES`] and carries the id unchanged.
+pub const MAX_MODEL_ID_BYTES: usize = 512;
 /// From a shutdown request to the forced exit.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_millis(2000);
 /// Exit status when the grace ran out before the server drained.
@@ -46,6 +50,22 @@ pub fn validate_instance_id(id: &str) -> Result<&str, &'static str> {
         Ok(id)
     } else {
         Err(INVALID_INSTANCE_ID)
+    }
+}
+
+/// Refuse a model id too long to announce. The owner checks the announced id
+/// against the one it asked for, so it is never cut short instead.
+pub fn validate_model_id(id: &str) -> Result<(), Error> {
+    if id.len() <= MAX_MODEL_ID_BYTES {
+        Ok(())
+    } else {
+        Err(Error::new(
+            ErrorCode::InvalidConfig,
+            format!(
+                "the model id is {} bytes long; managed mode serves ids of at most {MAX_MODEL_ID_BYTES} bytes",
+                id.len()
+            ),
+        ))
     }
 }
 
@@ -132,12 +152,17 @@ impl Lifecycle {
     pub fn request_stop(&self, reason: StopReason) {
         // The watchdog comes first: nothing after it may block the exit.
         self.watchdog.call_once(|| {
-            let _ = std::thread::Builder::new()
+            let spawned = std::thread::Builder::new()
                 .name("managed-watchdog".into())
                 .spawn(|| {
                     std::thread::sleep(SHUTDOWN_GRACE);
                     hard_exit(FORCED_EXIT_CODE);
                 });
+            // Without a watchdog nothing bounds the shutdown, and `Once` would
+            // not try again: exit now rather than risk outliving the grace.
+            if spawned.is_err() {
+                hard_exit(FORCED_EXIT_CODE);
+            }
         });
         self.stop.cancel();
         let mut output = self.lock();
@@ -232,7 +257,7 @@ fn ready_record(instance_id: &str, port: u16, model: &str, model_load_ms: u64) -
         .with("version", env!("CARGO_PKG_VERSION"))
         .with("host", "127.0.0.1")
         .with("port", port)
-        .with("model", truncate(model, MAX_MESSAGE_BYTES))
+        .with("model", model)
         .with("capabilities", CAPABILITIES.to_vec())
         .with("model_load_ms", model_load_ms)
 }
@@ -344,6 +369,24 @@ mod tests {
                 env!("CARGO_PKG_VERSION")
             )
         );
+    }
+
+    #[test]
+    fn the_longest_accepted_model_id_is_announced_unchanged() {
+        let longest = "m".repeat(MAX_MODEL_ID_BYTES);
+        assert!(validate_model_id(&longest).is_ok());
+        let error = validate_model_id(&format!("{longest}m")).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfig);
+        assert!(!error.message.contains(&longest));
+
+        let out = Shared::default();
+        let id = "i".repeat(MAX_INSTANCE_ID_BYTES);
+        let lifecycle = Lifecycle::new(&id, Box::new(out.clone()));
+        assert!(lifecycle.announce_ready(u16::MAX, &longest, u64::MAX));
+        let records = out.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["model"], longest.as_str());
+        assert_eq!(records[0]["instance_id"], id.as_str());
     }
 
     #[test]

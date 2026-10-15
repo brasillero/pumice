@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 
 const CHILD_ENV: &str = "PUMICE_MANAGED_TEST_CHILD";
 /// `ok`, `stall` (ignores cancellation forever) or `cooperative` (runs until
-/// cancelled), or `fail-load`.
+/// cancelled), `fail-load`, or `no-threads` (on Linux, forbids new threads
+/// before loading).
 const ENGINE_ENV: &str = "PUMICE_TEST_ENGINE";
 const LOAD_MS_ENV: &str = "PUMICE_TEST_LOAD_MS";
 /// Created by the fake engine when a transcription starts.
@@ -79,6 +80,15 @@ fn child_main() -> ExitCode {
         .unwrap_or(0);
     let started_file = std::env::var_os(STARTED_FILE_ENV).map(PathBuf::from);
     run_with_engine_factory(std::env::args_os(), move |_path, _threads| {
+        #[cfg(target_os = "linux")]
+        if mode == "no-threads" {
+            let none = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: plain syscall on this process with a valid struct.
+            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &none) }, 0);
+        }
         thread::sleep(Duration::from_millis(load_ms));
         if mode == "fail-load" {
             return Err(Error::model_load_failed());
@@ -106,6 +116,11 @@ fn main() -> ExitCode {
             "eof_during_a_stuck_model_load_hits_the_watchdog",
             eof_during_a_stuck_model_load_hits_the_watchdog,
         ),
+        #[cfg(target_os = "linux")]
+        (
+            "a_watchdog_that_cannot_start_exits_at_once",
+            a_watchdog_that_cannot_start_exits_at_once,
+        ),
         (
             "eof_during_a_stalled_inference_hits_the_watchdog",
             eof_during_a_stalled_inference_hits_the_watchdog,
@@ -121,6 +136,10 @@ fn main() -> ExitCode {
         (
             "startup_failures_are_one_error_record",
             startup_failures_are_one_error_record,
+        ),
+        (
+            "a_model_id_too_long_to_announce_is_refused_before_loading",
+            a_model_id_too_long_to_announce_is_refused_before_loading,
         ),
         (
             "normal_mode_ignores_stdin_and_keeps_stdout_empty",
@@ -167,9 +186,14 @@ struct Setup {
     _dir: tempfile::TempDir,
     config: PathBuf,
     started_file: PathBuf,
+    model: String,
 }
 
 fn setup(model_present: bool) -> Setup {
+    setup_with_model_id(model_present, MODEL)
+}
+
+fn setup_with_model_id(model_present: bool, model: &str) -> Setup {
     let dir = tempfile::tempdir().unwrap();
     if model_present {
         std::fs::write(dir.path().join("model.gguf"), b"not a real model").unwrap();
@@ -177,7 +201,7 @@ fn setup(model_present: bool) -> Setup {
     let config = dir.path().join("transcribe.yml");
     std::fs::write(
         &config,
-        "schema_version: 1\nmodels:\n  - id: turbo\n    path: model.gguf\n",
+        format!("schema_version: 1\nmodels:\n  - id: {model}\n    path: model.gguf\n"),
     )
     .unwrap();
     let started_file = dir.path().join("started");
@@ -185,6 +209,7 @@ fn setup(model_present: bool) -> Setup {
         _dir: dir,
         config,
         started_file,
+        model: model.to_string(),
     }
 }
 
@@ -205,7 +230,7 @@ fn spawn(setup: &Setup, engine: &str, load_ms: u64, extra: &[&str]) -> Spawned {
         .env(STARTED_FILE_ENV, &setup.started_file)
         .arg("--config")
         .arg(&setup.config)
-        .args(["serve", "--model", MODEL, "--port", "0"])
+        .args(["serve", "--model", &setup.model, "--port", "0"])
         .args(extra)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -507,6 +532,27 @@ fn eof_during_a_stuck_model_load_hits_the_watchdog() {
     assert_eq!(events(&child.all_records()), ["stopping"]);
 }
 
+/// The watchdog thread cannot be created (no threads allowed): with nothing
+/// to bound the shutdown, a stop request exits at once instead.
+#[cfg(target_os = "linux")]
+fn a_watchdog_that_cannot_start_exits_at_once() {
+    // SAFETY: plain syscall without arguments.
+    if unsafe { libc::geteuid() } == 0 {
+        // RLIMIT_NPROC does not apply to root.
+        return;
+    }
+    let setup = setup(true);
+    let mut child = spawn(&setup, "no-threads", 60_000, &managed_args());
+    thread::sleep(Duration::from_millis(100));
+    child.close_stdin();
+    let closed = Instant::now();
+
+    let status = child.wait(PROMPT);
+    assert_eq!(status.code(), Some(3), "stderr: {}", child.stderr());
+    assert!(closed.elapsed() < GRACE, "{:?}", closed.elapsed());
+    assert!(child.all_records().is_empty());
+}
+
 fn eof_during_a_stalled_inference_hits_the_watchdog() {
     let setup = setup(true);
     let mut child = spawn(&setup, "stall", 0, &managed_args());
@@ -607,6 +653,19 @@ fn startup_failures_are_one_error_record() {
             "the human message goes to stderr"
         );
     }
+}
+
+fn a_model_id_too_long_to_announce_is_refused_before_loading() {
+    let long_id = "m".repeat(600);
+    let setup = setup_with_model_id(true, &long_id);
+    // A load would fail with `model_load_failed`; it never starts.
+    let mut child = spawn(&setup, "fail-load", 0, &managed_args());
+    let status = child.wait(PROMPT);
+    assert_eq!(status.code(), Some(2), "stderr: {}", child.stderr());
+    let records = child.all_records();
+    assert_eq!(events(&records), ["error"]);
+    assert_eq!(records[0]["code"], "invalid_config");
+    assert_eq!(records[0]["instance_id"], INSTANCE);
 }
 
 fn normal_mode_ignores_stdin_and_keeps_stdout_empty() {
