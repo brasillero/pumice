@@ -513,7 +513,7 @@ fn missing_model_error(path: &Path, catalog: Option<&str>, config_arg: Option<&P
             let command = match config_arg {
                 Some(config) => format!(
                     "pumice-transcribe --config {} models download {id}",
-                    config.display()
+                    shell_quote(&config.to_string_lossy())
                 ),
                 None => format!("pumice-transcribe models download {id}"),
             };
@@ -525,6 +525,22 @@ fn missing_model_error(path: &Path, catalog: Option<&str>, config_arg: Option<&P
         None => format!("model file not found: {}", path.display()),
     };
     Error::new(ErrorCode::ModelNotFound, message)
+}
+
+/// Quotes an argument for POSIX-style shells when it contains characters
+/// outside the always-safe set, so the printed command is executable as
+/// written even when the config path contains spaces or shell specials.
+fn shell_quote(arg: &str) -> String {
+    const SAFE: &[char] = &['_', '-', '.', ',', '/', ':', '@', '%', '+', '=', '~'];
+    if !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || SAFE.contains(&c))
+    {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
 }
 
 /// The catalog id of the configured entry `model_id` names, if any.
@@ -1064,6 +1080,34 @@ mod tests {
             transcription_ms: 0,
             backend: None,
         }
+    }
+
+    #[test]
+    fn shell_quote_leaves_simple_paths_alone() {
+        assert_eq!(
+            shell_quote("/home/user/transcribe.yml"),
+            "/home/user/transcribe.yml"
+        );
+        assert_eq!(shell_quote("rel/dir/config.yml"), "rel/dir/config.yml");
+    }
+
+    #[test]
+    fn shell_quote_quotes_paths_with_spaces_or_specials() {
+        assert_eq!(
+            shell_quote("/tmp/config with spaces.yml"),
+            "'/tmp/config with spaces.yml'"
+        );
+        assert_eq!(shell_quote("/tmp/it's.yml"), "'/tmp/it'\\''s.yml'");
+        let command = missing_model_error(
+            Path::new("/models/model.gguf"),
+            Some("whisper-tiny-q8_0"),
+            Some(Path::new("/tmp/config with spaces.yml")),
+        )
+        .message;
+        assert!(
+            command.contains("--config '/tmp/config with spaces.yml' models download"),
+            "unexpected message: {command}"
+        );
     }
 
     #[test]
