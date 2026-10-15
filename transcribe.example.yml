@@ -27,11 +27,12 @@ server:
   port: 17568
 
 # Optional override for where downloaded catalog models are stored.
-# Relative paths resolve against this file's directory. The default is the
-# per-user data directory ($XDG_DATA_HOME/pumice/models or
-# ~/.local/share/pumice/models on Linux, ~/Library/Application Support on
-# macOS, %LOCALAPPDATA%\pumice\models on Windows).
-# models_dir: ~/pumice-models
+# Relative paths resolve against this file's directory; `~` is NOT expanded
+# — write an absolute path. The default is the per-user data directory
+# ($XDG_DATA_HOME/pumice/models or ~/.local/share/pumice/models on Linux,
+# ~/Library/Application Support on macOS, %LOCALAPPDATA%\pumice\models on
+# Windows).
+# models_dir: /absolute/path/to/models
 
 # Explicit model list. Nothing is enabled implicitly.
 models:

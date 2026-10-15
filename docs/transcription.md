@@ -139,32 +139,66 @@ pumice-transcribe models verify whisper-tiny-q8_0 --json
 ```
 
 Downloads stream into `<file name>.part` next to the final file, hashing
-while writing. The file is renamed into place only when both the exact byte
-size and the catalog SHA-256 match; on any failure (network error, HTTP error
-status, wrong size, wrong hash, interruption) the partial file is deleted and
-nothing is left looking installed. There is no resume: an interrupted
-download restarts from zero. A `Content-Length` that disagrees with the
-catalog size is refused before any byte is stored, and redirects are followed
-manually — at most 5, HTTPS targets only. Two concurrent downloads of the
-same model fail fast (the second reports "already in progress").
+while writing. The staging file and the per-model lock are created private
+to the user (on Unix, mode 0600). The models directory itself is created
+private too (mode 0700, along with any parents the download creates), and a
+download refuses to run into an existing directory that group or others can
+write — installation renames by name and is only safe in a directory other
+users cannot modify (fix permissions with `chmod 700` or choose another
+`models_dir`). The file is renamed into place only when both the exact byte
+size and the catalog SHA-256 match, and the installed file is then checked
+to be the very file that was hashed (same file identity; a swap between
+hashing and rename removes the installed file and fails). On Unix the models
+directory is synced before success is reported, so the rename survives a
+power loss; on Windows there is no directory sync — the rename is the commit
+point.
+
+On any error (network error, HTTP error status, wrong size, wrong hash,
+timeout) the partial file is deleted and nothing is left looking installed.
+If the process is killed or the machine loses power mid-download, the
+`.part` file stays behind; the next `models download` of the same model
+removes it before starting over. There is no resume: an interrupted download
+restarts from zero. A `Content-Length` that disagrees with the catalog size
+is refused before any byte is stored, and redirects are followed manually —
+at most 5, HTTPS targets only. Two concurrent downloads of the same model
+fail fast (the second reports "already in progress").
 
 When the file is already installed and verifies, `models download` reports
-`already installed` (exit 0) without touching the network. When a file exists
-but fails verification (corrupt or modified), the command reports it and
-requires `--force` to replace it.
+`already installed` (exit 0) without touching the network. When a file
+exists but fails verification (corrupt or modified), the command reports it
+and requires `--force` to replace it.
 
-Timeouts: 30 s to connect, 60 s of read stall. The only request header is
-`User-Agent: pumice-transcribe/<version>`; no credentials are sent.
+Timeouts: 30 s to connect, 60 s of read stall, and an overall deadline of
+at least 10 minutes that grows with the model size
+(`max(10 min, size / 256 KiB per s)`); a download exceeding its budget fails
+and cleans up like any other error. The connect and stall bounds only cover
+socket operations — ureq's blocking DNS lookup cannot be interrupted by
+them, so the overall deadline is the only bound that also covers a stalled
+resolver. The only request header is `User-Agent:
+pumice-transcribe/<version>`; no credentials are sent.
 
 Progress (designed for a future UI, `arch-modules/D10`): with `--json`,
-progress events are JSON Lines on stderr, at most about 4 per second:
+progress and state events are JSON Lines on stderr. Byte progress, at most
+about 4 per second:
 
 ```json
 {"schema_version":1,"event":"progress","model":"whisper-tiny-q8_0","bytes":20971520,"total":45981088}
 ```
 
+Phase transitions, each emitted once before the corresponding phase starts:
+
+```json
+{"schema_version":1,"event":"state","model":"whisper-tiny-q8_0","state":"connecting"}
+```
+
+`state` is one of `connecting` (before the HTTP request; the blocking DNS
+lookup above is not covered by the timeouts), `downloading` (streaming
+bytes), `verifying` (comparing the SHA-256) or `installing` (renaming into
+place).
+
 The final result is the usual envelope on stdout. Without `--json`, a simple
-overwriting progress line is shown on stderr.
+overwriting progress line is shown on stderr and no JSONL events are
+emitted.
 
 ### Where downloaded files go
 
@@ -177,7 +211,10 @@ D2 — downloads never edit the config and never enable a model):
 - Windows: `%LOCALAPPDATA%\pumice\models`
 
 Set `models_dir` in `transcribe.yml` to override it (relative values resolve
-against the config file's directory).
+against the config file's directory; `~` is not expanded). On Unix the
+directory is created mode 0700, and a download refuses an existing directory
+that group or others can write — see
+[Downloading models](#downloading-models).
 
 ### Registering a catalog model
 
@@ -218,8 +255,11 @@ schema_version: 1
 default_model: tiny      # optional; must name an entry in models
 language: pt             # optional default language hint
 threads: 8               # optional default thread count (1-32)
-models_dir: ~/pumice-models  # optional; where `catalog:` files live (see
-                             # "Downloading models" for the default)
+models_dir: /absolute/path/to/models  # optional; where `catalog:` files live
+                                      # (see "Downloading models" for the
+                                      # default). `~` is NOT expanded here —
+                                      # use an absolute path, or a relative
+                                      # one (resolved against this file)
 models:                  # explicit list; nothing is enabled implicitly
   - id: turbo
     catalog: whisper-large-v3-turbo-q8_0   # downloaded catalog model
@@ -228,7 +268,9 @@ models:                  # explicit list; nothing is enabled implicitly
 ```
 
 Relative `path` values and a relative `models_dir` resolve against the
-directory that contains the config file. Paths must be nonempty. Model ids
+directory that contains the config file. A leading `~` is not expanded by
+YAML or by this module — write an absolute path or a relative one. Paths
+must be nonempty. Model ids
 must match `[a-z0-9][a-z0-9._-]*`. A model entry has exactly one of `path`
 (a local GGUF file) or `catalog` (a built-in catalog id, see "Downloading
 models"). Duplicate ids, dangling `default_model`, unknown catalog ids,
@@ -289,6 +331,11 @@ pumice-transcribe models verify <catalog-id> [--json]
 These manage the built-in pinned model catalog; see
 [Downloading models](#downloading-models) for the full behavior (where files
 go, verification, progress output, network rules).
+
+In `models catalog`, `installed: yes` means a regular file with the expected
+size is present — presence and size only, not integrity (any right-sized
+file counts, even with different content). Use `models verify` to re-hash
+the installed file against the catalog SHA-256.
 
 ### `serve`
 
@@ -482,7 +529,10 @@ is not in the config `models` list.
 - **"unknown setting `foo`"**: the config contains a key that is not part of
 the schema. Check the file line in the error message.
 - **"model file not found"**: the resolved model path does not point to a
-regular file.
+regular file. For a `catalog:` entry the error names the fixing command,
+e.g. `pumice-transcribe --config FILE models download whisper-tiny-q8_0`
+(`--config` is kept when you passed one, because a `models_dir` override
+only applies through that config file).
 - **"unknown catalog model ..."**: the id passed to `models download`,
   `models verify` or a config `catalog:` entry is not in the built-in
   catalog; run `pumice-transcribe models catalog`.
