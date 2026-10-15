@@ -223,7 +223,8 @@ impl Pipeline {
     /// [`RawReason::CleanupFailed`]. When the budget dies before the attempt
     /// starts, the reason is [`RawReason::BudgetExhausted`] instead.
     pub async fn format(&self, request: &ExtractedRequest, started: Instant) -> FormatOutcome {
-        self.format_until_observed(request, started, None, &()).await
+        self.format_until_observed(request, started, None, &())
+            .await
     }
 
     /// [`format`](Self::format), reporting each step to `progress`.

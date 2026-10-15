@@ -93,13 +93,6 @@ pub struct Flow {
     pub budgets: Budgets,
 }
 
-impl Flow {
-    /// True when the flow names the built-in passthrough route.
-    pub fn is_passthrough(&self) -> bool {
-        self.relay_route.eq_ignore_ascii_case("passthrough")
-    }
-}
-
 /// Per-flow budgets; the stage deadlines can only shorten the overall one
 /// (D2). Defaults per D5.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,18 +203,25 @@ fn config_dir_of(path: &Path) -> PathBuf {
     }
 }
 
-/// Resolves a relative module path against the orchestrator file's directory.
+/// Resolves a relative module path against the orchestrator file's
+/// directory; inner `.` components are normalized away so error locations
+/// and child arguments name real paths.
 fn resolve_against(path: &Path, config_dir: &Path) -> PathBuf {
-    if path.is_relative() {
+    let joined = if path.is_relative() {
         config_dir.join(path)
     } else {
         path.to_path_buf()
-    }
+    };
+    joined.components().collect()
 }
 
 fn validate(raw: RawConfig, config_dir: &Path) -> Result<Config, ConfigError> {
     match &raw.schema_version {
-        None => return Err(ConfigError::general("schema_version is required (must be 1)")),
+        None => {
+            return Err(ConfigError::general(
+                "schema_version is required (must be 1)",
+            ));
+        }
         Some(span) if span.value != 1 => {
             return Err(ConfigError::at(
                 span.referenced,
@@ -237,7 +237,11 @@ fn validate(raw: RawConfig, config_dir: &Path) -> Result<Config, ConfigError> {
     for entry in &raw.flows {
         let flow = validate_flow(entry)?;
         if flows.iter().any(|existing| existing.id == flow.id) {
-            let duplicate = entry.value.id.as_ref().map_or(entry.referenced, |id| id.referenced);
+            let duplicate = entry
+                .value
+                .id
+                .as_ref()
+                .map_or(entry.referenced, |id| id.referenced);
             return Err(ConfigError::at(
                 duplicate,
                 format!("duplicate flow id \"{}\" in \"flows\"", flow.id),
@@ -282,7 +286,12 @@ fn validate_modules(
     let modules = modules.value;
 
     let transcription = match modules.transcription {
-        Some(entry) => module_ref(entry.referenced, entry.value.config, "transcription", config_dir)?,
+        Some(entry) => module_ref(
+            entry.referenced,
+            entry.value.config,
+            "transcription",
+            config_dir,
+        )?,
         None => {
             return Err(ConfigError::at(
                 modules_span,
@@ -291,7 +300,12 @@ fn validate_modules(
         }
     };
     let formatter = match modules.formatter {
-        Some(entry) => Some(module_ref(entry.referenced, entry.value.config, "formatter", config_dir)?),
+        Some(entry) => Some(module_ref(
+            entry.referenced,
+            entry.value.config,
+            "formatter",
+            config_dir,
+        )?),
         None => None,
     };
     let relay = match modules.relay {
@@ -366,15 +380,16 @@ fn validate_flow(entry: &Spanned<RawFlow>) -> Result<Flow, ConfigError> {
         ));
     };
     if id.value.trim().is_empty() {
-        return Err(ConfigError::at(
-            id.referenced,
-            "flow id must not be empty",
-        ));
+        return Err(ConfigError::at(id.referenced, "flow id must not be empty"));
     }
     let id_span = id.referenced;
     let id = &id.value;
 
-    let enabled = flow.enabled.as_ref().map(|span| span.value).unwrap_or(false);
+    let enabled = flow
+        .enabled
+        .as_ref()
+        .map(|span| span.value)
+        .unwrap_or(false);
 
     let Some(transcription_model) = &flow.transcription_model else {
         return Err(ConfigError::at(
@@ -455,29 +470,31 @@ fn validate_flow(entry: &Spanned<RawFlow>) -> Result<Flow, ConfigError> {
 fn validate_budgets(raw: Option<&Spanned<RawBudgets>>) -> Result<Budgets, ConfigError> {
     let defaults = Budgets::default();
     let Some(raw) = raw else { return Ok(defaults) };
-    let budget = |span: &Option<Spanned<u64>>, name: &str, default: Duration| {
-        match span {
-            None => Ok(default),
-            Some(span) => {
-                if span.value == 0 {
-                    return Err(ConfigError::at(
-                        span.referenced,
-                        format!("budgets_ms.{name} must be greater than zero"),
-                    ));
-                }
-                if span.value > MAX_BUDGET_MS {
-                    return Err(ConfigError::at(
-                        span.referenced,
-                        format!("budgets_ms.{name} must be at most {MAX_BUDGET_MS}"),
-                    ));
-                }
-                Ok(Duration::from_millis(span.value))
+    let budget = |span: &Option<Spanned<u64>>, name: &str, default: Duration| match span {
+        None => Ok(default),
+        Some(span) => {
+            if span.value == 0 {
+                return Err(ConfigError::at(
+                    span.referenced,
+                    format!("budgets_ms.{name} must be greater than zero"),
+                ));
             }
+            if span.value > MAX_BUDGET_MS {
+                return Err(ConfigError::at(
+                    span.referenced,
+                    format!("budgets_ms.{name} must be at most {MAX_BUDGET_MS}"),
+                ));
+            }
+            Ok(Duration::from_millis(span.value))
         }
     };
     let budgets = Budgets {
         total: budget(&raw.value.total, "total", defaults.total)?,
-        transcription: budget(&raw.value.transcription, "transcription", defaults.transcription)?,
+        transcription: budget(
+            &raw.value.transcription,
+            "transcription",
+            defaults.transcription,
+        )?,
         formatter: budget(&raw.value.formatter, "formatter", defaults.formatter)?,
         relay: budget(&raw.value.relay, "relay", defaults.relay)?,
     };
@@ -761,19 +778,19 @@ flows:
         let raw = loaded.flow("raw").unwrap();
         assert!(!raw.enabled, "enabled defaults to false");
         assert_eq!(raw.formatter, None, "explicit null selects no formatter");
-        assert!(raw.is_passthrough());
+        assert!(raw.relay_route.eq_ignore_ascii_case("passthrough"));
 
         // Module paths resolve against the orchestrator file's directory.
         let dir = tmp.path();
         assert_eq!(
             loaded.config.modules.transcription.config,
-            dir.join("./transcribe.yml")
+            dir.join("transcribe.yml")
         );
         assert_eq!(
             loaded.config.modules.formatter.as_ref().unwrap().config,
-            dir.join("./formatter.yml")
+            dir.join("formatter.yml")
         );
-        assert_eq!(loaded.config.modules.relay.config, dir.join("./relay.yml"));
+        assert_eq!(loaded.config.modules.relay.config, dir.join("relay.yml"));
         assert!(loaded.path.is_absolute());
         assert!(loaded.flow("missing").is_none());
     }
@@ -826,9 +843,12 @@ flows:
         assert!(err.contains("multiple YAML documents"), "{err}");
 
         // Unknown keys inside nested maps are rejected too.
-        let err = load_text(&tmp, "schema_version: 1\nmodules:\n  transcription:\n    config: t.yml\n    bogus: 1\n")
-            .unwrap_err()
-            .to_string();
+        let err = load_text(
+            &tmp,
+            "schema_version: 1\nmodules:\n  transcription:\n    config: t.yml\n    bogus: 1\n",
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("unknown setting `bogus`"), "{err}");
     }
 
@@ -843,17 +863,26 @@ flows:
         let err = load_text(&tmp, "schema_version: 1\nmodules:\n  relay:\n    location: in_process\n    config: relay.yml\n")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("\"modules.transcription\" is required"), "{err}");
+        assert!(
+            err.contains("\"modules.transcription\" is required"),
+            "{err}"
+        );
         assert!(err.contains(":3:"), "points at the modules map: {err}");
 
-        let err = load_text(&tmp, "schema_version: 1\nmodules:\n  transcription:\n    config: t.yml\n")
-            .unwrap_err()
-            .to_string();
+        let err = load_text(
+            &tmp,
+            "schema_version: 1\nmodules:\n  transcription:\n    config: t.yml\n",
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("\"modules.relay\" is required"), "{err}");
 
-        let err = load_text(&tmp, "schema_version: 1\nmodules:\n  transcription:\n    location: t.yml\n")
-            .unwrap_err()
-            .to_string();
+        let err = load_text(
+            &tmp,
+            "schema_version: 1\nmodules:\n  transcription:\n    location: t.yml\n",
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("unknown setting `location`"), "{err}");
 
         let err = load_text(&tmp, "schema_version: 1\nmodules:\n  transcription: {}\n  relay:\n    location: in_process\n    config: relay.yml\n")
@@ -874,7 +903,10 @@ flows:
         let err = load_text(&tmp, &format!("{base}    config: relay.yml\n"))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("\"modules.relay.location\" is required"), "{err}");
+        assert!(
+            err.contains("\"modules.relay.location\" is required"),
+            "{err}"
+        );
 
         let err = load_text(
             &tmp,
@@ -935,12 +967,17 @@ flows:
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("flow \"a\" has no \"transcription_model\""), "{err}");
+        assert!(
+            err.contains("flow \"a\" has no \"transcription_model\""),
+            "{err}"
+        );
 
         // `formatter` missing entirely is an error; explicit null is not.
         let err = load_text(
             &tmp,
-            &format!("{modules}  - id: a\n    transcription_model: t\n    relay_route: passthrough\n"),
+            &format!(
+                "{modules}  - id: a\n    transcription_model: t\n    relay_route: passthrough\n"
+            ),
         )
         .unwrap_err()
         .to_string();
@@ -1002,7 +1039,9 @@ flows:
 
         // Enabled flow with a formatter but no formatter module: rejected at
         // the flow's formatter line.
-        let text = format!("{no_formatter_module}  - id: a\n    enabled: true\n    transcription_model: t\n    formatter: builtin:clean\n    relay_route: claude\n");
+        let text = format!(
+            "{no_formatter_module}  - id: a\n    enabled: true\n    transcription_model: t\n    formatter: builtin:clean\n    relay_route: claude\n"
+        );
         let err = load_text(&tmp, &text).unwrap_err().to_string();
         assert!(
             err.contains("selects a formatter but \"modules.formatter\" is not configured"),
@@ -1029,7 +1068,10 @@ flows:
         let err = load_text(&tmp, &flow("      total: 0\n"))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("budgets_ms.total must be greater than zero"), "{err}");
+        assert!(
+            err.contains("budgets_ms.total must be greater than zero"),
+            "{err}"
+        );
 
         let err = load_text(&tmp, &flow("      relay: 3600001\n"))
             .unwrap_err()
@@ -1073,13 +1115,18 @@ flows:
         let xdg_value = xdg.clone().into_os_string();
 
         // Without a per-user file the lookup names the missing file.
-        let err = load_with_env(None, &|key: &str| {
+        let err = load_with_env(None, |key: &str| {
             (key == "XDG_CONFIG_HOME").then(|| xdg_value.clone())
         })
         .unwrap_err()
         .to_string();
         assert!(
-            err.contains(&xdg.join("pumice").join("orchestrator.yml").display().to_string()),
+            err.contains(
+                &xdg.join("pumice")
+                    .join("orchestrator.yml")
+                    .display()
+                    .to_string()
+            ),
             "names the per-user path: {err}"
         );
 
@@ -1087,7 +1134,7 @@ flows:
         let dir = xdg.join("pumice");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("orchestrator.yml"), VALID).unwrap();
-        let loaded = load_with_env(None, &|key: &str| {
+        let loaded = load_with_env(None, |key: &str| {
             (key == "XDG_CONFIG_HOME").then(|| xdg_value.clone())
         })
         .unwrap();

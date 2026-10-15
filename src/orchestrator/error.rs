@@ -87,10 +87,6 @@ impl ConfigError {
     pub fn column(&self) -> Option<u64> {
         self.column
     }
-
-    pub fn message(&self) -> &str {
-        &self.message
-    }
 }
 
 impl fmt::Display for ConfigError {
@@ -110,6 +106,82 @@ impl fmt::Display for ConfigError {
 }
 
 impl std::error::Error for ConfigError {}
+
+/// A stage failure inside a `pumice run` execution: a stable code, a fixed
+/// safe message and the process exit code it maps to (D7).
+///
+/// Messages never contain dictated text, transcripts or audio; configuration
+/// errors may name the configuration file and setting location. The optional
+/// parts are boxed to keep `Result<_, StageError>` small.
+#[derive(Debug)]
+pub struct StageError {
+    pub stage: &'static str,
+    pub code: &'static str,
+    pub message: String,
+    pub cause_code: Option<Box<str>>,
+    pub location: Option<Box<crate::orchestrator::result::ErrorLocation>>,
+    pub exit: u8,
+}
+
+impl StageError {
+    pub fn new(
+        stage: &'static str,
+        code: &'static str,
+        message: impl Into<String>,
+        exit: u8,
+    ) -> StageError {
+        StageError {
+            stage,
+            code,
+            message: message.into(),
+            cause_code: None,
+            location: None,
+            exit,
+        }
+    }
+
+    pub fn with_cause(mut self, cause_code: impl Into<String>) -> StageError {
+        self.cause_code = Some(cause_code.into().into_boxed_str());
+        self
+    }
+
+    pub fn set_location(&mut self, location: crate::orchestrator::result::ErrorLocation) {
+        self.location = Some(Box::new(location));
+    }
+
+    /// A configuration error with its `file:line:column` position, shared by
+    /// the orchestrator's own config errors and the modules'.
+    pub fn invalid_config(error: &ConfigError) -> StageError {
+        let message = error.to_string();
+        let mut stage_error = StageError::new(
+            crate::orchestrator::result::stage::PREPARE,
+            "invalid_config",
+            message,
+            2,
+        );
+        if let Some(file) = error.path() {
+            stage_error.set_location(crate::orchestrator::result::ErrorLocation {
+                file: file.to_path_buf(),
+                line: error.line(),
+                column: error.column(),
+            });
+        }
+        stage_error
+    }
+
+    /// The run was cancelled by a signal; the exit code follows the shell
+    /// convention (130 for Ctrl-C, 143 for SIGTERM).
+    pub fn cancelled(
+        stage: &'static str,
+        reason: crate::orchestrator::cancel::CancelReason,
+    ) -> StageError {
+        let message = match reason {
+            crate::orchestrator::cancel::CancelReason::Interrupt => "cancelled by Ctrl-C",
+            crate::orchestrator::cancel::CancelReason::Terminate => "cancelled by SIGTERM",
+        };
+        StageError::new(stage, "cancelled", message, reason.exit_code())
+    }
+}
 
 #[cfg(test)]
 mod tests {
