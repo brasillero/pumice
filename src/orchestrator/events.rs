@@ -59,7 +59,7 @@ impl EventWriter {
         let (sender, receiver) = mpsc::sync_channel::<String>(EVENT_QUEUE);
         let drained = Arc::new(AtomicBool::new(false));
         let thread_drained = Arc::clone(&drained);
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("pumice-run-events".to_owned())
             .spawn(move || {
                 let mut stderr = std::io::stderr().lock();
@@ -72,8 +72,13 @@ impl EventWriter {
                 }
                 let _ = stderr.flush();
                 thread_drained.store(true, Ordering::Release);
-            })
-            .expect("spawn the event writer thread");
+            });
+        // Events are best-effort: without a writer thread the queue's
+        // receiver is gone, every send fails silently and `finish` has
+        // nothing to wait for.
+        if spawned.is_err() {
+            drained.store(true, Ordering::Release);
+        }
         EventWriter {
             sender,
             drained,
@@ -90,7 +95,7 @@ impl EventWriter {
         elapsed_ms: Option<u64>,
         code: Option<&'static str>,
     ) {
-        let line = serde_json::to_string(&Event {
+        let Ok(line) = serde_json::to_string(&Event {
             schema_version: SCHEMA_VERSION,
             operation_id: &self.operation_id,
             seq: self.seq,
@@ -99,8 +104,9 @@ impl EventWriter {
             event,
             elapsed_ms,
             code,
-        })
-        .expect("an event always serializes");
+        }) else {
+            return;
+        };
         self.seq += 1;
         let _ = self.sender.try_send(line);
     }

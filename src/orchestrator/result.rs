@@ -6,9 +6,9 @@
 //! deliberately have no `Debug`: dictated text must never reach a log through
 //! `{:?}`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MODULE: &str = "orchestrator";
@@ -112,6 +112,7 @@ pub struct Timings {
 /// Where a configuration problem was found.
 #[derive(Debug, Clone, Serialize)]
 pub struct ErrorLocation {
+    #[serde(serialize_with = "serialize_path_lossy")]
     pub file: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<u64>,
@@ -132,4 +133,30 @@ pub struct FlowError {
     pub cause_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<ErrorLocation>,
+}
+
+/// Every path in the envelope goes through here: paths are display
+/// metadata, so a path that is not valid Unicode (non-UTF-8 bytes on Unix,
+/// unpaired surrogates on Windows) is written lossily with U+FFFD instead of
+/// failing serialization. No `PathBuf` reaches serde directly.
+pub fn serialize_path_lossy<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&path.to_string_lossy())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_utf8_paths_serialize_lossily() {
+        use std::os::unix::ffi::OsStrExt;
+        let location = ErrorLocation {
+            file: PathBuf::from(std::ffi::OsStr::from_bytes(b"/cfg/bad\xff.yml")),
+            line: Some(1),
+            column: None,
+        };
+        let json = serde_json::to_value(&location).expect("serializes");
+        assert_eq!(json["file"], "/cfg/bad\u{fffd}.yml");
+        assert_eq!(json["line"], 1);
+    }
 }

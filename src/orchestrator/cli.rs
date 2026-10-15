@@ -162,16 +162,15 @@ fn run_flow(params: RunParams, json: bool) -> ExitCode {
 }
 
 /// Writes the result and returns the exit code. A failed stdout write cannot
-/// be reported with another envelope on the broken stream, and is not
+/// be reported with another envelope on the broken stream (nor can an
+/// envelope that fails to serialize), and is not
 /// reported on stderr either: under `--json` the event thread may still hold
 /// a blocked stderr, so any synchronous write there could hang the exit, and
 /// a plain line would break the JSONL-only stderr. It exits 1 silently.
 fn report(output: RunOutput, json: bool) -> ExitCode {
     let exit = output.exit_code();
     if json {
-        let line =
-            serde_json::to_string(&output.into_envelope()).expect("the envelope always serializes");
-        if writeln!(std::io::stdout().lock(), "{line}").is_err() {
+        if !write_envelope(&output.into_envelope()) {
             return ExitCode::from(1);
         }
         return ExitCode::from(exit);
@@ -209,6 +208,17 @@ fn report(output: RunOutput, json: bool) -> ExitCode {
     }
 }
 
+/// Serializes `envelope` as one line on stdout; false when it could not be
+/// serialized or written. Never panics and never touches stderr, so the
+/// caller can exit 1 even while a blocked stderr is held by the event
+/// writer (see [`report`]).
+fn write_envelope(envelope: &RunEnvelope) -> bool {
+    match serde_json::to_string(envelope) {
+        Ok(line) => writeln!(std::io::stdout().lock(), "{line}").is_ok(),
+        Err(_) => false,
+    }
+}
+
 /// A failure envelope for argument errors (no flow was ever named).
 fn argument_failure(json: bool, message: String) {
     if json {
@@ -231,8 +241,8 @@ fn argument_failure(json: bool, message: String) {
                 location: None,
             }),
         };
-        let line = serde_json::to_string(&envelope).expect("the envelope always serializes");
-        let _ = writeln!(std::io::stdout().lock(), "{line}");
+        // Exit 2 either way; a failed write has nowhere safer to go.
+        let _ = write_envelope(&envelope);
     } else {
         eprintln!("error: {message}\n{USAGE}");
     }
@@ -259,8 +269,7 @@ fn internal_failure(json: bool, message: String) -> ExitCode {
                 location: None,
             }),
         };
-        let line = serde_json::to_string(&envelope).expect("the envelope always serializes");
-        let _ = writeln!(std::io::stdout().lock(), "{line}");
+        let _ = write_envelope(&envelope);
     } else {
         eprintln!("error: internal: {message}");
     }

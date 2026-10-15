@@ -1708,6 +1708,82 @@ fn a_broken_stdout_with_a_blocked_stderr_still_exits() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_config_path_still_gets_a_valid_envelope() {
+    // A config file name with a non-UTF-8 byte and invalid contents: the
+    // error location is reported lossily (U+FFFD) in a valid envelope with
+    // exit 2 — with a normal stderr and with a full, never-read one.
+    use std::io::Read;
+    use std::os::unix::ffi::OsStrExt;
+
+    let rig = make_rig(&Script::default());
+    let name = std::ffi::OsStr::from_bytes(b"orchestrator-\xff.yml");
+    let config = rig.cfg.join(name);
+    fs::write(&config, "schema_version: 2\n").expect("write config");
+    let lossy = config.to_string_lossy().into_owned();
+    assert!(lossy.contains('\u{fffd}'));
+
+    for full_stderr in [false, true] {
+        let mut command = Command::new(rig.pumice());
+        command
+            .arg("run")
+            .arg(&rig.audio)
+            .args(["--flow", "clean", "--json", "--config"])
+            .arg(&config)
+            .env("XDG_CONFIG_HOME", &rig.xdg)
+            .env("HOME", rig.keep.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped());
+        let stderr_pipe = if full_stderr {
+            let (read, write) = full_pipe();
+            command.stderr(Stdio::from(write));
+            Some(read)
+        } else {
+            command.stderr(Stdio::piped());
+            None
+        };
+        let mut child = command.spawn().expect("spawn pumice run");
+        drop(command);
+        // The envelope is one short line: it fits the pipe buffer, so reading
+        // after the exit cannot deadlock.
+        let status = wait_bounded(&mut child, std::time::Duration::from_secs(15))
+            .unwrap_or_else(|| panic!("pumice run hung (full stderr: {full_stderr})"));
+        let mut stdout = String::new();
+        child
+            .stdout
+            .take()
+            .expect("stdout")
+            .read_to_string(&mut stdout)
+            .expect("read stdout");
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            pipe.read_to_string(&mut stderr).expect("read stderr");
+        }
+        drop(stderr_pipe);
+
+        assert_eq!(
+            status.code(),
+            Some(2),
+            "full: {full_stderr}: {stdout}{stderr}"
+        );
+        let envelope: Value = serde_json::from_str(stdout.trim_end())
+            .unwrap_or_else(|error| panic!("one JSON document: {error}: {stdout:?}"));
+        assert_eq!(envelope["ok"], false);
+        assert_eq!(envelope["error"]["code"], "invalid_config", "{envelope}");
+        assert_eq!(
+            envelope["error"]["location"]["file"],
+            json!(lossy),
+            "{envelope}"
+        );
+        assert!(!stderr.contains("panicked"), "{stderr}");
+        for line in stderr.lines() {
+            serde_json::from_str::<Value>(line)
+                .unwrap_or_else(|error| panic!("stderr is JSONL only: {error}: {line}"));
+        }
+    }
+}
+
 // --- Cancellation: Ctrl-C and SIGTERM reap every child -----------------------
 
 /// Spawns `pumice run --json` for the rig's flow and returns the child.
