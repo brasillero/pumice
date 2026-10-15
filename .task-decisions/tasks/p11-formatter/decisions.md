@@ -38,3 +38,29 @@
 **Why.** `arch-modules/D13` builds the formatter into the core; it is pure text transformation with no native code.
 
 **Rejected.** A separate formatter server process.
+
+### D4 · Active · `apply` re-emits the client's request byte for byte
+- date: 2026-10-15
+- decided by: claude (orchestrator, owner-delegated 2026-10-15)
+- origin: conversation
+- area: architecture
+- revisit if: a client needs the formatter to rewrite or normalize request values
+
+**Decision.** `apply` parses the request only to find `messages` and probe each message's `role` and `content`; every top-level value and every existing message is re-emitted from the original raw JSON (serde_json `raw_value`), and only the inserted `system` message is newly serialized. Top-level key names are re-emitted in normalized form and whitespace between members may change; nothing else does. The library API takes and returns the request as text. The workspace `serde_json` keeps `preserve_order`; `arbitrary_precision` is not used.
+
+**Why.** Codex review round 2 found that parsing through `serde_json::Value` lost big numbers, and that the `arbitrary_precision` fix silently turned an object with the key `$serde_json::private::Number` into a number. Keeping the raw bytes is lossless by construction and matches the relay's pass-through rule.
+
+**Rejected.** Round-tripping through `Value` with `arbitrary_precision`; a `Value`-based public API.
+
+### D5 · Active · Duplicate top-level keys are rejected
+- date: 2026-10-15
+- decided by: claude (orchestrator, owner-delegated 2026-10-15)
+- origin: conversation
+- area: architecture
+- revisit if: a real client sends duplicate top-level keys
+
+**Decision.** The formatter refuses a request that repeats a top-level member with `invalid_input`, with a fixed message that does not name the key. This is stricter than the relay, which accepts duplicate unknown keys.
+
+**Why.** The formatter re-emits the request, so it would have to silently pick which copy wins; refusing is safer. Codex review round 3 found the first version echoed the key (client text) and was quadratic; both fixed.
+
+**Rejected.** Keeping the last value, as serde does for unknown keys.
