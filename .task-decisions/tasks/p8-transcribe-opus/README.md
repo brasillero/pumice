@@ -3,7 +3,7 @@ title: P8: Opus audio (WebM and Ogg) for transcription
 state: Done
 ticket: —
 branch: p8-transcribe-opus
-mr: —
+mr: PR #100
 start: 2026-10-15
 end: 2026-10-15
 ---
