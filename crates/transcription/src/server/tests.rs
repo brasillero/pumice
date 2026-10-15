@@ -491,6 +491,28 @@ async fn audio_errors_map_to_fixed_messages() {
     .await;
 }
 
+#[tokio::test]
+async fn unsupported_format_message_reflects_enabled_features() {
+    let engine = TestEngine::returning("x");
+    let state = state(Arc::clone(&engine));
+    let error = error(
+        send(&state, post(basic_body(b"definitely not audio"))).await,
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    let message = error["message"].as_str().unwrap();
+    #[cfg(feature = "opus")]
+    assert!(
+        message.contains("ogg (Opus)") && message.contains("WebM (Opus)"),
+        "message: {message}"
+    );
+    #[cfg(not(feature = "opus"))]
+    assert!(
+        !message.contains("Opus"),
+        "message: {message}"
+    );
+}
+
 #[cfg(feature = "opus")]
 #[tokio::test]
 async fn webm_opus_upload_transcribes() {
