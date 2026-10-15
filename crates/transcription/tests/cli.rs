@@ -516,6 +516,7 @@ fn json_success_envelope_shape() {
         audio_seconds: 1.5,
         model_load_ms: 100,
         transcription_ms: 200,
+        backend: Some("CPU [haswell]".to_string()),
     };
     let mut buf = Vec::new();
     print_success(&output, true, &mut buf).unwrap();
@@ -528,6 +529,7 @@ fn json_success_envelope_shape() {
     assert_eq!(json["result"]["audio_seconds"], 1.5);
     assert_eq!(json["result"]["model_load_ms"], 100);
     assert_eq!(json["result"]["transcription_ms"], 200);
+    assert_eq!(json["result"]["backend"], "CPU [haswell]");
     assert!(json["error"].is_null());
 }
 

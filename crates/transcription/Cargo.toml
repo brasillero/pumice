@@ -16,6 +16,11 @@ path = "src/main.rs"
 [features]
 default = []
 engine = ["dep:transcribe-cpp"]
+# Opt-in Linux-only mode: the engine links as shared libraries plus one ggml
+# CPU module per x86 ISA tier; the best module for the running CPU is selected
+# at startup from a directory next to the executable. The default `engine`
+# build stays a single static portable binary.
+cpu-variants = ["engine", "transcribe-cpp/dynamic-backends"]
 
 [dependencies]
 axum = { workspace = true }

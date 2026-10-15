@@ -32,6 +32,53 @@ CARGO_TARGET_DIR=target/native TRANSCRIBE_CMAKE_ARGS="-DGGML_NATIVE=ON" \
 See `crates/transcription/README.md` for the full build section, including
 Windows notes.
 
+## Faster CPU builds (runtime CPU variants)
+
+Linux x86-64 only, opt-in. The default build above is a single static binary
+with a portable x86-64 baseline; on modern CPUs it leaves a lot of transcription
+speed unused. The `cpu-variants` Cargo feature instead links the engine as
+shared libraries plus one ggml CPU module per x86 ISA tier (14 modules from
+baseline `x64` up to `sapphirerapids`). At startup the binary picks the
+fastest module the running CPU **and OS** can actually execute, using Rust's
+`is_x86_feature_detected!` (which checks OS-enabled state via XGETBV, unlike
+ggml's own CPUID-only scoring), and loads only that module, from
+`cpu/<variant>/libggml-cpu-<variant>.so` inside the executable's own
+directory — never from the current directory or PATH. Each module is staged
+alone in its variant directory at build time, so ggml's directory probe can
+only ever see the selected one. Nothing is copied or written at runtime: the
+staged folder works from a read-only install directory. If the selected
+variant's module was not staged, the binary falls back to the next staged
+variant this CPU and OS can execute, down to the plain `x64` portable floor,
+so an incomplete staged package degrades instead of failing; variants whose
+features the host lacks are never fallback candidates, so there is no SIGILL
+risk from the fallback walk.
+
+Build and stage a self-contained folder (binary + its shared libraries and
+CPU modules) in one step:
+
+```bash
+crates/transcription/scripts/build-cpu-variants.sh
+# result: target/cpu-variants/stage/
+```
+
+The staged binary resolves its libraries from its own directory and works
+from any location; copy the whole folder. Run it exactly like the regular
+CLI. It prints the selected CPU module on stderr at startup, `serve` reports
+the selected backend at model load, and `file --json` includes a `backend`
+field, e.g. `"CPU (...) [haswell]"`.
+
+The portable build's engine linkage and compiler baseline are unaffected: the
+script uses its own `CARGO_TARGET_DIR` and overrides the conservative
+`TRANSCRIBE_CMAKE_ARGS` from `.cargo/config.toml`, so nothing in the portable
+build changes. (The one visible addition to ordinary `engine` builds from
+this work is the `backend` field in `file --json` and the startup backend
+line; the binary stays a single static portable executable.) Windows and
+macOS builds are unchanged (the feature is off by default and its runtime
+wiring is Linux x86-64-only; other architectures have no module mapping).
+
+Measurements for both builds on server-1 and the details of the mechanism are
+in [`docs/research/P7-cpu-variants.md`](../docs/research/P7-cpu-variants.md).
+
 ## Getting models
 
 `pumice-transcribe` needs a Whisper GGUF model. The owner uses these two
