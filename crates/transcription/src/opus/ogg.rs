@@ -229,7 +229,9 @@ fn validate_pages(bytes: &[u8]) -> Result<PageValidation, Error> {
         if !completed_any {
             // The page completes no packet: it must not claim a position.
             if granule != -1 {
-                return Err(Error::invalid_input("ogg page granule without a completed packet"));
+                return Err(Error::invalid_input(
+                    "ogg page granule without a completed packet",
+                ));
             }
         } else if !audio_on_page {
             // A header page (OpusHead or OpusTags): the granule must be 0.
@@ -761,7 +763,11 @@ mod tests {
             let offsets = page_offsets(&bytes);
             bytes[offsets[2] + 6..offsets[2] + 14].copy_from_slice(&granule.to_le_bytes());
             fix_crcs(&mut bytes, offsets[2]);
-            assert_eq!(err_code(&bytes), ErrorCode::InvalidInput, "granule {granule}");
+            assert_eq!(
+                err_code(&bytes),
+                ErrorCode::InvalidInput,
+                "granule {granule}"
+            );
         }
 
         // The same equality rule applies to every intermediate audio page:
@@ -795,7 +801,13 @@ mod tests {
         let mut bytes = header_pages(&packets);
         let mut payload = packets[2].to_vec();
         payload.extend_from_slice(&packets[3]);
-        bytes.extend(page(2, FLAG_EOS, 1500, &packet_laces(&[&packets[2], &packets[3]]), &payload));
+        bytes.extend(page(
+            2,
+            FLAG_EOS,
+            1500,
+            &packet_laces(&[&packets[2], &packets[3]]),
+            &payload,
+        ));
         let decoded = decode_ogg_opus(bytes, &CancelToken::new()).unwrap();
         assert_eq!(decoded.samples.len(), 1_188);
     }

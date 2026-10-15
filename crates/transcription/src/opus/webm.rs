@@ -349,10 +349,7 @@ fn walk_track_entry(bytes: &[u8], element: &Element, info: &mut WebmInfo) -> Res
                 }
             }
             ID_CODEC_ID => {
-                if codec_id
-                    .replace(element_slice(bytes, &child)?)
-                    .is_some()
-                {
+                if codec_id.replace(element_slice(bytes, &child)?).is_some() {
                     return Err(Error::invalid_input("duplicate webm codec id"));
                 }
             }
@@ -426,8 +423,8 @@ fn walk_track_entry(bytes: &[u8], element: &Element, info: &mut WebmInfo) -> Res
             "unsupported webm codec (expected A_OPUS)",
         ));
     }
-    info.codec_private = codec_private
-        .ok_or_else(|| Error::invalid_input("webm track has no opus header"))?;
+    info.codec_private =
+        codec_private.ok_or_else(|| Error::invalid_input("webm track has no opus header"))?;
     info.codec_delay_ns = codec_delay;
     info.track_number = track_number;
     Ok(())
@@ -590,9 +587,7 @@ fn validate(bytes: &[u8]) -> Result<WebmInfo, Error> {
                             ));
                         }
                         if scale.replace(value).is_some() {
-                            return Err(Error::invalid_input(
-                                "duplicate webm timestamp scale",
-                            ));
+                            return Err(Error::invalid_input("duplicate webm timestamp scale"));
                         }
                     }
                     info_reader.pos = child.data_end;
@@ -752,8 +747,8 @@ pub(crate) fn decode_webm_opus(
         }
     }
     if let Some(ns) = info.codec_delay_ns {
-        let ns = i64::try_from(ns)
-            .map_err(|_| Error::invalid_input("webm codec delay out of range"))?;
+        let ns =
+            i64::try_from(ns).map_err(|_| Error::invalid_input("webm codec delay out of range"))?;
         let delay = ns_to_samples(ns)?;
         if delay != head.pre_skip as i64 {
             return Err(Error::invalid_input(
@@ -1270,7 +1265,9 @@ mod tests {
                     // The cluster ends at the first Segment-level sibling.
                     let mut inner = Reader::new(bytes, element.data_start, element.data_end);
                     while inner.pos < element.data_end {
-                        let Some(child) = inner.next().unwrap() else { break };
+                        let Some(child) = inner.next().unwrap() else {
+                            break;
+                        };
                         if is_segment_level(child.id) {
                             inner.pos = child.start;
                             break;

@@ -507,10 +507,7 @@ async fn unsupported_format_message_reflects_enabled_features() {
         "message: {message}"
     );
     #[cfg(not(feature = "opus"))]
-    assert!(
-        !message.contains("Opus"),
-        "message: {message}"
-    );
+    assert!(!message.contains("Opus"), "message: {message}");
 }
 
 #[cfg(feature = "opus")]
