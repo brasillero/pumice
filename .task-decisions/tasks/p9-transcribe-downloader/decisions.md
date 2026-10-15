@@ -38,3 +38,16 @@
 **Why.** The plan allows a clean restart first (item 3c optional); resume adds identity checks (ETag, size) and more failure modes.
 
 **Rejected.** Range-based resume in the first version.
+
+### D4 · Active · Installed models are verified by re-hashing; parent directories are trusted
+- date: 2026-10-15
+- decided by: claude (orchestrator), brasillero (authorized)
+- origin: D2
+- area: transcription
+- revisit if: Pumice is installed for several users sharing one models directory
+
+**Decision.** After the atomic rename, the downloader reopens the installed file (no symlink following) and re-checks its size and SHA-256 against the catalog before reporting success, on every platform. The models directory and any directories Pumice creates for it are private (0700 on Unix), and an existing group- or world-writable models directory is refused; the directories above it (the user's home and data directories) are trusted.
+
+**Why.** Review round 2 showed that file-identity checks need nightly-only APIs on Windows and that a writable ancestor could still swap the path; a writer that can change the user's own home can already replace any file the user runs, so defending against it here adds complexity without real protection. Re-hashing is portable and catches a swap at install time (about 1–2 s for Turbo).
+
+**Rejected.** File-identity checks (device/inode, Windows file index); validating every ancestor directory.
