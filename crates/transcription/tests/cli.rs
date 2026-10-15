@@ -1792,3 +1792,107 @@ fn help_mentions_config_and_model_flags() {
         .unwrap();
     assert!(models_help.status.success());
 }
+
+#[test]
+fn serve_missing_catalog_model_names_the_download_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("transcribe.yml");
+    std::fs::write(
+        &config,
+        "schema_version: 1\nmodels_dir: models\nmodels:\n  - id: tiny\n    catalog: whisper-tiny-q8_0\n",
+    )
+    .unwrap();
+
+    let out = isolated_command(env!("CARGO_BIN_EXE_pumice-transcribe"))
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "serve",
+            "--port",
+            "0",
+            "--model",
+            "tiny",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("models download whisper-tiny-q8_0"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("--config {}", config.display())),
+        "stderr must preserve --config: {stderr}"
+    );
+}
+
+#[test]
+fn file_missing_catalog_model_names_the_download_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("transcribe.yml");
+    std::fs::write(
+        &config,
+        "schema_version: 1\nmodels_dir: models\nmodels:\n  - id: tiny\n    catalog: whisper-tiny-q8_0\n",
+    )
+    .unwrap();
+    let wav = tmp.path().join("clip.wav");
+    std::fs::write(&wav, write_silence_wav(0.05, 16_000, 1)).unwrap();
+
+    let out = isolated_command(env!("CARGO_BIN_EXE_pumice-transcribe"))
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "file",
+            wav.to_str().unwrap(),
+            "--model",
+            "tiny",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("models download whisper-tiny-q8_0"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("--config {}", config.display())),
+        "stderr must preserve --config: {stderr}"
+    );
+}
+
+#[test]
+fn file_missing_path_model_keeps_the_plain_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("transcribe.yml");
+    std::fs::write(
+        &config,
+        "schema_version: 1\nmodels:\n  - id: local\n    path: absent.gguf\n",
+    )
+    .unwrap();
+    let wav = tmp.path().join("clip.wav");
+    std::fs::write(&wav, write_silence_wav(0.05, 16_000, 1)).unwrap();
+
+    let out = isolated_command(env!("CARGO_BIN_EXE_pumice-transcribe"))
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "file",
+            wav.to_str().unwrap(),
+            "--model",
+            "local",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("model file not found"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("models download"),
+        "local path entries get no download hint: {stderr}"
+    );
+}

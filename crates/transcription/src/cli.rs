@@ -383,7 +383,11 @@ where
     let args = Args::try_parse_from(args).map_err(|e| Error::invalid_arguments(format!("{e}")))?;
     let loaded = load_config(&args)?;
     match args.command {
-        Command::File(file_args) => run_file(file_args, &loaded.config, |_, _| Ok(engine)),
+        Command::File(file_args) => {
+            run_file(file_args, &loaded.config, args.config.as_deref(), |_, _| {
+                Ok(engine)
+            })
+        }
         _ => Err(Error::invalid_arguments(
             "run_with_engine only supports the file subcommand",
         )),
@@ -395,13 +399,14 @@ where
     F: FnOnce(&Path, i32) -> Result<Box<dyn Engine>, Error>,
 {
     let loaded = load_config(&args)?;
+    let config_arg = args.config.as_deref();
     match args.command {
         Command::File(file_args) => {
-            let output = run_file(file_args, &loaded.config, make_engine)?;
+            let output = run_file(file_args, &loaded.config, config_arg, make_engine)?;
             Ok(CommandOutput::Transcription(output))
         }
         Command::Serve(serve_args) => {
-            run_serve(serve_args, &loaded.config, make_engine)?;
+            run_serve(serve_args, &loaded.config, config_arg, make_engine)?;
             Ok(CommandOutput::None)
         }
         Command::CheckConfig(_) => Ok(CommandOutput::CheckConfig(match loaded.source {
@@ -499,7 +504,44 @@ fn resolve_models_dir(config: &Config) -> Result<PathBuf, Error> {
         })
 }
 
-fn run_serve<F>(serve_args: ServeArgs, config: &Config, make_engine: F) -> Result<(), Error>
+/// Error for a missing model file. A `catalog:` entry names the command that
+/// fixes it — preserving an explicit `--config`, since a `models_dir` override
+/// only takes effect through the same config file.
+fn missing_model_error(path: &Path, catalog: Option<&str>, config_arg: Option<&Path>) -> Error {
+    let message = match catalog {
+        Some(id) => {
+            let command = match config_arg {
+                Some(config) => format!(
+                    "pumice-transcribe --config {} models download {id}",
+                    config.display()
+                ),
+                None => format!("pumice-transcribe models download {id}"),
+            };
+            format!(
+                "model file not found: {} (catalog model `{id}`); download it with: {command}",
+                path.display()
+            )
+        }
+        None => format!("model file not found: {}", path.display()),
+    };
+    Error::new(ErrorCode::ModelNotFound, message)
+}
+
+/// The catalog id of the configured entry `model_id` names, if any.
+fn catalog_of<'a>(config: &'a Config, model_id: &str) -> Option<&'a str> {
+    config
+        .models
+        .iter()
+        .find(|m| m.id == model_id)
+        .and_then(|m| m.catalog.as_deref())
+}
+
+fn run_serve<F>(
+    serve_args: ServeArgs,
+    config: &Config,
+    config_arg: Option<&Path>,
+    make_engine: F,
+) -> Result<(), Error>
 where
     F: FnOnce(&Path, i32) -> Result<Box<dyn Engine>, Error>,
 {
@@ -508,7 +550,11 @@ where
         resolve_model_id(config, serve_args.model.as_deref(), None)?;
 
     if !model_path.is_file() {
-        return Err(Error::model_not_found(&model_path));
+        return Err(missing_model_error(
+            &model_path,
+            catalog_of(config, &served_model_id),
+            config_arg,
+        ));
     }
 
     let port = serve_args.port.or(config.server_port).ok_or_else(|| {
@@ -547,14 +593,19 @@ fn load_config(args: &Args) -> Result<LoadedConfig, Error> {
     config::load(args.config.as_deref()).map_err(Error::invalid_config)
 }
 
-fn run_file<F>(file_args: FileArgs, config: &Config, make_engine: F) -> Result<SuccessOutput, Error>
+fn run_file<F>(
+    file_args: FileArgs,
+    config: &Config,
+    config_arg: Option<&Path>,
+    make_engine: F,
+) -> Result<SuccessOutput, Error>
 where
     F: FnOnce(&Path, i32) -> Result<Box<dyn Engine>, Error>,
 {
     let language = normalize_language(file_args.language.or_else(|| config.language.clone()))?;
     let threads = normalize_threads(file_args.threads.or(config.threads))?;
 
-    let (_model_id, model_path) = resolve_model_id(
+    let (model_id, model_path) = resolve_model_id(
         config,
         file_args.model.as_deref(),
         file_args.model_file.as_deref(),
@@ -569,7 +620,11 @@ where
     let (pcm, audio_seconds) = decode_audio_from_reader(file)?;
 
     if !model_path.is_file() {
-        return Err(Error::model_not_found(&model_path));
+        return Err(missing_model_error(
+            &model_path,
+            catalog_of(config, &model_id),
+            config_arg,
+        ));
     }
 
     let start = Instant::now();
