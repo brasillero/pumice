@@ -89,7 +89,7 @@ a shorter recording instead of failing.
 
 ## Third-party licenses
 
-This crate uses [Symphonia](https://github.com/pdelbarrio/symphonia) to decode
+This crate uses [Symphonia](https://github.com/pdeljanov/Symphonia) to decode
 RIFF/WAVE, MP3, FLAC and Ogg Vorbis files. Symphonia is licensed under the
 MPL-2.0. Distributing binaries that include Symphonia requires shipping its
 notice and pointing to its exact source; this is enforced in the

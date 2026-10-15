@@ -1,6 +1,5 @@
 use crate::audio::{
-    MAX_AUDIO_SECONDS, MAX_FILE_BYTES, decode_audio_with_cancel, normalize_and_validate,
-    resample_to_target,
+    MAX_FILE_BYTES, decode_audio_with_cancel, normalize_and_validate, resample_to_target,
 };
 use crate::config::{Config, validate_language};
 use crate::engine::{CancelToken, Engine};
@@ -186,10 +185,6 @@ impl<R> BudgetReader<R> {
             overshot: false,
         }
     }
-
-    pub fn read_bytes(&self) -> u64 {
-        self.read
-    }
 }
 
 impl<R: Read> Read for BudgetReader<R> {
@@ -211,16 +206,6 @@ impl<R: Read> Read for BudgetReader<R> {
         self.read += n as u64;
         Ok(n)
     }
-}
-
-/// Compute the duration of normalized 16 kHz mono PCM in seconds.
-pub fn pcm_seconds(pcm: &[f32]) -> f64 {
-    pcm.len() as f64 / 16_000.0
-}
-
-/// Clamp a raw duration to the inclusive maximum audio length.
-pub fn clamp_audio_seconds(seconds: f64) -> f64 {
-    seconds.min(MAX_AUDIO_SECONDS)
 }
 
 #[cfg(test)]
