@@ -42,6 +42,9 @@ jobs:
       - name: cargo clippy -p pumice-transcription --features engine
         run: cargo clippy -p pumice-transcription --features engine --all-targets --locked -- -D warnings
 
+      - name: cargo test -p pumice-transcription --features opus
+        run: cargo test -p pumice-transcription --features opus --locked
+
       - name: cargo build --release -p pumice-transcription --features engine
         run: cargo build --release -p pumice-transcription --features engine --locked
 
@@ -66,19 +69,23 @@ jobs:
       - name: Smoke test transcription with tiny model
         run: |
           bin="target/release/pumice-transcribe"
-          out_file="${RUNNER_TEMP}/transcribe-out.json"
-          "$bin" file crates/transcription/tests/fixtures/sample-pt.wav \
-            --model-file "$MODEL_DIR/whisper-tiny-Q8_0.gguf" --json > "$out_file"
-          python3 -c "
-          import json, sys
-          with open(sys.argv[1]) as f:
-              data = json.load(f)
-          assert data.get('schema_version') == 1, data
-          assert data.get('ok') is True, data
-          assert data['result']['language'] == 'pt', data
-          assert data['result']['text'], data
-          print('smoke ok')
-          " "$out_file"
+          for fixture in sample-pt.wav chrome-mediarecorder.webm; do
+            out_file="${RUNNER_TEMP}/transcribe-${fixture}.json"
+            "$bin" file "crates/transcription/tests/fixtures/$fixture" \
+              --model-file "$MODEL_DIR/whisper-tiny-Q8_0.gguf" --json > "$out_file"
+            python3 - "$out_file" "$fixture" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          assert data.get("schema_version") == 1, data
+          assert data.get("ok") is True, data
+          assert data["result"]["language"] == "pt", data
+          assert data["result"]["text"], data
+          print(sys.argv[2] + " smoke ok")
+          PY
+          done
 
   transcription-cpu-variants:
     name: Transcription runtime CPU variants (Linux)
@@ -137,15 +144,17 @@ jobs:
           out_file="${RUNNER_TEMP}/transcribe-cpu-variants-out.json"
           "$bin" file crates/transcription/tests/fixtures/sample-pt.wav \
             --model-file "$MODEL_DIR/whisper-tiny-Q8_0.gguf" --json > "$out_file"
-          python3 -c "
-          import json, sys
-          with open(sys.argv[1]) as f:
-              data = json.load(f)
-          assert data.get('schema_version') == 1, data
-          assert data.get('ok') is True, data
-          assert data['result']['language'] == 'pt', data
-          assert data['result']['text'], data
-          assert data['result']['backend'].startswith('CPU'), data
-          print('smoke ok')
-          " "$out_file"
+          python3 - "$out_file" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          assert data.get("schema_version") == 1, data
+          assert data.get("ok") is True, data
+          assert data["result"]["language"] == "pt", data
+          assert data["result"]["text"], data
+          assert data["result"]["backend"].startswith("CPU"), data
+          print("smoke ok")
+          PY
           chmod -R u+w target/cpu-variants/stage

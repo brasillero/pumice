@@ -263,6 +263,12 @@ const INVALID_STREAM: ApiError = invalid(Some("stream"), "stream must be true or
 const NOT_UTF8: ApiError = invalid(None, "A text parameter is not valid UTF-8.");
 const NUL_IN_TEXT: ApiError = invalid(None, "A text parameter contains a NUL character.");
 const UNDECODABLE_AUDIO: ApiError = invalid(Some("file"), "The audio file could not be decoded.");
+#[cfg(feature = "opus")]
+const UNSUPPORTED_FORMAT: ApiError = invalid(
+    Some("file"),
+    "Invalid file format. Supported formats: wav, mp3, flac, ogg (Vorbis), ogg (Opus), WebM (Opus).",
+);
+#[cfg(not(feature = "opus"))]
 const UNSUPPORTED_FORMAT: ApiError = invalid(
     Some("file"),
     "Invalid file format. Supported formats: wav, mp3, flac, ogg (Vorbis).",
