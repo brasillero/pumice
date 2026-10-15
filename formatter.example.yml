@@ -1,0 +1,24 @@
+# Pumice formatter module configuration example.
+#
+# pumice-format reads exactly one configuration file:
+#   1. the path passed with --config, else
+#   2. the per-user file: ~/.config/pumice/formatter.yml on Linux and macOS
+#      ($XDG_CONFIG_HOME/pumice/formatter.yml when XDG_CONFIG_HOME is absolute),
+#      and %APPDATA%\pumice\formatter.yml on Windows,
+#   otherwise no file is used; select formatters explicitly with
+#   --formatter builtin:clean.
+#
+# Validate a file with: pumice-format check-config --config <path>
+# Full guide: docs/formatter.md
+
+schema_version: 1
+
+# Registered formatter definition files. Relative paths resolve against
+# this file; absolute paths are used as given. Nothing is enabled
+# implicitly: only the built-ins exist until a file is registered here.
+formatters:
+  - path: example-formatter.clean.yml
+
+# Optional default formatter, used by `apply` when --formatter is omitted.
+# Must be one of the registered ids above or builtin:clean.
+default: clean-example

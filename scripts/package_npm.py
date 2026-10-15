@@ -4,11 +4,13 @@
 Stages and packs five npm packages from the S7.1 release archives:
 
 - ``@brasillero/pumice`` — the front package: a zero-dependency Node.js
-  launcher (``bin/pumice.js``) plus LICENSE and README. The installed
+  launcher (``bin/pumice.js``) plus LICENSE, THIRD_PARTY_NOTICES.md and
+  README. The installed
   command stays ``pumice`` (the unscoped npm name ``pumice`` is rejected
   by the registry's similarity rule).
 - ``@brasillero/pumice-{linux-x64,win32-x64,darwin-x64,darwin-arm64}`` —
-  native packages, each with exactly one executable and a LICENSE.
+  native packages, each with exactly one executable, a LICENSE and
+  THIRD_PARTY_NOTICES.md.
 
 The input directory must contain exactly the four release archives produced
 by ``scripts/package_release.py`` (``pumice-{version}-{target}.zip`` /
@@ -73,6 +75,12 @@ DATA_MODE = 0o644
 LAUNCHER_SOURCE = NPM_DIR / "bin" / "pumice.js"
 FRONT_README_SOURCE = NPM_DIR / "README.front.md"
 LICENSE_SOURCE = REPO_ROOT / "LICENSE"
+# License notices for third-party content embedded in the binary (the
+# Handy-derived built-in formatter prompt). Shipped in every package: the
+# front package documents the install and the native packages carry the
+# executable itself.
+NOTICES_SOURCE = REPO_ROOT / "crates" / "formatter" / "THIRD_PARTY_NOTICES.md"
+NOTICES_NAME = "THIRD_PARTY_NOTICES.md"
 
 
 def native_package_name(platform_key: str) -> str:
@@ -107,7 +115,7 @@ def front_manifest(version: str) -> dict:
         "type": "commonjs",
         "bin": {FRONT_BIN_NAME: "bin/pumice.js"},
         "engines": {"node": ">=22"},
-        "files": ["bin/pumice.js", "README.md", "LICENSE"],
+        "files": ["bin/pumice.js", "README.md", "LICENSE", NOTICES_NAME],
         # Exact-version pins to the matching native packages; managers
         # install only the one matching the current os/cpu.
         "optionalDependencies": {
@@ -130,7 +138,7 @@ def native_manifest(version: str, platform_key: str, executable: str) -> dict:
         "license": "MIT",
         "os": [npm_os],
         "cpu": [npm_cpu],
-        "files": [f"bin/{executable}"],
+        "files": [f"bin/{executable}", NOTICES_NAME],
     }
 
 
@@ -285,6 +293,7 @@ def stage_packages(version: str, binaries: dict[str, bytes], stage: Path) -> lis
     )
     _write(front / "README.md", FRONT_README_SOURCE.read_text(), DATA_MODE)
     _write(front / "LICENSE", LICENSE_SOURCE.read_text(), DATA_MODE)
+    _write(front / NOTICES_NAME, NOTICES_SOURCE.read_text(), DATA_MODE)
 
     folders = [front]
     for target, (platform_key, executable) in TARGET_TO_NPM.items():
@@ -299,6 +308,7 @@ def stage_packages(version: str, binaries: dict[str, bytes], stage: Path) -> lis
             DATA_MODE,
         )
         _write(folder / "LICENSE", LICENSE_SOURCE.read_text(), DATA_MODE)
+        _write(folder / NOTICES_NAME, NOTICES_SOURCE.read_text(), DATA_MODE)
         folders.append(folder)
     return folders
 

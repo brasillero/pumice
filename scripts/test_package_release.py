@@ -16,7 +16,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 LINUX_TARGET = "x86_64-unknown-linux-musl"
 WINDOWS_TARGET = "x86_64-pc-windows-msvc"
-EXPECTED_MEMBERS = ("pumice", "LICENSE", "relay.example.yml", "INSTALL.md")
+EXPECTED_MEMBERS = (
+    "pumice",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "relay.example.yml",
+    "INSTALL.md",
+)
 
 
 class PackageReleaseTests(unittest.TestCase):
@@ -39,14 +45,21 @@ class PackageReleaseTests(unittest.TestCase):
         with tarfile.open(archive) as handle:
             members = {member.name: member for member in handle.getmembers()}
             payload = handle.extractfile(f"{top}/pumice").read()
+            notices = handle.extractfile(f"{top}/THIRD_PARTY_NOTICES.md").read()
 
         self.assertEqual(
             sorted(members), sorted(f"{top}/{name}" for name in EXPECTED_MEMBERS)
         )
         self.assertEqual(members[f"{top}/pumice"].mode, 0o755)
-        for name in ("LICENSE", "relay.example.yml", "INSTALL.md"):
-            self.assertEqual(members[f"{top}/{name}"].mode, 0o644)
+        for name in EXPECTED_MEMBERS:
+            if name != "pumice":
+                self.assertEqual(members[f"{top}/{name}"].mode, 0o644)
         self.assertEqual(payload, self.binary.read_bytes())
+        self.assertEqual(
+            notices,
+            (REPO_ROOT / "crates" / "formatter" / "THIRD_PARTY_NOTICES.md").read_bytes(),
+        )
+        self.assertIn(b"Copyright (c) 2025 CJ Pais", notices)
 
     def test_zip_membership_and_executable_mode(self):
         archive = package_release.package(WINDOWS_TARGET, self.binary, self.work / "dist")

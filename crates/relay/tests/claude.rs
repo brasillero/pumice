@@ -92,7 +92,9 @@ async fn passes_the_restricted_invocation() {
             "--effort",
             "low",
             "--settings",
-            "{\"env\":{\"ANTHROPIC_BEDROCK_SERVICE_TIER\":\"default\",\"CLAUDE_CODE_DISABLE_FAST_MODE\":\"1\",\"CLAUDE_CODE_DISABLE_THINKING\":\"\",\"CLAUDE_CODE_EFFORT_LEVEL\":\"low\",\"MAX_THINKING_TOKENS\":\"0\"},\"fastMode\":false}",
+            // serde_json preserves insertion order (workspace preserve_order
+            // feature): fastMode first, then CHEAPEST_ENV in array order.
+            "{\"fastMode\":false,\"env\":{\"MAX_THINKING_TOKENS\":\"0\",\"CLAUDE_CODE_EFFORT_LEVEL\":\"low\",\"CLAUDE_CODE_DISABLE_FAST_MODE\":\"1\",\"CLAUDE_CODE_DISABLE_THINKING\":\"\",\"ANTHROPIC_BEDROCK_SERVICE_TIER\":\"default\"}}",
             "--output-format",
             "json",
             "--system-prompt-file",

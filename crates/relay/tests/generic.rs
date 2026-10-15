@@ -273,12 +273,13 @@ async fn request_is_exact() {
     assert_eq!(content_length, request.body.len());
 
     // The body: exactly model/stream/messages, system and user separate, the
-    // dictation byte-exact inside the user message.
+    // dictation byte-exact inside the user message. Keys keep insertion
+    // order (serde_json preserve_order).
     let body: Value =
         serde_json::from_slice(&request.body).expect("the request body is valid JSON");
     assert_eq!(
         body.as_object().unwrap().keys().collect::<Vec<_>>(),
-        ["messages", "model", "stream"]
+        ["model", "stream", "messages"]
     );
     assert_eq!(body["model"], json!(MODEL));
     assert_eq!(body["stream"], json!(false));

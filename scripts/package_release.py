@@ -3,9 +3,10 @@
 
 Builds ``pumice-{version}-{target}.zip`` (Windows) or
 ``pumice-{version}-{target}.tar.gz`` (Unix) with a single top-level directory
-containing the release executable, LICENSE, relay.example.yml and INSTALL.md.
-Only the explicitly listed files are packaged — never the repository or the
-target directory, and never the test-only fake CLI.
+containing the release executable, LICENSE, THIRD_PARTY_NOTICES.md,
+relay.example.yml and INSTALL.md. Only the explicitly listed files are
+packaged — never the repository or the target directory, and never the
+test-only fake CLI.
 
 Used by the release-preview workflow (.github/workflows/release.yml) and by
 the local tests in scripts/test_package_release.py. Stdlib only.
@@ -32,9 +33,16 @@ SUPPORTED_TARGETS = frozenset(
     }
 )
 
-# Files copied verbatim into every archive, relative to the repo root.
-# INSTALL.md lives next to this script and is the archive install note.
-PACKAGE_FILES = ("LICENSE", "relay.example.yml", "INSTALL.md")
+# Files copied verbatim into every archive, as {archive name: source path}
+# relative to the repo root. INSTALL.md is the archive install note;
+# THIRD_PARTY_NOTICES.md carries the license notices of adapted third-party
+# content embedded in the binary (the Handy-derived built-in formatter).
+PACKAGE_FILES = {
+    "LICENSE": "LICENSE",
+    "THIRD_PARTY_NOTICES.md": "crates/formatter/THIRD_PARTY_NOTICES.md",
+    "relay.example.yml": "relay.example.yml",
+    "INSTALL.md": "scripts/INSTALL.md",
+}
 
 EXECUTABLE_MODE = 0o755
 DATA_MODE = 0o644
@@ -97,10 +105,8 @@ def package(
     members: list[tuple[Path, str, int]] = [
         (binary, executable_name(target), EXECUTABLE_MODE)
     ]
-    for name in PACKAGE_FILES:
-        source = repo_root / name
-        if name == "INSTALL.md":
-            source = repo_root / "scripts" / "INSTALL.md"
+    for name, source_name in PACKAGE_FILES.items():
+        source = repo_root / source_name
         if not source.is_file():
             raise SystemExit(f"error: packaged file missing: {source}")
         members.append((source, name, DATA_MODE))

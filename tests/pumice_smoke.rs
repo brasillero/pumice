@@ -59,6 +59,25 @@ fn run(command: &mut Command) -> Output {
         .expect("pumice binary runs")
 }
 
+/// Runs the command with `input` on stdin.
+fn run_with_stdin(command: &mut Command, input: &[u8]) -> Output {
+    use std::io::Write;
+
+    let mut child = command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("pumice binary runs");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin is piped")
+        .write_all(input)
+        .expect("write stdin");
+    child.wait_with_output().expect("reap pumice")
+}
+
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
@@ -122,6 +141,116 @@ fn unknown_command_errors_with_the_overview_and_exits_2() {
         "error line: {stderr}"
     );
     assert!(stderr.contains("usage:"), "overview follows: {stderr}");
+}
+
+#[test]
+fn format_list_runs_in_process_and_uses_the_per_user_config() {
+    let home = HermeticHome::new();
+    let dir = home.pumice_dir();
+    fs::create_dir_all(&dir).expect("create per-user config dir");
+    fs::write(
+        dir.join("notes.yml"),
+        "schema_version: 1\nid: notes\ndescription: Test\nsystem: RULES\n",
+    )
+    .expect("write definition");
+    fs::write(
+        dir.join("formatter.yml"),
+        "schema_version: 1\nformatters:\n  - path: notes.yml\ndefault: notes\n",
+    )
+    .expect("write formatter.yml");
+
+    let output = run(&mut home.command(&["format", "list"]));
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let stdout = stdout(&output);
+    assert!(
+        stdout.contains("builtin:clean"),
+        "built-ins listed: {stdout}"
+    );
+    assert!(
+        stdout.contains("notes"),
+        "configured formatters listed: {stdout}"
+    );
+    assert!(stdout.contains("yes"), "the default is marked: {stdout}");
+}
+
+#[test]
+fn format_show_builtin_prints_an_editable_definition() {
+    let home = HermeticHome::new();
+    let output = run(&mut home.command(&["format", "show", "builtin:clean"]));
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let stdout = stdout(&output);
+    assert!(stdout.contains("id: my-clean"), "placeholder id: {stdout}");
+    assert!(stdout.contains("system: |"), "{stdout}");
+}
+
+#[test]
+fn format_show_output_reloads_to_the_exact_same_definition() {
+    // The in-process entry point, like the standalone binary: `show` stdout
+    // must be a definition file that reloads to the exact same text, with no
+    // added or dropped trailing newline.
+    let home = HermeticHome::new();
+    let dir = home.pumice_dir();
+    fs::create_dir_all(&dir).expect("create per-user config dir");
+    fs::write(
+        dir.join("notes.yml"),
+        "schema_version: 1\nid: notes\ndescription: Test\nsystem: \"Rule\\n\\n\"\n",
+    )
+    .expect("write definition");
+    fs::write(
+        dir.join("formatter.yml"),
+        "schema_version: 1\nformatters:\n  - path: notes.yml\n",
+    )
+    .expect("write formatter.yml");
+
+    let output = run(&mut home.command(&["format", "show", "notes"]));
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let tmp = TempDir::new().expect("temp dir");
+    let path = tmp.path().join("show.yml");
+    fs::write(&path, &output.stdout).expect("write show output");
+    let loaded =
+        pumice_formatter::load_definition_file(&path).expect("show output is a definition");
+    assert_eq!(loaded.id, "notes");
+    assert_eq!(loaded.system, "Rule\n\n");
+}
+
+#[test]
+fn format_apply_transforms_a_request_and_names_the_program_in_errors() {
+    let home = HermeticHome::new();
+    let request =
+        br#"{"model":"claude","messages":[{"role":"user","content":"hi"}],"stream":false}"#;
+    let output = run_with_stdin(
+        &mut home.command(&["format", "apply", "--formatter", "builtin:clean"]),
+        request,
+    );
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let transformed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(transformed["messages"][0]["role"], "system");
+    assert_eq!(transformed["messages"][1]["content"], "hi");
+
+    // The in-process CLI shows `pumice format` as its program name.
+    let help = run(&mut home.command(&["format", "--help"]));
+    assert_eq!(help.status.code(), Some(0));
+    assert!(
+        stdout(&help).contains("pumice format"),
+        "help names the program: {}",
+        stdout(&help)
+    );
+    let bad = run(&mut home.command(&["format", "show", "missing", "--json"]));
+    assert_eq!(bad.status.code(), Some(2));
+    let envelope: serde_json::Value = serde_json::from_slice(&bad.stdout).unwrap();
+    assert_eq!(envelope["error"]["code"], "formatter_not_found");
+}
+
+#[test]
+fn the_overview_lists_the_format_command() {
+    let home = HermeticHome::new();
+    let output = run(&mut home.command(&[]));
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("pumice format"),
+        "overview lists the format subcommand: {}",
+        stderr(&output)
+    );
 }
 
 #[test]

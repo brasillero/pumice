@@ -1,7 +1,7 @@
 //! `pumice` command dispatch: the orchestrator entry point hands each
-//! subcommand to its module. The relay runs in-process from its library
-//! (staying inside this single executable); transcription runs as the
-//! `pumice-transcribe` program installed next to this executable.
+//! subcommand to its module. The relay and the formatter run in-process from
+//! their libraries (staying inside this single executable); transcription
+//! runs as the `pumice-transcribe` program installed next to this executable.
 //!
 //! On Unix `pumice transcribe` replaces itself with the sibling program
 //! (`CommandExt::exec`), so arguments (as `OsString`), signals and the exit
@@ -23,12 +23,16 @@ usage:
   pumice relay serve                           alias for the command above
   pumice relay check-config [--config <path>]  validate and summarize the relay configuration
   pumice relay doctor [--config <path>]        show which provider CLIs are installed
+  pumice format list [--config <path>]         list formatters (built-ins and configured)
+  pumice format show <id> [--config <path>]    print one formatter definition
+  pumice format apply [--formatter <id>]       insert a formatter's rules into one chat request
+  pumice format check-config [--config <path>] validate the formatter configuration
   pumice transcribe [ARGS…]                    run the transcription module installed next to pumice
   pumice --help                                print this help
   pumice --version                             print the version
 
-The relay's own options (and transcription's) are documented under
-`pumice relay --help` and `pumice transcribe --help`.
+The modules' own options are documented under `pumice relay --help`,
+`pumice format --help` and `pumice transcribe --help`.
 ";
 
 pub fn run() -> ExitCode {
@@ -45,6 +49,7 @@ pub fn run() -> ExitCode {
             ExitCode::SUCCESS
         }
         [command, rest @ ..] if command == "relay" => relay(rest),
+        [command, rest @ ..] if command == "format" => format(rest),
         [command, rest @ ..] if command == "transcribe" => transcribe(rest),
         [] => {
             // Bare `pumice` is the future orchestrator; until the stack
@@ -65,6 +70,13 @@ pub fn run() -> ExitCode {
 /// standalone `pumice-relay` binary; a bare `relay` starts the service.
 fn relay(args: &[OsString]) -> ExitCode {
     pumice_relay::cli::run_with("pumice relay", args.iter().cloned())
+}
+
+/// Runs the formatter CLI in-process with the same argument handling as the
+/// standalone `pumice-format` binary (arch-modules/D13); the program name in
+/// help and errors is `pumice format`.
+fn format(args: &[OsString]) -> ExitCode {
+    pumice_formatter::cli::run_with("pumice format", args.iter().cloned())
 }
 
 #[cfg(unix)]
