@@ -1434,6 +1434,40 @@ fn the_relay_stage_cap_shortens_the_provider_call() {
     assert!(envelope.get("result").is_none());
 }
 
+#[test]
+fn a_relay_timeout_at_the_overall_budget_is_a_flow_timeout() {
+    // Total 3.3 s with the default stage caps: the overall budget (0.8 s of
+    // work after the 2.5 s reserve) is what limits the stalled provider,
+    // even though the pipeline's response reserve fires it shortly before
+    // the work deadline.
+    let rig = make_rig(&Script {
+        fake: json!({
+            "stdout": claude_envelope(false, "too late"),
+            "exit_code": 0,
+            "sleep_ms": 30_000,
+        }),
+        flows: "  - id: clean
+    enabled: true
+    transcription_model: turbo
+    formatter: builtin:clean
+    relay_route: claude
+    budgets_ms:
+      total: 3300
+"
+        .to_owned(),
+        ..Script::default()
+    });
+    let started = std::time::Instant::now();
+    let (output, envelope) = rig.run_json("clean");
+    assert_failure(&output, &envelope, 1, "flow_timeout", "relay");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(15),
+        "the sleeping provider was cut short"
+    );
+    assert_eq!(rig.fake_calls(), 1, "the provider did start");
+    assert_eq!(envelope["transcript"]["text"], RAW);
+}
+
 // --- Cancellation: Ctrl-C and SIGTERM reap every child -----------------------
 
 /// Spawns `pumice run --json` for the rig's flow and returns the child.

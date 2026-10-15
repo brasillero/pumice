@@ -78,11 +78,17 @@ pub fn build_request(
 
 /// Maps the pipeline outcome to the flow result or a relay-stage error.
 /// `now` and `work_deadline` classify a spent overall flow budget as
-/// `flow_timeout` rather than a relay timeout (p12-pumice-run/D2).
+/// `flow_timeout` rather than a relay timeout (p12-pumice-run/D2);
+/// `flow_owned_deadline` is whether the deadline handed to the pipeline was
+/// the flow's work deadline, so a timeout the pipeline reports as bound by
+/// its caller ([`FormatOutcome::caller_deadline_bound`]) maps to
+/// `flow_timeout` even though the pipeline's response reserve makes it fire
+/// shortly before `work_deadline`.
 pub fn map_outcome(
     outcome: FormatOutcome,
     now: Instant,
     work_deadline: Instant,
+    flow_owned_deadline: bool,
 ) -> Result<String, StageError> {
     match outcome.kind {
         OutcomeKind::Formatted | OutcomeKind::Passthrough | OutcomeKind::Empty => Ok(outcome.text),
@@ -102,7 +108,11 @@ pub fn map_outcome(
         )),
         OutcomeKind::Raw(RawReason::BudgetExhausted)
         | OutcomeKind::Raw(RawReason::ProviderFailed(ProviderError::Timeout)) => {
-            Err(timeout_error(now, work_deadline))
+            Err(timeout_error(
+                now,
+                work_deadline,
+                outcome.caller_deadline_bound && flow_owned_deadline,
+            ))
         }
         OutcomeKind::Raw(RawReason::ProviderFailed(kind)) => Err(provider_error(kind)),
         OutcomeKind::Raw(RawReason::CleanupFailed(_)) => Err(StageError::new(
@@ -142,7 +152,19 @@ pub fn timeout_error_at(
     }
 }
 
-fn timeout_error(now: Instant, work_deadline: Instant) -> StageError {
+/// A relay-stage timeout: `flow_timeout` when the overall flow budget was
+/// the binding limit — either already spent now, or reported by the pipeline
+/// as the caller-bound deadline it enforced (which fires one response
+/// reserve before `work_deadline`) — and `relay_timeout` otherwise.
+fn timeout_error(now: Instant, work_deadline: Instant, caller_bound_flow: bool) -> StageError {
+    if caller_bound_flow {
+        return StageError::new(
+            stage::RELAY,
+            "flow_timeout",
+            "the flow's total budget is exhausted",
+            1,
+        );
+    }
     timeout_error_at(
         stage::RELAY,
         "relay_timeout",

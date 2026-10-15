@@ -630,7 +630,11 @@ impl Execution<'_> {
         };
 
         let now = Instant::now();
-        let result = relay_stage::map_outcome(outcome, now, prepared.work_deadline);
+        // Whether the deadline handed to the pipeline is the flow's work
+        // deadline: then a caller-bound timeout is the overall budget firing.
+        let flow_owned_deadline = deadline == prepared.work_deadline;
+        let result =
+            relay_stage::map_outcome(outcome, now, prepared.work_deadline, flow_owned_deadline);
         match result {
             // Never accept a success that lands past the stage deadline.
             Ok(_) if now >= deadline => Err(relay_stage::timeout_error_at(
