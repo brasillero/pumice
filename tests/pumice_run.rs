@@ -913,11 +913,15 @@ fn a_symlinked_pumice_finds_the_sibling_next_to_the_real_executable() {
     fs::create_dir_all(&launcher).unwrap();
     std::os::unix::fs::symlink(rig.pumice(), launcher.join(exe("pumice"))).unwrap();
 
-    // A non-UTF-8 audio path survives the whole way to the sibling.
-    let weird = rig
-        .keep
-        .path()
-        .join(std::ffi::OsStr::from_bytes(b"audio-\xff.wav"));
+    // A non-UTF-8 audio path survives the whole way to the sibling. macOS
+    // file systems refuse non-UTF-8 names (EILSEQ), so there it is a
+    // non-ASCII UTF-8 name without a Unicode decomposition instead.
+    let name: &[u8] = if cfg!(target_os = "macos") {
+        b"audio-\xe2\x80\x94.wav"
+    } else {
+        b"audio-\xff.wav"
+    };
+    let weird = rig.keep.path().join(std::ffi::OsStr::from_bytes(name));
     fs::write(&weird, b"RIFF fake").unwrap();
     let audio_arg = rig.keep.path().join("audio-arg.bin");
     let mut scenario: Value = serde_json::from_slice(
@@ -1728,7 +1732,8 @@ fn an_argument_error_with_a_broken_stdout_exits_1() {
     assert_eq!(status.code(), Some(1));
 }
 
-#[cfg(unix)]
+// Not on macOS: its file systems refuse non-UTF-8 file names (EILSEQ).
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn a_non_utf8_config_path_still_gets_a_valid_envelope() {
     // A config file name with a non-UTF-8 byte and invalid contents: the

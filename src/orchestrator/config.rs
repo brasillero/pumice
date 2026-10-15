@@ -1193,7 +1193,9 @@ flows:
 
     #[test]
     fn per_user_path_platform_rules() {
-        let xdg = std::env::temp_dir().join("xdg-orch");
+        // Unix rules are checked on the text, so the base must be a Unix
+        // path on every host (a Windows temp dir is not absolute here).
+        let xdg = PathBuf::from("/tmp/xdg-orch");
         let xdg_value = xdg.clone().into_os_string();
         let path = per_user_config_path_for(
             &|key| (key == "XDG_CONFIG_HOME").then(|| xdg_value.clone()),
