@@ -84,3 +84,18 @@ via `opus`/`opusic-sys`) and read WebM with
 [webm-iterable](https://github.com/austinleroy/webm-iterable) (MIT, with
 ebml-iterable, MIT). Binaries that include them must ship the libopus
 BSD-3-Clause notice and the MIT licenses of webm-iterable/ebml-iterable.
+
+`models download` uses [ureq](https://github.com/algesten/ureq) (MIT OR
+Apache-2.0) as its blocking HTTP client, with TLS from
+[rustls](https://github.com/rustls/rustls) (Apache-2.0 OR ISC OR MIT) whose
+crypto provider is [ring](https://github.com/briansmith/ring)
+(Apache-2.0 AND ISC). ring compiles some C and assembly through `cc`, so
+building this crate needs a C toolchain on every platform; the stock GitHub
+Actions runners (Windows, macOS, Linux) already provide one. WebPKI roots
+ship via [webpki-roots](https://github.com/rustls/webpki-roots)
+(CDLA-Permissive-2.0). SHA-256 comes from
+[sha2](https://github.com/RustCrypto/hashes) (MIT OR Apache-2.0, pure Rust)
+and the per-model download lock from
+[fd-lock](https://github.com/yoshuawuyts/fd-lock) (MIT OR Apache-2.0; rustix
+on Unix, windows-sys on Windows). These dependencies are only compiled into
+`pumice-transcribe`, never into the `pumice` core.
