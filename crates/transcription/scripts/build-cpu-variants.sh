@@ -30,24 +30,40 @@ export CARGO_TARGET_DIR="$target_dir"
 export TRANSCRIBE_CMAKE_ARGS="-DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF"
 
 echo "building pumice-transcribe (cpu-variants, $profile) in $target_dir"
+json_log="$target_dir/cargo-build.json"
 if [ "$profile" = release ]; then
-    timeout 1200 cargo build --release -p pumice-transcription --features cpu-variants --locked
+    timeout 1200 cargo build --release -p pumice-transcription --features cpu-variants \
+        --locked --message-format=json > "$json_log"
 else
-    timeout 1200 cargo build -p pumice-transcription --features cpu-variants --locked
+    timeout 1200 cargo build -p pumice-transcription --features cpu-variants \
+        --locked --message-format=json > "$json_log"
 fi
 
 bin="$target_dir/$profile/pumice-transcribe"
-sys_out=""
-for out in "$target_dir/$profile/build"/transcribe-cpp-sys-*/out; do
-    if ls "$out"/lib/libggml-cpu-*.so >/dev/null 2>&1; then
-        sys_out="$out"
-        break
-    fi
-done
+# Stage ONLY the build-script output directory of this build: several cached
+# transcribe-cpp-sys-<hash>/out directories can coexist after toolchain or
+# dependency changes, and picking the wrong one pairs the fresh executable
+# with stale native libraries. The build-script-executed messages of the
+# build we just ran name the exact out_dir Cargo used.
+sys_out="$(jq -rs '
+    [.[] | select(.reason == "build-script-executed")
+          | select(.package_id | contains("transcribe-cpp-sys"))]
+    | last | .out_dir // empty
+' "$json_log")"
 if [ -z "$sys_out" ]; then
-    echo "error: no transcribe-cpp-sys build output with CPU variant modules found" >&2
+    echo "error: no transcribe-cpp-sys build-script output in the current build" >&2
     exit 1
 fi
+echo "staging native libraries from $sys_out"
+
+# Validate the staged set before copying: the executable plus an incomplete
+# or mismatched library set fails at startup, not here.
+for lib in libtranscribe.so libggml.so libggml-base.so libggml-cpu-x64.so; do
+    if ! ls "$sys_out"/lib/"$lib"* >/dev/null 2>&1; then
+        echo "error: expected library $lib* missing from $sys_out/lib" >&2
+        exit 1
+    fi
+done
 
 rm -rf "$stage_dir"
 mkdir -p "$stage_dir"
