@@ -2,7 +2,7 @@
 //! then the shared packet decoder. Vorbis and other Ogg codecs never reach
 //! this module.
 
-use super::{OpusHead, OpusPacket, decode_packets};
+use super::{OpusHead, OpusPacket, decode_packets, packet_frames};
 use crate::audio::{DecodedAudio, map_symphonia_error};
 use crate::engine::CancelToken;
 use crate::{Error, ErrorCode};
@@ -92,9 +92,11 @@ fn validate_pages(bytes: &[u8]) -> Result<PageValidation, Error> {
     let mut expected_seq = 0u32;
     let mut seen_bos = false;
     let mut seen_eos = false;
-    let mut prev_granule = 0i64;
+    let mut final_granule = 0i64;
+    let mut decoded_so_far = 0u64;
     let mut packets = 0usize;
     let mut packet_open = false;
+    let mut current: Vec<u8> = Vec::new();
 
     while offset < bytes.len() {
         let available = bytes.len() - offset;
@@ -174,7 +176,11 @@ fn validate_pages(bytes: &[u8]) -> Result<PageValidation, Error> {
         if continued != packet_open {
             return Err(Error::invalid_input("ogg packet continuation mismatch"));
         }
-        packet_open = lacing.last() == Some(&255);
+        // A page with no lacing values neither completes nor opens anything:
+        // the open-packet state must survive it unchanged.
+        if segment_count > 0 {
+            packet_open = lacing.last() == Some(&255);
+        }
         if eos {
             if packet_open {
                 return Err(Error::invalid_input("ogg stream ends mid-packet"));
@@ -182,31 +188,83 @@ fn validate_pages(bytes: &[u8]) -> Result<PageValidation, Error> {
             seen_eos = true;
         }
 
-        let completes_packet = !packet_open;
-        if completes_packet {
-            packets = packets
-                .checked_add(lacing.iter().filter(|&&v| v < 255).count())
-                .ok_or_else(|| Error::invalid_input("ogg packet count overflow"))?;
+        // Assemble the packets this page completes. Every lacing value below
+        // 255 closes a packet, regardless of whether the page ends with an
+        // open one; a page may complete several packets and then begin a
+        // continuation. RFC 7845 fixes the two header packets (OpusHead,
+        // OpusTags), so everything after them is an audio packet whose Opus
+        // duration feeds the granule checks below.
+        let body = &header[HEADER_LEN + segment_count..page_len];
+        let mut pos = 0usize;
+        let mut completed_any = false;
+        let mut audio_on_page = false;
+        let mut decoded_on_page = 0u64;
+        for &lace in lacing {
+            let take = usize::from(lace).min(body.len() - pos);
+            current.extend_from_slice(&body[pos..pos + take]);
+            pos += take;
+            if lace < 255 {
+                completed_any = true;
+                packets = packets
+                    .checked_add(1)
+                    .ok_or_else(|| Error::invalid_input("ogg packet count overflow"))?;
+                if packets > 2 {
+                    // An audio packet: its duration counts toward this page's
+                    // granule position.
+                    let duration = packet_frames(&current)?;
+                    decoded_on_page = decoded_on_page
+                        .checked_add(duration as u64)
+                        .ok_or_else(|| Error::invalid_input("ogg granule position overflow"))?;
+                    audio_on_page = true;
+                }
+                current.clear();
+            }
         }
-        if granule == -1 {
-            if completes_packet {
-                return Err(Error::invalid_input(
-                    "ogg page is missing its granule position",
-                ));
+
+        // Granule semantics, per RFC 7845 section 4: the granule position of
+        // an audio page is the number of decoded 48 kHz samples (the pre-skip
+        // region is decoded, so it is included) cumulated over the packets
+        // completed so far, minus any end trim, which appears only on the
+        // final EOS page.
+        if !completed_any {
+            // The page completes no packet: it must not claim a position.
+            if granule != -1 {
+                return Err(Error::invalid_input("ogg page granule without a completed packet"));
             }
-        } else {
-            if granule < 0 {
-                return Err(Error::invalid_input("invalid ogg granule position"));
-            }
-            if expected_seq == 1 && granule != 0 {
+        } else if !audio_on_page {
+            // A header page (OpusHead or OpusTags): the granule must be 0.
+            // A nonzero value describes a stream cropped before encoding.
+            if granule != 0 {
                 return Err(Error::unsupported_format(
                     "cropped ogg streams are not supported",
                 ));
             }
-            if granule < prev_granule {
-                return Err(Error::invalid_input("ogg granule position moved backwards"));
+        } else if granule == -1 {
+            return Err(Error::invalid_input(
+                "ogg audio page is missing its granule position",
+            ));
+        } else {
+            let decoded_before = decoded_so_far;
+            let page_end = decoded_before
+                .checked_add(decoded_on_page)
+                .ok_or_else(|| Error::invalid_input("ogg granule position overflow"))?;
+            if eos {
+                // End trim is allowed only on the EOS page, and it may not
+                // reach back past the packets completed before this page.
+                if granule < decoded_before as i64 || granule > page_end as i64 {
+                    return Err(Error::invalid_input(
+                        "ogg end trim exceeds the samples decoded on the final page",
+                    ));
+                }
+            } else if granule != page_end as i64 {
+                return Err(Error::invalid_input(
+                    "ogg granule position does not match the completed packet durations",
+                ));
             }
-            prev_granule = granule;
+            decoded_so_far = page_end;
+        }
+        if granule != -1 {
+            final_granule = granule;
         }
 
         offset = offset
@@ -219,7 +277,7 @@ fn validate_pages(bytes: &[u8]) -> Result<PageValidation, Error> {
     }
     Ok(PageValidation {
         packets,
-        final_granule: prev_granule,
+        final_granule,
     })
 }
 
@@ -308,7 +366,7 @@ pub(crate) fn decode_ogg_opus(bytes: Vec<u8>, cancel: &CancelToken) -> Result<De
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::opus::tests::fixture;
+    use crate::opus::tests::{fixture, ogg_packets};
 
     fn opus_fixture() -> Vec<u8> {
         fixture("sample-pt-48k.opus")
@@ -602,5 +660,143 @@ mod tests {
         let bytes = repeated_packet_ogg(6_001);
         let err = decode_ogg_opus(bytes, &CancelToken::new()).unwrap_err();
         assert_eq!(err.code, ErrorCode::AudioTooLong);
+    }
+
+    /// Header pages for the continuation tests: BOS page with OpusHead, then
+    /// a tags page, matching RFC 7845 section 3.
+    fn header_pages(packets: &[Box<[u8]>]) -> Vec<u8> {
+        let mut bytes = page(0, FLAG_BOS, 0, &packet_laces(&[&packets[0]]), &packets[0]);
+        bytes.extend(page(1, 0, 0, &packet_laces(&[&packets[1]]), &packets[1]));
+        bytes
+    }
+
+    #[test]
+    fn continued_audio_page_is_valid() {
+        // A page completes one 20 ms packet and begins the next, which
+        // completes on the EOS page. Review case ogg-continued-audio.opus.
+        let packets = ogg_packets(&opus_fixture());
+        let first = &packets[2];
+        let big = packets[2..]
+            .iter()
+            .find(|p| p.len() > 255)
+            .expect("fixture has an audio packet larger than 255 bytes");
+
+        let mut bytes = header_pages(&packets);
+        let mut payload = first.to_vec();
+        payload.extend_from_slice(&big[..255]);
+        bytes.extend(page(2, 0, 960, &[first.len() as u8, 255], &payload));
+        bytes.extend(page(
+            3,
+            FLAG_CONTINUED | FLAG_EOS,
+            1920,
+            &[(big.len() - 255) as u8],
+            &big[255..],
+        ));
+        let validation = validate_pages(&bytes).unwrap();
+        assert_eq!(validation.packets, 4);
+        let decoded = decode_ogg_opus(bytes, &CancelToken::new()).unwrap();
+        assert_eq!(decoded.samples.len(), 1_608);
+    }
+
+    #[test]
+    fn continued_tags_and_empty_page_are_valid() {
+        // The tags packet spans two pages, and an empty page sits between
+        // the two halves of a split audio packet; open-packet state must
+        // survive both. Review case ogg-continued-tags.opus plus an
+        // empty-page variant.
+        let packets = ogg_packets(&opus_fixture());
+        let first = &packets[2];
+        let big = packets[2..]
+            .iter()
+            .find(|p| p.len() > 255)
+            .expect("fixture has an audio packet larger than 255 bytes");
+        let mut tags = packets[1].to_vec();
+        tags.extend(std::iter::repeat_n(0, 300));
+
+        let mut bytes = page(0, FLAG_BOS, 0, &packet_laces(&[&packets[0]]), &packets[0]);
+        // Tags: opened on page 1, completed on page 2 (a header page, so its
+        // granule is 0).
+        bytes.extend(page(1, 0, -1, &[255], &tags[..255]));
+        bytes.extend(page(
+            2,
+            FLAG_CONTINUED,
+            0,
+            &[(tags.len() - 255) as u8],
+            &tags[255..],
+        ));
+        // Audio: page 3 completes one packet and opens the big one; page 4
+        // is empty (no packet completes, granule -1, state unchanged); page 5
+        // completes the big one.
+        let mut payload = first.to_vec();
+        payload.extend_from_slice(&big[..255]);
+        bytes.extend(page(3, 0, 960, &[first.len() as u8, 255], &payload));
+        bytes.extend(page(4, FLAG_CONTINUED, -1, &[], &[]));
+        bytes.extend(page(
+            5,
+            FLAG_CONTINUED | FLAG_EOS,
+            1920,
+            &[(big.len() - 255) as u8],
+            &big[255..],
+        ));
+        let decoded = decode_ogg_opus(bytes, &CancelToken::new()).unwrap();
+        assert_eq!(decoded.samples.len(), 1_608);
+    }
+
+    #[test]
+    fn rejects_crc_consistent_granule_mutations() {
+        // The tags completion page must have granule 0 (a nonzero value is a
+        // cropped stream). Review case granule-page1.opus.
+        let mut bytes = opus_fixture();
+        let offsets = page_offsets(&bytes);
+        bytes[offsets[1] + 6..offsets[1] + 14].copy_from_slice(&10i64.to_le_bytes());
+        fix_crcs(&mut bytes, offsets[1]);
+        assert_eq!(err_code(&bytes), ErrorCode::UnsupportedFormat);
+
+        // A first non-EOS audio page granule below, or above, the samples its
+        // completed packets decode to is impossible. Review cases
+        // granule-page2.opus (0), ogg-firstaudio-small.opus (1) and
+        // ogg-firstaudio-plus.opus (50000).
+        for granule in [0i64, 1, 50_000] {
+            let mut bytes = opus_fixture();
+            let offsets = page_offsets(&bytes);
+            bytes[offsets[2] + 6..offsets[2] + 14].copy_from_slice(&granule.to_le_bytes());
+            fix_crcs(&mut bytes, offsets[2]);
+            assert_eq!(err_code(&bytes), ErrorCode::InvalidInput, "granule {granule}");
+        }
+
+        // The same equality rule applies to every intermediate audio page:
+        // setting page 4's granule back to page 3's value is impossible.
+        let mut bytes = opus_fixture();
+        let offsets = page_offsets(&bytes);
+        bytes[offsets[3] + 6..offsets[3] + 14].copy_from_slice(&48_000i64.to_le_bytes());
+        fix_crcs(&mut bytes, offsets[3]);
+        assert_eq!(err_code(&bytes), ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn eos_end_trim_within_the_final_page_is_valid() {
+        // End trim shorter than one packet, and an end trim reaching back a
+        // whole packet: both are allowed on the EOS page. Review cases
+        // ogg-short-tail.opus (488 output samples) and
+        // ogg-eos-trim-whole-packet.opus (1188).
+        let packets = ogg_packets(&opus_fixture());
+
+        let mut bytes = header_pages(&packets);
+        bytes.extend(page(
+            2,
+            FLAG_EOS,
+            800,
+            &packet_laces(&[&packets[2]]),
+            &packets[2],
+        ));
+        let decoded = decode_ogg_opus(bytes, &CancelToken::new()).unwrap();
+        assert_eq!(decoded.samples.len(), 488);
+
+        let mut bytes = header_pages(&packets);
+        let mut payload = packets[2].to_vec();
+        payload.extend_from_slice(&packets[3]);
+        bytes.extend(page(2, FLAG_EOS, 1500, &packet_laces(&[&packets[2], &packets[3]]), &payload));
+        let decoded = decode_ogg_opus(bytes, &CancelToken::new()).unwrap();
+        assert_eq!(decoded.samples.len(), 1_188);
     }
 }

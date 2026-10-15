@@ -169,7 +169,8 @@ pub(crate) fn decode_packets(
         if cancel.is_cancelled() {
             return Err(Error::cancelled());
         }
-        let frames = packet_frames(&packet.data)?;
+        // Validate the declared duration before any decode buffer is used.
+        packet_frames(&packet.data)?;
         // Decode into a fixed buffer; `decode_float` returns whole frames and
         // never writes past the buffer. FEC is off and empty input never
         // reaches libopus, so no packet-loss concealment can run.
