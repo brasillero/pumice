@@ -107,7 +107,33 @@ pub async fn execute(
     operation_id: String,
     events: Option<&mut EventWriter>,
 ) -> RunOutput {
-    let (cancel, cancel_task) = cancel::install();
+    let mut events = events;
+    // The signal handlers go in before anything is prepared or spawned; a
+    // registration failure stops the run before it starts.
+    let (cancel, cancel_task) = match cancel::install() {
+        Ok(installed) => installed,
+        Err(_) => {
+            let error = StageError::new(
+                stage::PREPARE,
+                "internal",
+                "the cancellation signal handlers could not be registered",
+                1,
+            );
+            if let Some(events) = events.as_mut() {
+                events.emit(None, event::STARTED, None, None);
+                events.emit(None, event::FINISHED, Some(0), Some(error.code));
+            }
+            return RunOutput {
+                operation_id,
+                flow: Some(params.flow.clone()),
+                transcript: None,
+                result: None,
+                stages: StageReports::default(),
+                total: Duration::ZERO,
+                error: Some(error),
+            };
+        }
+    };
     let mut execution = Execution {
         params,
         events,

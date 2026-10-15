@@ -1553,6 +1553,34 @@ fn sigterm_during_transcription_exits_143() {
 
 #[cfg(unix)]
 #[test]
+fn a_signal_right_after_the_started_event_is_handled() {
+    // The handlers are registered before the `started` event: a SIGTERM the
+    // moment it appears gets the envelope and exit 143, never the default
+    // signal death.
+    use std::io::BufRead;
+
+    let mut script = Script::default();
+    script.stub["file"] = json!({"sleep_ms": 30_000, "exit_code": 0});
+    let rig = make_rig(&script);
+    let mut child = spawn_run(&rig, "clean");
+    let mut stderr = std::io::BufReader::new(child.stderr.take().expect("stderr"));
+    let mut first = String::new();
+    stderr.read_line(&mut first).expect("read the first event");
+    let event: Value = serde_json::from_str(&first).expect("an event");
+    assert_eq!(event["event"], "started", "{first}");
+    send_signal(child.id(), libc::SIGTERM);
+
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut stderr, &mut rest).expect("drain stderr");
+    let output = child.wait_with_output().expect("reap pumice run");
+    assert_eq!(output.status.code(), Some(143), "{first}{rest}");
+    let envelope = one_json_document(&output);
+    assert_eq!(envelope["error"]["code"], "cancelled");
+    assert!(!rest.contains("S3NT1NEL"));
+}
+
+#[cfg(unix)]
+#[test]
 fn ctrl_c_during_the_provider_call_kills_and_reaps_the_tree() {
     let rig = make_rig(&Script {
         fake: json!({
