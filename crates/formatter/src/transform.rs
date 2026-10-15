@@ -6,8 +6,10 @@
 //! `developer` message, and changes nothing else. It works on the raw
 //! request text: every value the client sent — numbers of any size or
 //! precision, key order, string escapes, unknown members — is re-emitted
-//! byte for byte from the input; only whitespace between top-level members
-//! and between `messages` elements may differ. If the request carries
+//! byte for byte from the input; top-level key names are re-serialized in
+//! normalized form (escape sequences are canonicalized), and only
+//! whitespace between top-level members and between `messages` elements
+//! may differ. If the request carries
 //! non-empty `system`/`developer` instructions *anywhere* in the
 //! conversation — not just in the leading run — the default policy refuses
 //! with [`ErrorCode::FormatterInstructionConflict`]; [`ConflictPolicy::Append`]
@@ -16,9 +18,10 @@
 //! modified.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 use serde::Deserialize;
-use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde_json::value::RawValue;
 
 use crate::definition::FormatterDefinition;
@@ -50,10 +53,12 @@ impl std::fmt::Display for ConflictPolicy {
 ///
 /// The input must be a JSON object with a `messages` array whose entries are
 /// objects with a string `role`; nothing else is required or rewritten. The
-/// result differs from the input only by the inserted message and by
-/// whitespace between top-level members and between `messages` elements:
-/// every value is re-emitted byte for byte ([`RawValue`]), so numbers of any
-/// size or precision, key order and string escapes survive untouched.
+/// result differs from the input only by the inserted message, by
+/// whitespace between top-level members and between `messages` elements,
+/// and by the normalization of top-level key names: every value is
+/// re-emitted byte for byte ([`RawValue`]), so numbers of any size or
+/// precision, key order and string escapes survive untouched. Error
+/// messages never quote request text (dictated content).
 pub fn apply(
     request: &str,
     formatter: &FormatterDefinition,
@@ -65,17 +70,26 @@ pub fn apply(
     if !trimmed.is_empty() && !trimmed.starts_with('{') {
         return Err(Error::invalid_input("the request must be a JSON object"));
     }
-    let TopLevel(entries) = serde_json::from_str::<TopLevel>(request)
-        .map_err(|err| Error::invalid_input(format!("the request is not valid JSON: {err}")))?;
+    // Only the position is reported, never serde's message: error text must
+    // not carry client-controlled strings.
+    let TopLevel(entries) = serde_json::from_str::<TopLevel>(request).map_err(|err| {
+        Error::invalid_input(format!(
+            "the request is not valid JSON (line {}, column {})",
+            err.line(),
+            err.column()
+        ))
+    })?;
 
     // The relay rejects duplicate struct fields (serde's "duplicate field"
     // error becomes its HTTP 400), so the formatter refuses repeated
-    // top-level members too instead of silently keeping one of them.
-    for (index, (key, _)) in entries.iter().enumerate() {
-        if entries[..index].iter().any(|(earlier, _)| earlier == key) {
-            return Err(Error::invalid_input(format!(
-                "the request repeats the top-level member \"{key}\""
-            )));
+    // top-level members too instead of silently keeping one of them. The
+    // key itself is client-controlled, so the error does not name it.
+    let mut seen = HashSet::with_capacity(entries.len());
+    for (key, _) in &entries {
+        if !seen.insert(key.as_str()) {
+            return Err(Error::invalid_input(
+                "the request repeats a top-level member; duplicate keys are rejected",
+            ));
         }
     }
 
@@ -95,11 +109,17 @@ pub fn apply(
 
     let mut probes = Vec::with_capacity(messages.len());
     for (index, message) in messages.iter().enumerate() {
-        let probe = serde_json::from_str::<MessageProbe>(message.get()).map_err(|_| {
+        // A derived struct would also accept positional arrays
+        // (`["user","hi"]`); each message must be a JSON object.
+        let malformed = || {
             Error::invalid_input(format!(
                 "message {index} must be an object with a string \"role\""
             ))
-        })?;
+        };
+        if !starts_with_object(message.get()) {
+            return Err(malformed());
+        }
+        let probe = serde_json::from_str::<MessageProbe>(message.get()).map_err(|_| malformed())?;
         probes.push(probe);
     }
 
@@ -195,14 +215,20 @@ impl<'de> Deserialize<'de> for TopLevel {
     }
 }
 
-/// The only fields `apply` needs from a message: its `role` and whether its
-/// `content` carries instructions. Everything else stays in the raw bytes.
+/// True when `raw` starts with `{` after any whitespace: a JSON object.
+fn starts_with_object(raw: &str) -> bool {
+    raw.trim_start_matches([' ', '\t', '\n', '\r'])
+        .starts_with('{')
+}
+
+/// The only fields `apply` needs from a message: its `role` and its raw
+/// `content`. Everything else stays in the raw bytes.
 #[derive(Deserialize)]
 struct MessageProbe<'a> {
     #[serde(borrow)]
     role: Cow<'a, str>,
     #[serde(default)]
-    content: Option<ContentProbe>,
+    content: Option<Box<RawValue>>,
 }
 
 impl MessageProbe<'_> {
@@ -213,92 +239,34 @@ impl MessageProbe<'_> {
     }
 
     /// True when the message carries content worth protecting: a
-    /// non-whitespace string or a non-empty array. Absent, null, empty-string
-    /// and empty-array content does not conflict.
+    /// non-whitespace string, a non-empty array or any other value. Absent,
+    /// null, empty-string and empty-array content does not conflict.
     fn content_present(&self) -> bool {
-        matches!(self.content, Some(ContentProbe::Present))
+        self.content
+            .as_deref()
+            .is_some_and(|raw| content_present(raw.get()))
     }
 }
 
-/// Whether one `content` value is worth protecting, probed without
-/// materializing it: non-blank text, non-empty arrays and any other value
-/// conflict; blank text and empty arrays do not. `null` never reaches this
-/// type (`Option` absorbs it as absent).
-enum ContentProbe {
-    Blank,
-    Present,
-}
-
-impl<'de> Deserialize<'de> for ContentProbe {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct ContentVisitor;
-        impl<'de> Visitor<'de> for ContentVisitor {
-            type Value = ContentProbe;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("message content")
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<ContentProbe, E> {
-                Ok(if value.trim().is_empty() {
-                    ContentProbe::Blank
-                } else {
-                    ContentProbe::Present
-                })
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> Result<ContentProbe, A::Error>
-            where
-                A: SeqAccess<'de>,
-            {
-                // An array conflicts when it holds any element at all.
-                if seq.next_element::<IgnoredAny>()?.is_none() {
-                    return Ok(ContentProbe::Blank);
-                }
-                while seq.next_element::<IgnoredAny>()?.is_some() {}
-                Ok(ContentProbe::Present)
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<ContentProbe, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
-                Ok(ContentProbe::Present)
-            }
-
-            fn visit_bool<E>(self, _: bool) -> Result<ContentProbe, E> {
-                Ok(ContentProbe::Present)
-            }
-
-            fn visit_i64<E>(self, _: i64) -> Result<ContentProbe, E> {
-                Ok(ContentProbe::Present)
-            }
-
-            fn visit_i128<E>(self, _: i128) -> Result<ContentProbe, E> {
-                Ok(ContentProbe::Present)
-            }
-
-            fn visit_u64<E>(self, _: u64) -> Result<ContentProbe, E> {
-                Ok(ContentProbe::Present)
-            }
-
-            fn visit_u128<E>(self, _: u128) -> Result<ContentProbe, E> {
-                Ok(ContentProbe::Present)
-            }
-
-            fn visit_f64<E>(self, _: f64) -> Result<ContentProbe, E> {
-                Ok(ContentProbe::Present)
-            }
-
-            fn visit_unit<E>(self) -> Result<ContentProbe, E> {
-                Ok(ContentProbe::Blank)
-            }
-        }
-        deserializer.deserialize_any(ContentVisitor)
+/// Whether one raw `content` value is worth protecting, classified from its
+/// first byte so numbers are never converted (serde_json's `deserialize_any`
+/// turns `1e400` into an f64 overflow error, which would surface as a
+/// misleading "message must be an object" failure): strings conflict unless
+/// blank, arrays unless empty, `null` never (the `Option` usually absorbs it
+/// as absent first), every other value — objects, booleans, numbers of any
+/// size — always.
+fn content_present(raw: &str) -> bool {
+    let text = raw.trim_start_matches([' ', '\t', '\n', '\r']);
+    match text.as_bytes().first() {
+        // The raw value already parsed as JSON, so these cannot fail.
+        Some(b'"') => serde_json::from_str::<String>(text)
+            .map(|string| !string.trim().is_empty())
+            .unwrap_or(true),
+        Some(b'[') => serde_json::from_str::<Vec<IgnoredAny>>(text)
+            .map(|items| !items.is_empty())
+            .unwrap_or(true),
+        Some(b'n') => false,
+        _ => true,
     }
 }
 
@@ -490,11 +458,107 @@ mod tests {
         ] {
             let err = apply(request, &formatter(), ConflictPolicy::Reject).unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidInput, "{err}");
-            assert!(
-                err.message.contains("repeats the top-level member"),
-                "{err}"
-            );
+            assert!(err.message.contains("repeats a top-level member"), "{err}");
         }
+    }
+
+    #[test]
+    fn duplicate_member_errors_never_name_the_key() {
+        // Keys are client-controlled text: the error must not echo them.
+        let request = r#"{"messages":[],"PRIVATE_DICTATION":1,"PRIVATE_DICTATION":2}"#;
+        let err = apply(request, &formatter(), ConflictPolicy::Reject).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput, "{err}");
+        assert!(!err.message.contains("PRIVATE_DICTATION"), "{err}");
+    }
+
+    #[test]
+    fn many_distinct_top_level_members_stay_fast() {
+        // Near-1 MiB of distinct keys: a quadratic duplicate scan needed
+        // seconds here; the HashSet finishes inside the normal test budget.
+        let mut request = String::from(r#"{"messages":[{"role":"user","content":"hi"}]"#);
+        for index in 0..10_000 {
+            request.push_str(&format!(",\"key_{index:05}\":\"{:0>80}\"", index));
+        }
+        request.push('}');
+        assert!(request.len() > 900_000, "{}", request.len());
+        let out = apply(&request, &formatter(), ConflictPolicy::Reject).unwrap();
+        assert!(out.contains("\"key_09999\""), "{out:.200}");
+    }
+
+    #[test]
+    fn messages_must_be_objects_not_arrays_scalars_or_null() {
+        // A derived struct would accept positional arrays; every other shape
+        // is rejected with the same message.
+        for messages in [
+            r#"[["user","hi"]]"#,
+            r#"[["system","rules"],{"role":"user","content":"hi"}]"#,
+            r#"["hi"]"#,
+            r#"[5]"#,
+            r#"[null]"#,
+        ] {
+            let request = format!(r#"{{"messages": {messages}}}"#);
+            let err = apply(&request, &formatter(), ConflictPolicy::Reject).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidInput, "{messages}: {err}");
+            assert!(err.message.contains("message 0"), "{messages}: {err}");
+        }
+    }
+
+    #[test]
+    fn content_of_any_number_size_is_classified_without_conversion() {
+        // serde_json's deserialize_any fails on f64 overflow ("number out of
+        // range"); content must be classified from its raw bytes instead.
+        // A user message carries no instructions, so it always transforms.
+        for policy in [ConflictPolicy::Reject, ConflictPolicy::Append] {
+            let request = r#"{"messages":[{"role":"user","content":1e400}]}"#;
+            let out = apply(request, &formatter(), policy).unwrap();
+            assert!(out.contains(r#""content":1e400"#), "{policy}: {out}");
+        }
+    }
+
+    #[test]
+    fn huge_number_content_still_conflicts_on_instructions() {
+        // Numbers (of any size), booleans and objects count as instructions
+        // and conflict on reject; append keeps them in place. Byte positions
+        // stand in for a Value parse here: serde_json::Value itself rejects
+        // f64 overflows, which is exactly what this test exercises.
+        for content in ["1e400", "true", r#"{"text":"rules"}"#] {
+            let request = format!(
+                r#"{{"messages":[{{"role":"system","content":{content}}},{{"role":"user","content":"hi"}}]}}"#
+            );
+            let err = apply(&request, &formatter(), ConflictPolicy::Reject).unwrap_err();
+            assert_eq!(
+                err.code,
+                ErrorCode::FormatterInstructionConflict,
+                "{content}: {err}"
+            );
+            let out = apply(&request, &formatter(), ConflictPolicy::Append).unwrap();
+            let existing = out.find(&format!("\"content\":{content}")).unwrap();
+            let inserted = out.find("THE RULES").unwrap();
+            let user = out.find(r#""content":"hi""#).unwrap();
+            assert!(existing < inserted && inserted < user, "{content}: {out}");
+        }
+    }
+
+    #[test]
+    fn empty_and_null_content_still_does_not_conflict() {
+        for content in ["null", r#"[]"#, r#" "" "#] {
+            let request = format!(
+                r#"{{"messages":[{{"role":"system","content":{content}}},{{"role":"user","content":"hi"}}]}}"#
+            );
+            let out = apply(&request, &formatter(), ConflictPolicy::Reject).unwrap();
+            assert_eq!(roles(&out), ["system", "system", "user"], "{content}");
+        }
+    }
+
+    #[test]
+    fn top_level_key_names_are_re_emitted_normalized() {
+        // Values stay byte for byte, but key names go through JSON string
+        // serialization, so escapes in a key are canonicalized.
+        let request =
+            "{\n \"mod\\u0065l\" : \"x\",\t\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}] }";
+        let out = apply(request, &formatter(), ConflictPolicy::Reject).unwrap();
+        assert!(out.contains(r#"{"model":"x""#), "{out}");
+        assert!(out.contains(r#""content":"hi""#), "{out}");
     }
 
     #[test]

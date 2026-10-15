@@ -593,6 +593,47 @@ fn apply_json_keeps_the_transformed_request_byte_exact() {
 }
 
 #[test]
+fn errors_never_echo_request_text_in_plain_or_json_mode() {
+    // Dictated text is private: no matter where it sits in a rejected
+    // request, neither stdout nor stderr may contain it (AGENTS.md rule 5).
+    const SENTINEL: &str = "PRIVATE_DICTATION_9f3b7c";
+    let home = HermeticHome::new();
+    let cases = [
+        // duplicate top-level member named with the sentinel
+        format!(r#"{{"messages":[],"{SENTINEL}":1,"{SENTINEL}":2}}"#),
+        // invalid JSON where the content should be
+        format!(r#"{{"messages":[{{"role":"user","content":{SENTINEL}}}]}}"#),
+        // a message that is a bare string
+        format!(r#"{{"messages":["{SENTINEL}"]}}"#),
+        // a positional-array message
+        format!(r#"{{"messages":[["{SENTINEL}","hi"]]}}"#),
+        // a role of the wrong type, sentinel in content
+        format!(r#"{{"messages":[{{"role":5,"content":"{SENTINEL}"}}]}}"#),
+        // an instruction conflict carrying the sentinel
+        format!(
+            r#"{{"messages":[{{"role":"system","content":"{SENTINEL}"}},{{"role":"user","content":"hi"}}]}}"#
+        ),
+        // trailing garbage after a valid request
+        format!(r#"{{"messages":[]}} {SENTINEL}"#),
+    ];
+    for case in &cases {
+        for json in [false, true] {
+            let mut args = vec!["apply", "--formatter", "builtin:clean"];
+            if json {
+                args.push("--json");
+            }
+            let output = run_with_stdin(&mut home.command(&args), case.as_bytes());
+            assert_eq!(output.status.code(), Some(2), "{case}");
+            let combined = format!("{}{}", stdout(&output), stderr(&output));
+            assert!(
+                !combined.contains(SENTINEL),
+                "sentinel leaked (json={json}) for {case}: {combined}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_transformed_handy_like_request_is_accepted_by_the_relay() {
     // The Handy replacement shape: the user message is the plain dictation
     // (Handy itself would wrap it and append its own prompt; the formatter

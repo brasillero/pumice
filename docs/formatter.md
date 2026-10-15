@@ -28,8 +28,11 @@ with one `{"role":"system","content":…}` message inserted before the first
 non-system/developer message. Everything else — model, `stream`, unknown
 members, every other message — is preserved exactly. `apply` works on the
 raw request text: numbers of any size or precision, key order and string
-escapes inside every value are re-emitted byte for byte, and only whitespace
-between top-level members and between `messages` elements may change.
+escapes inside every value are re-emitted byte for byte. Top-level key
+names are re-emitted in normalized JSON string form (escape sequences are
+canonicalized, e.g. `"mod\u0065l"` prints as `"model"`), and only
+whitespace between top-level members and between `messages` elements may
+change.
 
 ## Formatter definitions
 
@@ -126,13 +129,20 @@ stdout. Without `--json`, failed runs write nothing to stdout (the error goes
 to stderr); with `--json`, failures print the error envelope to stdout
 instead.
 
+**Shape.** The request must be a JSON object with a `messages` array, and
+every message must be a JSON object with a string `role` (positional arrays
+and other shapes are refused). A request that repeats a top-level member is
+rejected — stricter than the relay, which accepts repeated unknown keys:
+the formatter re-emits the request, so it never silently picks one of two
+values for the same key.
+
 **Conflict policy.** If any `system` or `developer` message anywhere in the
 conversation — not just at the start — carries non-empty content, `apply`
 refuses with the error `formatter_instruction_conflict`: the client's own
 instructions are never silently replaced or overridden. The check is
 conservative: any non-empty content array conflicts, even one holding only
-empty text parts. Absent, null, empty-string and whitespace-only content do
-not conflict. With `--on-conflict append` the existing instructions are kept
+empty text parts, and so does any other value (object, boolean, number).
+Absent, null, empty-string and whitespace-only content do not conflict. With `--on-conflict append` the existing instructions are kept
 and the formatter's message is inserted right after the leading
 `system`/`developer` messages, before the user content.
 
