@@ -79,3 +79,55 @@
 **Rejected.** A Pumice-specific contract, or "close enough" compatibility.
 
 **Consequences.** Reviews check the endpoint against the official OpenAI API reference; Kimi and Codex iterate until Codex approves, then the supervisor does a full final review.
+
+### D7 · Active · Transcription accepts Opus audio
+- date: 2026-10-15
+- decided by: brasillero
+- origin: #4
+- area: transcription
+- revisit if: —
+
+**Decision.** The transcription module adds support for Opus audio (WebM/Opus and Ogg/Opus), the format browsers record in.
+
+**Why.** Apps like T3 that record in the browser send WebM/Opus; without it they need a conversion step.
+
+**Rejected.** Leaving Opus out until Symphonia is replaced.
+
+### D8 · Active · The transcription server is not exposed to other people
+- date: 2026-10-15
+- decided by: brasillero
+- origin: conversation
+- area: distribution
+- revisit if: the owner asks to let friends use transcription
+
+**Decision.** `pumice-transcribe serve` stays on `127.0.0.1` on server-1 only; no tunnel, public hostname or access for friends.
+
+**Why.** Owner choice.
+
+**Rejected.** Exposing it through the Cloudflare tunnel.
+
+### D9 · Active · Kimi k2.8-code writes the code
+- date: 2026-10-15
+- decided by: brasillero
+- origin: conversation
+- area: process
+- revisit if: the owner evaluates Kimi k2.8-code against k2.7-code-highspeed
+
+**Decision.** Implementation tasks go to Kimi `kimi-k2.8-code` instead of `kimi-k2.7-code-highspeed`; Codex still reviews and the supervisor still does the final review.
+
+**Why.** k2.7-code-highspeed needed many review rounds; the owner wants to try the stronger model and evaluate it later.
+
+**Rejected.** —
+
+### D10 · Active · The supervisor decides and merges while the owner is away
+- date: 2026-10-15
+- decided by: brasillero
+- origin: conversation
+- area: process
+- revisit if: the owner returns and reviews the work
+
+**Decision.** While the owner is away, the supervising agent orchestrates the plan in D1 (with D7 and D8), decides open questions on the owner's behalf, and merges pull requests when needed. Decisions taken that way are recorded as `decided by: claude (orchestrator), brasillero (authorized)`.
+
+**Why.** Owner instruction: keep progressing without waiting for them.
+
+**Rejected.** —

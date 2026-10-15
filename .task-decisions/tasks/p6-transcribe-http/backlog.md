@@ -2,19 +2,6 @@
 
 ## Active
 
-### #1 · To do · Browser test page that talks to the transcription endpoint
-- type: Task
-- area: api
-- origin: conversation
-- ticket: —
-- created: 2026-10-15
-
-**Context.** After the endpoint is done, the owner wants a simple HTML page that records from the microphone, sends the audio to `pumice-transcribe serve` and shows the result, to simulate an app like T3 integrating with Pumice. Codex writes it.
-
-**To do.**
-- [ ] Codex writes the page once the endpoint is approved.
-- [ ] Owner tries it by talking to it.
-
 ## Deferred
 
 ### #2 · Deferred · Test that serve() drains an active worker on shutdown
@@ -49,7 +36,7 @@
 - origin: conversation
 - ticket: —
 - created: 2026-10-15
-- reason: waits for the owner's decision on audio formats and on replacing Symphonia
+- reason: approved by the owner (D7); scheduled after the CPU speed step
 
 **Context.** Browsers' `MediaRecorder` produces WebM/Opus (or MP4/AAC), which the server rejects, so an app like T3 recording in the browser could not send its audio as is. The test page works around it by building a WAV itself. Symphonia 0.6.1 has no Opus decoder.
 
@@ -57,3 +44,18 @@
 - [ ] Owner decides whether Opus is needed and how (a pure-Rust decoder, or with the Symphonia replacement).
 
 ## Closed
+
+### #1 · Moved · Browser test page that talks to the transcription endpoint
+- type: Task
+- area: api
+- origin: conversation
+- ticket: —
+- created: 2026-10-15
+- closed: 2026-10-15
+- outcome: → p6b-transcribe-test-page#1
+
+**Context.** After the endpoint is done, the owner wants a simple HTML page that records from the microphone, sends the audio to `pumice-transcribe serve` and shows the result, to simulate an app like T3 integrating with Pumice. Codex writes it.
+
+**To do.**
+- [x] Codex writes the page once the endpoint is approved.
+- [ ] Owner tries it by talking to it.
