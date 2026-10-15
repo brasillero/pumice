@@ -531,6 +531,9 @@ fn missing_model_error(path: &Path, catalog: Option<&str>, config_arg: Option<&P
 /// outside the always-safe set, so the printed command is executable as
 /// written even when the config path contains spaces or shell specials.
 fn shell_quote(arg: &str) -> String {
+    #[cfg(windows)]
+    const SAFE: &[char] = &['_', '-', '.', ',', '/', '\\', ':', '@', '+', '=', '~'];
+    #[cfg(not(windows))]
     const SAFE: &[char] = &['_', '-', '.', ',', '/', ':', '@', '%', '+', '=', '~'];
     if !arg.is_empty()
         && arg
@@ -538,6 +541,10 @@ fn shell_quote(arg: &str) -> String {
             .all(|c| c.is_ascii_alphanumeric() || SAFE.contains(&c))
     {
         arg.to_string()
+    } else if cfg!(windows) {
+        // cmd.exe and PowerShell both take double quotes; Windows paths cannot
+        // contain `"`.
+        format!("\"{arg}\"")
     } else {
         format!("'{}'", arg.replace('\'', "'\\''"))
     }
@@ -1082,6 +1089,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn shell_quote_leaves_simple_paths_alone() {
         assert_eq!(
@@ -1091,6 +1099,7 @@ mod tests {
         assert_eq!(shell_quote("rel/dir/config.yml"), "rel/dir/config.yml");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn shell_quote_quotes_paths_with_spaces_or_specials() {
         assert_eq!(
@@ -1107,6 +1116,19 @@ mod tests {
         assert!(
             command.contains("--config '/tmp/config with spaces.yml' models download"),
             "unexpected message: {command}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_quote_uses_double_quotes_on_windows() {
+        assert_eq!(
+            shell_quote(r"C:\Users\me\transcribe.yml"),
+            r"C:\Users\me\transcribe.yml"
+        );
+        assert_eq!(
+            shell_quote(r"C:\Users\my name\transcribe.yml"),
+            r#""C:\Users\my name\transcribe.yml""#
         );
     }
 
