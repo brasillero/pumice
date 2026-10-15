@@ -208,10 +208,12 @@ impl Downloader {
     /// A blocked DNS query itself cannot be interrupted, so it can overshoot
     /// the budget — the deadline is rechecked right before installation to
     /// close that gap.
-    fn agent(&self) -> ureq::Agent {
+    /// ureq lets the connect timeout win over the request timeout, so each
+    /// hop gets a client whose connect timeout is capped by `remaining`.
+    fn agent(&self, remaining: std::time::Duration) -> ureq::Agent {
         ureq::AgentBuilder::new()
             .user_agent(concat!("pumice-transcribe/", env!("CARGO_PKG_VERSION")))
-            .timeout_connect(self.timeouts.connect)
+            .timeout_connect(self.timeouts.connect.min(remaining))
             .redirects(0)
             .build()
     }
@@ -373,7 +375,6 @@ impl Downloader {
         deadline: Duration,
         on_event: &mut dyn FnMut(DownloadEvent),
     ) -> Result<String, Error> {
-        let agent = self.agent();
         let mut url = url::Url::parse(&spec.url)
             .map_err(|e| Error::download_failed(format!("invalid download URL: {e}")))?;
         let deadline_at = started + deadline;
@@ -387,6 +388,7 @@ impl Downloader {
             // start a new full-length timeout for it. The overall timeout of
             // this request is the remaining budget.
             let remaining = deadline_at.saturating_duration_since(std::time::Instant::now());
+            let agent = self.agent(remaining);
             let (status, response) = match agent.get(url.as_str()).timeout(remaining).call() {
                 Ok(response) => (response.status(), response),
                 Err(ureq::Error::Status(status, response)) => (status, response),
@@ -1737,7 +1739,7 @@ mod tests {
             err.message
         );
         assert!(
-            std::fs::symlink_metadata(&dest).is_ok(),
+            std::fs::symlink_metadata(&dest).is_err(),
             "the link itself must be removed, not the target"
         );
         assert_eq!(std::fs::read(&target).unwrap(), TEST_BYTES);
