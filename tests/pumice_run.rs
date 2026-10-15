@@ -1620,6 +1620,96 @@ fn a_relay_timeout_at_the_overall_budget_is_a_flow_timeout() {
     assert_eq!(envelope["transcript"]["text"], RAW);
 }
 
+/// A pipe as (read end, write end).
+#[cfg(unix)]
+fn pipe() -> (std::os::fd::OwnedFd, std::os::fd::OwnedFd) {
+    use std::os::fd::FromRawFd;
+    let mut fds = [0; 2];
+    // SAFETY: `fds` is a valid two-element array for pipe(2) to fill.
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe");
+    // SAFETY: both descriptors were just created and are owned here only.
+    unsafe {
+        (
+            std::os::fd::OwnedFd::from_raw_fd(fds[0]),
+            std::os::fd::OwnedFd::from_raw_fd(fds[1]),
+        )
+    }
+}
+
+/// A pipe whose buffer is already full, so the next blocking write to its
+/// write end blocks until someone reads (nobody will).
+#[cfg(unix)]
+fn full_pipe() -> (std::os::fd::OwnedFd, std::os::fd::OwnedFd) {
+    use std::os::fd::AsRawFd;
+    let (read, write) = pipe();
+    let fd = write.as_raw_fd();
+    // SAFETY: fcntl on a descriptor we own. O_NONBLOCK lives on the open
+    // file description, so it is cleared again before the child inherits it.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        assert!(flags >= 0);
+        assert_eq!(libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK), 0);
+        let chunk = [b'x'; 4096];
+        while libc::write(fd, chunk.as_ptr().cast(), chunk.len()) > 0 {}
+        while libc::write(fd, chunk.as_ptr().cast(), 1) > 0 {}
+        assert_eq!(libc::fcntl(fd, libc::F_SETFL, flags), 0);
+    }
+    (read, write)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_broken_stdout_with_a_blocked_stderr_still_exits() {
+    // stdout's reader is gone (EPIPE) and stderr is full and never read:
+    // the run must still exit 1 promptly instead of blocking on stderr, in
+    // both modes.
+    let rig = make_rig(&Script {
+        flows: FLOW_RAW.to_owned(),
+        ..Script::default()
+    });
+    for json_mode in [true, false] {
+        let (stderr_read, stderr_write) = full_pipe();
+        let (stdout_read, stdout_write) = pipe();
+        drop(stdout_read);
+        let mut command = Command::new(rig.pumice());
+        command
+            .arg("run")
+            .arg(&rig.audio)
+            .args(["--flow", "raw", "--config"])
+            .arg(rig.orchestrator_yml())
+            .env("XDG_CONFIG_HOME", &rig.xdg)
+            .env("HOME", rig.keep.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout_write))
+            .stderr(Stdio::from(stderr_write));
+        if json_mode {
+            command.arg("--json");
+        }
+        let mut child = command.spawn().expect("spawn pumice run");
+        // The Command still holds copies of the write ends until dropped.
+        drop(command);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("poll pumice run") {
+                break Some(status);
+            }
+            if std::time::Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let Some(status) = status else {
+            // Still our unreaped child: killing it is safe.
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("pumice run hung on a blocked stderr (json: {json_mode})");
+        };
+        assert_eq!(status.code(), Some(1), "json: {json_mode}");
+        drop(stderr_read);
+    }
+}
+
 // --- Cancellation: Ctrl-C and SIGTERM reap every child -----------------------
 
 /// Spawns `pumice run --json` for the rig's flow and returns the child.

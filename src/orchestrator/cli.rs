@@ -162,15 +162,16 @@ fn run_flow(params: RunParams, json: bool) -> ExitCode {
 }
 
 /// Writes the result and returns the exit code. A failed stdout write cannot
-/// be reported with another envelope on the broken stream: stderr metadata
-/// and exit 1 (`output_failed`).
+/// be reported with another envelope on the broken stream, and is not
+/// reported on stderr either: under `--json` the event thread may still hold
+/// a blocked stderr, so any synchronous write there could hang the exit, and
+/// a plain line would break the JSONL-only stderr. It exits 1 silently.
 fn report(output: RunOutput, json: bool) -> ExitCode {
     let exit = output.exit_code();
     if json {
         let line =
             serde_json::to_string(&output.into_envelope()).expect("the envelope always serializes");
         if writeln!(std::io::stdout().lock(), "{line}").is_err() {
-            eprintln!("error: output_failed: could not write the result to stdout");
             return ExitCode::from(1);
         }
         return ExitCode::from(exit);
@@ -184,7 +185,6 @@ fn report(output: RunOutput, json: bool) -> ExitCode {
                 writeln!(stdout, "{}", text.text)
             };
             if written.is_err() {
-                eprintln!("error: output_failed: could not write the result to stdout");
                 return ExitCode::from(1);
             }
             ExitCode::SUCCESS

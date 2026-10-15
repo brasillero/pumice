@@ -121,7 +121,9 @@ success or failure alike:
 
 Exit codes: **0** success; **2** invalid arguments, configuration, audio
 input, model or route; **1** runtime failure (provider errors, timeouts,
-protocol problems); **130** Ctrl-C; **143** SIGTERM.
+protocol problems); **130** Ctrl-C; **143** SIGTERM. When stdout cannot be
+written (for example, its reader has closed the pipe), the command exits 1
+without writing to stderr, so a blocked stderr can never hold up the exit.
 
 Stable error codes, by stage: `invalid_arguments`, `invalid_config`,
 `flow_not_found`, `flow_disabled` (prepare); `transcription_not_installed`,
