@@ -145,13 +145,16 @@ private too (mode 0700, along with any parents the download creates), and a
 download refuses to run into an existing directory that group or others can
 write — installation renames by name and is only safe in a directory other
 users cannot modify (fix permissions with `chmod 700` or choose another
-`models_dir`). The file is renamed into place only when both the exact byte
-size and the catalog SHA-256 match, and the installed file is then checked
-to be the very file that was hashed (same file identity; a swap between
-hashing and rename removes the installed file and fails). On Unix the models
-directory is synced before success is reported, so the rename survives a
-power loss; on Windows there is no directory sync — the rename is the commit
-point.
+`models_dir`). The directories above the models directory (the user's home
+and data directories) are trusted: the downloader does not validate them, on
+the grounds that a writer able to rename those can already replace anything
+the user runs. The file is renamed into place only when both the exact byte
+size and the catalog SHA-256 match, and the installed file is then reopened
+without following links and re-read and re-hashed against the catalog — a
+swap between hashing and rename removes the installed file and fails. On
+Unix the models directory is synced before success is reported, so the
+rename survives a power loss; on Windows there is no directory sync — the
+rename is the commit point.
 
 On any error (network error, HTTP error status, wrong size, wrong hash,
 timeout) the partial file is deleted and nothing is left looking installed.
@@ -170,11 +173,15 @@ and requires `--force` to replace it.
 
 Timeouts: 30 s to connect, 60 s of read stall, and an overall deadline of
 at least 10 minutes that grows with the model size
-(`max(10 min, size / 256 KiB per s)`); a download exceeding its budget fails
-and cleans up like any other error. The connect and stall bounds only cover
-socket operations — ureq's blocking DNS lookup cannot be interrupted by
-them, so the overall deadline is the only bound that also covers a stalled
-resolver. The only request header is `User-Agent:
+(`max(10 min, size / 256 KiB per s)`). The deadline is applied to the whole
+HTTP request (ureq's overall request timeout), so it bounds DNS resolution,
+connecting, redirects, receiving the response headers and reading the body;
+it is also checked once more right before the verified file is renamed into
+place, so a transfer that only finished after the deadline is never
+installed. One caveat: the blocking DNS lookup itself cannot be interrupted,
+so a stalled resolver can overshoot the deadline slightly before the check
+runs. The connect and read-stall timeouts still bound their individual
+socket operations. The only request header is `User-Agent:
 pumice-transcribe/<version>`; no credentials are sent.
 
 Progress (designed for a future UI, `arch-modules/D10`): with `--json`,
@@ -191,10 +198,9 @@ Phase transitions, each emitted once before the corresponding phase starts:
 {"schema_version":1,"event":"state","model":"whisper-tiny-q8_0","state":"connecting"}
 ```
 
-`state` is one of `connecting` (before the HTTP request; the blocking DNS
-lookup above is not covered by the timeouts), `downloading` (streaming
-bytes), `verifying` (comparing the SHA-256) or `installing` (renaming into
-place).
+`state` is one of `connecting` (before the HTTP request), `downloading`
+(streaming bytes), `verifying` (comparing the SHA-256) or `installing`
+(renaming into place).
 
 The final result is the usual envelope on stdout. Without `--json`, a simple
 overwriting progress line is shown on stderr and no JSONL events are
