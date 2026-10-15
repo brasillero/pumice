@@ -1,9 +1,9 @@
-//! CLI entry-point tests (S7.3 follow-up): a bare `pumice` starts the same
-//! service as `pumice serve`, `--config` works in the bare form and the
-//! `serve` alias, help/version and malformed arguments never start a server,
-//! and the bad-config (exit 2) and occupied-port (exit 1) contracts hold.
-//! Everything runs against hermetic fake provider binaries and the built-in
-//! `passthrough` model — no AI CLI is ever invoked.
+//! CLI entry-point tests (S7.3 follow-up): a bare `pumice-relay` starts the
+//! same service as `pumice-relay serve`, `--config` works in the bare form
+//! and the `serve` alias, help/version and malformed arguments never start a
+//! server, and the bad-config (exit 2) and occupied-port (exit 1) contracts
+//! hold. Everything runs against hermetic fake provider binaries and the
+//! built-in `passthrough` model — no AI CLI is ever invoked.
 
 mod support;
 
@@ -412,6 +412,58 @@ fn malformed_args_exit_2_with_usage_without_starting_the_service() {
         assert!(
             stderr.contains("usage:"),
             "args {args:?} must print usage: {stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "args {args:?} must not write stdout: {:?}",
+            output.stdout
+        );
+    }
+}
+
+#[test]
+fn duplicate_config_is_a_usage_error_with_command_specific_usage() {
+    let cwd = TempDir::new().expect("temp dir");
+    // Leading plus trailing `--config`, for each subcommand and the bare
+    // form: a usage error that names its own complete usage line exactly
+    // once, and never starts anything.
+    for (args, usage) in [
+        (
+            &["--config", "a.yml", "check-config", "--config", "b.yml"][..],
+            "usage: pumice-relay check-config [--config <path>]",
+        ),
+        (
+            &["--config", "a.yml", "serve", "--config", "b.yml"][..],
+            "usage: pumice-relay serve [--config <path>] [--plain]",
+        ),
+        (
+            &["--config", "a.yml", "--plain", "--config", "b.yml"][..],
+            "usage: pumice-relay [--config <path>] [--plain]",
+        ),
+        (
+            &["--config", "a.yml", "doctor", "--config", "b.yml"][..],
+            "usage: pumice-relay doctor [--config <path>] [--login-check --provider <id>]",
+        ),
+    ] {
+        let output = run(args, cwd.path());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "args {args:?} must exit 2: {stderr}"
+        );
+        assert!(
+            stderr.contains(usage),
+            "args {args:?} must name its own usage: {stderr}"
+        );
+        assert!(
+            !stderr.contains("usage: usage:"),
+            "args {args:?} must not nest usage prefixes: {stderr}"
+        );
+        assert_eq!(
+            stderr.matches("usage:").count(),
+            1,
+            "args {args:?} must print usage once: {stderr}"
         );
         assert!(
             output.stdout.is_empty(),

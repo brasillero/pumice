@@ -105,15 +105,16 @@ fn peel_leading_config<'a>(args: &'a [&'a str]) -> (Option<&'a Path>, &'a [&'a s
 }
 
 /// Merges a leading `--config` with the command's own flag. Two configs are
-/// a usage error, never "last one wins".
+/// a usage error, never "last one wins"; `usage` is the command's complete
+/// usage line, printed as-is.
 fn merge_config<'a>(
     leading: Option<&'a Path>,
     own: Option<&'a Path>,
-    command: &str,
+    usage: &str,
 ) -> Result<Option<&'a Path>, ExitCode> {
     match (leading, own) {
         (Some(_), Some(_)) => {
-            eprintln!("error: --config given more than once\nusage: {command} [--config <path>]");
+            eprintln!("error: --config given more than once\n{usage}");
             Err(ExitCode::from(2))
         }
         (Some(path), None) | (None, Some(path)) => Ok(Some(path)),
@@ -198,7 +199,8 @@ fn check_config(leading: Option<&Path>, args: &[&str], name: &str) -> ExitCode {
         Ok(own) => own,
         Err(code) => return code,
     };
-    let explicit = match merge_config(leading, own, &command) {
+    let explicit = match merge_config(leading, own, &format!("usage: {command} [--config <path>]"))
+    {
         Ok(explicit) => explicit,
         Err(code) => return code,
     };
@@ -216,7 +218,11 @@ fn serve(leading: Option<&Path>, args: &[&str], name: &str, command: &str) -> Ex
         Ok(flags) => flags,
         Err(code) => return code,
     };
-    let config = match merge_config(leading, flags.config, command) {
+    let config = match merge_config(
+        leading,
+        flags.config,
+        &format!("usage: {command} [--config <path>] [--plain]"),
+    ) {
         Ok(config) => config,
         Err(code) => return code,
     };
