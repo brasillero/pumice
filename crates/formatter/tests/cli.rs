@@ -76,12 +76,11 @@ fn run_with_stdin(command: &mut Command, input: &[u8]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("pumice-format binary runs");
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin is piped")
-        .write_all(input)
-        .expect("write stdin");
+    // A command that fails before reading stdin (an argument or config
+    // error) may exit first; the closed pipe is then expected, not a failure.
+    if let Err(error) = child.stdin.take().expect("stdin is piped").write_all(input) {
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe, "write stdin");
+    }
     child.wait_with_output().expect("reap pumice-format")
 }
 
