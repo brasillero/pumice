@@ -216,6 +216,16 @@ fn read_uint(bytes: &[u8], element: &Element) -> Result<u64, Error> {
     Ok(value)
 }
 
+/// EBML float element: 4- or 8-byte big-endian IEEE 754.
+fn read_float(bytes: &[u8], element: &Element) -> Result<f64, Error> {
+    let data = element_slice(bytes, element)?;
+    match data.len() {
+        4 => Ok(f32::from_be_bytes(data.try_into().unwrap()).into()),
+        8 => Ok(f64::from_be_bytes(data.try_into().unwrap())),
+        _ => Err(Error::invalid_input("invalid webm float element")),
+    }
+}
+
 #[derive(Debug)]
 struct WebmInfo {
     track_number: u64,
@@ -223,6 +233,10 @@ struct WebmInfo {
     codec_delay_ns: Option<u64>,
     /// TimestampScale in nanoseconds per tick (Matroska default 1 ms).
     timestamp_scale: u64,
+    /// Audio/Channels, when the track declares it.
+    audio_channels: Option<u64>,
+    /// Audio/SamplingFrequency, when the track declares it.
+    sampling_frequency: Option<f64>,
     block_count: usize,
 }
 
@@ -317,6 +331,11 @@ fn note_block(
 fn walk_track_entry(bytes: &[u8], element: &Element, info: &mut WebmInfo) -> Result<(), Error> {
     let mut reader = Reader::new(bytes, element.data_start, element.data_end);
     let mut track_number: Option<u64> = None;
+    let mut track_type: Option<u64> = None;
+    let mut codec_id: Option<&[u8]> = None;
+    let mut codec_private: Option<Vec<u8>> = None;
+    let mut codec_delay: Option<u64> = None;
+    let mut audio: Option<bool> = None;
     while let Some(child) = reader.next()? {
         match child.id {
             ID_TRACK_NUMBER => {
@@ -325,22 +344,65 @@ fn walk_track_entry(bytes: &[u8], element: &Element, info: &mut WebmInfo) -> Res
                 }
             }
             ID_TRACK_TYPE => {
-                if read_uint(bytes, &child)? != 2 {
-                    return Err(Error::unsupported_format("webm track is not audio"));
+                if track_type.replace(read_uint(bytes, &child)?).is_some() {
+                    return Err(Error::invalid_input("duplicate webm track type"));
                 }
             }
             ID_CODEC_ID => {
-                if element_slice(bytes, &child)? != b"A_OPUS" {
-                    return Err(Error::unsupported_format(
-                        "unsupported webm codec (expected A_OPUS)",
-                    ));
+                if codec_id
+                    .replace(element_slice(bytes, &child)?)
+                    .is_some()
+                {
+                    return Err(Error::invalid_input("duplicate webm codec id"));
                 }
             }
             ID_CODEC_PRIVATE => {
-                info.codec_private = element_slice(bytes, &child)?.to_vec();
+                if codec_private
+                    .replace(element_slice(bytes, &child)?.to_vec())
+                    .is_some()
+                {
+                    return Err(Error::invalid_input("duplicate webm codec private"));
+                }
             }
             ID_CODEC_DELAY => {
-                info.codec_delay_ns = Some(read_uint(bytes, &child)?);
+                if codec_delay.replace(read_uint(bytes, &child)?).is_some() {
+                    return Err(Error::invalid_input("duplicate webm codec delay"));
+                }
+            }
+            ID_AUDIO => {
+                // At most one Audio master; its channel and rate metadata is
+                // checked against OpusHead once the header is parsed.
+                if audio.replace(true).is_some() {
+                    return Err(Error::invalid_input("duplicate webm audio element"));
+                }
+                let mut channels: Option<u64> = None;
+                let mut sampling_frequency: Option<f64> = None;
+                let mut audio_reader = Reader::new(bytes, child.data_start, child.data_end);
+                while let Some(grandchild) = audio_reader.next()? {
+                    match grandchild.id {
+                        ID_CHANNELS => {
+                            if channels.replace(read_uint(bytes, &grandchild)?).is_some() {
+                                return Err(Error::invalid_input(
+                                    "duplicate webm audio channel count",
+                                ));
+                            }
+                        }
+                        ID_SAMPLING_FREQUENCY => {
+                            if sampling_frequency
+                                .replace(read_float(bytes, &grandchild)?)
+                                .is_some()
+                            {
+                                return Err(Error::invalid_input(
+                                    "duplicate webm audio sampling frequency",
+                                ));
+                            }
+                        }
+                        _ => {}
+                    }
+                    audio_reader.pos = grandchild.data_end;
+                }
+                info.audio_channels = channels;
+                info.sampling_frequency = sampling_frequency;
             }
             ID_CONTENT_ENCODING => {
                 return Err(Error::unsupported_format(
@@ -356,6 +418,17 @@ fn walk_track_entry(bytes: &[u8], element: &Element, info: &mut WebmInfo) -> Res
     if track_number == 0 {
         return Err(Error::invalid_input("webm track number is zero"));
     }
+    if track_type.ok_or_else(|| Error::invalid_input("webm track has no type"))? != 2 {
+        return Err(Error::unsupported_format("webm track is not audio"));
+    }
+    if codec_id.ok_or_else(|| Error::invalid_input("webm track has no codec id"))? != b"A_OPUS" {
+        return Err(Error::unsupported_format(
+            "unsupported webm codec (expected A_OPUS)",
+        ));
+    }
+    info.codec_private = codec_private
+        .ok_or_else(|| Error::invalid_input("webm track has no opus header"))?;
+    info.codec_delay_ns = codec_delay;
     info.track_number = track_number;
     Ok(())
 }
@@ -369,12 +442,18 @@ fn walk_block_group(
 ) -> Result<(), Error> {
     let mut reader = Reader::new(bytes, element.data_start, element.data_end);
     let mut blocks = 0usize;
+    let mut discard_padding: Option<()> = None;
     while let Some(child) = reader.next()? {
         match child.id {
             ID_BLOCK => {
                 note_block(bytes, &child, cluster_ts, timeline, &mut blocks)?;
             }
-            ID_DISCARD_PADDING | ID_BLOCK_DURATION | ID_REFERENCE_BLOCK | ID_VOID | ID_CRC32 => {}
+            ID_DISCARD_PADDING => {
+                if discard_padding.replace(()).is_some() {
+                    return Err(Error::invalid_input("duplicate webm discard padding"));
+                }
+            }
+            ID_BLOCK_DURATION | ID_REFERENCE_BLOCK | ID_VOID | ID_CRC32 => {}
             _ => {
                 return Err(Error::invalid_input(
                     "unexpected element in webm block group",
@@ -483,6 +562,8 @@ fn validate(bytes: &[u8]) -> Result<WebmInfo, Error> {
         codec_private: Vec::new(),
         codec_delay_ns: None,
         timestamp_scale: DEFAULT_TIMESTAMP_SCALE,
+        audio_channels: None,
+        sampling_frequency: None,
         block_count: 0,
     };
     let mut track_entries = 0usize;
@@ -654,8 +735,26 @@ pub(crate) fn decode_webm_opus(
 ) -> Result<DecodedAudio, Error> {
     let info = validate(&bytes)?;
     let head = OpusHead::parse(&info.codec_private)?;
+    if let Some(channels) = info.audio_channels {
+        if channels != u64::from(head.channels) {
+            return Err(Error::unsupported_format(
+                "webm audio channel metadata disagrees with the opus header",
+            ));
+        }
+    }
+    if let Some(rate) = info.sampling_frequency {
+        // Opus always decodes at 48 kHz; the Matroska Opus mapping fixes the
+        // declared sampling frequency to that value.
+        if !rate.is_finite() || rate != f64::from(OPUS_SAMPLE_RATE) {
+            return Err(Error::unsupported_format(
+                "webm audio sampling frequency is not 48000",
+            ));
+        }
+    }
     if let Some(ns) = info.codec_delay_ns {
-        let delay = ns_to_samples(ns as i64)?;
+        let ns = i64::try_from(ns)
+            .map_err(|_| Error::invalid_input("webm codec delay out of range"))?;
+        let delay = ns_to_samples(ns)?;
         if delay != head.pre_skip as i64 {
             return Err(Error::invalid_input(
                 "webm codec delay disagrees with the opus pre-skip",
@@ -1249,5 +1348,146 @@ mod tests {
                 .code,
             ErrorCode::InvalidInput
         );
+    }
+
+    /// A complete TrackEntry: number, audio type, A_OPUS, CodecPrivate.
+    fn full_track_entry() -> Vec<u8> {
+        let mut entry = uint(TRACK_NUMBER, 1);
+        entry.extend(uint(TRACK_TYPE, 2));
+        entry.extend(str_el(CODEC_ID, "A_OPUS"));
+        entry.extend(el(CODEC_PRIVATE, &opus_head_bytes()));
+        entry
+    }
+
+    /// A file whose single track entry carries `extras` after the complete
+    /// entry fields, with one 20 ms block so end-to-end decode works.
+    fn file_with_track_extras(extras: &[u8]) -> Vec<u8> {
+        let mut entry = full_track_entry();
+        entry.extend_from_slice(extras);
+        let mut file = ebml_header("webm");
+        file.extend_from_slice(SEGMENT);
+        file.extend_from_slice(UNKNOWN_SIZE);
+        file.extend(el(TRACKS, &el(TRACK_ENTRY, &entry)));
+        let mut cluster = uint(TIMESTAMP, 0);
+        cluster.extend(simple_block(0, 0, &opus_packet_bytes()));
+        file.extend(el(CLUSTER, &cluster));
+        file
+    }
+
+    #[test]
+    fn rejects_missing_track_type_and_codec_id() {
+        // Review cases missing-tracktype.webm and missing-codecid.webm.
+        let mut entry = uint(TRACK_NUMBER, 1);
+        entry.extend(str_el(CODEC_ID, "A_OPUS"));
+        entry.extend(el(CODEC_PRIVATE, &opus_head_bytes()));
+        let mut file = ebml_header("webm");
+        file.extend_from_slice(SEGMENT);
+        file.extend_from_slice(UNKNOWN_SIZE);
+        file.extend(el(TRACKS, &el(TRACK_ENTRY, &entry)));
+        assert_eq!(validate_code(&file), ErrorCode::InvalidInput);
+
+        let mut entry = uint(TRACK_NUMBER, 1);
+        entry.extend(uint(TRACK_TYPE, 2));
+        entry.extend(el(CODEC_PRIVATE, &opus_head_bytes()));
+        let mut file = ebml_header("webm");
+        file.extend_from_slice(SEGMENT);
+        file.extend_from_slice(UNKNOWN_SIZE);
+        file.extend(el(TRACKS, &el(TRACK_ENTRY, &entry)));
+        assert_eq!(validate_code(&file), ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn rejects_duplicate_singular_track_fields() {
+        // Review cases duplicate-codec.webm, duplicate-head.webm and a
+        // duplicate CodecDelay (the complete entry has none, so add two).
+        let mut delays = el(CODEC_DELAY, &6_500_000u64.to_be_bytes()[1..]);
+        delays.extend(el(CODEC_DELAY, &6_500_000u64.to_be_bytes()[1..]));
+        for extra in [
+            str_el(CODEC_ID, "A_OPUS"),
+            el(CODEC_PRIVATE, &opus_head_bytes()),
+            delays,
+        ] {
+            let file = file_with_track_extras(&extra);
+            assert_eq!(validate_code(&file), ErrorCode::InvalidInput);
+        }
+        // A duplicate Audio master is rejected too.
+        let audio = uint(&[0x9F], 1);
+        let mut dup = el(&[0xE1], &audio);
+        dup.extend(el(&[0xE1], &audio));
+        let file = file_with_track_extras(&dup);
+        assert_eq!(validate_code(&file), ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn rejects_out_of_range_codec_delay() {
+        // Review case delay-u64max.webm and the i64::MAX boundary: the
+        // unsigned claim must not wrap into a tiny negative delay.
+        for delay in [u64::MAX, i64::MAX as u64] {
+            let file = file_with_track_extras(&el(CODEC_DELAY, &delay.to_be_bytes()));
+            assert_eq!(
+                decode_webm_opus(file, &CancelToken::new())
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidInput,
+                "delay {delay}"
+            );
+        }
+    }
+
+    #[test]
+    fn checks_audio_metadata_against_the_opus_header() {
+        // Review case track-channels3.webm: Audio/Channels declaring three
+        // channels contradicts the mono OpusHead.
+        let file = file_with_track_extras(&el(&[0xE1], &uint(&[0x9F], 3)));
+        assert_eq!(
+            decode_webm_opus(file, &CancelToken::new())
+                .unwrap_err()
+                .code,
+            ErrorCode::UnsupportedFormat
+        );
+
+        // Opus decodes at 48 kHz; any other declared rate is not an Opus
+        // track. Consistent metadata (mono, 48 kHz) decodes fine.
+        let file = file_with_track_extras(&el(&[0xE1], &uint(&[0x9F], 1)));
+        let decoded = decode_webm_opus(file, &CancelToken::new()).unwrap();
+        assert_eq!(decoded.samples.len(), 960 - 312);
+
+        let mut audio = uint(&[0x9F], 1);
+        audio.extend(el(&[0xB5], &48_000f32.to_be_bytes()));
+        let file = file_with_track_extras(&el(&[0xE1], &audio));
+        decode_webm_opus(file, &CancelToken::new()).unwrap();
+
+        let mut audio = uint(&[0x9F], 1);
+        audio.extend(el(&[0xB5], &44_100f32.to_be_bytes()));
+        let file = file_with_track_extras(&el(&[0xE1], &audio));
+        assert_eq!(
+            decode_webm_opus(file, &CancelToken::new())
+                .unwrap_err()
+                .code,
+            ErrorCode::UnsupportedFormat
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_discard_padding() {
+        // Review case duplicate-padding.webm: DiscardPadding is singular;
+        // last-wins silently changed the trim.
+        let mut group = el(BLOCK, &{
+            let mut body = vec![0x81];
+            body.extend(0i16.to_be_bytes());
+            body.push(0);
+            body.extend_from_slice(&opus_packet_bytes());
+            body
+        });
+        group.extend(el(DISCARD_PADDING, &500_000u64.to_be_bytes()[2..]));
+        group.extend(el(DISCARD_PADDING, &[0]));
+        let mut cluster = uint(TIMESTAMP, 0);
+        cluster.extend(el(BLOCK_GROUP, &group));
+        let mut file = ebml_header("webm");
+        file.extend_from_slice(SEGMENT);
+        file.extend_from_slice(UNKNOWN_SIZE);
+        file.extend(el(TRACKS, &el(TRACK_ENTRY, &full_track_entry())));
+        file.extend(el(CLUSTER, &cluster));
+        assert_eq!(validate_code(&file), ErrorCode::InvalidInput);
     }
 }
