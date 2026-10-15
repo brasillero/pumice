@@ -103,3 +103,29 @@
 **Why.** Keeps the change reviewable while the pieces depend on each other.
 
 **Rejected.** —
+
+### D9 · Active · Paths in the `pumice run` envelope are lossy text
+- date: 2026-10-15
+- decided by: claude (orchestrator, owner-delegated 2026-10-15)
+- origin: conversation
+- area: cli
+- revisit if: a UI needs to reopen a reported file by its exact native path
+
+**Decision.** Every path in the `--json` envelope (today only `error.location.file`) is written as a string; bytes that are not valid UTF-8 (Unix) or unpaired surrogates (Windows) become U+FFFD. Writing the envelope never panics: if it cannot be serialized or written, the command exits 1 and writes nothing to stderr.
+
+**Why.** Codex review round 3 showed a non-UTF-8 `--config` path made the envelope panic and could hang the exit on a full stderr. The path is metadata shown to the user, so a lossy form loses nothing that matters.
+
+**Rejected.** Encoding native paths as byte arrays (awkward for UIs); dropping the location for such paths.
+
+### D10 · Active · A failed run does not store its transcript
+- date: 2026-10-15
+- decided by: claude (orchestrator, owner-delegated 2026-10-15)
+- origin: D7
+- area: cli
+- revisit if: users lose dictations because they ran without `--json`
+
+**Decision.** On failure the raw transcript is only in that run's `--json` envelope. Plain mode says so, and says that rerunning repeats the whole flow (a new transcription and possibly another paid provider call); it never claims the transcript was preserved. No transcript is written to disk.
+
+**Why.** The first wording promised a recovery that does not exist, and a rerun can spend quota. Storing dictations would need its own privacy decision (AGENTS.md security rule 5).
+
+**Rejected.** Saving failed transcripts to a file; printing the raw transcript as the result on failure (already rejected in D7).
