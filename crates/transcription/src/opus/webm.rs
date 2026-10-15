@@ -277,9 +277,12 @@ impl Timeline {
     /// muxers timestamp blocks on a wall clock; measured Chrome
     /// MediaRecorder recordings stay within 7 ms at a 1 ms timebase, while
     /// the sum of absolute per-interval errors reaches seconds) and one unit
-    /// below half the shortest packet in the stream, so a lost, duplicated or
-    /// duration-altered packet always exceeds it. All arithmetic is checked
-    /// integer math in units of 48 kHz frames * ns/s.
+    /// below half the shortest packet in the stream. A lost, duplicated or
+    /// duration-altered packet is rejected when it moves a later block's
+    /// timestamp beyond that bound; the last packet has no later timestamp to
+    /// witness it, and a packet shorter than the jitter allowance can go
+    /// unnoticed. All arithmetic is checked integer math in units of 48 kHz
+    /// frames * ns/s.
     fn check(&self) -> Result<(), Error> {
         let Some(&(first_timestamp, _)) = self.blocks.first() else {
             return Ok(());
