@@ -3,7 +3,7 @@ title: P9: model catalog and downloader for transcription
 state: Done
 ticket: —
 branch: p9-transcribe-downloader
-mr: —
+mr: PR #103
 start: 2026-10-15
 end: 2026-10-15
 ---
