@@ -27,6 +27,7 @@ cpu-variants = ["engine", "transcribe-cpp/dynamic-backends"]
 axum = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true }
+fd-lock = "4.0.4"
 http-body-util = { workspace = true }
 libc = { workspace = true }
 futures-core = "0.3"
@@ -37,10 +38,13 @@ rubato = { workspace = true }
 serde = { workspace = true }
 serde-saphyr = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10.9"
 symphonia = { version = "=0.6.1", default-features = false, features = ["wav", "pcm", "mp3", "flac", "ogg", "vorbis"] }
 tokio = { workspace = true }
 tokio-util = "0.7"
 transcribe-cpp = { version = "=0.3.1", optional = true, default-features = false }
+ureq = { version = "2.12.1", default-features = false, features = ["tls"] }
+url = "2"
 webm-iterable = { version = "=0.7.1", default-features = false, optional = true }
 
 [dev-dependencies]

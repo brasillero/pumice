@@ -305,6 +305,8 @@ fn map_error(code: ErrorCode) -> ApiError {
         | ErrorCode::EngineNotAvailable
         | ErrorCode::EngineFailed
         | ErrorCode::ModelLoadFailed
+        | ErrorCode::ChecksumMismatch
+        | ErrorCode::DownloadFailed
         | ErrorCode::Internal => TRANSCRIPTION_FAILED,
     }
 }

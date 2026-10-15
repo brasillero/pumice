@@ -102,32 +102,149 @@ in [`docs/research/P7-cpu-variants.md`](../docs/research/P7-cpu-variants.md).
 
 ## Getting models
 
-`pumice-transcribe` needs a Whisper GGUF model. The owner uses these two
-models, pinned by revision and SHA-256:
+`pumice-transcribe` needs a Whisper GGUF model. The built-in catalog carries
+the two models the owner uses, pinned by full repository revision, byte size
+and SHA-256:
 
-| ID | Model | Source | Revision | SHA-256 |
+| Catalog ID | Model | Source | Revision | SHA-256 |
 | --- | --- | --- | --- | --- |
-| `turbo` | `whisper-large-v3-turbo-Q8_0.gguf` | `handy-computer/whisper-large-v3-turbo-gguf` | `5eaf945c` | `b2e30cc286bc9f3aba4db9099fc7403543497c05ce7100d0d83091ddfd25a183` |
-| `tiny` | `whisper-tiny-Q8_0.gguf` | `handy-computer/whisper-tiny-gguf` | `6687f30c` | `325b9c7997cd1eff81ef709d55766565e71be696130cc3a3d444713798706834` |
+| `whisper-large-v3-turbo-q8_0` | `whisper-large-v3-turbo-Q8_0.gguf` | `handy-computer/whisper-large-v3-turbo-gguf` | `5eaf945c7978e564bae5b28a5b1639dd93c2bfb1` | `b2e30cc286bc9f3aba4db9099fc7403543497c05ce7100d0d83091ddfd25a183` |
+| `whisper-tiny-q8_0` | `whisper-tiny-Q8_0.gguf` | `handy-computer/whisper-tiny-gguf` | `6687f30c99641ee265df421e582354adbc8848fc` | `325b9c7997cd1eff81ef709d55766565e71be696130cc3a3d444713798706834` |
 
+The weights come from OpenAI's Whisper models: `whisper-tiny` is Apache-2.0
+and `whisper-large-v3-turbo` is MIT, per their Hugging Face model cards.
 `tiny` is fast and rough; `turbo` is slower and usually more accurate.
 
-A manual download recipe (verify the exact Hugging Face URL form before you
-run it; URLs can change):
+Models from outside the catalog stay supported: download them any way you
+like, verify the bytes yourself and register a local `path:` entry.
+
+## Downloading models
+
+Model downloads are explicit: nothing is fetched at startup, by a request,
+or by `serve`. The only outbound traffic this module ever initiates is a
+`models download` of a catalog-pinned file.
 
 ```bash
-# tiny
-url="https://huggingface.co/handy-computer/whisper-tiny-gguf/resolve/6687f30c99641ee265df421e582354adbc8848fc/whisper-tiny-Q8_0.gguf"
-curl -L --fail -o whisper-tiny-Q8_0.gguf "$url"
-echo "325b9c7997cd1eff81ef709d55766565e71be696130cc3a3d444713798706834  whisper-tiny-Q8_0.gguf" | sha256sum -c -
+# What can be downloaded and what is already installed
+pumice-transcribe models catalog
+pumice-transcribe models catalog --json
 
-# turbo
-url="https://huggingface.co/handy-computer/whisper-large-v3-turbo-gguf/resolve/5eaf945c/whisper-large-v3-turbo-Q8_0.gguf"
-curl -L --fail -o whisper-large-v3-turbo-Q8_0.gguf "$url"
-echo "b2e30cc286bc9f3aba4db9099fc7403543497c05ce7100d0d83091ddfd25a183  whisper-large-v3-turbo-Q8_0.gguf" | sha256sum -c -
+# Download (or confirm) a catalog model
+pumice-transcribe models download whisper-tiny-q8_0
+pumice-transcribe models download whisper-tiny-q8_0 --json
+
+# Re-hash an installed model against the catalog
+pumice-transcribe models verify whisper-tiny-q8_0
+pumice-transcribe models verify whisper-tiny-q8_0 --json
 ```
 
-An automatic downloader tied to a pinned catalog is planned for a later phase.
+Downloads stream into `<file name>.part` next to the final file, hashing
+while writing. The staging file and the per-model lock are created private
+to the user (on Unix, mode 0600). The models directory itself is created
+private too (mode 0700, along with any parents the download creates), and a
+download refuses to run into an existing directory that group or others can
+write — installation renames by name and is only safe in a directory other
+users cannot modify (fix permissions with `chmod 700` or choose another
+`models_dir`). The directories above the models directory (the user's home
+and data directories) are trusted: the downloader does not validate them, on
+the grounds that a writer able to rename those can already replace anything
+the user runs. The file is renamed into place only when both the exact byte
+size and the catalog SHA-256 match, and the installed file is then reopened
+without following links — on Unix with `O_NOFOLLOW`, on Windows by opening
+the leaf with `FILE_FLAG_OPEN_REPARSE_POINT` so a symlink or junction is
+opened as itself and rejected — and re-read and re-hashed against the
+catalog: a swap between hashing and rename removes the installed file and
+fails. On Unix the models directory is synced before success is reported, so
+the rename survives a power loss; on Windows there is no directory sync —
+the rename is the commit point.
+
+On any error (network error, HTTP error status, wrong size, wrong hash,
+timeout) the partial file is deleted and nothing is left looking installed.
+If the process is killed or the machine loses power mid-download, the
+`.part` file stays behind; the next `models download` of the same model
+removes it before starting over. There is no resume: an interrupted download
+restarts from zero. A `Content-Length` that disagrees with the catalog size
+is refused before any byte is stored, and redirects are followed manually —
+at most 5, HTTPS targets only. Two concurrent downloads of the same model
+fail fast (the second reports "already in progress").
+
+When the file is already installed and verifies, `models download` reports
+`already installed` (exit 0) without touching the network. When a file
+exists but fails verification (corrupt or modified), the command reports it
+and requires `--force` to replace it.
+
+Timeouts: 30 s to connect, and one overall per-download deadline of at
+least 10 minutes that grows with the model size
+(`max(10 min, size / 256 KiB per s)`). The deadline is a single absolute
+budget computed when the download starts: every HTTP request the download
+makes — including each redirect hop, which gets only the time remaining, so
+a chain of redirects cannot extend the budget — carries the remaining time
+as its overall timeout, and it bounds DNS resolution, connecting, receiving
+the response headers and reading the body. There is no separate read-stall
+limit. The deadline is an HTTP transfer/install-admission budget: disk
+writes, the post-install re-hash and the directory sync are not
+wall-clock-interruptible, and the budget is checked once more right before
+the verified file is renamed into place, so a transfer that only finished
+after the deadline is never installed. One caveat: the blocking DNS lookup
+itself cannot be interrupted, so a stalled resolver is only stopped once it
+returns. The only request header is `User-Agent:
+pumice-transcribe/<version>`; no credentials are sent.
+
+Progress (designed for a future UI, `arch-modules/D10`): with `--json`,
+progress and state events are JSON Lines on stderr. Byte progress, at most
+about 4 per second:
+
+```json
+{"schema_version":1,"event":"progress","model":"whisper-tiny-q8_0","bytes":20971520,"total":45981088}
+```
+
+Phase transitions, each emitted once before the corresponding phase starts:
+
+```json
+{"schema_version":1,"event":"state","model":"whisper-tiny-q8_0","state":"connecting"}
+```
+
+`state` is one of `connecting` (before the HTTP request), `downloading`
+(streaming bytes), `verifying` (comparing the SHA-256) or `installing`
+(renaming into place).
+
+The final result is the usual envelope on stdout. Without `--json`, a simple
+overwriting progress line is shown on stderr and no JSONL events are
+emitted.
+
+### Where downloaded files go
+
+By default, downloaded models live in the per-user data directory (decision
+D2 — downloads never edit the config and never enable a model):
+
+- Linux: `$XDG_DATA_HOME/pumice/models`, else `~/.local/share/pumice/models`
+- macOS: absolute `$XDG_DATA_HOME/pumice/models` when set, else
+  `~/Library/Application Support/pumice/models`
+- Windows: `%LOCALAPPDATA%\pumice\models`
+
+Set `models_dir` in `transcribe.yml` to override it (relative values resolve
+against the config file's directory; `~` is not expanded). On Unix the
+directory is created mode 0700, and a download refuses an existing directory
+that group or others can write — see
+[Downloading models](#downloading-models).
+
+### Registering a catalog model
+
+A model entry can use `catalog: <catalog id>` instead of `path:`; exactly one
+of the two is required. The entry resolves to the catalog file inside the
+models directory:
+
+```yaml
+schema_version: 1
+models:
+  - id: turbo
+    catalog: whisper-large-v3-turbo-q8_0
+  - id: local
+    path: /opt/models/my-model.gguf
+```
+
+`check-config` validates catalog ids; `models list` shows which entries use
+`catalog:` and whether the file is present.
 
 ## Configuration
 
@@ -150,17 +267,27 @@ schema_version: 1
 default_model: tiny      # optional; must name an entry in models
 language: pt             # optional default language hint
 threads: 8               # optional default thread count (1-32)
+models_dir: /absolute/path/to/models  # optional; where `catalog:` files live
+                                      # (see "Downloading models" for the
+                                      # default). `~` is NOT expanded here —
+                                      # use an absolute path, or a relative
+                                      # one (resolved against this file)
 models:                  # explicit list; nothing is enabled implicitly
   - id: turbo
-    path: whisper-large-v3-turbo-Q8_0.gguf
+    catalog: whisper-large-v3-turbo-q8_0   # downloaded catalog model
   - id: tiny
-    path: whisper-tiny-Q8_0.gguf
+    path: whisper-tiny-Q8_0.gguf           # local file
 ```
 
-Relative `path` values resolve against the directory that contains the config
-file. Paths must be nonempty. Model ids must match `[a-z0-9][a-z0-9._-]*`.
-Duplicate ids, dangling `default_model`, unknown keys, and invalid
-`schema_version` are rejected with a file:line:column message.
+Relative `path` values and a relative `models_dir` resolve against the
+directory that contains the config file. A leading `~` is not expanded by
+YAML or by this module — write an absolute path or a relative one. Paths
+must be nonempty. Model ids
+must match `[a-z0-9][a-z0-9._-]*`. A model entry has exactly one of `path`
+(a local GGUF file) or `catalog` (a built-in catalog id, see "Downloading
+models"). Duplicate ids, dangling `default_model`, unknown catalog ids,
+unknown keys, and invalid `schema_version` are rejected with a
+file:line:column message.
 
 Validate a file without loading a model:
 
@@ -198,10 +325,29 @@ pumice-transcribe models list
 pumice-transcribe models list --json
 ```
 
-Lists configured models with their resolved path, whether it is a regular file,
-its size in bytes when it is a regular file, and which model is the default.
-Missing paths and directories have `exists: false` and no `size` field in JSON.
-No hashing or network access is performed.
+Lists configured models with their resolved path, whether it is a regular
+file, its size in bytes when it is a regular file, and which model is the
+default. Entries that use `catalog:` instead of `path` show the catalog id
+in the `catalog` field (JSON) and resolve their path inside the models
+directory. Missing paths and directories have `exists: false` and no `size`
+field in JSON. No hashing or network access is performed.
+
+### `models catalog`, `models download`, `models verify`
+
+```bash
+pumice-transcribe models catalog [--json]
+pumice-transcribe models download <catalog-id> [--json] [--force]
+pumice-transcribe models verify <catalog-id> [--json]
+```
+
+These manage the built-in pinned model catalog; see
+[Downloading models](#downloading-models) for the full behavior (where files
+go, verification, progress output, network rules).
+
+In `models catalog`, `installed: yes` means a regular file with the expected
+size is present — presence and size only, not integrity (any right-sized
+file counts, even with different content). Use `models verify` to re-hash
+the installed file against the catalog SHA-256.
 
 ### `serve`
 
@@ -376,6 +522,8 @@ Failures use the same envelope with `ok: false` and `error.code`:
 | `engine_failed` | Engine error during transcription | 1 |
 | `cancelled` | Transcription cancelled | 1 |
 | `model_load_failed` | Failed to load the model | 1 |
+| `checksum_mismatch` | A downloaded or installed model file failed size or SHA-256 verification (see `--force`) | 1 |
+| `download_failed` | Network or HTTP failure during `models download` | 1 |
 | `internal` | Unexpected internal error | 1 |
 
 Config errors include `error.location.file`, `line`, and `column` when the
@@ -393,4 +541,14 @@ is not in the config `models` list.
 - **"unknown setting `foo`"**: the config contains a key that is not part of
 the schema. Check the file line in the error message.
 - **"model file not found"**: the resolved model path does not point to a
-regular file.
+regular file. For a `catalog:` entry the error names the fixing command,
+e.g. `pumice-transcribe --config FILE models download whisper-tiny-q8_0`
+(`--config` is kept when you passed one, because a `models_dir` override
+only applies through that config file).
+- **"unknown catalog model ..."**: the id passed to `models download`,
+  `models verify` or a config `catalog:` entry is not in the built-in
+  catalog; run `pumice-transcribe models catalog`.
+- **"... does not match the catalog entry (corrupt or modified); re-run with
+  --force"**: a file is already installed under the catalog's file name but
+  its size or SHA-256 differs. The file is left untouched; pass `--force` to
+  replace it.

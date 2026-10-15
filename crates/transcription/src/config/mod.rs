@@ -28,6 +28,9 @@ pub struct Config {
     pub threads: Option<usize>,
     /// Optional default server port.
     pub server_port: Option<u16>,
+    /// Override for the per-user models directory used by `catalog:` model
+    /// entries; resolved to an absolute path.
+    pub models_dir: Option<PathBuf>,
     /// Explicit list of configured models. Nothing is enabled implicitly.
     pub models: Vec<ModelEntry>,
 }
@@ -35,8 +38,12 @@ pub struct Config {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelEntry {
     pub id: String,
-    /// Absolute or config-dir-relative model path, resolved to an absolute path.
+    /// Absolute or config-dir-relative model path, resolved to an absolute
+    /// path. For `catalog:` entries this is the catalog file name inside the
+    /// models directory.
     pub path: PathBuf,
+    /// Built-in catalog id when the entry uses `catalog:` instead of `path`.
+    pub catalog: Option<String>,
 }
 
 /// Where the effective configuration came from.
@@ -91,20 +98,23 @@ pub fn load_with_env(
         },
     };
     let config = match &source {
-        ConfigSource::File(path) => load_file(path)?,
+        ConfigSource::File(path) => load_file(path, &get_env)?,
         ConfigSource::NoFile => Config::default(),
     };
     Ok(LoadedConfig { config, source })
 }
 
-fn load_file(path: &Path) -> Result<Config, ConfigError> {
+fn load_file(
+    path: &Path,
+    get_env: &dyn Fn(&str) -> Option<OsString>,
+) -> Result<Config, ConfigError> {
     let text = std::fs::read_to_string(path).map_err(|error| {
         ConfigError::file(path, format!("cannot read configuration file: {error}"))
     })?;
     let config_dir = config_dir_of(path);
     let raw = serde_saphyr::from_str_with_options::<Option<RawConfig>>(&text, saphyr_options())
         .map_err(|error| parse_error(path, &error))?;
-    validate(raw, Some(&config_dir)).map_err(|error| error.with_file(path))
+    validate(raw, Some(&config_dir), get_env).map_err(|error| error.with_file(path))
 }
 
 fn saphyr_options() -> serde_saphyr::Options {
@@ -114,7 +124,11 @@ fn saphyr_options() -> serde_saphyr::Options {
     }
 }
 
-fn validate(raw: Option<RawConfig>, config_dir: Option<&Path>) -> Result<Config, ConfigError> {
+fn validate(
+    raw: Option<RawConfig>,
+    config_dir: Option<&Path>,
+    get_env: &dyn Fn(&str) -> Option<OsString>,
+) -> Result<Config, ConfigError> {
     let raw = raw.unwrap_or_default();
 
     match &raw.schema_version {
@@ -154,6 +168,19 @@ fn validate(raw: Option<RawConfig>, config_dir: Option<&Path>) -> Result<Config,
         .as_ref()
         .and_then(|s| s.value.port.as_ref().map(|p| p.value));
 
+    let models_dir = match &raw.models_dir {
+        Some(span) => {
+            if span.value.as_os_str().is_empty() {
+                return Err(ConfigError::at(
+                    span.referenced,
+                    "models_dir must not be empty",
+                ));
+            }
+            Some(resolve_against(&span.value, config_dir))
+        }
+        None => None,
+    };
+
     let mut models: Vec<ModelEntry> = Vec::new();
     for entry in &raw.models {
         let entry_location = entry.referenced;
@@ -162,22 +189,6 @@ fn validate(raw: Option<RawConfig>, config_dir: Option<&Path>) -> Result<Config,
             Some(id) => id,
             None => return Err(ConfigError::at(entry_location, "model entry has no \"id\"")),
         };
-        let path = match &entry.path {
-            Some(path) => path,
-            None => {
-                return Err(ConfigError::at(
-                    entry_location,
-                    format!("model entry \"{}\" has no \"path\"", id.value),
-                ));
-            }
-        };
-
-        if path.value.as_os_str().is_empty() {
-            return Err(ConfigError::at(
-                path.referenced,
-                format!("model \"{}\" path must not be empty", id.value),
-            ));
-        }
 
         if id.value.is_empty() {
             return Err(ConfigError::at(id.referenced, "model id must not be empty"));
@@ -198,9 +209,64 @@ fn validate(raw: Option<RawConfig>, config_dir: Option<&Path>) -> Result<Config,
             ));
         }
 
+        let (path, catalog) = match (&entry.path, &entry.catalog) {
+            (Some(_), Some(_)) => {
+                return Err(ConfigError::at(
+                    entry_location,
+                    format!(
+                        "model entry \"{}\" must have exactly one of \"path\" or \"catalog\"",
+                        id.value
+                    ),
+                ));
+            }
+            (None, None) => {
+                return Err(ConfigError::at(
+                    entry_location,
+                    format!(
+                        "model entry \"{}\" has no \"path\" or \"catalog\"",
+                        id.value
+                    ),
+                ));
+            }
+            (Some(path), None) => {
+                if path.value.as_os_str().is_empty() {
+                    return Err(ConfigError::at(
+                        path.referenced,
+                        format!("model \"{}\" path must not be empty", id.value),
+                    ));
+                }
+                (resolve_against(&path.value, config_dir), None)
+            }
+            (None, Some(catalog)) => {
+                let catalog_entry = crate::catalog::find(&catalog.value).ok_or_else(|| {
+                    ConfigError::at(
+                        catalog.referenced,
+                        format!(
+                            "unknown catalog model \"{}\"; run `pumice-transcribe models catalog` to list available models",
+                            catalog.value
+                        ),
+                    )
+                })?;
+                let dir = models_dir
+                    .clone()
+                    .or_else(|| crate::models_dir::default_models_dir(get_env))
+                    .ok_or_else(|| {
+                        ConfigError::at(
+                            catalog.referenced,
+                            "no models directory: set models_dir in transcribe.yml or define XDG_DATA_HOME or HOME",
+                        )
+                    })?;
+                (
+                    dir.join(catalog_entry.file_name),
+                    Some(catalog.value.clone()),
+                )
+            }
+        };
+
         models.push(ModelEntry {
             id: id.value.clone(),
-            path: resolve_against(&path.value, config_dir),
+            path,
+            catalog,
         });
     }
 
@@ -225,11 +291,12 @@ fn validate(raw: Option<RawConfig>, config_dir: Option<&Path>) -> Result<Config,
         language,
         threads: raw.threads.map(|s| s.value),
         server_port,
+        models_dir,
         models,
     })
 }
 
-fn is_valid_id(id: &str) -> bool {
+pub(crate) fn is_valid_id(id: &str) -> bool {
     let mut bytes = id.bytes();
     match bytes.next() {
         Some(b) if b.is_ascii_lowercase() || b.is_ascii_digit() => {}
@@ -615,5 +682,168 @@ models:
         let error = ConfigError::at(Location::UNKNOWN, "lost position")
             .with_file(Path::new("transcribe.yml"));
         assert_eq!(error.to_string(), "transcribe.yml: lost position");
+    }
+
+    #[test]
+    fn catalog_entry_resolves_into_configured_models_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_config(
+            &tmp,
+            r#"schema_version: 1
+models_dir: downloaded
+models:
+  - id: tiny
+    catalog: whisper-tiny-q8_0
+"#,
+        );
+        let loaded = load(Some(&path)).unwrap();
+        let expected = tmp.path().join("downloaded").join("whisper-tiny-Q8_0.gguf");
+        assert_eq!(loaded.config.models[0].path, expected);
+        assert_eq!(
+            loaded.config.models[0].catalog.as_deref(),
+            Some("whisper-tiny-q8_0")
+        );
+        assert_eq!(
+            loaded.config.models_dir,
+            Some(tmp.path().join("downloaded"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_entry_falls_back_to_xdg_data_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_config(
+            &tmp,
+            r#"schema_version: 1
+models:
+  - id: tiny
+    catalog: whisper-tiny-q8_0
+"#,
+        );
+        let xdg = tmp.path().join("xdg");
+        let env_value = xdg.clone().into_os_string();
+        let loaded = load_with_env(Some(&path), |key| {
+            (key == "XDG_DATA_HOME").then(|| env_value.clone())
+        })
+        .unwrap();
+        assert_eq!(
+            loaded.config.models[0].path,
+            xdg.join("pumice")
+                .join("models")
+                .join("whisper-tiny-Q8_0.gguf")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn catalog_entry_falls_back_to_localappdata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_config(
+            &tmp,
+            r#"schema_version: 1
+models:
+  - id: tiny
+    catalog: whisper-tiny-q8_0
+"#,
+        );
+        let local = tmp.path().join("local");
+        let env_value = local.clone().into_os_string();
+        let loaded = load_with_env(Some(&path), |key| {
+            (key == "LOCALAPPDATA").then(|| env_value.clone())
+        })
+        .unwrap();
+        assert_eq!(
+            loaded.config.models[0].path,
+            local
+                .join("pumice")
+                .join("models")
+                .join("whisper-tiny-Q8_0.gguf")
+        );
+    }
+
+    #[test]
+    fn catalog_entry_without_any_models_dir_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_config(
+            &tmp,
+            r#"schema_version: 1
+models:
+  - id: tiny
+    catalog: whisper-tiny-q8_0
+"#,
+        );
+        let err = load_with_env(Some(&path), no_env).unwrap_err();
+        assert!(err.to_string().contains("no models directory"));
+    }
+
+    #[test]
+    fn unknown_catalog_id_reports_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_config(
+            &tmp,
+            r#"schema_version: 1
+models:
+  - id: tiny
+    catalog: whisper-base-q8_0
+"#,
+        );
+        let err = load(Some(&path)).unwrap_err();
+        let err_str = err.to_string();
+        assert!(err_str.contains("unknown catalog model \"whisper-base-q8_0\""));
+        assert!(err_str.contains(":4:"));
+    }
+
+    #[test]
+    fn path_and_catalog_together_are_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_config(
+            &tmp,
+            r#"schema_version: 1
+models:
+  - id: tiny
+    path: tiny.gguf
+    catalog: whisper-tiny-q8_0
+"#,
+        );
+        let err = load(Some(&path)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("must have exactly one of \"path\" or \"catalog\"")
+        );
+    }
+
+    #[test]
+    fn model_entry_without_path_or_catalog_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_config(
+            &tmp,
+            r#"schema_version: 1
+models:
+  - id: tiny
+"#,
+        );
+        let err = load(Some(&path)).unwrap_err();
+        assert!(err.to_string().contains("has no \"path\" or \"catalog\""));
+    }
+
+    #[test]
+    fn empty_models_dir_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_config(&tmp, "schema_version: 1\nmodels_dir: \"\"\n");
+        let err = load(Some(&path)).unwrap_err();
+        assert!(err.to_string().contains("models_dir must not be empty"));
+    }
+
+    #[test]
+    fn absolute_models_dir_is_used_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let abs = tmp.path().join("elsewhere");
+        let path = write_config(
+            &tmp,
+            &format!("schema_version: 1\nmodels_dir: {}\n", abs.display()),
+        );
+        let loaded = load(Some(&path)).unwrap();
+        assert_eq!(loaded.config.models_dir, Some(abs));
     }
 }

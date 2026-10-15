@@ -14,6 +14,8 @@ pub(crate) struct RawConfig {
     pub language: Option<Spanned<String>>,
     pub threads: Option<Spanned<usize>>,
     pub server: Option<Spanned<RawServerConfig>>,
+    /// Override for the per-user models directory used by `catalog:` entries.
+    pub models_dir: Option<Spanned<PathBuf>>,
     #[serde(default)]
     pub models: Vec<Spanned<RawModelEntry>>,
 }
@@ -28,5 +30,9 @@ pub(crate) struct RawServerConfig {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawModelEntry {
     pub id: Option<Spanned<String>>,
+    /// Local GGUF file; mutually exclusive with `catalog`.
     pub path: Option<Spanned<PathBuf>>,
+    /// Built-in catalog id; the entry resolves to the catalog file inside the
+    /// models directory. Mutually exclusive with `path`.
+    pub catalog: Option<Spanned<String>>,
 }

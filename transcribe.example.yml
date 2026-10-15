@@ -26,12 +26,22 @@ server:
   # Override with: pumice-transcribe serve --port PORT
   port: 17568
 
+# Optional override for where downloaded catalog models are stored.
+# Relative paths resolve against this file's directory; `~` is NOT expanded
+# — write an absolute path. The default is the per-user data directory
+# ($XDG_DATA_HOME/pumice/models or ~/.local/share/pumice/models on Linux,
+# ~/Library/Application Support on macOS, %LOCALAPPDATA%\pumice\models on
+# Windows).
+# models_dir: /absolute/path/to/models
+
 # Explicit model list. Nothing is enabled implicitly.
 models:
-  # whisper-large-v3-turbo-Q8_0.gguf: larger, slower, more accurate.
+  # A model from the built-in catalog. Download it explicitly with:
+  #   pumice-transcribe models download whisper-large-v3-turbo-q8_0
+  # An entry has exactly one of `catalog:` or `path:`.
   - id: turbo
-    path: whisper-large-v3-turbo-Q8_0.gguf
+    catalog: whisper-large-v3-turbo-q8_0
 
-  # whisper-tiny-Q8_0.gguf: small, fast, rough. Useful for testing.
+  # A local GGUF file. Relative paths resolve against this file's directory.
   - id: tiny
     path: whisper-tiny-Q8_0.gguf
