@@ -41,10 +41,16 @@ shared libraries plus one ggml CPU module per x86 ISA tier (14 modules from
 baseline `x64` up to `sapphirerapids`). At startup the binary picks the
 fastest module the running CPU **and OS** can actually execute, using Rust's
 `is_x86_feature_detected!` (which checks OS-enabled state via XGETBV, unlike
-ggml's own CPUID-only scoring), and loads only that module from a trusted
-directory next to the executable — never from the current directory or PATH.
-The plain `x64` module is the portable floor, so a missing feature degrades
-instead of crashing with SIGILL.
+ggml's own CPUID-only scoring), and loads only that module, from
+`cpu/<variant>/libggml-cpu-<variant>.so` inside the executable's own
+directory — never from the current directory or PATH. Each module is staged
+alone in its variant directory at build time, so ggml's directory probe can
+only ever see the selected one. Nothing is copied or written at runtime: the
+staged folder works from a read-only install directory. If the selected
+variant's module was not staged, the binary falls back to the next safe
+lower tier that exists, down to the plain `x64` portable floor, so a missing
+feature or an incomplete staged package degrades instead of crashing with
+SIGILL.
 
 Build and stage a self-contained folder (binary + its shared libraries and
 CPU modules) in one step:

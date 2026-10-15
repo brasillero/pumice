@@ -14,8 +14,7 @@ transcript, portable baseline kept).
   module per x86 ISA tier (`GGML_CPU_ALL_VARIANTS`, 14 modules in a non-MSVC
   x86-64 build, from baseline `x64` up to `sapphirerapids`). At startup the
   binary loads the modules with `transcribe_cpp::init_backends_with(dir,
-  BackendMask::CPU)` where `dir` is a private per-process directory inside
-  the executable's own directory or its `lib/` subdirectory — never the
+  BackendMask::CPU)` where `dir` is `<exe dir>/cpu/<variant>/` — never the
   current directory, PATH, a temp dir or ggml's default search paths.
   Registration is restricted to CPU backends, so no GPU driver can be pulled
   in.
@@ -36,30 +35,36 @@ transcript, portable baseline kept).
   ISA without AMX.
 - transcribe-cpp 0.3.1 exposes only directory-based backend loading, and
   ggml scores whatever the directory holds. To make ggml load exactly the
-  chosen module and nothing else, the module is copied alone into a private
-  per-process directory (`.pumice-cpu-variant-<pid>`) inside the trusted
-  install dir and removed right after registration (after `dlopen` the
-  mapping stays valid). ggml's CPUID-only scoring still runs on that one
-  module but has nothing else it could pick instead.
+  chosen module and nothing else, the staging script places each module
+  alone in `<exe dir>/cpu/<variant>/libggml-cpu-<variant>.so` at build time,
+  and startup initializes backends from the selected variant's directory
+  only. Nothing is copied or written at runtime (an earlier design copied
+  the module into a per-process directory and was rejected in review round
+  2: it failed on read-only install dirs and was attackable through
+  symlinks), so the staged folder works read-only. If the chosen variant's
+  module is not staged, startup falls back to the next lower tier whose
+  module exists — the tiers nest, so any lower tier is safe — down to `x64`;
+  if none exists, startup fails with the "modules missing" error.
+- Init failures distinguish modules missing / no usable CPU module, each
+  with a recovery hint, in fixed text with no native error strings.
 - The selected variant is reported from ground truth: the ggml device
   description plus the mapped `libggml-cpu-*.so` file read from
   /proc/self/maps (the full pathname is preserved, spaces and the
   " (deleted)" suffix included). It appears in `serve`'s startup line and as
   a `backend` field in `file --json`, e.g. `"CPU (Intel(R) Core(TM)
   i5-14500T) [alderlake]"`.
-- Init failures distinguish modules missing / staging failed / no usable CPU
-  module, each with a recovery hint, in fixed text with no native error
-  strings.
 - `crates/transcription/scripts/build-cpu-variants.sh` builds this mode and
-  stages a self-contained folder under `target/cpu-variants/stage/` (binary +
-  every `.so` the build produced). The script resolves the exact
-  `transcribe-cpp-sys` `out_dir` of the build just run (from `cargo
-  --message-format=json` build-script-executed messages) so a fresh
-  executable is never paired with stale cached libraries, and validates that
-  libtranscribe, libggml, libggml-base and the x64 module are all present.
-  The binary carries an `$ORIGIN` rpath emitted from
-  `crates/transcription/build.rs`, gated on the feature, so the staged folder
-  works from any location.
+  stages a self-contained folder under `target/cpu-variants/stage/`: the
+  binary, the core libraries (libtranscribe, libggml, libggml-base) beside
+  it, and one `cpu/<variant>/libggml-cpu-<variant>.so` per variant the build
+  produced. The script resolves the exact `transcribe-cpp-sys` `out_dir` of
+  the build just run (from `cargo --message-format=json` build-script-
+  executed messages) so a fresh executable is never paired with stale cached
+  libraries, creates the build target directory before logging, and
+  validates that the core libraries and the x64 module are all present and
+  that at least two variant directories were staged. The binary carries an
+  `$ORIGIN` rpath emitted from `crates/transcription/build.rs`, gated on the
+  feature, so the staged folder works from any location.
 - The conservative portable baseline in `.cargo/config.toml`
   (`TRANSCRIBE_CMAKE_ARGS`, `force=false`) cannot suppress the variants: the
   script uses its own `CARGO_TARGET_DIR` (so CMake never reuses the static
@@ -69,10 +74,13 @@ transcript, portable baseline kept).
   the feature itself sets `GGML_BACKEND_DL=ON`, `GGML_CPU_ALL_VARIANTS=ON`
   and `GGML_NATIVE=OFF`.
 - CI: a Linux job in `.github/workflows/transcription.yml` clippy-checks the
-  feature, runs its full test suite (module discovery, variant chooser, maps
-  parsing), then builds and stages the mode, runs the `ldd` check and the
-  Whisper tiny smoke test against the staged binary (asserting the `backend`
-  field). Existing jobs are unchanged.
+  feature, runs its full test suite (variant chooser, staged-layout
+  selection, maps parsing), then builds and stages the mode, asserts the
+  staged tree has `cpu/x64/` plus at least one other variant directory,
+  makes the stage read-only (`chmod -R a-w`), runs the `ldd` check and the
+  Whisper tiny smoke test against the staged binary (asserting the
+  `backend` field), and restores write permission. Existing jobs are
+  unchanged.
 
 ## Method
 
@@ -125,8 +133,9 @@ Transcript: exact match in all runs of both builds.
 
 - Only the chosen module is dlopen'd: the startup line prints
   `cpu-variants: selected ggml CPU module libggml-cpu-alderlake.so`, and
-  /proc/self/maps shows exactly one `libggml-cpu-*.so` mapped. The private
-  staging directory is removed before the first request.
+  /proc/self/maps shows exactly one `libggml-cpu-*.so` mapped. The staged
+  folder was made read-only (`chmod -R a-w`) before the run: startup and
+  inference need no writes to the install directory.
 - The variant chooser is unit-tested with injected feature sets, independent
   of the host, including "CPU advertises AVX-512 but the OS has the state
   disabled" (the AVX-512/AMX tiers are not chosen) and "AVX state disabled"
