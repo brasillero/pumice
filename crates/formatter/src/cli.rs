@@ -96,11 +96,11 @@ struct CheckConfigArgs {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct Envelope {
+struct Envelope<R> {
     schema_version: i32,
     ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<serde_json::Value>,
+    result: Option<R>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<JsonError>,
 }
@@ -121,7 +121,7 @@ enum CommandOutput {
         text: String,
         json_result: serde_json::Value,
     },
-    Apply(serde_json::Value),
+    Apply(String),
     CheckConfig(Option<PathBuf>),
 }
 
@@ -191,15 +191,19 @@ pub fn run_with(name: &str, args: impl IntoIterator<Item = OsString>) -> ExitCod
         }
         Ok(CommandOutput::Apply(request)) => {
             let printed = if json {
+                // The transformed request goes into the envelope raw, so big
+                // numbers, key order and escapes survive byte for byte.
+                let result = serde_json::value::RawValue::from_string(request)
+                    .expect("the transformed request is valid JSON");
                 let envelope = Envelope {
                     schema_version: 1,
                     ok: true,
-                    result: Some(request),
+                    result: Some(result),
                     error: None,
                 };
                 serde_json::to_string(&envelope).unwrap()
             } else {
-                serde_json::to_string(&request).unwrap()
+                request
             };
             match writeln!(stdout, "{printed}") {
                 Ok(()) => ExitCode::SUCCESS,
@@ -233,7 +237,7 @@ fn handle_clap_error(err: clap::Error, wants_json: bool) -> ExitCode {
             ExitCode::SUCCESS
         }
         _ if wants_json => {
-            let envelope = Envelope {
+            let envelope = Envelope::<serde_json::Value> {
                 schema_version: 1,
                 ok: false,
                 result: None,
@@ -293,8 +297,8 @@ fn run_command(args: Args) -> Result<CommandOutput, Error> {
             let loaded = load_config(args.config.as_deref())?;
             let definition = resolve_formatter(apply_args.formatter.as_deref(), &loaded.config)?;
             let request = read_request(&apply_args.request)?;
-            let request: serde_json::Value = serde_json::from_slice(&request).map_err(|err| {
-                Error::invalid_input(format!("the request is not valid JSON: {err}"))
+            let request = std::str::from_utf8(&request).map_err(|_| {
+                Error::invalid_input("the request is not valid JSON: the bytes are not valid UTF-8")
             })?;
             let transformed = transform::apply(request, &definition, apply_args.on_conflict)?;
             Ok(CommandOutput::Apply(transformed))
@@ -550,7 +554,7 @@ fn print_error(
     stderr: &mut dyn Write,
 ) -> io::Result<()> {
     if json {
-        let envelope = Envelope {
+        let envelope = Envelope::<serde_json::Value> {
             schema_version: 1,
             ok: false,
             result: None,

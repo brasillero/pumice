@@ -512,7 +512,8 @@ fn help_names_the_program_and_lists_the_commands() {
 fn apply_preserves_big_integers_and_long_decimals_in_unknown_fields() {
     let home = HermeticHome::new();
     // A u64-overflowing integer and a decimal longer than f64 precision:
-    // both must pass through byte-exact (serde_json arbitrary_precision).
+    // both must pass through byte-exact (raw pass-through, no Value
+    // round-trip).
     let request = br#"{"model":"claude","messages":[{"role":"user","content":"hi"}],"big":18446744073709551617,"negative":-18446744073709551617,"price":1.1000000000000000055511151231257827021181583404541015625}"#;
     let output = run_with_stdin(
         &mut home.command(&["apply", "--formatter", "builtin:clean"]),
@@ -555,6 +556,40 @@ fn apply_preserves_nested_key_order_in_unknown_fields() {
         stdout.find("\"z\"").unwrap() < stdout.find("\"a\"").unwrap(),
         "z serializes before a: {stdout}"
     );
+}
+
+#[test]
+fn apply_preserves_odd_keys_byte_for_byte() {
+    let home = HermeticHome::new();
+    // serde_json's internal number marker is a legitimate client key: it
+    // must come out untouched, not decoded into a number.
+    let request = br#"{"messages":[{"role":"user","content":"hi"}],"metadata":{"$serde_json::private::Number":"123"}}"#;
+    let output = run_with_stdin(
+        &mut home.command(&["apply", "--formatter", "builtin:clean"]),
+        request,
+    );
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let stdout = stdout(&output);
+    assert!(
+        stdout.contains(r#""metadata":{"$serde_json::private::Number":"123"}"#),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn apply_json_keeps_the_transformed_request_byte_exact() {
+    let home = HermeticHome::new();
+    // The --json envelope embeds the transformed request raw, so precision
+    // and key order survive there too.
+    let request = br#"{"messages":[{"role":"user","content":"hi"}],"big":18446744073709551617}"#;
+    let output = run_with_stdin(
+        &mut home.command(&["apply", "--formatter", "builtin:clean", "--json"]),
+        request,
+    );
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let stdout = stdout(&output);
+    assert!(stdout.contains(r#""ok":true"#), "{stdout}");
+    assert!(stdout.contains(r#""big":18446744073709551617"#), "{stdout}");
 }
 
 #[test]

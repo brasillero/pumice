@@ -26,7 +26,10 @@ echo '{"model":"claude","messages":[{"role":"user","content":"reunião às nove 
 `apply` prints the transformed request JSON to stdout: the same request
 with one `{"role":"system","content":…}` message inserted before the first
 non-system/developer message. Everything else — model, `stream`, unknown
-members, every other message — is preserved exactly.
+members, every other message — is preserved exactly. `apply` works on the
+raw request text: numbers of any size or precision, key order and string
+escapes inside every value are re-emitted byte for byte, and only whitespace
+between top-level members and between `messages` elements may change.
 
 ## Formatter definitions
 
