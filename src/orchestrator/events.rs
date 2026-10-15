@@ -37,6 +37,19 @@ struct Event<'a> {
     code: Option<&'a str>,
 }
 
+/// Where an operation's lifecycle events go. Only metadata crosses this
+/// boundary: stage names, event names, elapsed milliseconds and error codes,
+/// never any text. `Send` so a service can run operations on its own tasks.
+pub trait EventSink: Send {
+    fn emit(
+        &mut self,
+        stage: Option<&'static str>,
+        event: &'static str,
+        elapsed_ms: Option<u64>,
+        code: Option<&'static str>,
+    );
+}
+
 /// Emits events on a writer thread; sending never blocks the run.
 pub struct EventWriter {
     sender: mpsc::SyncSender<String>,
@@ -87,8 +100,19 @@ impl EventWriter {
         }
     }
 
+    /// Closes the queue and gives the writer a short budget to flush.
+    pub fn finish(self) {
+        drop(self.sender);
+        let deadline = std::time::Instant::now() + DRAIN_WAIT;
+        while !self.drained.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+impl EventSink for EventWriter {
     /// Queues one event; dropped silently when the queue is full.
-    pub fn emit(
+    fn emit(
         &mut self,
         stage: Option<&'static str>,
         event: &'static str,
@@ -109,15 +133,6 @@ impl EventWriter {
         };
         self.seq += 1;
         let _ = self.sender.try_send(line);
-    }
-
-    /// Closes the queue and gives the writer a short budget to flush.
-    pub fn finish(self) {
-        drop(self.sender);
-        let deadline = std::time::Instant::now() + DRAIN_WAIT;
-        while !self.drained.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
     }
 }
 

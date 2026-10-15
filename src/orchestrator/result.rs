@@ -2,16 +2,75 @@
 //! `schema_version: 1` JSON document on stdout under `--json`, with the raw
 //! transcript and the final text as separate fields.
 //!
-//! Content-bearing types ([`RunEnvelope`], [`Transcript`], [`FinalText`])
-//! deliberately have no `Debug`: dictated text must never reach a log through
-//! `{:?}`.
+//! [`RunOutput`] is what one flow execution produced, independent of how it
+//! is presented: the CLI writes it as this envelope or as plain text, and a
+//! future HTTP presenter can reuse the same envelope.
+//!
+//! Content-bearing types ([`RunOutput`], [`RunEnvelope`], [`Transcript`],
+//! [`FinalText`]) deliberately have no `Debug`: dictated text must never
+//! reach a log through `{:?}`.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Serialize, Serializer};
 
+use crate::orchestrator::error::StageError;
+
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MODULE: &str = "orchestrator";
+
+/// Everything one flow execution produced: the envelope fields and, through
+/// the error, the CLI's exit code.
+pub struct RunOutput {
+    pub operation_id: String,
+    pub flow: Option<String>,
+    pub transcript: Option<Transcript>,
+    pub result: Option<FinalText>,
+    pub stages: StageReports,
+    pub total: Duration,
+    pub error: Option<StageError>,
+}
+
+impl RunOutput {
+    pub fn exit_code(&self) -> u8 {
+        self.error.as_ref().map_or(0, |error| error.exit)
+    }
+
+    /// The one result document (stdout under `--json`).
+    pub fn into_envelope(self) -> RunEnvelope {
+        RunEnvelope {
+            schema_version: SCHEMA_VERSION,
+            operation_id: self.operation_id,
+            module: MODULE,
+            ok: self.error.is_none(),
+            flow: self.flow,
+            transcript: self.transcript,
+            result: self.result,
+            stages: self.stages,
+            timings_ms: Timings {
+                total: millis(self.total),
+            },
+            error: self.error.as_ref().map(flow_error),
+        }
+    }
+}
+
+fn flow_error(error: &StageError) -> FlowError {
+    FlowError {
+        stage: error.stage.to_owned(),
+        code: error.code.to_owned(),
+        message: error.message.clone(),
+        retryable: false,
+        cause_code: error.cause_code.as_deref().map(str::to_owned),
+        location: error.location.as_deref().cloned(),
+    }
+}
+
+/// A duration in whole milliseconds, saturating.
+pub fn millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
+}
 
 /// The full result document.
 #[derive(Serialize)]
@@ -74,10 +133,10 @@ pub struct StageReport {
 }
 
 impl StageReport {
-    pub fn measured(status: StageStatus, elapsed: std::time::Duration) -> StageReport {
+    pub fn measured(status: StageStatus, elapsed: Duration) -> StageReport {
         StageReport {
             status,
-            elapsed_ms: Some(elapsed.as_millis().min(u64::MAX as u128) as u64),
+            elapsed_ms: Some(millis(elapsed)),
             model_load_ms: None,
             inference_ms: None,
         }
