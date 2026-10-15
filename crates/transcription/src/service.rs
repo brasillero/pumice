@@ -6,11 +6,15 @@ use crate::engine::{CancelToken, Engine};
 use crate::{Error, ErrorCode, Transcript, TranscriptionOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// Result of the shared decode → resample → engine pipeline.
 pub struct TranscriptionResult {
     pub transcript: Transcript,
     pub audio_seconds: f64,
+    /// Time spent in the engine call alone, without reading, decoding or
+    /// resampling the audio.
+    pub inference: Duration,
 }
 
 /// Decode and resample audio from a reader, returning 16 kHz mono PCM and its
@@ -65,12 +69,15 @@ pub fn transcribe_pcm_from_reader<R: Read + Send + Sync>(
 ) -> Result<TranscriptionResult, Error> {
     let (pcm, audio_seconds) = decode_audio_from_reader_with_cancel(reader, cancel)?;
     check_cancel(cancel)?;
+    let started = Instant::now();
     let transcript = transcribe_pcm(engine, &pcm, options, cancel)?;
+    let inference = started.elapsed();
     // A run that finished after cancellation is discarded, never published.
     check_cancel(cancel)?;
     Ok(TranscriptionResult {
         transcript,
         audio_seconds,
+        inference,
     })
 }
 

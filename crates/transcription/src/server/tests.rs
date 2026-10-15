@@ -17,6 +17,8 @@ const BOUNDARY: &str = "pumice-test-boundary";
 #[derive(Default)]
 struct TestEngine {
     text: String,
+    language: Option<String>,
+    delay: Duration,
     gated: bool,
     panic: bool,
     started: Notify,
@@ -74,6 +76,7 @@ impl Engine for TestEngine {
         if self.panic {
             panic!("test engine panic");
         }
+        std::thread::sleep(self.delay);
         if self.gated {
             while !self.release.load(Ordering::SeqCst) {
                 if cancel.is_cancelled() {
@@ -89,7 +92,7 @@ impl Engine for TestEngine {
         }
         Ok(Transcript {
             text: self.text.clone(),
-            language: None,
+            language: self.language.clone(),
         })
     }
 }
@@ -849,4 +852,495 @@ fn a_run_that_finishes_after_cancellation_is_discarded() {
         &CancelToken::new(),
     );
     assert_eq!(result.err().map(|e| e.code), Some(ErrorCode::Cancelled));
+}
+
+// --- Managed mode -----------------------------------------------------------
+
+const PORT: u16 = 40123;
+const HOST: &str = "127.0.0.1:40123";
+
+fn managed(state: ServerState) -> ServerState {
+    state.managed("gen-1".to_string(), PORT)
+}
+
+fn with_host(mut request: Request) -> Request {
+    request
+        .headers_mut()
+        .insert(header::HOST, header::HeaderValue::from_static(HOST));
+    request
+}
+
+fn get(uri: &str) -> Request {
+    Request::get(uri).body(Body::empty()).unwrap()
+}
+
+fn post_detailed(body: impl Into<Body>) -> Request {
+    let mut request = post(body);
+    *request.uri_mut() = "/pumice/v1/transcriptions".parse().unwrap();
+    with_host(request)
+}
+
+/// Status, the headers a client acts on, and the exact body.
+async fn snapshot(response: Response) -> (StatusCode, Vec<(String, String)>, Vec<u8>) {
+    let status = response.status();
+    let mut headers: Vec<_> = response
+        .headers()
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.to_str().unwrap().to_string()))
+        .collect();
+    headers.sort();
+    (status, headers, body_bytes(response).await)
+}
+
+/// A managed-route error: an OpenAI error object whose `code` is always set.
+async fn managed_error(response: Response, status: StatusCode, code: &str) -> serde_json::Value {
+    let error = error(response, status).await;
+    assert_eq!(error["code"], code, "{error}");
+    error
+}
+
+#[tokio::test]
+async fn managed_routes_do_not_exist_without_managed_mode() {
+    let state = state(TestEngine::returning("x"));
+    let unknown = snapshot(send(&state, get("/no-such-route")).await).await;
+    for request in [
+        with_host(get("/ready")),
+        post_detailed(basic_body(&wav(1.0))),
+    ] {
+        assert_eq!(snapshot(send(&state, request).await).await, unknown);
+    }
+}
+
+#[tokio::test]
+async fn public_routes_answer_byte_identically_in_managed_mode() {
+    let requests: Vec<fn() -> Request> = vec![
+        || post(basic_body(&wav(1.0))),
+        || {
+            post(multipart(&[
+                Part::File("file", &wav(1.0)),
+                Part::Text("model", MODEL),
+                Part::Text("response_format", "text"),
+            ]))
+        },
+        || post(multipart(&[Part::File("file", &wav(1.0))])),
+        || {
+            post(multipart(&[
+                Part::File("file", b"not audio"),
+                Part::Text("model", MODEL),
+            ]))
+        },
+        || {
+            let mut request = post(basic_body(&wav(1.0)));
+            // Managed-route guards never apply to the OpenAI routes.
+            request.headers_mut().insert(
+                header::ORIGIN,
+                header::HeaderValue::from_static("http://example.com"),
+            );
+            request
+        },
+        || get("/v1/models"),
+        || get("/v1/models/turbo"),
+        || get("/v1/models/other"),
+        || get("/health"),
+        || get("/unknown"),
+        || Request::delete("/health").body(Body::empty()).unwrap(),
+    ];
+    for make in requests {
+        let plain = state(TestEngine::returning("same words"));
+        let managed = managed(state(TestEngine::returning("same words")));
+        assert_eq!(
+            snapshot(send(&plain, make()).await).await,
+            snapshot(send(&managed, make()).await).await
+        );
+    }
+
+    // A busy answer too.
+    let mut busy = Vec::new();
+    for is_managed in [false, true] {
+        let engine = TestEngine::gated("x");
+        let mut state = state(Arc::clone(&engine));
+        if is_managed {
+            state = managed(state);
+        }
+        let first = tokio::spawn(send_owned(state.clone(), post(basic_body(&wav(1.0)))));
+        engine.started.notified().await;
+        busy.push(snapshot(send(&state, post(basic_body(&wav(1.0)))).await).await);
+        engine.release();
+        first.await.unwrap();
+    }
+    assert_eq!(busy[0], busy[1]);
+}
+
+#[tokio::test]
+async fn ready_reports_the_instance_until_shutdown() {
+    let engine = TestEngine::gated("x");
+    let state = managed(state(Arc::clone(&engine)));
+    let response = send(&state, with_host(get("/ready"))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        String::from_utf8(body_bytes(response).await).unwrap(),
+        format!(
+            r#"{{"schema_version":1,"module":"transcription","instance_id":"gen-1","protocol_version":1,"version":"{}","model":"turbo","capabilities":["openai_transcriptions","detailed_transcriptions","managed_shutdown"],"state":"ready"}}"#,
+            env!("CARGO_PKG_VERSION")
+        )
+    );
+
+    // Busy is still ready.
+    let first = tokio::spawn(send_owned(state.clone(), post(basic_body(&wav(1.0)))));
+    engine.started.notified().await;
+    let response = send(&state, with_host(get("/ready"))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    state.shutdown.cancel();
+    let response = send(&state, with_host(get("/ready"))).await;
+    let error = managed_error(response, StatusCode::SERVICE_UNAVAILABLE, "shutting_down").await;
+    assert_eq!(error["type"], "server_error");
+    engine.release();
+    first.await.unwrap();
+}
+
+#[tokio::test]
+async fn detailed_route_returns_the_versioned_result() {
+    let engine = Arc::new(TestEngine {
+        text: "olá mundo".to_string(),
+        delay: Duration::from_millis(60),
+        ..Default::default()
+    });
+    let state = managed(state(engine));
+    let response = send(
+        &state,
+        post_detailed(multipart(&[
+            Part::File("file", &wav(1.5)),
+            Part::Text("model", MODEL),
+            Part::Text("language", "pt"),
+        ])),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+    let body = json(response).await;
+    let keys: Vec<_> = body.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(
+        keys,
+        [
+            "schema_version",
+            "text",
+            "language",
+            "audio_seconds",
+            "inference_ms"
+        ]
+    );
+    assert_eq!(body["schema_version"], 1);
+    assert_eq!(body["text"], "olá mundo");
+    assert_eq!(body["language"], "pt");
+    assert_eq!(body["audio_seconds"], 1.5);
+    let inference_ms = body["inference_ms"].as_u64().unwrap();
+    assert!((60..10_000).contains(&inference_ms), "{inference_ms}");
+}
+
+#[tokio::test]
+async fn detailed_route_reports_detected_language_and_omits_unknown_values() {
+    let detected = Arc::new(TestEngine {
+        text: "hello".to_string(),
+        language: Some("en".to_string()),
+        ..Default::default()
+    });
+    let body = json(
+        send(
+            &managed(state(detected)),
+            post_detailed(basic_body(&wav(1.0))),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(body["language"], "en");
+
+    // Silence: empty text is a success, and an unknown language is left out.
+    let body = json(
+        send(
+            &managed(state(TestEngine::returning(""))),
+            post_detailed(basic_body(&wav(1.0))),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(body["text"], "");
+    assert!(body.get("language").is_none(), "{body}");
+}
+
+#[tokio::test]
+async fn detailed_route_errors_carry_stable_codes() {
+    let state = managed(state(TestEngine::returning("x")));
+    let cases: Vec<(Vec<u8>, StatusCode, &str)> = vec![
+        (
+            multipart(&[Part::File("file", &wav(1.0))]),
+            StatusCode::BAD_REQUEST,
+            "missing_model",
+        ),
+        (
+            multipart(&[Part::File("file", &wav(1.0)), Part::Text("model", "other")]),
+            StatusCode::NOT_FOUND,
+            "model_not_found",
+        ),
+        (
+            multipart(&[
+                Part::File("file", &wav(1.0)),
+                Part::Text("model", MODEL),
+                Part::Text("response_format", "text"),
+            ]),
+            StatusCode::BAD_REQUEST,
+            "invalid_response_format",
+        ),
+        (
+            multipart(&[
+                Part::File("file", &wav(1.0)),
+                Part::Text("model", MODEL),
+                Part::Text("flow", "clean"),
+            ]),
+            StatusCode::BAD_REQUEST,
+            "unsupported_parameter",
+        ),
+        (
+            multipart(&[Part::File("file", b"not audio"), Part::Text("model", MODEL)]),
+            StatusCode::BAD_REQUEST,
+            "unsupported_format",
+        ),
+        (
+            multipart(&[Part::File("file", &wav(121.0)), Part::Text("model", MODEL)]),
+            StatusCode::BAD_REQUEST,
+            "audio_too_long",
+        ),
+        (
+            multipart(&[
+                Part::File("file", &wav(1.0)),
+                Part::Text("model", MODEL),
+                Part::Text("prompt", &"p".repeat(16 * 1024 + 1)),
+            ]),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "field_too_large",
+        ),
+    ];
+    for (body, status, code) in cases {
+        managed_error(send(&state, post_detailed(body)).await, status, code).await;
+    }
+
+    let mut oversize = post_detailed(Body::empty());
+    oversize.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        header::HeaderValue::from(MAX_TOTAL_BODY_BYTES + 1),
+    );
+    managed_error(
+        send(&state, oversize).await,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "body_too_large",
+    )
+    .await;
+    assert_eq!(state.admission.available_permits(), 1);
+}
+
+#[tokio::test]
+async fn detailed_and_openai_routes_share_one_admission() {
+    let engine = TestEngine::gated("first");
+    let state = managed(state(Arc::clone(&engine)));
+    let first = tokio::spawn(send_owned(
+        state.clone(),
+        post_detailed(basic_body(&wav(1.0))),
+    ));
+    engine.started.notified().await;
+
+    // Neither route reads the body while busy.
+    let (body, _tx) = hanging_body(b"--");
+    let busy = send(&state, post_detailed(body)).await;
+    assert_eq!(busy.headers()[header::RETRY_AFTER], "1");
+    let busy = managed_error(busy, StatusCode::TOO_MANY_REQUESTS, "rate_limit_exceeded").await;
+    assert_eq!(busy["type"], "rate_limit_error");
+    let (body, _tx) = hanging_body(b"--");
+    error(
+        send(&state, post(body)).await,
+        StatusCode::TOO_MANY_REQUESTS,
+    )
+    .await;
+
+    engine.release();
+    assert_eq!(first.await.unwrap().status(), StatusCode::OK);
+
+    // And the other way round.
+    let engine = TestEngine::gated("first");
+    let state = managed(state_with(Arc::clone(&engine), Limits::default()));
+    let first = tokio::spawn(send_owned(state.clone(), post(basic_body(&wav(1.0)))));
+    engine.started.notified().await;
+    let (body, _tx) = hanging_body(b"--");
+    managed_error(
+        send(&state, post_detailed(body)).await,
+        StatusCode::TOO_MANY_REQUESTS,
+        "rate_limit_exceeded",
+    )
+    .await;
+    engine.release();
+    assert_eq!(first.await.unwrap().status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn detailed_route_cancels_on_shutdown_like_the_openai_route() {
+    let engine = TestEngine::gated("must not be published");
+    let state = managed(state(Arc::clone(&engine)));
+    let request = tokio::spawn(send_owned(
+        state.clone(),
+        post_detailed(basic_body(&wav(1.0))),
+    ));
+    engine.started.notified().await;
+
+    state.shutdown.cancel();
+    let response = request.await.unwrap();
+    managed_error(response, StatusCode::SERVICE_UNAVAILABLE, "shutting_down").await;
+    wait_until(|| engine.saw_cancel.load(Ordering::SeqCst)).await;
+    assert_eq!(state.admission.available_permits(), 0);
+    engine.release();
+    wait_until(|| state.admission.available_permits() == 1).await;
+}
+
+#[tokio::test]
+async fn managed_routes_accept_only_the_literal_loopback_host_and_no_origin() {
+    let engine = Arc::new(TestEngine {
+        text: "x".to_string(),
+        ..Default::default()
+    });
+    let state = managed(state(Arc::clone(&engine)));
+    let bad_hosts = [
+        None,
+        Some("127.0.0.1"),
+        Some("127.0.0.1:1"),
+        Some("localhost:40123"),
+        Some("attacker.example:40123"),
+        Some("[::1]:40123"),
+    ];
+    for host in bad_hosts {
+        for path in ["/ready", "/pumice/v1/transcriptions"] {
+            let mut request = if path == "/ready" {
+                get(path)
+            } else {
+                post_detailed(basic_body(&wav(1.0)))
+            };
+            request.headers_mut().remove(header::HOST);
+            if let Some(host) = host {
+                request
+                    .headers_mut()
+                    .insert(header::HOST, header::HeaderValue::from_static(host));
+            }
+            let error = managed_error(
+                send(&state, request).await,
+                StatusCode::FORBIDDEN,
+                "host_not_allowed",
+            )
+            .await;
+            assert_eq!(error["type"], "invalid_request_error");
+        }
+    }
+
+    // An absolute URI must name the same authority.
+    let mut request = with_host(get("/ready"));
+    *request.uri_mut() = "http://attacker.example:40123/ready".parse().unwrap();
+    managed_error(
+        send(&state, request).await,
+        StatusCode::FORBIDDEN,
+        "host_not_allowed",
+    )
+    .await;
+
+    // Any Origin is refused, even this server's own, before admission.
+    for origin in ["http://127.0.0.1:40123", "null", "http://localhost:40123"] {
+        let mut request = post_detailed(basic_body(&wav(1.0)));
+        request
+            .headers_mut()
+            .insert(header::ORIGIN, header::HeaderValue::from_static(origin));
+        managed_error(
+            send(&state, request).await,
+            StatusCode::FORBIDDEN,
+            "origin_not_allowed",
+        )
+        .await;
+        let mut request = with_host(get("/ready"));
+        request
+            .headers_mut()
+            .insert(header::ORIGIN, header::HeaderValue::from_static(origin));
+        managed_error(
+            send(&state, request).await,
+            StatusCode::FORBIDDEN,
+            "origin_not_allowed",
+        )
+        .await;
+    }
+    assert!(
+        engine.options.lock().unwrap().is_none(),
+        "the engine never ran"
+    );
+    assert_eq!(state.admission.available_permits(), 1);
+}
+
+/// Send a raw HTTP/1.1 request over a real socket without waiting for the
+/// answer.
+async fn open_request(addr: std::net::SocketAddr, body: &[u8]) -> tokio::net::TcpStream {
+    use tokio::io::AsyncWriteExt;
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let head = format!(
+        "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: {addr}\r\nContent-Type: multipart/form-data; boundary={BOUNDARY}\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    stream.write_all(body).await.unwrap();
+    stream
+}
+
+#[tokio::test]
+async fn serve_waits_for_an_active_worker_before_returning() {
+    let engine = TestEngine::gated("late");
+    let listener = bind(0).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let handle = serve_on(
+        listener,
+        Arc::clone(&engine) as Arc<dyn Engine>,
+        MODEL.to_string(),
+        None,
+        None,
+        async {
+            let _ = rx.await;
+        },
+    )
+    .unwrap();
+
+    let _client = open_request(addr, &basic_body(&wav(1.0))).await;
+    time::timeout(Duration::from_secs(5), engine.started.notified())
+        .await
+        .expect("the engine started");
+    tx.send(()).unwrap();
+    wait_until(|| engine.saw_cancel.load(Ordering::SeqCst)).await;
+    time::sleep(Duration::from_millis(100)).await;
+    assert!(!handle.is_finished(), "returned while the engine still ran");
+
+    engine.release();
+    time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("server stopped after the engine returned")
+        .unwrap();
+    assert!(engine.finished.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn serve_on_refuses_a_non_loopback_listener() {
+    let Ok(listener) = TcpListener::bind("0.0.0.0:0").await else {
+        return; // no IPv4 wildcard in this environment
+    };
+    let result = serve_on(
+        listener,
+        TestEngine::returning("x"),
+        MODEL.to_string(),
+        None,
+        None,
+        std::future::pending(),
+    );
+    assert_eq!(
+        result.err().map(|e| e.kind()),
+        Some(io::ErrorKind::InvalidInput)
+    );
 }
