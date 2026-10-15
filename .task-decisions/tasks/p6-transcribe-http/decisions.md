@@ -64,3 +64,18 @@
 **Why.** Fast answers; server-1 has enough memory.
 
 **Rejected.** Loading the model only when a request arrives.
+
+### D6 · Active · Endpoints match the OpenAI API as a requirement
+- date: 2026-10-15
+- decided by: brasillero
+- origin: conversation
+- area: api
+- revisit if: —
+
+**Decision.** Every Pumice HTTP endpoint must match the OpenAI-compatible API standard (request fields, response shapes, error envelope, status codes) as a requirement. Unsupported OpenAI options are rejected explicitly, never silently ignored.
+
+**Why.** Apps such as T3 must integrate without adapters.
+
+**Rejected.** A Pumice-specific contract, or "close enough" compatibility.
+
+**Consequences.** Reviews check the endpoint against the official OpenAI API reference; Kimi and Codex iterate until Codex approves, then the supervisor does a full final review.
