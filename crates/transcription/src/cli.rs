@@ -431,9 +431,14 @@ fn run_models_command(command: ModelsCommand, config: &Config) -> Result<Command
                 download::RedirectPolicy::HttpsOnly,
                 download::Timeouts::default(),
             );
-            let result = downloader.fetch(&spec, &dir, args.force, &mut |bytes, _| {
-                // Progress is best-effort; never fail the download over it.
-                let _ = reporter.tick(bytes);
+            let result = downloader.fetch(&spec, &dir, args.force, &mut |event| match event {
+                download::DownloadEvent::Progress { received, .. } => {
+                    // Progress is best-effort; never fail the download over it.
+                    let _ = reporter.tick(received);
+                }
+                download::DownloadEvent::State(state) => {
+                    let _ = reporter.state(state);
+                }
             })?;
 
             let (already_installed, path, bytes, sha256) = match result {
@@ -635,11 +640,15 @@ fn build_catalog_list(models_dir: &Path) -> Vec<CatalogListEntry> {
         .collect()
 }
 
-/// Throttled download progress designed for a future UI (`arch-modules/D10`):
-/// with `json`, one JSON Line per tick on stderr
-/// (`{"schema_version":1,"event":"progress","model":ID,"bytes":N,"total":M}`);
-/// otherwise a single human-readable line on stderr that overwrites itself.
-/// At most ~4 events per second, plus the first and the completing tick.
+/// Download progress and phase transitions designed for a future UI
+/// (`arch-modules/D10`): with `json`, one JSON Line per tick and per phase
+/// change on stderr (`progress`:
+/// `{"schema_version":1,"event":"progress","model":ID,"bytes":N,"total":M}`;
+/// `state`:
+/// `{"schema_version":1,"event":"state","model":ID,"state":"connecting|downloading|verifying|installing"}`);
+/// otherwise a single human-readable line on stderr that overwrites itself
+/// (state events are JSON-only). At most ~4 progress events per second, plus
+/// the first and the completing tick.
 struct ProgressReporter<'a> {
     writer: &'a mut dyn Write,
     json: bool,
@@ -659,6 +668,20 @@ impl<'a> ProgressReporter<'a> {
             total,
             last_sent: None,
         }
+    }
+
+    /// Emits a phase transition as a JSONL `state` event (JSON mode only).
+    fn state(&mut self, state: download::DownloadState) -> io::Result<()> {
+        if !self.json {
+            return Ok(());
+        }
+        let line = serde_json::json!({
+            "schema_version": 1,
+            "event": "state",
+            "model": self.model,
+            "state": state.as_str(),
+        });
+        writeln!(self.writer, "{line}")
     }
 
     fn tick(&mut self, bytes: u64) -> io::Result<()> {
@@ -1079,6 +1102,27 @@ mod tests {
         }
         let last: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(last["bytes"], 1_000);
+    }
+
+    #[test]
+    fn progress_state_lines_have_the_documented_shape() {
+        let mut buf = Vec::new();
+        {
+            let mut reporter = ProgressReporter::new(&mut buf, true, "whisper-tiny-q8_0", 1_000);
+            reporter.state(download::DownloadState::Connecting).unwrap();
+            reporter.state(download::DownloadState::Installing).unwrap();
+        }
+        let text = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let expected = ["connecting", "installing"];
+        for (line, state) in lines.iter().zip(expected) {
+            let value: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(value["schema_version"], 1);
+            assert_eq!(value["event"], "state");
+            assert_eq!(value["model"], "whisper-tiny-q8_0");
+            assert_eq!(value["state"], state);
+        }
     }
 
     #[test]
