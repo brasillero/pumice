@@ -13,6 +13,8 @@ pub enum ErrorCode {
     EngineFailed,
     ModelLoadFailed,
     ModelNotFound,
+    ChecksumMismatch,
+    DownloadFailed,
     Cancelled,
     Internal,
 }
@@ -30,6 +32,8 @@ impl ErrorCode {
             Self::EngineFailed => "engine_failed",
             Self::ModelLoadFailed => "model_load_failed",
             Self::ModelNotFound => "model_not_found",
+            Self::ChecksumMismatch => "checksum_mismatch",
+            Self::DownloadFailed => "download_failed",
             Self::Cancelled => "cancelled",
             Self::Internal => "internal",
         }
@@ -149,6 +153,14 @@ impl Error {
             ErrorCode::ModelNotFound,
             format!("model file not found: {}", path.display()),
         )
+    }
+
+    pub fn checksum_mismatch(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::ChecksumMismatch, message)
+    }
+
+    pub fn download_failed(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::DownloadFailed, message)
     }
 
     pub fn cancelled() -> Self {
