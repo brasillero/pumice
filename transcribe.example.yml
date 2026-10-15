@@ -3,9 +3,9 @@
 # pumice-transcribe reads exactly one configuration file:
 #   1. the path passed with --config, else
 #   2. the per-user file: ~/.config/pumice/transcribe.yml on Linux and macOS
-#      ($XDG_CONFIG_HOME/pumice/transcribe.yml when XDG_CONFIG_HOME is set),
+#      ($XDG_CONFIG_HOME/pumice/transcribe.yml when XDG_CONFIG_HOME is absolute),
 #      and %APPDATA%\pumice\transcribe.yml on Windows,
-#   otherwise no file is used and every option must be given on the command line.
+#   otherwise no file is used; select a model with --model-file.
 #
 # Validate a file with: pumice-transcribe check-config --config <path>
 

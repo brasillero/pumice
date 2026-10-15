@@ -75,8 +75,17 @@ pub fn load_with_env(
             ConfigSource::File(path.to_path_buf())
         }
         None => match per_user_config_path(&get_env) {
-            Some(candidate) if candidate.exists() => ConfigSource::File(candidate),
-            _ => ConfigSource::NoFile,
+            Some(candidate) => match std::fs::symlink_metadata(&candidate) {
+                Ok(_) => ConfigSource::File(candidate),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => ConfigSource::NoFile,
+                Err(error) => {
+                    return Err(ConfigError::file(
+                        candidate,
+                        format!("cannot inspect configuration file: {error}"),
+                    ));
+                }
+            },
+            None => ConfigSource::NoFile,
         },
     };
     let config = match &source {
@@ -129,7 +138,9 @@ fn validate(raw: Option<RawConfig>, config_dir: Option<&Path>) -> Result<Config,
         None => None,
     };
 
-    if let Some(span) = &raw.threads && (span.value == 0 || span.value > MAX_THREADS) {
+    if let Some(span) = &raw.threads
+        && (span.value == 0 || span.value > MAX_THREADS)
+    {
         return Err(ConfigError::at(
             span.referenced,
             format!("threads must be between 1 and {MAX_THREADS}"),
@@ -153,6 +164,13 @@ fn validate(raw: Option<RawConfig>, config_dir: Option<&Path>) -> Result<Config,
                 ));
             }
         };
+
+        if path.value.as_os_str().is_empty() {
+            return Err(ConfigError::at(
+                path.referenced,
+                format!("model \"{}\" path must not be empty", id.value),
+            ));
+        }
 
         if id.value.is_empty() {
             return Err(ConfigError::at(id.referenced, "model id must not be empty"));
@@ -464,6 +482,19 @@ models:
         let loaded = load(Some(&path)).unwrap();
         let expected = tmp.path().join("models/tiny.gguf");
         assert_eq!(loaded.config.models[0].path, expected);
+    }
+
+    #[test]
+    fn empty_model_path_reports_its_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_config(
+            &tmp,
+            "schema_version: 1\nmodels:\n  - id: tiny\n    path: \"\"\n",
+        );
+        let err = load(Some(&path)).unwrap_err();
+        assert_eq!(err.line(), Some(4));
+        assert_eq!(err.column(), Some(11));
+        assert!(err.message().contains("path must not be empty"));
     }
 
     #[test]

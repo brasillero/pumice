@@ -397,8 +397,8 @@ fn build_model_list(config: &Config) -> Vec<ModelListEntry> {
         .iter()
         .map(|entry| {
             let (exists, size) = match std::fs::metadata(&entry.path) {
-                Ok(meta) => (meta.is_file(), Some(meta.len())),
-                Err(_) => (false, None),
+                Ok(meta) if meta.is_file() => (true, Some(meta.len())),
+                _ => (false, None),
             };
             ModelListEntry {
                 id: entry.id.clone(),

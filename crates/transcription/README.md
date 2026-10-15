@@ -59,7 +59,7 @@ This is a documented limitation; Windows native builds come in a later phase.
 ## Usage
 
 ```bash
-pumice-transcribe file audio.wav --model-file model.gguf [--language pt] [--json]
+pumice-transcribe file audio.wav --model-file model.gguf --language pt --json
 ```
 
 `--model-file` takes a direct GGUF path. You can also use `--model ID` to

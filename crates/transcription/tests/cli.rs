@@ -1,9 +1,35 @@
-use pumice_transcription::cli::{SuccessOutput, print_error, print_success, run_with_engine};
+use pumice_transcription::cli::{
+    SuccessOutput, print_error, print_success, run_with_engine as run_with_engine_raw,
+};
 use pumice_transcription::{
     Engine, EngineError, ErrorCode, FakeEngine, Transcript, TranscriptionOptions, config,
 };
 use std::io::Cursor;
 use std::process::Command;
+
+fn isolated_command(bin: &str) -> Command {
+    let mut command = Command::new(bin);
+    command
+        .env_remove("HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("APPDATA");
+    command
+}
+
+fn run_with_engine(
+    args: Vec<&str>,
+    engine: Box<dyn Engine>,
+) -> Result<SuccessOutput, pumice_transcription::Error> {
+    let mut args: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
+    let temp = tempfile::tempdir().unwrap();
+    if !args.iter().any(|arg| arg == "--config") {
+        let config = temp.path().join("transcribe.yml");
+        std::fs::write(&config, "schema_version: 1\n").unwrap();
+        args.insert(1, "--config".into());
+        args.insert(2, config.into());
+    }
+    run_with_engine_raw(args, engine)
+}
 
 fn write_wav_f32(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
     let mut buf = Cursor::new(Vec::new());
@@ -323,7 +349,7 @@ fn fifo_without_writer_returns_invalid_input_with_timeout() {
     assert!(status.success(), "mkfifo failed");
 
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let mut child = std::process::Command::new(bin)
+    let mut child = isolated_command(bin)
         .args([
             "file",
             fifo_path.to_str().unwrap(),
@@ -536,7 +562,7 @@ fn plain_error_goes_to_stderr() {
 #[test]
 fn binary_help_and_version() {
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let help = Command::new(bin).arg("--help").output().unwrap();
+    let help = isolated_command(bin).arg("--help").output().unwrap();
     assert!(
         help.status.success(),
         "--help failed: stdout={:?}, stderr={:?}",
@@ -547,7 +573,10 @@ fn binary_help_and_version() {
     assert!(stdout.contains("pumice-transcribe"));
     assert!(stdout.contains("file"));
 
-    let file_help = Command::new(bin).args(["file", "--help"]).output().unwrap();
+    let file_help = isolated_command(bin)
+        .args(["file", "--help"])
+        .output()
+        .unwrap();
     assert!(
         file_help.status.success(),
         "file --help failed: stdout={:?}, stderr={:?}",
@@ -557,7 +586,7 @@ fn binary_help_and_version() {
     let file_stdout = String::from_utf8(file_help.stdout).unwrap();
     assert!(file_stdout.contains("--model"));
 
-    let version = Command::new(bin).arg("--version").output().unwrap();
+    let version = isolated_command(bin).arg("--version").output().unwrap();
     assert!(
         version.status.success(),
         "--version failed: stdout={:?}, stderr={:?}",
@@ -750,7 +779,7 @@ fn threads_validation_rejects_too_large() {
 #[test]
 fn json_parse_error_missing_model_with_json() {
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let out = Command::new(bin)
+    let out = isolated_command(bin)
         .args(["file", "audio.wav", "--json"])
         .output()
         .unwrap();
@@ -772,7 +801,7 @@ fn json_parse_error_missing_model_with_json() {
 #[test]
 fn json_parse_error_bad_threads_with_json() {
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let out = Command::new(bin)
+    let out = isolated_command(bin)
         .args(["file", "audio.wav", "--threads", "abc", "--json"])
         .output()
         .unwrap();
@@ -790,7 +819,7 @@ fn json_parse_error_bad_threads_with_json() {
 #[test]
 fn json_parse_error_unknown_flag_with_json() {
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let out = Command::new(bin)
+    let out = isolated_command(bin)
         .args([
             "file",
             "audio.wav",
@@ -815,7 +844,7 @@ fn json_parse_error_unknown_flag_with_json() {
 #[test]
 fn parse_error_unknown_flag_without_json_goes_to_stderr() {
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let out = Command::new(bin)
+    let out = isolated_command(bin)
         .args([
             "file",
             "audio.wav",
@@ -840,7 +869,7 @@ fn parse_error_unknown_flag_without_json_goes_to_stderr() {
 #[cfg(target_os = "linux")]
 fn output_failure_on_dev_full_reports_exit_1() {
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let out = Command::new(bin)
+    let out = isolated_command(bin)
         .args(["file", "audio.wav", "--model-file", "/dev/null", "--json"])
         .stdout(std::process::Stdio::from(
             std::fs::OpenOptions::new()
@@ -861,7 +890,7 @@ fn output_failure_on_dev_full_reports_exit_1() {
 #[cfg(target_os = "linux")]
 fn help_output_failure_on_dev_full_reports_exit_1() {
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let out = Command::new(bin)
+    let out = isolated_command(bin)
         .arg("--help")
         .stdout(std::process::Stdio::from(
             std::fs::OpenOptions::new()
@@ -882,7 +911,7 @@ fn help_output_failure_on_dev_full_reports_exit_1() {
 #[cfg(target_os = "linux")]
 fn version_output_failure_on_dev_full_reports_exit_1() {
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let out = Command::new(bin)
+    let out = isolated_command(bin)
         .arg("--version")
         .stdout(std::process::Stdio::from(
             std::fs::OpenOptions::new()
@@ -1050,7 +1079,7 @@ fn chained_ogg_returns_unsupported_format_json() {
     bytes.extend(std::fs::read(fixture_path("sample-pt.ogg")).unwrap());
     std::fs::write(&path, bytes).unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_pumice-transcribe"))
+    let out = isolated_command(env!("CARGO_BIN_EXE_pumice-transcribe"))
         .args([
             "file",
             path.to_str().unwrap(),
@@ -1086,7 +1115,7 @@ fn long_compressed_audio_returns_audio_too_long() {
 #[test]
 fn json_error_envelope_for_unsupported_format() {
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let out = Command::new(bin)
+    let out = isolated_command(bin)
         .args([
             "file",
             fixture_path("sample-pt.opus").to_str().unwrap(),
@@ -1109,7 +1138,7 @@ fn json_error_envelope_for_unsupported_format() {
 #[test]
 fn json_error_envelope_for_audio_too_long() {
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let out = Command::new(bin)
+    let out = isolated_command(bin)
         .args([
             "file",
             fixture_path("long-silence.mp3").to_str().unwrap(),
@@ -1415,7 +1444,7 @@ models:
 "#,
     );
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let out = Command::new(bin)
+    let out = isolated_command(bin)
         .args(["check-config", "--config", config_path.to_str().unwrap()])
         .output()
         .unwrap();
@@ -1431,7 +1460,7 @@ fn check_config_json_success_with_no_file() {
     let tmp = tempfile::tempdir().unwrap();
     // No config in this temp home, and no explicit file.
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let out = Command::new(bin)
+    let out = isolated_command(bin)
         .args(["check-config", "--json"])
         .env("HOME", tmp.path())
         .env_remove("XDG_CONFIG_HOME")
@@ -1461,7 +1490,7 @@ models:
 "#,
     );
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let out = Command::new(bin)
+    let out = isolated_command(bin)
         .args([
             "check-config",
             "--config",
@@ -1494,7 +1523,7 @@ models:
 #[test]
 fn check_config_explicit_missing_file_fails() {
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let out = Command::new(bin)
+    let out = isolated_command(bin)
         .args(["check-config", "--config", "/tmp/does-not-exist-p4b.yml"])
         .output()
         .unwrap();
@@ -1526,7 +1555,7 @@ models:
     );
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
 
-    let plain = Command::new(bin)
+    let plain = isolated_command(bin)
         .args(["models", "list", "--config", config_path.to_str().unwrap()])
         .output()
         .unwrap();
@@ -1537,7 +1566,7 @@ models:
     assert!(plain_stdout.contains("yes"));
     assert!(plain_stdout.contains("no"));
 
-    let json = Command::new(bin)
+    let json = isolated_command(bin)
         .args([
             "models",
             "list",
@@ -1560,6 +1589,59 @@ models:
     let huge = models.iter().find(|m| m["id"] == "huge").unwrap();
     assert_eq!(huge["exists"], false);
     assert!(huge["size"].is_null());
+}
+
+#[test]
+fn models_list_does_not_report_directory_size() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = write_config(
+        &tmp,
+        "schema_version: 1\nmodels:\n  - id: directory\n    path: .\n",
+    );
+    let out = isolated_command(env!("CARGO_BIN_EXE_pumice-transcribe"))
+        .args([
+            "models",
+            "list",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let entry = &value["result"][0];
+    assert_eq!(entry["exists"], false);
+    assert!(entry.get("size").is_none());
+}
+
+#[test]
+fn relative_config_path_resolves_model_against_config_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("transcribe.yml"),
+        "schema_version: 1\nmodels:\n  - id: tiny\n    path: models/tiny.gguf\n",
+    )
+    .unwrap();
+    let out = isolated_command(env!("CARGO_BIN_EXE_pumice-transcribe"))
+        .current_dir(tmp.path())
+        .args([
+            "models",
+            "list",
+            "--config",
+            "config/transcribe.yml",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        value["result"][0]["path"],
+        config_dir.join("models/tiny.gguf").to_str().unwrap()
+    );
 }
 
 #[test]
@@ -1586,7 +1668,7 @@ models:
     .unwrap();
 
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let out = Command::new(bin)
+    let out = isolated_command(bin)
         .args(["check-config"])
         .env("HOME", tmp.path())
         .env_remove("XDG_CONFIG_HOME")
@@ -1599,19 +1681,47 @@ models:
     assert!(stdout.contains(config_path.to_str().unwrap()));
 }
 
+#[cfg(unix)]
+#[test]
+fn broken_per_user_config_symlink_is_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_dir = tmp.path().join(".config").join("pumice");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_path = config_dir.join("transcribe.yml");
+    std::os::unix::fs::symlink(config_dir.join("missing.yml"), &config_path).unwrap();
+
+    let out = isolated_command(env!("CARGO_BIN_EXE_pumice-transcribe"))
+        .args(["check-config", "--json"])
+        .env("HOME", tmp.path())
+        .env_remove("XDG_CONFIG_HOME")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stderr.is_empty());
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "invalid_config");
+    assert_eq!(
+        value["error"]["location"]["file"],
+        config_path.to_str().unwrap()
+    );
+}
+
 #[test]
 fn help_mentions_config_and_model_flags() {
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let top = Command::new(bin).arg("--help").output().unwrap();
+    let top = isolated_command(bin).arg("--help").output().unwrap();
     let top_stdout = String::from_utf8(top.stdout).unwrap();
     assert!(top_stdout.contains("--config"));
 
-    let file_help = Command::new(bin).args(["file", "--help"]).output().unwrap();
+    let file_help = isolated_command(bin)
+        .args(["file", "--help"])
+        .output()
+        .unwrap();
     let file_stdout = String::from_utf8(file_help.stdout).unwrap();
     assert!(file_stdout.contains("--model"));
     assert!(file_stdout.contains("--model-file"));
 
-    let models_help = Command::new(bin)
+    let models_help = isolated_command(bin)
         .args(["models", "--help"])
         .output()
         .unwrap();

@@ -90,9 +90,9 @@ models:                  # explicit list; nothing is enabled implicitly
 ```
 
 Relative `path` values resolve against the directory that contains the config
-file. Model ids must match `[a-z0-9][a-z0-9._-]*`. Duplicate ids, dangling
-`default_model`, unknown keys, and invalid `schema_version` are rejected with a
-file:line:column message.
+file. Paths must be nonempty. Model ids must match `[a-z0-9][a-z0-9._-]*`.
+Duplicate ids, dangling `default_model`, unknown keys, and invalid
+`schema_version` are rejected with a file:line:column message.
 
 Validate a file without loading a model:
 
@@ -130,9 +130,10 @@ pumice-transcribe models list
 pumice-transcribe models list --json
 ```
 
-Lists configured models with their resolved path, whether the file exists, its
-size in bytes, and which model is the default. No hashing or network access is
-performed.
+Lists configured models with their resolved path, whether it is a regular file,
+its size in bytes when it is a regular file, and which model is the default.
+Missing paths and directories have `exists: false` and no `size` field in JSON.
+No hashing or network access is performed.
 
 ## Supported formats and limits
 
