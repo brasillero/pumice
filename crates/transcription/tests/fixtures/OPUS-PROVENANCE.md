@@ -43,7 +43,14 @@ pre-skip and end trim (final granule minus pre-skip = 5,760,000 samples);
 | File | ffmpeg arguments | SHA-256 |
 | --- | --- | --- |
 | `silence120.opus` | `-f lavfi -i anullsrc=r=48000:cl=mono -t 120 -c:a libopus -b:a 8k` | `3616ccb6d1eacbc1d2e18868112dd7b42546d36d8175c81ce514e119eccfaa24` |
-| `silence121.webm` | 121 s of the same silence, libopus in WebM (exact flags not recorded by the review harness) | `57f901245c63115ab7637372c09c834ec99363fa83b9f91e37da8b4a8bcacb88` |
+| `silence121.webm` | `-f lavfi -i anullsrc=r=48000:cl=mono -t 121 -c:a libopus -b:a 8k` | `a7969cbd31a0883deda155ab6e6509c9ddd0d8884ecd21fb935bd95fec46a1e6` |
+
+The WebM muxer writes wall-clock muxing timestamps, so re-running the
+command does not reproduce `silence121.webm` byte for byte (the earlier copy
+of this fixture, whose exact flags were not recorded, was replaced on
+2026-10-15 by the file above, generated with the command recorded here); any
+regenerated copy is equivalent input. `silence121.webm` carries 121 s and
+must fail as too long.
 
 ## Browser recording
 
