@@ -3,12 +3,19 @@
 //! The relay's full test suite lives in `crates/relay/tests`; this file
 //! verifies the orchestrator entry point: the bare-command contract (D1),
 //! the `relay` subcommand against a hermetic config directory, the
-//! `relay.yml` rename (D3) and the `transcribe` sibling dispatch (D2). No
-//! provider CLI is ever invoked — `check-config` only validates YAML.
+//! `relay.yml` rename (D3) and the `transcribe` sibling dispatch (D2: it runs
+//! only the sibling next to `pumice`; D4: on Unix it execs it, so signals and
+//! exit codes are native). No provider CLI is ever invoked — `check-config`
+//! only validates YAML.
 
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
+#[cfg(unix)]
+use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::path::Path;
 
 use tempfile::TempDir;
 
@@ -245,6 +252,129 @@ fn transcribe_passes_arguments_through_and_propagates_the_exit_code() {
     assert_eq!(output.status.code(), Some(7), "exit status propagates");
     let stdout = stdout(&output);
     assert_eq!(stdout.lines().collect::<Vec<_>>(), ["alpha", "two words"]);
+}
+
+#[test]
+fn transcribe_propagates_small_and_large_child_exit_codes() {
+    let install = Install::with_transcribe();
+    for code in ["3", "255"] {
+        let output = run(&mut install.command(&["transcribe", code]));
+        assert_eq!(
+            output.status.code(),
+            Some(code.parse().unwrap()),
+            "exit status {code} propagates"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn transcribe_propagates_the_childs_full_exit_code_on_windows() {
+    // The Windows dispatch must not truncate the child's status to eight
+    // bits: 256 would become 0, 3010 would become 194.
+    let install = Install::with_transcribe();
+    for code in ["256", "3010"] {
+        let output = run(&mut install.command(&["transcribe", code]));
+        assert_eq!(
+            output.status.code(),
+            Some(code.parse().unwrap()),
+            "the full exit status {code} must not truncate"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn transcribe_preserves_non_utf8_arguments_byte_for_byte() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let install = Install::with_transcribe();
+    // Not valid UTF-8 anywhere, and it contains a space: only byte-faithful
+    // forwarding keeps it intact.
+    let raw = b"file /tmp/audio-\xff.wav";
+    let mut command = Command::new(install.pumice());
+    command
+        .args(["transcribe", "0"])
+        .arg(OsStr::from_bytes(raw))
+        .stdin(std::process::Stdio::null());
+    let output = run(&mut command);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let mut expected = raw.to_vec();
+    expected.push(b'\n');
+    assert_eq!(
+        output.stdout, expected,
+        "the argument must arrive byte for byte: {:?}",
+        output.stdout
+    );
+
+    // A non-UTF-8 first argument is an unknown command, not a panic and not
+    // a Unicode validation error.
+    let mut command = Command::new(install.pumice());
+    command
+        .arg(OsStr::from_bytes(b"\xff"))
+        .stdin(std::process::Stdio::null());
+    let output = run(&mut command);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = stderr(&output);
+    assert!(stderr.contains("unknown command"), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn sigterm_right_after_start_reaches_the_execd_stub_and_orphans_nothing() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let install = Install::with_transcribe();
+    let pid_file = install._keep.path().join("stub.pid");
+    let mut command = Command::new(install.pumice());
+    command
+        .args(["transcribe", "0"])
+        .env("PUMICE_STUB_PID_FILE", &pid_file)
+        .stdin(std::process::Stdio::null());
+    let mut child = command.spawn().expect("spawn pumice");
+    let pumice_pid = child.id();
+
+    // The stub only writes this file after the exec, when `pumice`'s PID has
+    // become the stub's own.
+    let stub_pid = wait_for_pid_file(&pid_file, Duration::from_secs(10));
+    assert_eq!(
+        stub_pid,
+        i64::from(pumice_pid),
+        "exec replaces the process: the stub owns `pumice`'s PID"
+    );
+
+    // The same cancellation a supervisor sends to the `pumice` PID it just
+    // started now lands on the stub itself.
+    assert_eq!(unsafe { libc::kill(stub_pid as i32, libc::SIGTERM) }, 0);
+    let status = child.wait().expect("reap the stub");
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGTERM),
+        "SIGTERM reaches the stub itself, not an abandoned wrapper"
+    );
+
+    // And nothing is left behind: the PID names no process anymore.
+    let alive = unsafe { libc::kill(stub_pid as i32, 0) };
+    assert_eq!(alive, -1, "no orphan remains with the stub's PID");
+}
+
+#[cfg(unix)]
+fn wait_for_pid_file(path: &Path, timeout: Duration) -> i64 {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(text) = fs::read_to_string(path)
+            && let Ok(pid) = text.trim().parse::<i64>()
+        {
+            return pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the stub did not record its pid within {timeout:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]
