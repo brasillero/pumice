@@ -23,6 +23,7 @@ const ID_TRACK_TYPE: u64 = 0x83;
 const ID_CODEC_ID: u64 = 0x86;
 const ID_CODEC_PRIVATE: u64 = 0x63A2;
 const ID_CODEC_DELAY: u64 = 0x56AA;
+const ID_TRACK_TIMESTAMP_SCALE: u64 = 0x23314F;
 const ID_CONTENT_ENCODING: u64 = 0x6D80;
 const ID_CUES: u64 = 0x1C53_BB6B;
 const ID_ATTACHMENTS: u64 = 0x1941_A469;
@@ -240,56 +241,83 @@ struct WebmInfo {
     block_count: usize,
 }
 
-/// The codec timeline across blocks. Each block's absolute timestamp (in
-/// ticks) must continue the previous block by that packet's actual Opus
-/// duration; durations are converted with checked rational arithmetic so an
-/// unsupported timebase fails loudly instead of rounding.
+/// The codec timeline across blocks, checked as one stream-wide expectation
+/// once every block is known: the position predicted from the first block's
+/// timestamp plus the sum of all preceding packet durations (exact rational
+/// arithmetic) must match each block's timestamp within a fixed allowance
+/// that never resets at a cluster boundary.
 #[derive(Debug)]
 struct Timeline {
     tick_scale_ns: u64,
-    /// Absolute timestamp and 48 kHz frame count of the previous block.
-    last: Option<(i128, usize)>,
+    /// Absolute timestamp (ticks) and validated 48 kHz frame count per block,
+    /// in stream order.
+    blocks: Vec<(i128, usize)>,
 }
 
 impl Timeline {
     fn new(tick_scale_ns: u64) -> Self {
         Self {
             tick_scale_ns,
-            last: None,
+            blocks: Vec::new(),
         }
     }
 
+    /// Validates the packet duration and records the block; the stream-wide
+    /// continuity check runs in [`Timeline::check`] after the walk, because
+    /// the allowance depends on the shortest packet duration in the stream.
     fn note(&mut self, absolute: i128, payload: &[u8]) -> Result<(), Error> {
         let duration = packet_frames(payload)?;
-        if let Some((last_timestamp, last_duration)) = self.last {
-            // Expected continuation in ticks: last_duration frames at 48 kHz,
-            // one tick is tick_scale_ns nanoseconds. Compare
-            // |diff * denominator - numerator| against half a packet with i128
-            // checked math. Tolerance justification: real muxers timestamp
-            // blocks on a wall clock, and Chrome MediaRecorder recordings
-            // deviate from the nominal grid by up to ~8 ms on 60 ms packets;
-            // a lost or fabricated block, or a packet whose duration was
-            // altered, shifts the timeline by at least a whole packet, which
-            // half a packet of tolerance cannot absorb.
-            let numerator = i128::from(last_duration as u64) * NS_PER_SECOND;
-            let denominator = i128::from(self.tick_scale_ns)
-                .checked_mul(i128::from(OPUS_SAMPLE_RATE))
-                .ok_or_else(|| Error::invalid_input("webm timestamp scale out of range"))?;
-            let diff = absolute
-                .checked_sub(last_timestamp)
+        self.blocks.push((absolute, duration));
+        Ok(())
+    }
+
+    /// Every block must lie within `bound` of the position predicted from the
+    /// first block's timestamp plus the sum of all preceding packet durations.
+    /// The allowance is the smaller of 6 ms plus one timestamp tick (real
+    /// muxers timestamp blocks on a wall clock; measured Chrome
+    /// MediaRecorder recordings stay within 7 ms at a 1 ms timebase, while
+    /// the sum of absolute per-interval errors reaches seconds) and one unit
+    /// below half the shortest packet in the stream, so a lost, duplicated or
+    /// duration-altered packet always exceeds it. All arithmetic is checked
+    /// integer math in units of 48 kHz frames * ns/s.
+    fn check(&self) -> Result<(), Error> {
+        let Some(&(first_timestamp, _)) = self.blocks.first() else {
+            return Ok(());
+        };
+        let tick_ns = i128::from(self.tick_scale_ns);
+        let jitter_bound = i128::from(6_000_000u64)
+            .checked_add(tick_ns)
+            .and_then(|ns| ns.checked_mul(i128::from(OPUS_SAMPLE_RATE)))
+            .ok_or_else(|| Error::invalid_input("webm timestamp scale out of range"))?;
+        let min_packet_frames = self
+            .blocks
+            .iter()
+            .map(|&(_, frames)| frames as i128)
+            .min()
+            .expect("blocks is non-empty");
+        let half_packet = min_packet_frames
+            .checked_mul(NS_PER_SECOND)
+            .and_then(|ns| ns.checked_div(2))
+            .and_then(|ns| ns.checked_sub(1))
+            .ok_or_else(|| Error::invalid_input("webm timestamps out of range"))?;
+        let bound = jitter_bound.min(half_packet);
+        let mut total_frames = 0i128;
+        for &(timestamp, frames) in &self.blocks {
+            let residual = timestamp
+                .checked_sub(first_timestamp)
+                .and_then(|ticks| ticks.checked_mul(tick_ns))
+                .and_then(|scaled| scaled.checked_mul(i128::from(OPUS_SAMPLE_RATE)))
+                .and_then(|scaled| scaled.checked_sub(total_frames.checked_mul(NS_PER_SECOND)?))
                 .ok_or_else(|| Error::invalid_input("webm timestamps out of range"))?;
-            let delta = diff
-                .checked_mul(denominator)
-                .and_then(|scaled| scaled.checked_sub(numerator))
-                .ok_or_else(|| Error::invalid_input("webm timestamps out of range"))?;
-            let tolerance = numerator / 2;
-            if delta.abs() > tolerance {
+            if residual.abs() > bound {
                 return Err(Error::invalid_input(
-                    "webm block timestamps do not match the packet durations",
+                    "webm block timeline does not match the packet durations",
                 ));
             }
+            total_frames = total_frames
+                .checked_add(frames as i128)
+                .ok_or_else(|| Error::invalid_input("webm timestamps out of range"))?;
         }
-        self.last = Some((absolute, duration));
         Ok(())
     }
 }
@@ -335,6 +363,7 @@ fn walk_track_entry(bytes: &[u8], element: &Element, info: &mut WebmInfo) -> Res
     let mut codec_id: Option<&[u8]> = None;
     let mut codec_private: Option<Vec<u8>> = None;
     let mut codec_delay: Option<u64> = None;
+    let mut track_timestamp_scale: Option<f64> = None;
     let mut audio: Option<bool> = None;
     while let Some(child) = reader.next()? {
         match child.id {
@@ -364,6 +393,23 @@ fn walk_track_entry(bytes: &[u8], element: &Element, info: &mut WebmInfo) -> Res
             ID_CODEC_DELAY => {
                 if codec_delay.replace(read_uint(bytes, &child)?).is_some() {
                     return Err(Error::invalid_input("duplicate webm codec delay"));
+                }
+            }
+            ID_TRACK_TIMESTAMP_SCALE => {
+                // Block time is (ClusterTimestamp + block timestamp *
+                // TrackTimestampScale) * TimestampScale; only the default
+                // 1.0 leaves the timeline validation's timestamps correct,
+                // so any other value (including NaN and infinities) is
+                // rejected before the continuity check.
+                let value = read_float(bytes, &child)?;
+                if track_timestamp_scale.is_some() {
+                    return Err(Error::invalid_input("duplicate webm track timestamp scale"));
+                }
+                track_timestamp_scale = Some(value);
+                if value != 1.0 {
+                    return Err(Error::unsupported_format(
+                        "webm track timestamp scale is not supported",
+                    ));
                 }
             }
             ID_AUDIO => {
@@ -640,6 +686,9 @@ fn validate(bytes: &[u8]) -> Result<WebmInfo, Error> {
             "webm file must contain exactly one audio track",
         ));
     }
+    if let Some(timeline) = &timeline {
+        timeline.check()?;
+    }
     if info.codec_private.is_empty() {
         return Err(Error::invalid_input("webm track has no opus header"));
     }
@@ -741,12 +790,13 @@ pub(crate) fn decode_webm_opus(
     }
     if info
         .sampling_frequency
-        .is_some_and(|rate| !rate.is_finite() || rate != f64::from(OPUS_SAMPLE_RATE))
+        .is_some_and(|rate| !rate.is_finite() || rate <= 0.0)
     {
-        // Opus always decodes at 48 kHz; the Matroska Opus mapping fixes the
-        // declared sampling frequency to that value.
-        return Err(Error::unsupported_format(
-            "webm audio sampling frequency is not 48000",
+        // Per the Matroska A_OPUS mapping this is the original input rate
+        // (OpusHead's input sample rate), not a decode rate; decoding always
+        // happens at 48 kHz. Only reject metadata that is not a real rate.
+        return Err(Error::invalid_input(
+            "webm audio sampling frequency must be positive and finite",
         ));
     }
     if let Some(ns) = info.codec_delay_ns {
@@ -794,10 +844,11 @@ mod tests {
 
     fn el(id: &[u8], body: &[u8]) -> Vec<u8> {
         let mut out = id.to_vec();
-        if body.len() < 128 {
+        if body.len() < 127 {
             out.push(0x80 | body.len() as u8);
         } else {
-            assert!(body.len() < 16_384);
+            // 127 is the all-ones (unknown-size) marker in a 1-byte vint.
+            assert!(body.len() < 16_383);
             out.push(0x40 | (body.len() >> 8) as u8);
             out.push(body.len() as u8);
         }
@@ -1446,8 +1497,7 @@ mod tests {
             ErrorCode::UnsupportedFormat
         );
 
-        // Opus decodes at 48 kHz; any other declared rate is not an Opus
-        // track. Consistent metadata (mono, 48 kHz) decodes fine.
+        // Consistent metadata (mono, 48 kHz) decodes fine.
         let file = file_with_track_extras(&el(&[0xE1], &uint(&[0x9F], 1)));
         let decoded = decode_webm_opus(file, &CancelToken::new()).unwrap();
         assert_eq!(decoded.samples.len(), 960 - 312);
@@ -1457,15 +1507,50 @@ mod tests {
         let file = file_with_track_extras(&el(&[0xE1], &audio));
         decode_webm_opus(file, &CancelToken::new()).unwrap();
 
-        let mut audio = uint(&[0x9F], 1);
-        audio.extend(el(&[0xB5], &44_100f32.to_be_bytes()));
-        let file = file_with_track_extras(&el(&[0xE1], &audio));
-        assert_eq!(
-            decode_webm_opus(file, &CancelToken::new())
-                .unwrap_err()
-                .code,
-            ErrorCode::UnsupportedFormat
-        );
+        // The Matroska A_OPUS mapping declares the original input rate here
+        // (OpusHead's input sample rate), not the decode rate: decoding
+        // stays at 48 kHz, so any positive finite value is accepted.
+        for rate in [16_000f32, 44_100.0, 48_000.0] {
+            let mut audio = uint(&[0x9F], 1);
+            audio.extend(el(&[0xB5], &rate.to_be_bytes()));
+            let file = file_with_track_extras(&el(&[0xE1], &audio));
+            let decoded = decode_webm_opus(file, &CancelToken::new()).unwrap();
+            assert_eq!(decoded.samples.len(), 960 - 312, "rate {rate}");
+        }
+
+        // A rate that is not positive and finite is not a real input rate.
+        for rate in [0.0f32, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut audio = uint(&[0x9F], 1);
+            audio.extend(el(&[0xB5], &rate.to_be_bytes()));
+            let file = file_with_track_extras(&el(&[0xE1], &audio));
+            assert_eq!(
+                decode_webm_opus(file, &CancelToken::new())
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidInput,
+                "rate {rate}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_original_input_rate_metadata_in_real_fixture() {
+        // Review case real-input-rate16k.webm: the full ordinary WebM
+        // fixture with only the original-input metadata changed to 16 kHz
+        // (Audio/SamplingFrequency and, per the mapping, OpusHead's input
+        // rate) must decode unchanged at 48 kHz.
+        let mut bytes = fixture("sample-pt.webm");
+        let pattern: Vec<u8> = [0xB5, 0x88]
+            .into_iter()
+            .chain(48_000f64.to_be_bytes())
+            .collect();
+        let at = bytes
+            .windows(pattern.len())
+            .position(|w| w == pattern)
+            .unwrap();
+        bytes[at + 2..at + 10].copy_from_slice(&16_000f64.to_be_bytes());
+        let decoded = decode_webm_opus(bytes, &CancelToken::new()).unwrap();
+        assert_eq!(decoded.samples.len(), 681_120);
     }
 
     #[test]
@@ -1488,6 +1573,283 @@ mod tests {
         file.extend_from_slice(UNKNOWN_SIZE);
         file.extend(el(TRACKS, &el(TRACK_ENTRY, &full_track_entry())));
         file.extend(el(CLUSTER, &cluster));
+        assert_eq!(validate_code(&file), ErrorCode::InvalidInput);
+    }
+
+    // --- Stream-wide cumulative timeline (review round 2) -------------------
+
+    /// The first `count` real 20 ms audio packets from the Ogg fixture.
+    fn real_packets(count: usize) -> Vec<Box<[u8]>> {
+        let bytes = fixture("sample-pt-48k.opus");
+        let packets = crate::opus::tests::ogg_packets(&bytes);
+        packets[2..2 + count].to_vec()
+    }
+
+    /// A complete file holding one SimpleBlock per entry, in order:
+    /// (relative timestamp in ticks, payload). Blocks are spread over
+    /// clusters so the tiny test writer's size vints stay short; cluster
+    /// boundaries do not reset the stream-wide timeline check.
+    fn file_of_blocks(blocks: &[(i16, &[u8])]) -> Vec<u8> {
+        let mut file = ebml_header("webm");
+        file.extend_from_slice(SEGMENT);
+        file.extend_from_slice(UNKNOWN_SIZE);
+        file.extend(el(TRACKS, &track_entry("A_OPUS", &opus_head_bytes())));
+        for chunk in blocks.chunks(32) {
+            let mut cluster = uint(TIMESTAMP, 0);
+            for &(timestamp, payload) in chunk {
+                cluster.extend(simple_block(timestamp, 0, payload));
+            }
+            file.extend(el(CLUSTER, &cluster));
+        }
+        file
+    }
+
+    /// Review reproduction 20ms-jitter5-control: a uniform 20 ms stream whose
+    /// timestamps deviate from the ideal grid by at most 5 ms stays well
+    /// inside the cumulative 7 ms allowance and decodes.
+    #[test]
+    fn stream_wide_timeline_accepts_bounded_wall_clock_jitter() {
+        let packets = real_packets(100);
+        let jitter = |i: usize| match i {
+            19 => 5,
+            21 => -5,
+            _ => 0,
+        };
+        let blocks: Vec<(i16, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (20 * i as i16 + jitter(i), &**p))
+            .collect();
+        let file = file_of_blocks(&blocks);
+        let decoded = decode_webm_opus(file, &CancelToken::new()).unwrap();
+        assert_eq!(decoded.samples.len(), 100 * 960 - 312);
+    }
+
+    /// Review reproduction 20ms-jitter5-dropped: removing one packet while
+    /// keeping every surviving timestamp shifts the stream-wide residual by a
+    /// whole 20 ms packet, which no per-block allowance can hide.
+    #[test]
+    fn stream_wide_timeline_rejects_dropped_packet_under_jitter() {
+        let packets = real_packets(100);
+        let jitter = |i: usize| match i {
+            19 => 5,
+            21 => -5,
+            _ => 0,
+        };
+        let blocks: Vec<(i16, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != 20)
+            .map(|(i, p)| (20 * i as i16 + jitter(i), &**p))
+            .collect();
+        let file = file_of_blocks(&blocks);
+        assert_eq!(validate_code(&file), ErrorCode::InvalidInput);
+    }
+
+    /// Review reproductions drift-20ms-plus1ms/plus10ms: shifting every
+    /// timestamp by a small amount that locally looks like jitter
+    /// accumulates past the allowance; the cumulative residual rejects it.
+    #[test]
+    fn stream_wide_timeline_rejects_accumulated_drift() {
+        for shift in [1i16, 10] {
+            let packets = real_packets(100);
+            let blocks: Vec<(i16, &[u8])> = packets
+                .iter()
+                .enumerate()
+                .map(|(i, p)| ((20 + shift) * i as i16, &**p))
+                .collect();
+            let file = file_of_blocks(&blocks);
+            assert_eq!(
+                validate_code(&file),
+                ErrorCode::InvalidInput,
+                "shift {shift}"
+            );
+        }
+    }
+
+    /// Merges three consecutive same-configuration 20 ms packets into one
+    /// 60 ms packet (Opus code 3, VBR) the way a muxer's repacketizer
+    /// combines frames: one shared TOC, a 0x80-flagged frame count, lengths
+    /// for all but the last frame, then the frame data without the per-
+    /// packet TOC bytes.
+    fn merged_60ms_packet(packets: &[Box<[u8]>]) -> Vec<u8> {
+        let [a, b, c]: [&[u8]; 3] = packets
+            .iter()
+            .map(|p| &**p)
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+        let toc = a[0];
+        assert_eq!(toc & 0x03, 0, "single-frame packets only");
+        assert_eq!(toc >> 3, b[0] >> 3, "same configuration");
+        assert_eq!(toc >> 3, c[0] >> 3, "same configuration");
+        assert!(a.len() <= 255 && b.len() <= 255, "one-byte frame lengths");
+        let mut merged = vec![
+            (toc & 0xFC) | 0x03,
+            0x80 | 3,
+            (a.len() - 1) as u8,
+            (b.len() - 1) as u8,
+        ];
+        merged.extend_from_slice(&a[1..]);
+        merged.extend_from_slice(&b[1..]);
+        merged.extend_from_slice(&c[1..]);
+        merged
+    }
+
+    /// Review reproductions mixed-60-20-control/mixed-dropped-20-after60:
+    /// with changing packet sizes, a per-block half-packet allowance keyed on
+    /// the previous (60 ms) packet absorbed a dropped 20 ms packet; the
+    /// stream-wide residual still jumps by the full 20 ms.
+    #[test]
+    fn stream_wide_timeline_rejects_dropped_packet_after_60ms_packet() {
+        let packets = real_packets(20);
+        let p60 = merged_60ms_packet(&packets[10..13]);
+        let control: Vec<(i16, &[u8])> = vec![
+            (0, &p60),
+            (60, &packets[13]),
+            (80, &packets[14]),
+            (100, &packets[15]),
+        ];
+        let file = file_of_blocks(&control);
+        let decoded = decode_webm_opus(file, &CancelToken::new()).unwrap();
+        assert_eq!(decoded.samples.len(), 2_880 + 3 * 960 - 312);
+
+        let dropped: Vec<(i16, &[u8])> = vec![(0, &p60), (80, &packets[14]), (100, &packets[15])];
+        let file = file_of_blocks(&dropped);
+        assert_eq!(validate_code(&file), ErrorCode::InvalidInput);
+    }
+
+    /// Review reproduction toc-double20-to40: relabeling a real 20 ms packet
+    /// as two equal-sized frames (code 1) doubles its duration; the old
+    /// allowance used the corrupted duration itself, the cumulative residual
+    /// exposes the mismatch immediately.
+    #[test]
+    fn stream_wide_timeline_rejects_packet_duration_extension() {
+        let packets = real_packets(20);
+        let at = packets
+            .iter()
+            .position(|p| p.len() % 2 == 1 && p[0] & 3 == 0)
+            .unwrap();
+        let p40: Vec<u8> = std::iter::once(packets[at][0] | 1)
+            .chain(packets[at][1..].iter().copied())
+            .collect();
+        let blocks: Vec<(i16, &[u8])> =
+            vec![(0, &p40), (20, &packets[at + 1]), (40, &packets[at + 2])];
+        let file = file_of_blocks(&blocks);
+        assert_eq!(validate_code(&file), ErrorCode::InvalidInput);
+    }
+
+    /// Byte offsets of every block's two-byte relative timestamp field in a
+    /// real fixture, following the same unknown-size sibling-boundary walk
+    /// as the validator.
+    fn block_timestamp_offsets(bytes: &[u8]) -> Vec<usize> {
+        let mut reader = Reader::new(bytes, 0, bytes.len());
+        let header = reader.next().unwrap().unwrap();
+        reader.pos = header.data_end;
+        let mut segment = None;
+        while let Some(element) = reader.next().unwrap() {
+            if element.id == ID_SEGMENT {
+                segment = Some((element.data_start, element.data_end));
+            }
+            reader.pos = element.data_end;
+        }
+        let (segment_start, segment_end) = segment.unwrap();
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut pos = segment_start;
+        while pos < segment_end {
+            let mut segment_reader = Reader::new(bytes, pos, segment_end);
+            let Some(element) = segment_reader.next().unwrap() else {
+                break;
+            };
+            if element.id == ID_CLUSTER {
+                let mut cluster = Reader::new(bytes, element.data_start, element.data_end);
+                while cluster.pos < element.data_end {
+                    let Some(child) = cluster.next().unwrap() else {
+                        break;
+                    };
+                    if element.size.is_none() && is_segment_level(child.id) {
+                        cluster.pos = child.start;
+                        break;
+                    }
+                    if child.id == ID_SIMPLE_BLOCK {
+                        let track_len = bytes[child.data_start].leading_zeros() as usize + 1;
+                        offsets.push(child.data_start + track_len);
+                    }
+                    cluster.pos = child.data_end;
+                }
+                if element.size.is_none() {
+                    // The cluster ends at the first Segment-level sibling;
+                    // resume the segment walk there.
+                    pos = cluster.pos;
+                    continue;
+                }
+            }
+            pos = element.data_end;
+        }
+        offsets
+    }
+
+    /// Review reproduction chrome-middle-gap-20ms: shifting one middle block
+    /// and every later block forward by 20 ms compresses an interior gap
+    /// below half of the 60 ms packets; the cumulative residual jumps by the
+    /// full 20 ms at the shifted block.
+    #[test]
+    fn rejects_shifted_block_tail_in_chrome_fixture() {
+        let mut bytes = fixture("chrome-mediarecorder.webm");
+        let offsets = block_timestamp_offsets(&bytes);
+        assert!(offsets.len() > 100, "{}", offsets.len());
+        for &at in &offsets[100..] {
+            let relative = i16::from_be_bytes([bytes[at], bytes[at + 1]]);
+            bytes[at..at + 2].copy_from_slice(&(relative + 20).to_be_bytes());
+        }
+        assert_eq!(
+            decode_webm_opus(bytes, &CancelToken::new())
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidInput
+        );
+    }
+
+    // --- Track time transformations (review round 2) ------------------------
+
+    const TRACK_TIMESTAMP_SCALE: &[u8] = &[0x23, 0x31, 0x4F];
+
+    fn float_el(id: &[u8], value: f64) -> Vec<u8> {
+        el(id, &value.to_be_bytes())
+    }
+
+    /// Review reproductions track-timescale2/track-timescale-nan: block time
+    /// is (ClusterTimestamp + block timestamp * TrackTimestampScale) *
+    /// TimestampScale, so a scale other than the default 1.0 (including NaN
+    /// and infinities) changes the real timeline and must be rejected instead
+    /// of validating the untransformed timestamps.
+    #[test]
+    fn rejects_track_timestamp_scale_transforms() {
+        for value in [
+            2.0f64,
+            0.0,
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            let file = file_with_track_extras(&float_el(TRACK_TIMESTAMP_SCALE, value));
+            assert_eq!(
+                decode_webm_opus(file, &CancelToken::new())
+                    .unwrap_err()
+                    .code,
+                ErrorCode::UnsupportedFormat,
+                "scale {value}"
+            );
+        }
+
+        // The default 1.0 is a no-op and stays accepted; duplicates reject.
+        let file = file_with_track_extras(&float_el(TRACK_TIMESTAMP_SCALE, 1.0));
+        decode_webm_opus(file, &CancelToken::new()).unwrap();
+
+        let mut duplicate = float_el(TRACK_TIMESTAMP_SCALE, 1.0);
+        duplicate.extend(float_el(TRACK_TIMESTAMP_SCALE, 1.0));
+        let file = file_with_track_extras(&duplicate);
         assert_eq!(validate_code(&file), ErrorCode::InvalidInput);
     }
 }
