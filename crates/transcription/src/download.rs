@@ -90,8 +90,6 @@ impl RedirectPolicy {
 pub struct Timeouts {
     /// Time allowed to establish the connection.
     pub connect: Duration,
-    /// Maximum stall between received chunks.
-    pub read_stall: Duration,
     /// Floor for the overall per-download deadline; the effective deadline
     /// also grows with the model size (see [`Timeouts::total_deadline`]).
     pub total: Duration,
@@ -101,7 +99,6 @@ impl Default for Timeouts {
     fn default() -> Self {
         Self {
             connect: Duration::from_secs(30),
-            read_stall: Duration::from_secs(60),
             total: MIN_TOTAL_DEADLINE,
         }
     }
@@ -191,19 +188,18 @@ impl Downloader {
         }
     }
 
-    /// Builds the HTTP client for one download. The overall per-request
-    /// timeout carries the computed deadline, so DNS, connect, redirects,
-    /// response headers and body reads all share one budget: ureq checks the
-    /// remaining time around every socket operation, capping the per-read
-    /// stall at whatever is left. A blocked DNS query itself cannot be
-    /// interrupted, so it can overshoot the budget — the deadline is
-    /// rechecked right before installation to close that gap.
-    fn agent(&self, deadline: Duration) -> ureq::Agent {
+    /// Builds the HTTP client for one download. The per-download deadline is
+    /// a single absolute budget: [`Downloader::stream_to_file`] sets each
+    /// request's overall timeout to the time remaining on that budget, so
+    /// DNS, connect, redirects, response headers and body reads all share
+    /// it and ureq checks the remaining time around every socket operation.
+    /// A blocked DNS query itself cannot be interrupted, so it can overshoot
+    /// the budget — the deadline is rechecked right before installation to
+    /// close that gap.
+    fn agent(&self) -> ureq::Agent {
         ureq::AgentBuilder::new()
             .user_agent(concat!("pumice-transcribe/", env!("CARGO_PKG_VERSION")))
             .timeout_connect(self.timeouts.connect)
-            .timeout_read(self.timeouts.read_stall)
-            .timeout(deadline)
             .redirects(0)
             .build()
     }
@@ -352,9 +348,11 @@ impl Downloader {
     /// Performs the HTTP GET (following redirects by hand, so the policy and
     /// the limit are testable) and writes the body to `file`, hashing on the
     /// way. Enforces the exact expected size: more bytes, fewer bytes or a
-    /// wrong `Content-Length` are all failures. The overall deadline bounds
-    /// DNS, connect, redirects, headers and body through the agent's
-    /// per-request timeout and is also polled around body reads.
+    /// wrong `Content-Length` are all failures. The per-download deadline is
+    /// one absolute budget shared by every request: each request (including
+    /// every redirect hop) gets the remaining time as its overall timeout,
+    /// so a redirect chain cannot extend the budget. The budget is also
+    /// polled around body reads.
     fn stream_to_file(
         &self,
         spec: &DownloadSpec,
@@ -363,13 +361,21 @@ impl Downloader {
         deadline: Duration,
         on_event: &mut dyn FnMut(DownloadEvent),
     ) -> Result<String, Error> {
-        let agent = self.agent(deadline);
+        let agent = self.agent();
         let mut url = url::Url::parse(&spec.url)
             .map_err(|e| Error::download_failed(format!("invalid download URL: {e}")))?;
+        let deadline_at = started + deadline;
         let mut redirects = 0u32;
         on_event(DownloadEvent::State(DownloadState::Connecting));
         let response = loop {
-            let (status, response) = match agent.get(url.as_str()).call() {
+            // Fail immediately once the budget is spent instead of issuing a
+            // request with no time left.
+            check_deadline(started, deadline, spec.size_bytes)?;
+            // Each redirect hop is a fresh request; ureq would otherwise
+            // start a new full-length timeout for it. The overall timeout of
+            // this request is the remaining budget.
+            let remaining = deadline_at.saturating_duration_since(std::time::Instant::now());
+            let (status, response) = match agent.get(url.as_str()).timeout(remaining).call() {
                 Ok(response) => (response.status(), response),
                 Err(ureq::Error::Status(status, response)) => (status, response),
                 Err(ureq::Error::Transport(transport)) => {
@@ -961,7 +967,6 @@ mod tests {
     fn test_timeouts() -> Timeouts {
         Timeouts {
             connect: Duration::from_secs(5),
-            read_stall: Duration::from_secs(5),
             total: Duration::from_secs(600),
         }
     }
@@ -1371,7 +1376,7 @@ mod tests {
                 TEST_BYTES.len()
             );
             stream.write_all(head.as_bytes()).unwrap();
-            // A steady trickle: no read stall, but far too slow overall.
+            // A steady trickle: no socket stall, but far too slow overall.
             for &byte in TEST_BYTES {
                 stream.write_all(&[byte]).unwrap();
                 stream.flush().unwrap();
@@ -1381,27 +1386,31 @@ mod tests {
         let spec = spec_for(&base, TEST_BYTES);
         let timeouts = Timeouts {
             connect: Duration::from_secs(5),
-            read_stall: Duration::from_secs(5),
             total: Duration::from_millis(200),
         };
 
+        let started = std::time::Instant::now();
         let err = Downloader::new(RedirectPolicy::AllowHttp, timeouts)
             .fetch(&spec, tmp.path(), false, &mut |_| {})
             .unwrap_err();
 
-        // The overall deadline trips in the HTTP layer (the agent's
-        // per-request timeout) or in the read loop; either is a typed
-        // failure with full cleanup.
+        // The overall deadline trips in the HTTP layer (the per-request
+        // timeout) or in the read loop; either is a typed failure with full
+        // cleanup, and neither waits for the trickle to finish.
         assert_eq!(err.code, ErrorCode::DownloadFailed);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a body slower than the budget must not run to completion: {:?}",
+            started.elapsed()
+        );
         let dest = tmp.path().join("model.gguf");
         assert!(!dest.exists());
         assert!(!part_path(&dest).exists());
     }
 
-    /// Header fragments that each arrive well within the read-stall timeout
-    /// but add up past the overall deadline must fail: the deadline is
-    /// applied to the whole request (headers included), not polled only
-    /// between body reads.
+    /// Header fragments that each arrive quickly but add up past the overall
+    /// deadline must fail: the deadline is applied to the whole request
+    /// (headers included), not polled only between body reads.
     #[test]
     fn header_trickle_past_deadline_fails_and_cleans_up() {
         let tmp = private_dir();
@@ -1423,7 +1432,6 @@ mod tests {
         let spec = spec_for(&base, TEST_BYTES);
         let timeouts = Timeouts {
             connect: Duration::from_secs(5),
-            read_stall: Duration::from_secs(5),
             total: Duration::from_millis(200),
         };
 
@@ -1456,7 +1464,6 @@ mod tests {
         let spec = spec_for(&base, TEST_BYTES);
         let timeouts = Timeouts {
             connect: Duration::from_secs(5),
-            read_stall: Duration::from_secs(5),
             total: Duration::from_millis(200),
         };
 
@@ -1468,6 +1475,50 @@ mod tests {
         let dest = tmp.path().join("model.gguf");
         assert!(!dest.exists(), "an over-deadline body must not install");
         assert!(!part_path(&dest).exists());
+    }
+
+    /// The per-download deadline is one absolute budget: every redirect hop
+    /// is a fresh request, and each gets only the time remaining — a chain
+    /// of slow redirects must fail near the budget, not after summing the
+    /// hops.
+    #[test]
+    fn redirect_chain_cannot_extend_deadline() {
+        let tmp = private_dir();
+        let (base, requests) = serve(|path, stream| {
+            std::thread::sleep(Duration::from_millis(700));
+            match path {
+                "/file" => respond(stream, 302, &[("Location", "/hop2")], b""),
+                "/hop2" => respond(stream, 302, &[("Location", "/hop3")], b""),
+                "/hop3" => respond(stream, 200, &[], TEST_BYTES),
+                other => panic!("unexpected path {other}"),
+            }
+        });
+        let spec = spec_for(&base, TEST_BYTES);
+        let timeouts = Timeouts {
+            connect: Duration::from_secs(5),
+            total: Duration::from_secs(1),
+        };
+
+        let started = std::time::Instant::now();
+        let err = Downloader::new(RedirectPolicy::AllowHttp, timeouts)
+            .fetch(&spec, tmp.path(), false, &mut |_| {})
+            .unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::DownloadFailed);
+        assert!(
+            started.elapsed() < Duration::from_millis(1800),
+            "the redirect chain extended the deadline: {:?}",
+            started.elapsed()
+        );
+        let dest = tmp.path().join("model.gguf");
+        assert!(!dest.exists());
+        assert!(!part_path(&dest).exists());
+        // The second hop was cut off by the remaining budget; the third
+        // request never happened.
+        assert!(
+            requests.load(Ordering::SeqCst) < 3,
+            "the redirect chain must not issue requests past the budget"
+        );
     }
 
     /// Direct check of the deadline guard that runs right before
