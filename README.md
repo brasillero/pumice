@@ -17,7 +17,7 @@ Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude
 
 ## Status
 
-Pumice works end to end through Claude, Codex, Kimi and Kiro. Antigravity and the local OpenAI-compatible adapter are archived for now. You choose the providers in an explicit list in the YAML config — nothing is enabled by default, and there is no fallback: a failure is answered with an HTTP error and the app pastes its own transcript. Run `pumice doctor` to see which CLIs it found.
+Pumice works end to end through Claude, Codex, Kimi and Kiro. Antigravity and the local OpenAI-compatible adapter are archived for now. You choose the providers in an explicit list in the YAML config — nothing is enabled by default, and there is no fallback: a failure is answered with an HTTP error and the app pastes its own transcript. Run `pumice relay doctor` to see which CLIs it found.
 
 Pumice supports standalone downloads and the npm package `@brasillero/pumice` (installable with npm, pnpm, Bun or npx; the installed command is `pumice`). Check [GitHub Releases](https://github.com/brasillero/pumice/releases) and the [npm registry](https://www.npmjs.com/package/@brasillero/pumice) for published versions. See the [installation guide](docs/install.md) for installation, startup and Handy setup; building from source is also supported below.
 
@@ -29,12 +29,14 @@ With [Rust](https://rustup.rs/) installed:
 
 ```sh
 cargo build --release --locked --bin pumice
-./target/release/pumice check-config   # validates the per-user config (or --config <path>)
-./target/release/pumice doctor         # checks which CLIs are installed
-./target/release/pumice                # starts the service (live view; use --plain for one-line stderr logs)
+./target/release/pumice relay check-config   # validates the per-user config (or --config <path>)
+./target/release/pumice relay doctor         # checks which CLIs are installed
+./target/release/pumice relay serve          # starts the service (live view; use --plain for one-line stderr logs)
 ```
 
-In Handy: **Settings → Advanced → Experimental Features → Post Processing**, set the provider to **Custom**, base URL `http://127.0.0.1:7567/v1`, API key empty, model `claude`, `codex`, `kimi` or `kiro`. Choose `passthrough` to return the original transcript exactly, including whitespace and line breaks, without calling an AI. With Handy, only the text inside its `<transcript>` envelope is returned; its formatting prompt is omitted. Choose `inspect` to echo the full JSON request body that Pumice received, including Handy's attached prompt and every message and option; the result is pasted as JSON, which is useful for diagnostics, and it never calls an AI. See [`pumice.example.yaml`](pumice.example.yaml) for every configuration setting. On WSL, use `127.0.0.1`, not `localhost` (see [`docs/research/S0.5-wsl-localhost.md`](docs/research/S0.5-wsl-localhost.md)).
+In Handy: **Settings → Advanced → Experimental Features → Post Processing**, set the provider to **Custom**, base URL `http://127.0.0.1:7567/v1`, API key empty, model `claude`, `codex`, `kimi` or `kiro`. Choose `passthrough` to return the original transcript exactly, including whitespace and line breaks, without calling an AI. With Handy, only the text inside its `<transcript>` envelope is returned; its formatting prompt is omitted. Choose `inspect` to echo the full JSON request body that Pumice received, including Handy's attached prompt and every message and option; the result is pasted as JSON, which is useful for diagnostics, and it never calls an AI. See [`relay.example.yml`](relay.example.yml) for every configuration setting. On WSL, use `127.0.0.1`, not `localhost` (see [`docs/research/S0.5-wsl-localhost.md`](docs/research/S0.5-wsl-localhost.md)).
+
+**Upgrading from 0.2:** the old `pumice` / `pumice --plain` commands no longer start the service and the old `pumice.yaml` config is no longer read. Rename your config file to `relay.yml` (same directory) and run `pumice relay serve` instead of `pumice`. Handy's URL and port 7567 are unchanged. See [Upgrading from 0.2](docs/install.md#upgrading-from-02) in the installation guide.
 
 - Product spec: [`docs/spec.md`](docs/spec.md)
 - Transcription module guide: [`docs/transcription.md`](docs/transcription.md)

@@ -52,13 +52,13 @@ Node.js installed for the launcher.
 Once `pumice` is on your PATH:
 
 ```sh
-pumice
+pumice relay serve
 ```
 
-That single command starts the service and prints the address it listens on,
-`http://127.0.0.1:7567/v1`. (`pumice serve` is an explicit alias for the same
-command, and `pumice --config <path>` starts it with an explicit config
-file.) Stop the service with Ctrl-C.
+That command starts the relay service and prints the address it listens on,
+`http://127.0.0.1:7567/v1`. (`pumice relay` with no further arguments is the
+same command, and `pumice relay --config <path>` starts it with an explicit
+config file.) Stop the service with Ctrl-C.
 
 When `pumice` runs in a terminal, it opens a live interactive view of every
 completion request: arrived, queued, CLI started, CLI ended, responded or
@@ -104,20 +104,20 @@ If the executable is not on your PATH — for example right after extracting an
 archive — run it from its folder with an explicit path:
 
 ```sh
-./pumice          # Linux and macOS
-.\pumice.exe      # Windows PowerShell
+./pumice relay serve        # Linux and macOS
+.\pumice.exe relay serve    # Windows PowerShell
 ```
 
 ## Check that it works
 
 ```sh
-pumice doctor         # shows which provider CLIs were found; spends no quota
-pumice --version
+pumice relay doctor         # shows which provider CLIs were found; spends no quota
+pumice relay --version
 ```
 
 `doctor` only probes for installed CLIs, so it is free to run as often as you
 like. To verify that a provider is actually logged in and answers,
-run `pumice doctor --login-check --provider claude` — that one call spends a
+run `pumice relay doctor --login-check --provider claude` — that one call spends a
 small amount of your plan quota, which is why it only runs when you ask for
 it.
 
@@ -144,9 +144,9 @@ gets an error and the app keeps its own transcript (the built-in `passthrough`
 and `inspect` still work). To format dictations, create the per-user config
 and list the providers you want:
 
-- Windows: `%APPDATA%\pumice\pumice.yaml`
-- Linux and macOS: `~/.config/pumice/pumice.yaml`
-  (or `$XDG_CONFIG_HOME/pumice/pumice.yaml`)
+- Windows: `%APPDATA%\pumice\relay.yml`
+- Linux and macOS: `~/.config/pumice/relay.yml`
+  (or `$XDG_CONFIG_HOME/pumice/relay.yml`)
 
 ```yaml
 providers:                 # the client's model picks the entry; there is no
@@ -162,9 +162,9 @@ Pumice runs exactly that provider. A request without a model, or any
 failure, is answered with an HTTP error, and the app keeps its own
 transcript. Every entry needs `id` and `enabled`; `model` is required
 on enabled entries; `timeout_secs` and `binary` are optional and
-documented in [`pumice.example.yaml`](../pumice.example.yaml), which shows
+documented in [`relay.example.yml`](../relay.example.yml), which shows
 every supported provider. Gateways, routing and logins are configured in
-each CLI itself; Pumice inherits them. Validate the file with `pumice check-config`. The
+each CLI itself; Pumice inherits them. Validate the file with `pumice relay check-config`. The
 config lives outside the install folder, so upgrading never touches it.
 A `pumice setup` wizard that writes this file is planned next.
 
@@ -184,6 +184,19 @@ id to pick it.
   archived for now; listing them in the config is an error.
 - **OpenCode** — support was removed.
 
+## Upgrading from 0.2
+
+The 0.2 commands `pumice` and `pumice --plain` no longer start the
+service: bare `pumice` now prints the command overview and exits, and the
+service starts with `pumice relay serve` (or `pumice relay serve --plain`).
+The old `pumice.yaml` configuration file is no longer read, with no
+fallback: rename it to `relay.yml` in the same directory
+(`~/.config/pumice/relay.yml` on Linux and macOS,
+`%APPDATA%\pumice\relay.yml` on Windows) and keep its contents unchanged.
+Handy's base URL and port 7567 are exactly the same, so no Handy changes
+are needed. The standalone `pumice-relay` binary keeps its old arguments
+if you run it directly.
+
 ## Upgrade and remove
 
 Stop the service with Ctrl-C before updating or removing it. Choose the
@@ -197,7 +210,7 @@ command for your package manager:
 
 For archive installs, extract the newer archive into a fresh folder and
 replace the old executable. Your per-user config is kept. Restart with
-`pumice` after updating. To remove an archive install, delete its folder and
+`pumice relay serve` after updating. To remove an archive install, delete its folder and
 remove that directory from your PATH if you added it.
 
 ## Privacy

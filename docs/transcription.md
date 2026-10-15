@@ -4,6 +4,14 @@
 file and a Whisper GGUF model and returns the raw transcript. It is a
 standalone CLI; it does not talk to the relay or to any AI provider.
 
+When the transcription program is installed next to the `pumice`
+executable, every command below also works through the dispatcher with a
+`pumice transcribe` prefix — for example `pumice transcribe file audio.wav
+--model tiny` — with arguments, output and exit status passed through
+unchanged. The dispatcher never searches `PATH` or the working directory;
+it only runs the `pumice-transcribe` sitting in `pumice`'s own install
+directory.
+
 ## Building from source
 
 With [Rust](https://rustup.rs/) installed:
