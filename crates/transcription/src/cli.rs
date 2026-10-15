@@ -112,6 +112,10 @@ pub struct SuccessOutput {
     pub audio_seconds: f64,
     pub model_load_ms: u64,
     pub transcription_ms: u64,
+    /// Compute backend in use, e.g. `CPU [haswell]`; only present in builds
+    /// that can know it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -148,13 +152,17 @@ enum CommandOutput {
 
 impl From<SuccessOutput> for serde_json::Value {
     fn from(out: SuccessOutput) -> Self {
-        serde_json::json!({
+        let mut result = serde_json::json!({
             "text": out.text,
             "language": out.language,
             "audio_seconds": out.audio_seconds,
             "model_load_ms": out.model_load_ms,
             "transcription_ms": out.transcription_ms,
-        })
+        });
+        if let Some(backend) = out.backend {
+            result["backend"] = serde_json::Value::String(backend);
+        }
+        result
     }
 }
 
@@ -327,7 +335,12 @@ where
     let start = Instant::now();
     let engine = make_engine(&model_path, threads)?;
     let load_ms = start.elapsed().as_millis();
-    eprintln!("loaded model `{served_model_id}` in {load_ms} ms");
+    match engine.backend_label() {
+        Some(label) => {
+            eprintln!("loaded model `{served_model_id}` in {load_ms} ms (backend: {label})")
+        }
+        None => eprintln!("loaded model `{served_model_id}` in {load_ms} ms"),
+    }
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| Error::internal(format!("{e}")))?;
     rt.block_on(async {
@@ -397,6 +410,7 @@ where
         audio_seconds,
         model_load_ms,
         transcription_ms,
+        backend: engine.backend_label(),
     })
 }
 
@@ -617,6 +631,7 @@ mod tests {
             audio_seconds: 1.0,
             model_load_ms: 0,
             transcription_ms: 0,
+            backend: None,
         };
         let mut buf = Vec::new();
         print_success(&output, false, &mut buf).unwrap();
@@ -631,6 +646,7 @@ mod tests {
             audio_seconds: 1.0,
             model_load_ms: 0,
             transcription_ms: 0,
+            backend: None,
         };
         let mut buf = Vec::new();
         print_success(&output, false, &mut buf).unwrap();
@@ -645,6 +661,7 @@ mod tests {
             audio_seconds: 1.0,
             model_load_ms: 0,
             transcription_ms: 0,
+            backend: None,
         };
         let mut writer = FailingWriter;
         assert!(print_success(&output, false, &mut writer).is_err());
