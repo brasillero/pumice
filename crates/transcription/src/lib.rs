@@ -4,6 +4,8 @@ pub mod config;
 pub mod engine;
 pub mod error;
 mod riff;
+#[cfg(feature = "opus")]
+mod opus;
 pub mod server;
 pub mod service;
 

@@ -30,6 +30,8 @@ enum AudioFormat {
     Mp3,
     Flac,
     Ogg,
+    #[cfg(feature = "opus")]
+    Webm,
     Unknown,
 }
 
@@ -45,6 +47,13 @@ impl AudioFormat {
         }
         if bytes.len() >= 4 && &bytes[0..4] == b"OggS" {
             return Self::Ogg;
+        }
+        // EBML magic: WebM/Matroska. Only routed to the Opus decoder in
+        // `opus` builds; otherwise it falls through to Unknown, exactly as
+        // before.
+        #[cfg(feature = "opus")]
+        if bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+            return Self::Webm;
         }
         // MP3: an ID3 tag at the start, or an MPEG audio frame sync word (11 set bits).
         if bytes.starts_with(b"ID3") {
@@ -69,9 +78,10 @@ fn make_media_source(bytes: Vec<u8>) -> MediaSourceStream<'static> {
 /// enforced per-packet before any downmix or resample buffer is allocated, and
 /// no up-front reservation is made from header-declared lengths.
 ///
-/// Supported formats: RIFF/WAVE, MP3, FLAC and Ogg Vorbis. Ogg Opus is detected
-/// as an Ogg container but rejected with `UnsupportedFormat` because Symphonia
-/// has no Opus decoder.
+/// Supported formats: RIFF/WAVE, MP3, FLAC and Ogg Vorbis; with the `opus`
+/// feature also Ogg/Opus and WebM/Opus. Ogg/Opus is detected as an Ogg
+/// container; without the feature it is rejected with `UnsupportedFormat`
+/// because Symphonia has no Opus decoder.
 pub fn decode_audio<R: Read + Send + Sync>(reader: R) -> Result<DecodedAudio, Error> {
     decode_audio_with_cancel(reader, &CancelToken::new())
 }
@@ -105,12 +115,18 @@ pub fn decode_audio_with_cancel<R: Read + Send + Sync>(
             decode_track(&mut format, None, cancel)
         }
         AudioFormat::Ogg => {
+            #[cfg(feature = "opus")]
+            if crate::opus::ogg::is_ogg_opus(&bytes) {
+                return crate::opus::ogg::decode_ogg_opus(bytes, cancel);
+            }
             let mss = make_media_source(bytes);
             let mut format =
                 symphonia::default::formats::OggReader::try_new(mss, FormatOptions::default())
                     .map_err(map_symphonia_error)?;
             decode_track(&mut format, None, cancel)
         }
+        #[cfg(feature = "opus")]
+        AudioFormat::Webm => crate::opus::webm::decode_webm_opus(bytes, cancel),
         AudioFormat::Unknown => Err(Error::unsupported_format(
             "unknown or unsupported audio format",
         )),
@@ -289,7 +305,7 @@ fn decode_track(
     })
 }
 
-fn map_symphonia_error(err: SymphoniaError) -> Error {
+pub(crate) fn map_symphonia_error(err: SymphoniaError) -> Error {
     let msg = err.to_string();
     match err {
         SymphoniaError::Unsupported(_) => Error::unsupported_format(msg),
@@ -367,7 +383,7 @@ pub fn normalize_and_validate(pcm: Vec<f32>) -> Result<Vec<f32>, Error> {
     Ok(pcm)
 }
 
-fn downmix_to_mono(samples: Vec<f32>, channels: u16) -> Result<Vec<f32>, Error> {
+pub(crate) fn downmix_to_mono(samples: Vec<f32>, channels: u16) -> Result<Vec<f32>, Error> {
     match channels {
         1 => Ok(samples),
         2 => Ok(samples.chunks(2).map(|c| (c[0] + c[1]) / 2.0).collect()),
