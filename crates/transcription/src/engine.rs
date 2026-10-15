@@ -301,11 +301,12 @@ pub mod cpp {
     /// to the exact feature sets its CMake table compiles in.
     ///
     /// The safe bindings expose only directory-based loading, and ggml scores
-    /// everything it finds in that directory. To make ggml load only the
-    /// chosen module, it is staged alone in a private per-process directory
-    /// inside the trusted install dir (never cwd, PATH or a temp dir) and
-    /// removed right after registration; the plain `x64` module is the
-    /// portable floor when nothing better is safe.
+    /// everything it finds in that directory. The staging script therefore
+    /// places each CPU module alone in `<exe dir>/cpu/<variant>/` at build
+    /// time, and this module initializes backends from exactly that one
+    /// directory — never cwd, PATH or a temp dir, and nothing is copied or
+    /// written at runtime, so a read-only install directory works. The plain
+    /// `x64` module is the portable floor when nothing better is safe.
     #[cfg(all(feature = "cpu-variants", target_os = "linux"))]
     mod dynamic_backends {
         use std::fmt;
@@ -534,20 +535,14 @@ pub mod cpp {
 
         /// Why backend initialization failed, in fixed text safe to show on
         /// stderr: paths and variant names only, never native error strings.
-        /// Each variant names its category (modules missing / staging failed
-        /// / no usable CPU module) and carries the same recovery hint.
+        /// Each variant names its category (modules missing / no usable CPU
+        /// module) and carries the same recovery hint.
         #[derive(Debug)]
         pub enum InitError {
             ExeDir,
-            NoModuleDir {
+            ModulesMissing {
                 exe_dir: PathBuf,
-            },
-            ChosenModuleMissing {
                 variant: &'static str,
-                module_dir: PathBuf,
-            },
-            StageFailed {
-                module_dir: PathBuf,
             },
             NoUsableCpuModule {
                 variant: &'static str,
@@ -563,26 +558,12 @@ pub mod cpp {
                     InitError::ExeDir => {
                         write!(f, "cannot locate the executable directory; {hint}")
                     }
-                    InitError::NoModuleDir { exe_dir } => write!(
+                    InitError::ModulesMissing { exe_dir, variant } => write!(
                         f,
-                        "no ggml CPU modules found next to the executable ({}) or in its lib/ \
-                         subdirectory (modules missing); {hint}",
-                        exe_dir.display()
-                    ),
-                    InitError::ChosenModuleMissing {
-                        variant,
-                        module_dir,
-                    } => write!(
-                        f,
-                        "the selected ggml CPU module libggml-cpu-{variant}.so is missing from \
-                         {} (modules missing); the staged build is incomplete; {hint}",
-                        module_dir.display()
-                    ),
-                    InitError::StageFailed { module_dir } => write!(
-                        f,
-                        "cannot prepare a private module directory in {} (staging failed); \
-                         check that the directory is writable; {hint}",
-                        module_dir.display()
+                        "no staged ggml CPU module for libggml-cpu-{variant}.so or any lower \
+                         variant under {} (modules missing); the staged build is incomplete; \
+                         {hint}",
+                        exe_dir.join("cpu").display()
                     ),
                     InitError::NoUsableCpuModule {
                         variant,
@@ -598,36 +579,30 @@ pub mod cpp {
             }
         }
 
-        /// A private per-process directory inside the trusted install dir
-        /// holding exactly one module — a copy of the chosen one — so ggml's
-        /// directory probe can only see and load that module. Removed on
-        /// drop; after `dlopen` the loaded module stays mapped, so cleanup
-        /// never unloads it.
-        struct PrivateModuleDir(PathBuf);
-
-        impl PrivateModuleDir {
-            fn stage(module_dir: &Path, variant: &str) -> Result<Self, InitError> {
-                let fail = || InitError::StageFailed {
-                    module_dir: module_dir.to_path_buf(),
-                };
-                let dir = module_dir.join(format!(".pumice-cpu-variant-{}", std::process::id()));
-                std::fs::create_dir(&dir).map_err(|_| fail())?;
-                let copied = std::fs::copy(
-                    module_dir.join(format!("libggml-cpu-{variant}.so")),
-                    dir.join(format!("libggml-cpu-{variant}.so")),
-                );
-                if let Err(_error) = copied {
-                    let _ = std::fs::remove_dir_all(&dir);
-                    return Err(fail());
-                }
-                Ok(Self(dir))
-            }
+        /// The staged module file for one variant:
+        /// `<exe dir>/cpu/<variant>/libggml-cpu-<variant>.so`.
+        fn variant_module_file(exe_dir: &Path, variant: &str) -> PathBuf {
+            exe_dir
+                .join("cpu")
+                .join(variant)
+                .join(format!("libggml-cpu-{variant}.so"))
         }
 
-        impl Drop for PrivateModuleDir {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
+        /// The staged module directory to initialize backends from: the
+        /// chosen variant's, or the next lower tier whose module was staged.
+        /// The tiers nest (every tier requires everything a lower one does),
+        /// so any lower tier is safe on this host. `None` when no module at
+        /// or below the chosen tier was staged.
+        fn select_module_dir(
+            exe_dir: &Path,
+            chosen: &'static str,
+        ) -> Option<(&'static str, PathBuf)> {
+            let chosen_idx = VARIANTS.iter().position(|(name, _)| *name == chosen)?;
+            VARIANTS[..=chosen_idx]
+                .iter()
+                .rev()
+                .find(|(name, _)| variant_module_file(exe_dir, name).is_file())
+                .map(|(name, _)| (*name, exe_dir.join("cpu").join(name)))
         }
 
         /// Initialize backends, returning a fixed-text reason on failure.
@@ -636,63 +611,29 @@ pub mod cpp {
                 .ok()
                 .and_then(|path| path.parent().map(Path::to_path_buf))
                 .ok_or(InitError::ExeDir)?;
-            let module_dir =
-                backend_module_dir(&exe_dir).ok_or_else(|| InitError::NoModuleDir {
+            let chosen = choose_variant(detect);
+            let (variant, module_dir) =
+                select_module_dir(&exe_dir, chosen).ok_or_else(|| InitError::ModulesMissing {
                     exe_dir: exe_dir.clone(),
+                    variant: chosen,
                 })?;
-            let variant = choose_variant(detect);
-            if !module_dir
-                .join(format!("libggml-cpu-{variant}.so"))
-                .is_file()
-            {
-                return Err(InitError::ChosenModuleMissing {
-                    variant,
-                    module_dir,
-                });
-            }
-            // transcribe-cpp 0.3.1 exposes no per-path backend loader, so
-            // stage the single chosen module alone; ggml's CPUID-only scoring
-            // then has nothing else it could pick instead.
-            let private = PrivateModuleDir::stage(&module_dir, variant)?;
-            let result = ::transcribe_cpp::init_backends_with(
-                Some(&private.0),
+            ::transcribe_cpp::init_backends_with(
+                Some(&module_dir),
                 ::transcribe_cpp::BackendMask::CPU,
-            );
-            drop(private);
-            result.map_err(|_| InitError::NoUsableCpuModule {
+            )
+            .map_err(|_| InitError::NoUsableCpuModule {
                 variant,
-                module_dir,
+                module_dir: module_dir.clone(),
             })?;
-            eprintln!("cpu-variants: selected ggml CPU module libggml-cpu-{variant}.so");
+            if variant == chosen {
+                eprintln!("cpu-variants: selected ggml CPU module libggml-cpu-{variant}.so");
+            } else {
+                eprintln!(
+                    "cpu-variants: selected ggml CPU module libggml-cpu-{variant}.so (fallback: \
+                     libggml-cpu-{chosen}.so is not staged)"
+                );
+            }
             Ok(())
-        }
-
-        /// The directory to load modules from: the executable's directory, or
-        /// its `lib/` subdirectory when the modules live there. Only these
-        /// installation-relative locations are trusted.
-        fn backend_module_dir(exe_dir: &Path) -> Option<PathBuf> {
-            [exe_dir.to_path_buf(), exe_dir.join("lib")]
-                .into_iter()
-                .find(|dir| contains_backend_modules(dir))
-        }
-
-        /// Whether `name` is a real ggml CPU backend module filename, matching
-        /// the pattern ggml's own loader probes (`libggml-cpu-*.so`, plus the
-        /// unadorned `libggml-cpu.so`). Core libraries such as libggml-base.so
-        /// must not count: in the documented layout they sit beside the
-        /// executable, and counting them would stop the `lib/` fallback from
-        /// ever being considered.
-        fn is_cpu_module_name(name: &str) -> bool {
-            (name.starts_with("libggml-cpu-") && name.ends_with(".so")) || name == "libggml-cpu.so"
-        }
-
-        fn contains_backend_modules(dir: &Path) -> bool {
-            std::fs::read_dir(dir).is_ok_and(|entries| {
-                entries.flatten().any(|entry| {
-                    entry.path().is_file()
-                        && is_cpu_module_name(&entry.file_name().to_string_lossy())
-                })
-            })
         }
 
         #[cfg(test)]
@@ -807,44 +748,15 @@ pub mod cpp {
             }
 
             #[test]
-            fn private_module_dir_holds_one_module_and_cleans_up() {
-                let temp = tempfile::tempdir().unwrap();
-                std::fs::write(temp.path().join("libggml-cpu-haswell.so"), b"module").unwrap();
-                let staged_path;
-                {
-                    let staged = PrivateModuleDir::stage(temp.path(), "haswell").unwrap();
-                    staged_path = staged.0.clone();
-                    assert_eq!(
-                        std::fs::read(staged_path.join("libggml-cpu-haswell.so")).unwrap(),
-                        b"module"
-                    );
-                }
-                assert!(!staged_path.exists());
-                assert!(temp.path().exists());
-            }
-
-            #[test]
             fn init_errors_name_their_category() {
                 let temp = tempfile::tempdir().unwrap();
                 let cases = [
                     (
-                        InitError::NoModuleDir {
+                        InitError::ModulesMissing {
                             exe_dir: temp.path().to_path_buf(),
-                        },
-                        "modules missing",
-                    ),
-                    (
-                        InitError::ChosenModuleMissing {
                             variant: "haswell",
-                            module_dir: temp.path().to_path_buf(),
                         },
                         "modules missing",
-                    ),
-                    (
-                        InitError::StageFailed {
-                            module_dir: temp.path().to_path_buf(),
-                        },
-                        "staging failed",
                     ),
                     (
                         InitError::NoUsableCpuModule {
@@ -861,65 +773,75 @@ pub mod cpp {
                 }
             }
 
-            #[test]
-            fn no_modules_next_to_executable_is_an_error() {
-                let temp = tempfile::tempdir().unwrap();
-                assert_eq!(backend_module_dir(temp.path()), None);
+            fn stage_module(exe_dir: &Path, variant: &str) {
+                let dir = exe_dir.join("cpu").join(variant);
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join(format!("libggml-cpu-{variant}.so")), b"").unwrap();
             }
 
             #[test]
-            fn modules_next_to_executable_are_preferred() {
+            fn chosen_variant_directory_is_selected() {
                 let temp = tempfile::tempdir().unwrap();
-                std::fs::write(temp.path().join("libggml-cpu-x64.so"), b"").unwrap();
-                assert_eq!(
-                    backend_module_dir(temp.path()),
-                    Some(temp.path().to_path_buf())
-                );
+                stage_module(temp.path(), "x64");
+                stage_module(temp.path(), "haswell");
+                let (variant, dir) = select_module_dir(temp.path(), "haswell").unwrap();
+                assert_eq!(variant, "haswell");
+                assert_eq!(dir, temp.path().join("cpu").join("haswell"));
             }
 
             #[test]
-            fn lib_subdirectory_is_a_falllback() {
+            fn missing_chosen_variant_falls_back_to_a_lower_one() {
                 let temp = tempfile::tempdir().unwrap();
-                let lib = temp.path().join("lib");
-                std::fs::create_dir(&lib).unwrap();
-                std::fs::write(lib.join("libggml-cpu-haswell.so"), b"").unwrap();
-                assert_eq!(backend_module_dir(temp.path()), Some(lib));
+                stage_module(temp.path(), "sse42");
+                stage_module(temp.path(), "x64");
+                let (variant, dir) = select_module_dir(temp.path(), "haswell").unwrap();
+                assert_eq!(variant, "sse42");
+                assert_eq!(dir, temp.path().join("cpu").join("sse42"));
             }
 
             #[test]
-            fn unrelated_files_do_not_count_as_modules() {
+            fn empty_variant_directory_does_not_count() {
                 let temp = tempfile::tempdir().unwrap();
+                std::fs::create_dir_all(temp.path().join("cpu").join("haswell")).unwrap();
+                stage_module(temp.path(), "x64");
+                let (variant, _) = select_module_dir(temp.path(), "haswell").unwrap();
+                assert_eq!(variant, "x64");
+            }
+
+            #[test]
+            fn no_staged_variant_is_an_error() {
+                let temp = tempfile::tempdir().unwrap();
+                assert_eq!(select_module_dir(temp.path(), "haswell"), None);
+            }
+
+            #[test]
+            fn flat_or_versioned_module_files_do_not_count() {
+                let temp = tempfile::tempdir().unwrap();
+                // Old flat layout or stray files must not be mistaken for
+                // staged per-variant directories.
+                std::fs::write(temp.path().join("libggml-cpu-haswell.so"), b"").unwrap();
                 std::fs::write(temp.path().join("libggml-base.so"), b"").unwrap();
-                std::fs::write(temp.path().join("libggml.so"), b"").unwrap();
-                std::fs::write(temp.path().join("libtranscribe.so.0.3"), b"").unwrap();
                 std::fs::write(temp.path().join("notes.txt"), b"").unwrap();
-                assert_eq!(backend_module_dir(temp.path()), None);
+                assert_eq!(select_module_dir(temp.path(), "haswell"), None);
             }
 
             #[test]
-            fn versioned_module_names_do_not_count() {
+            fn read_only_install_dir_needs_no_writes() {
+                use std::os::unix::fs::PermissionsExt;
                 let temp = tempfile::tempdir().unwrap();
-                std::fs::write(temp.path().join("libggml-cpu-x64.so.0.3.1"), b"").unwrap();
-                assert_eq!(backend_module_dir(temp.path()), None);
-            }
-
-            #[test]
-            fn core_libs_beside_executable_do_not_hide_lib_modules() {
-                let temp = tempfile::tempdir().unwrap();
-                // Documented layout: core libraries beside the executable,
-                // CPU modules in lib/.
-                for core in [
-                    "libtranscribe.so.0.3",
-                    "libggml.so.0",
-                    "libggml-base.so.0",
-                    "libggml-cpu-alderlake.so.0.3.1",
-                ] {
-                    std::fs::write(temp.path().join(core), b"").unwrap();
+                stage_module(temp.path(), "x64");
+                let cpu = temp.path().join("cpu");
+                let x64 = cpu.join("x64");
+                for dir in [&cpu, &x64] {
+                    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
                 }
-                let lib = temp.path().join("lib");
-                std::fs::create_dir(&lib).unwrap();
-                std::fs::write(lib.join("libggml-cpu-haswell.so"), b"").unwrap();
-                assert_eq!(backend_module_dir(temp.path()), Some(lib));
+                let (variant, dir) = select_module_dir(temp.path(), "alderlake").unwrap();
+                assert_eq!(variant, "x64");
+                assert_eq!(dir, x64);
+                assert!(variant_module_file(temp.path(), "x64").is_file());
+                for dir in [&cpu, &x64] {
+                    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+                }
             }
         }
     }
