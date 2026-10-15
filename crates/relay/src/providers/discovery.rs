@@ -77,7 +77,7 @@ pub enum Version {
 }
 
 /// Detects every provider in `descriptors` — enabled or not, so a later
-/// `pumice doctor` can show the whole registry — and returns the statuses in
+/// `pumice relay doctor` can show the whole registry — and returns the statuses in
 /// descriptor order. Probes run concurrently; each gets its own deadline of
 /// [`PROBE_TIMEOUT`]. Never spends quota and never spawns a
 /// [`ProbeSpec::PathOnly`] provider.

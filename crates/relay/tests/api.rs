@@ -1413,7 +1413,7 @@ async fn authorization_header_is_ignored_and_never_logged() {
     }
 }
 
-/// Builds `pumice serve` YAML whose every registered provider binary points
+/// Builds `pumice-relay serve` YAML whose every registered provider binary points
 /// at its own disposable fake, so startup detection never looks a real CLI
 /// up on PATH. Returns the fakes — they must outlive the served process —
 /// and the YAML.
@@ -1464,7 +1464,7 @@ fn occupied_port_exits_1_naming_port() {
         .arg("--config")
         .arg(&config_path)
         .output()
-        .expect("run pumice serve");
+        .expect("run pumice-relay serve");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
@@ -1495,7 +1495,7 @@ fn grab_free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-/// Spawns `pumice serve` and returns the child plus a receiver holding the
+/// Spawns `pumice-relay serve` and returns the child plus a receiver holding the
 /// first stdout line, read on a helper thread.
 fn spawn_serve(config_path: &std::path::Path) -> (Child, mpsc::Receiver<Option<String>>) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
@@ -1506,7 +1506,7 @@ fn spawn_serve(config_path: &std::path::Path) -> (Child, mpsc::Receiver<Option<S
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn pumice serve");
+        .expect("spawn pumice-relay serve");
     let mut stdout = child.stdout.take().expect("piped stdout");
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
@@ -1580,7 +1580,7 @@ fn serve_prints_the_loopback_address() {
     panic!("could not start pumice on a free port after 3 attempts");
 }
 
-/// Spawns `pumice serve` like [`spawn_serve`] and additionally forwards every
+/// Spawns `pumice-relay serve` like [`spawn_serve`] and additionally forwards every
 /// stderr line, so a test can watch the startup provider status lines.
 fn spawn_serve_with_stderr(
     config_path: &std::path::Path,
@@ -1597,7 +1597,7 @@ fn spawn_serve_with_stderr(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn pumice serve");
+        .expect("spawn pumice-relay serve");
     let mut stdout = child.stdout.take().expect("piped stdout");
     let (stdout_tx, stdout_rx) = mpsc::channel();
     thread::spawn(move || {

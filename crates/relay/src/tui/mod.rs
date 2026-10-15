@@ -1,6 +1,6 @@
 //! Live interactive terminal view of completion requests (S4.6).
 //!
-//! When `pumice` runs in a terminal it shows every request's lifecycle:
+//! When `pumice relay` runs in a terminal it shows every request's lifecycle:
 //! arrived → queued → CLI started → CLI ended → responded/dropped. Dictated
 //! text and replies are shown only when the debug log is enabled; otherwise
 //! only metadata is visible. The module is split into a pure state part

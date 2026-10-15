@@ -62,7 +62,7 @@ struct TestServer {
 
 /// Builds a pipeline from `yaml` (`{binary}` replaced by the fake's path),
 /// serves it on an ephemeral loopback port and returns the running server.
-/// The debug log sink is opened exactly like `pumice serve` does.
+/// The debug log sink is opened exactly like `pumice-relay serve` does.
 async fn start_server(yaml: &str, scenario: Value) -> TestServer {
     let fake = FakeCli::new(scenario);
     let yaml = yaml.replace("{binary}", &fake.path().display().to_string());
@@ -512,7 +512,7 @@ fn serve_exits_1_when_the_debug_log_path_is_unopenable() {
         .arg("--config")
         .arg(&config_path)
         .output()
-        .expect("run pumice serve");
+        .expect("run pumice-relay serve");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
@@ -539,7 +539,7 @@ fn grab_free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-/// Spawns `pumice serve` and returns the child plus a receiver forwarding
+/// Spawns `pumice-relay serve` and returns the child plus a receiver forwarding
 /// every stderr line (`None` marks end of output), read on a helper thread.
 fn spawn_serve_stderr(config_path: &Path) -> (Child, mpsc::Receiver<Option<String>>) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
@@ -550,7 +550,7 @@ fn spawn_serve_stderr(config_path: &Path) -> (Child, mpsc::Receiver<Option<Strin
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn pumice serve");
+        .expect("spawn pumice-relay serve");
     let stderr = child.stderr.take().expect("piped stderr");
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {

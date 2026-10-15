@@ -1,4 +1,4 @@
-//! Tests for `pumice doctor` (S2.8 part 2): the default detection report
+//! Tests for `pumice-relay doctor` (S2.8 part 2): the default detection report
 //! (found/missing states, install hints, warnings and
 //! the exit-code contract) and the single quota-bearing `--login-check` path
 //! (one fixed call through the selected provider, never any other provider,
@@ -28,7 +28,7 @@ fn write_config(yaml: &str) -> (TempDir, PathBuf) {
     (dir, path)
 }
 
-/// Runs `pumice doctor --config <path> <extra...>` and captures the output.
+/// Runs `pumice-relay doctor --config <path> <extra...>` and captures the output.
 fn run_doctor(config_path: &Path, extra: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
         .arg("doctor")
@@ -36,7 +36,7 @@ fn run_doctor(config_path: &Path, extra: &[&str]) -> Output {
         .arg(config_path)
         .args(extra)
         .output()
-        .expect("run pumice doctor")
+        .expect("run pumice-relay doctor")
 }
 
 /// stdout and stderr combined, for assertions that do not care which stream
