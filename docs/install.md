@@ -197,6 +197,26 @@ Handy's base URL and port 7567 are exactly the same, so no Handy changes
 are needed. The standalone `pumice-relay` binary keeps its old arguments
 if you run it directly.
 
+### Updating a systemd user service (server-1)
+
+When Pumice runs as a systemd user service, rename the file and update the
+unit before restarting:
+
+1. `mv ~/.config/pumice/pumice.yaml ~/.config/pumice/relay.yml`
+2. In `~/.config/systemd/user/pumice.service`, change `ExecStart=` from
+   `pumice --plain` to the installed binary path followed by
+   `relay serve --plain` (for example
+   `ExecStart=/home/you/.cargo/bin/pumice relay serve --plain`), keeping the
+   unit's existing user and environment. If the unit passes an explicit
+   `--config .../pumice.yaml`, point that path at `relay.yml` instead.
+3. Reload and restart the service:
+
+   ```bash
+   systemctl --user daemon-reload && systemctl --user restart pumice
+   ```
+
+Handy's URL and port 7567 are unchanged.
+
 ## Upgrade and remove
 
 Stop the service with Ctrl-C before updating or removing it. Choose the

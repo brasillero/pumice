@@ -9,8 +9,21 @@ executable, every command below also works through the dispatcher with a
 `pumice transcribe` prefix — for example `pumice transcribe file audio.wav
 --model tiny` — with arguments, output and exit status passed through
 unchanged. The dispatcher never searches `PATH` or the working directory;
-it only runs the `pumice-transcribe` sitting in `pumice`'s own install
-directory.
+it only runs the `pumice-transcribe` sitting in the real `pumice`
+executable's own install directory (a symlinked `pumice` still resolves to
+its actual install directory).
+
+On Windows, Ctrl-C/Ctrl-Break is delivered to the console, not to a single
+process: while the transcription program handles the event and shuts down,
+`pumice` keeps waiting and then exits with the same full exit code.
+
+> **npm installs:** the npm package's real native binary lives inside the
+> platform package (`node_modules/@brasillero/pumice-<platform>/bin/`), and
+> no transcription binary ships there yet, so `pumice transcribe` is not
+> satisfied by an npm install of the launcher today. Until the Pumice
+> transcription archive ships (planned), install both programs into the
+> same directory, for example `cargo install --path . --locked` and
+> `cargo install --path crates/transcription --features engine --locked`.
 
 ## Building from source
 
