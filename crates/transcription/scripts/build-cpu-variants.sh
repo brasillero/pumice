@@ -25,6 +25,7 @@ fi
 
 target_dir="$repo_root/target/cpu-variants"
 stage_dir="$target_dir/stage"
+mkdir -p "$target_dir"
 
 export CARGO_TARGET_DIR="$target_dir"
 export TRANSCRIBE_CMAKE_ARGS="-DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF"
