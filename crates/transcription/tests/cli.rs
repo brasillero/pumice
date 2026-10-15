@@ -1,6 +1,6 @@
 use pumice_transcription::cli::{SuccessOutput, print_error, print_success, run_with_engine};
 use pumice_transcription::{
-    Engine, EngineError, ErrorCode, FakeEngine, Transcript, TranscriptionOptions,
+    Engine, EngineError, ErrorCode, FakeEngine, Transcript, TranscriptionOptions, config,
 };
 use std::io::Cursor;
 use std::process::Command;
@@ -170,7 +170,7 @@ fn fake_engine_full_path() {
             "pumice-transcribe",
             "file",
             audio_path.to_str().unwrap(),
-            "--model",
+            "--model-file",
             model_path.to_str().unwrap(),
             "--language",
             "pt",
@@ -199,7 +199,7 @@ fn fake_engine_failure_returns_engine_failed() {
             "pumice-transcribe",
             "file",
             audio_path.to_str().unwrap(),
-            "--model",
+            "--model-file",
             model_path.to_str().unwrap(),
         ],
         Box::new(FailingFakeEngine),
@@ -223,7 +223,7 @@ fn utf8_transcript_is_preserved() {
             "pumice-transcribe",
             "file",
             audio_path.to_str().unwrap(),
-            "--model",
+            "--model-file",
             model_path.to_str().unwrap(),
         ],
         Box::new(FakeEngine::new(accented, Some("pt"))),
@@ -244,7 +244,7 @@ fn missing_model_returns_model_not_found() {
             "pumice-transcribe",
             "file",
             audio_path.to_str().unwrap(),
-            "--model",
+            "--model-file",
             "/does/not/exist.gguf",
         ],
         Box::new(FakeEngine::new("x", None::<String>)),
@@ -261,7 +261,7 @@ fn missing_audio_file_returns_invalid_input() {
             "pumice-transcribe",
             "file",
             "/does/not/exist.wav",
-            "--model",
+            "--model-file",
             "/dev/null",
         ],
         Box::new(FakeEngine::new("x", None::<String>)),
@@ -282,7 +282,7 @@ fn non_audio_file_returns_unsupported_format() {
             "pumice-transcribe",
             "file",
             audio_path.to_str().unwrap(),
-            "--model",
+            "--model-file",
             "/dev/null",
         ],
         Box::new(FakeEngine::new("x", None::<String>)),
@@ -300,7 +300,7 @@ fn non_regular_file_returns_invalid_input() {
             "pumice-transcribe",
             "file",
             "/dev/null",
-            "--model",
+            "--model-file",
             "/dev/null",
         ],
         Box::new(FakeEngine::new("x", None::<String>)),
@@ -327,7 +327,7 @@ fn fifo_without_writer_returns_invalid_input_with_timeout() {
         .args([
             "file",
             fifo_path.to_str().unwrap(),
-            "--model",
+            "--model-file",
             "/dev/null",
             "--json",
         ])
@@ -383,7 +383,7 @@ fn too_large_file_returns_input_too_large() {
             "pumice-transcribe",
             "file",
             audio_path.to_str().unwrap(),
-            "--model",
+            "--model-file",
             "/dev/null",
         ],
         Box::new(FakeEngine::new("x", None::<String>)),
@@ -412,7 +412,7 @@ fn exact_size_limit_file_is_accepted() {
             "pumice-transcribe",
             "file",
             audio_path.to_str().unwrap(),
-            "--model",
+            "--model-file",
             model_path.to_str().unwrap(),
         ],
         Box::new(FakeEngine::new("x", None::<String>)),
@@ -433,7 +433,7 @@ fn too_long_audio_returns_audio_too_long() {
             "pumice-transcribe",
             "file",
             audio_path.to_str().unwrap(),
-            "--model",
+            "--model-file",
             "/dev/null",
         ],
         Box::new(FakeEngine::new("x", None::<String>)),
@@ -457,7 +457,7 @@ fn long_8khz_8bit_under_size_over_duration_rejected_before_resample() {
             "pumice-transcribe",
             "file",
             audio_path.to_str().unwrap(),
-            "--model",
+            "--model-file",
             "/dev/null",
         ],
         Box::new(FakeEngine::new("x", None::<String>)),
@@ -582,7 +582,7 @@ fn language_validation_accepts_pt() {
             "pumice-transcribe",
             "file",
             audio_path.to_str().unwrap(),
-            "--model",
+            "--model-file",
             model_path.to_str().unwrap(),
             "--language",
             "pt",
@@ -608,7 +608,7 @@ fn language_validation_normalizes_pt_uppercase() {
             "pumice-transcribe",
             "file",
             audio_path.to_str().unwrap(),
-            "--model",
+            "--model-file",
             model_path.to_str().unwrap(),
             "--language",
             "PT",
@@ -633,7 +633,7 @@ fn language_validation_rejects_portuguese() {
             "pumice-transcribe",
             "file",
             audio_path.to_str().unwrap(),
-            "--model",
+            "--model-file",
             model_path.to_str().unwrap(),
             "--language",
             "portuguese",
@@ -658,7 +658,7 @@ fn language_validation_rejects_zz() {
             "pumice-transcribe",
             "file",
             audio_path.to_str().unwrap(),
-            "--model",
+            "--model-file",
             model_path.to_str().unwrap(),
             "--language",
             "zz",
@@ -683,7 +683,7 @@ fn threads_validation_rejects_zero() {
             "pumice-transcribe",
             "file",
             audio_path.to_str().unwrap(),
-            "--model",
+            "--model-file",
             model_path.to_str().unwrap(),
             "--threads",
             "0",
@@ -710,7 +710,7 @@ fn explicit_language_overrides_engine_none() {
             "pumice-transcribe",
             "file",
             audio_path.to_str().unwrap(),
-            "--model",
+            "--model-file",
             model_path.to_str().unwrap(),
             "--language",
             "pt",
@@ -735,7 +735,7 @@ fn threads_validation_rejects_too_large() {
             "pumice-transcribe",
             "file",
             audio_path.to_str().unwrap(),
-            "--model",
+            "--model-file",
             model_path.to_str().unwrap(),
             "--threads",
             "33",
@@ -794,7 +794,7 @@ fn json_parse_error_unknown_flag_with_json() {
         .args([
             "file",
             "audio.wav",
-            "--model",
+            "--model-file",
             "/dev/null",
             "--unknown-flag",
             "--json",
@@ -819,7 +819,7 @@ fn parse_error_unknown_flag_without_json_goes_to_stderr() {
         .args([
             "file",
             "audio.wav",
-            "--model",
+            "--model-file",
             "/dev/null",
             "--unknown-flag",
         ])
@@ -841,7 +841,7 @@ fn parse_error_unknown_flag_without_json_goes_to_stderr() {
 fn output_failure_on_dev_full_reports_exit_1() {
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
     let out = Command::new(bin)
-        .args(["file", "audio.wav", "--model", "/dev/null", "--json"])
+        .args(["file", "audio.wav", "--model-file", "/dev/null", "--json"])
         .stdout(std::process::Stdio::from(
             std::fs::OpenOptions::new()
                 .write(true)
@@ -916,7 +916,7 @@ fn each_compressed_format_decodes_to_plausible_duration() {
                 "pumice-transcribe",
                 "file",
                 fixture_path(name).to_str().unwrap(),
-                "--model",
+                "--model-file",
                 model_path.to_str().unwrap(),
             ],
             Box::new(engine.clone()),
@@ -958,7 +958,7 @@ fn detection_ignores_file_extension() {
                 "pumice-transcribe",
                 "file",
                 path.to_str().unwrap(),
-                "--model",
+                "--model-file",
                 model_path.to_str().unwrap(),
             ],
             Box::new(engine),
@@ -986,7 +986,7 @@ fn truncated_compressed_files_return_typed_errors() {
                 "pumice-transcribe",
                 "file",
                 path.to_str().unwrap(),
-                "--model",
+                "--model-file",
                 model_path.to_str().unwrap(),
             ],
             Box::new(FakeEngine::new("x", None::<String>)),
@@ -1015,7 +1015,7 @@ fn empty_audio_file_returns_unsupported_format() {
             "pumice-transcribe",
             "file",
             path.to_str().unwrap(),
-            "--model",
+            "--model-file",
             "/dev/null",
         ],
         Box::new(FakeEngine::new("x", None::<String>)),
@@ -1032,7 +1032,7 @@ fn ogg_opus_returns_unsupported_format() {
             "pumice-transcribe",
             "file",
             fixture_path("sample-pt.opus").to_str().unwrap(),
-            "--model",
+            "--model-file",
             "/dev/null",
         ],
         Box::new(FakeEngine::new("x", None::<String>)),
@@ -1054,7 +1054,7 @@ fn chained_ogg_returns_unsupported_format_json() {
         .args([
             "file",
             path.to_str().unwrap(),
-            "--model",
+            "--model-file",
             "/dev/null",
             "--json",
         ])
@@ -1073,7 +1073,7 @@ fn long_compressed_audio_returns_audio_too_long() {
             "pumice-transcribe",
             "file",
             fixture_path("long-silence.ogg").to_str().unwrap(),
-            "--model",
+            "--model-file",
             "/dev/null",
         ],
         Box::new(FakeEngine::new("x", None::<String>)),
@@ -1090,7 +1090,7 @@ fn json_error_envelope_for_unsupported_format() {
         .args([
             "file",
             fixture_path("sample-pt.opus").to_str().unwrap(),
-            "--model",
+            "--model-file",
             "/dev/null",
             "--json",
         ])
@@ -1113,7 +1113,7 @@ fn json_error_envelope_for_audio_too_long() {
         .args([
             "file",
             fixture_path("long-silence.mp3").to_str().unwrap(),
-            "--model",
+            "--model-file",
             "/dev/null",
             "--json",
         ])
@@ -1127,4 +1127,493 @@ fn json_error_envelope_for_audio_too_long() {
     assert_eq!(json["schema_version"], 1);
     assert_eq!(json["ok"], false);
     assert_eq!(json["error"]["code"], "audio_too_long");
+}
+
+fn write_config(tmp: &tempfile::TempDir, text: &str) -> std::path::PathBuf {
+    let path = tmp.path().join("transcribe.yml");
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+#[test]
+fn model_id_resolves_from_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
+    let model_path = tmp.path().join("tiny.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+    let config_path = write_config(
+        &tmp,
+        &format!(
+            r#"schema_version: 1
+models:
+  - id: tiny
+    path: {}
+"#,
+            model_path.display()
+        ),
+    );
+
+    run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "--config",
+            config_path.to_str().unwrap(),
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            "tiny",
+        ],
+        Box::new(FakeEngine::new("hello", None::<String>)),
+    )
+    .unwrap();
+}
+
+#[test]
+fn model_file_flag_works_without_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
+    let model_path = tmp.path().join("model.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+
+    let result = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model-file",
+            model_path.to_str().unwrap(),
+        ],
+        Box::new(FakeEngine::new("hello", None::<String>)),
+    )
+    .unwrap();
+
+    assert_eq!(result.text, "hello");
+}
+
+#[test]
+fn model_and_model_file_are_mutually_exclusive() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
+    let model_path = tmp.path().join("model.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+    let config_path = write_config(
+        &tmp,
+        r#"schema_version: 1
+models:
+  - id: tiny
+    path: model.gguf
+"#,
+    );
+
+    let err = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "--config",
+            config_path.to_str().unwrap(),
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            "tiny",
+            "--model-file",
+            model_path.to_str().unwrap(),
+        ],
+        Box::new(FakeEngine::new("x", None::<String>)),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::InvalidArguments);
+}
+
+#[test]
+fn default_model_is_used_when_no_flag_is_given() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
+    let model_path = tmp.path().join("tiny.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+    let config_path = write_config(
+        &tmp,
+        &format!(
+            r#"schema_version: 1
+default_model: tiny
+models:
+  - id: tiny
+    path: {}
+"#,
+            model_path.display()
+        ),
+    );
+
+    let result = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "--config",
+            config_path.to_str().unwrap(),
+            "file",
+            audio_path.to_str().unwrap(),
+        ],
+        Box::new(FakeEngine::new("from default", None::<String>)),
+    )
+    .unwrap();
+
+    assert_eq!(result.text, "from default");
+}
+
+#[test]
+fn no_model_flag_and_no_default_model_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
+    let config_path = write_config(&tmp, "schema_version: 1\nmodels: []\n");
+
+    let err = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "--config",
+            config_path.to_str().unwrap(),
+            "file",
+            audio_path.to_str().unwrap(),
+        ],
+        Box::new(FakeEngine::new("x", None::<String>)),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::InvalidArguments);
+}
+
+#[test]
+fn unknown_model_id_lists_configured_ids() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
+    let model_path = tmp.path().join("tiny.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+    let config_path = write_config(
+        &tmp,
+        &format!(
+            r#"schema_version: 1
+models:
+  - id: tiny
+    path: {}
+"#,
+            model_path.display()
+        ),
+    );
+
+    let err = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "--config",
+            config_path.to_str().unwrap(),
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            "huge",
+        ],
+        Box::new(FakeEngine::new("x", None::<String>)),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::InvalidArguments);
+    assert!(err.to_string().contains("huge"));
+    assert!(err.to_string().contains("tiny"));
+}
+
+#[test]
+fn cli_language_overrides_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
+    let model_path = tmp.path().join("tiny.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+    let config_path = write_config(
+        &tmp,
+        &format!(
+            r#"schema_version: 1
+language: pt
+models:
+  - id: tiny
+    path: {}
+"#,
+            model_path.display()
+        ),
+    );
+
+    let engine = RecordingFakeEngine::new();
+    run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "--config",
+            config_path.to_str().unwrap(),
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            "tiny",
+            "--language",
+            "en",
+        ],
+        Box::new(engine.clone()),
+    )
+    .unwrap();
+
+    assert_eq!(engine.language(), Some("en".to_string()));
+}
+
+#[test]
+fn cli_threads_override_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
+    let model_path = tmp.path().join("tiny.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+    let config_path = write_config(
+        &tmp,
+        &format!(
+            r#"schema_version: 1
+threads: 8
+models:
+  - id: tiny
+    path: {}
+"#,
+            model_path.display()
+        ),
+    );
+
+    // A config-valid thread count combined with an out-of-bounds CLI value
+    // proves the CLI value wins (and is validated).
+    let err = run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "--config",
+            config_path.to_str().unwrap(),
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            "tiny",
+            "--threads",
+            "33",
+        ],
+        Box::new(FakeEngine::new("x", None::<String>)),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::InvalidArguments);
+}
+
+#[test]
+fn check_config_plain_success() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = write_config(
+        &tmp,
+        r#"schema_version: 1
+models:
+  - id: tiny
+    path: /tmp/tiny.gguf
+"#,
+    );
+    let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
+    let out = Command::new(bin)
+        .args(["check-config", "--config", config_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("config ok"));
+    assert!(stdout.contains(config_path.to_str().unwrap()));
+}
+
+#[test]
+fn check_config_json_success_with_no_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    // No config in this temp home, and no explicit file.
+    let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
+    let out = Command::new(bin)
+        .args(["check-config", "--json"])
+        .env("HOME", tmp.path())
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("APPDATA")
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["ok"], true);
+    assert!(json["result"]["file"].is_null());
+}
+
+#[test]
+fn check_config_fails_with_location() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = write_config(
+        &tmp,
+        r#"schema_version: 1
+models:
+  - id: tiny
+    path: tiny.gguf
+  - id: tiny
+    path: other.gguf
+"#,
+    );
+    let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
+    let out = Command::new(bin)
+        .args([
+            "check-config",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(json["error"]["code"], "invalid_config");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("duplicate model id")
+    );
+    assert!(
+        json["error"]["location"]["file"]
+            .as_str()
+            .unwrap()
+            .contains("transcribe.yml")
+    );
+    assert!(json["error"]["location"]["line"].is_number());
+}
+
+#[test]
+fn check_config_explicit_missing_file_fails() {
+    let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
+    let out = Command::new(bin)
+        .args(["check-config", "--config", "/tmp/does-not-exist-p4b.yml"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn models_list_plain_and_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    let existing_model = tmp.path().join("tiny.gguf");
+    std::fs::write(&existing_model, b"tiny").unwrap();
+    let missing_model = tmp.path().join("huge.gguf");
+    let config_path = write_config(
+        &tmp,
+        &format!(
+            r#"schema_version: 1
+default_model: tiny
+models:
+  - id: tiny
+    path: {}
+  - id: huge
+    path: {}
+"#,
+            existing_model.display(),
+            missing_model.display()
+        ),
+    );
+    let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
+
+    let plain = Command::new(bin)
+        .args(["models", "list", "--config", config_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(plain.status.success());
+    let plain_stdout = String::from_utf8(plain.stdout).unwrap();
+    assert!(plain_stdout.contains("tiny"));
+    assert!(plain_stdout.contains("huge"));
+    assert!(plain_stdout.contains("yes"));
+    assert!(plain_stdout.contains("no"));
+
+    let json = Command::new(bin)
+        .args([
+            "models",
+            "list",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(json.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["ok"], true);
+    let models = value["result"].as_array().unwrap();
+    assert_eq!(models.len(), 2);
+    let tiny = models.iter().find(|m| m["id"] == "tiny").unwrap();
+    assert_eq!(tiny["exists"], true);
+    assert_eq!(tiny["size"], 4);
+    assert_eq!(tiny["default"], true);
+    let huge = models.iter().find(|m| m["id"] == "huge").unwrap();
+    assert_eq!(huge["exists"], false);
+    assert!(huge["size"].is_null());
+}
+
+#[test]
+fn example_config_file_parses() {
+    let example =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../transcribe.example.yml");
+    config::load(Some(&example)).unwrap();
+}
+
+#[test]
+fn per_user_config_lookup_via_env() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_dir = tmp.path().join(".config").join("pumice");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_path = config_dir.join("transcribe.yml");
+    std::fs::write(
+        &config_path,
+        r#"schema_version: 1
+models:
+  - id: tiny
+    path: /tmp/tiny.gguf
+"#,
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
+    let out = Command::new(bin)
+        .args(["check-config"])
+        .env("HOME", tmp.path())
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("APPDATA")
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains(config_path.to_str().unwrap()));
+}
+
+#[test]
+fn help_mentions_config_and_model_flags() {
+    let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
+    let top = Command::new(bin).arg("--help").output().unwrap();
+    let top_stdout = String::from_utf8(top.stdout).unwrap();
+    assert!(top_stdout.contains("--config"));
+
+    let file_help = Command::new(bin).args(["file", "--help"]).output().unwrap();
+    let file_stdout = String::from_utf8(file_help.stdout).unwrap();
+    assert!(file_stdout.contains("--model"));
+    assert!(file_stdout.contains("--model-file"));
+
+    let models_help = Command::new(bin)
+        .args(["models", "--help"])
+        .output()
+        .unwrap();
+    assert!(models_help.status.success());
 }

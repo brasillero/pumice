@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
@@ -7,6 +8,7 @@ pub enum ErrorCode {
     InputTooLarge,
     AudioTooLong,
     UnsupportedFormat,
+    InvalidConfig,
     EngineNotAvailable,
     EngineFailed,
     ModelLoadFailed,
@@ -22,6 +24,7 @@ impl ErrorCode {
             Self::InputTooLarge => "input_too_large",
             Self::AudioTooLong => "audio_too_long",
             Self::UnsupportedFormat => "unsupported_format",
+            Self::InvalidConfig => "invalid_config",
             Self::EngineNotAvailable => "engine_not_available",
             Self::EngineFailed => "engine_failed",
             Self::ModelLoadFailed => "model_load_failed",
@@ -41,15 +44,34 @@ impl Serialize for ErrorCode {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct JsonLocation {
+    pub file: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct JsonError {
     pub code: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<JsonLocation>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Error {
     pub code: ErrorCode,
     pub message: String,
+    pub location: Option<ErrorLocation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ErrorLocation {
+    pub file: PathBuf,
+    pub line: Option<u64>,
+    pub column: Option<u64>,
 }
 
 impl Error {
@@ -57,6 +79,7 @@ impl Error {
         Self {
             code,
             message: message.into(),
+            location: None,
         }
     }
 
@@ -92,6 +115,18 @@ impl Error {
         Self::new(ErrorCode::UnsupportedFormat, message)
     }
 
+    pub fn invalid_config(config_error: crate::config::ConfigError) -> Self {
+        Self {
+            code: ErrorCode::InvalidConfig,
+            message: config_error.to_string(),
+            location: config_error.path().map(|file| ErrorLocation {
+                file: file.to_path_buf(),
+                line: config_error.line(),
+                column: config_error.column(),
+            }),
+        }
+    }
+
     pub fn engine_not_available() -> Self {
         Self::new(
             ErrorCode::EngineNotAvailable,
@@ -122,6 +157,11 @@ impl Error {
         JsonError {
             code: self.code.as_str().to_string(),
             message: self.message.clone(),
+            location: self.location.as_ref().map(|loc| JsonLocation {
+                file: loc.file.clone(),
+                line: loc.line,
+                column: loc.column,
+            }),
         }
     }
 }
