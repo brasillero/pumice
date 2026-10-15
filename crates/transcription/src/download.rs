@@ -5,16 +5,18 @@
 //! is fetched at startup or because of a request. Bytes stream into a
 //! `<file>.part` file created exclusively and privately, are hashed while
 //! writing and are renamed into place only when both the byte size and the
-//! SHA-256 from the catalog match; the installed file is then checked to be
-//! the very file that was hashed. Any failure deletes the partial file and
-//! restarts from zero next time — there is no resume (D3).
+//! SHA-256 from the catalog match; the installed file is then reopened
+//! without following links and re-read and re-hashed against the catalog
+//! (D4). Any failure deletes the partial file and restarts from zero next
+//! time — there is no resume (D3).
 //!
 //! Installation renames a name in the models directory, so the trust
 //! boundary is that directory: on Unix it (and any parents this module
 //! creates) is created mode 0700, and an existing directory writable by
-//! group or others is refused. That keeps other *users* from swapping the
-//! staged file between hashing and rename; same-user mutation is not a
-//! useful filesystem security boundary and is out of scope.
+//! group or others is refused. Directories above it (the user's home and
+//! data directories) are trusted: a writer able to rename those can already
+//! replace anything the user runs (D4). Same-user mutation is not a useful
+//! filesystem security boundary and is out of scope.
 //!
 //! The only request header is `User-Agent: pumice-transcribe/<version>`.
 //! There are no credentials, cookies or AI subscription tokens involved.
@@ -289,6 +291,8 @@ impl Downloader {
         }
 
         let mut file = create_part_file(&part)?;
+        #[cfg(not(unix))]
+        let _ = models_dir; // only the Unix directory sync uses it
 
         // `dest` does not exist here (see `fetch`): until the rename installs
         // our file, removing it is a no-op; afterwards it undoes the
@@ -302,7 +306,7 @@ impl Downloader {
             std::fs::rename(&part, dest).map_err(|e| {
                 Error::download_failed(format!("cannot move {} into place: {e}", part.display()))
             })?;
-            confirm_installed_identity(dest, &file, &sha256)?;
+            confirm_installed_file(dest, spec)?;
             // Persist the directory entry itself; without this a power loss
             // can roll back the rename after success was reported. There is
             // no directory sync on Windows: the rename is the commit point
@@ -678,93 +682,110 @@ fn create_part_file(path: &Path) -> Result<File, Error> {
         .map_err(|e| Error::download_failed(format!("cannot create {}: {e}", path.display())))
 }
 
-/// Confirms the file now installed at `dest` is the same file `written`
-/// refers to — the one the bytes were streamed into and hashed. The rename
-/// resolves the staging path by name, so a concurrent writer able to modify
-/// the models directory could have swapped names between hashing and
+/// Confirms the file now installed at `dest` still matches the catalog: the
+/// path is reopened without following links and re-read and re-hashed
+/// against the catalog entry (D4). Installation renames by name, so a
+/// concurrent directory writer could have swapped names between staging and
 /// rename; `prepare_models_dir` keeps other users out of the directory, and
-/// this check turns any remaining swap into a failure instead of an
-/// unverified installation. On mismatch the destination is removed.
-fn confirm_installed_identity(
-    dest: &Path,
-    written: &File,
-    expected_sha256: &str,
-) -> Result<(), Error> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-        let _ = expected_sha256; // only the Windows fallback re-hashes
-        let opened = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(dest)
-            .map_err(|e| installed_identity_error(dest, &format!("cannot reopen it: {e}")))?;
-        let (written_meta, opened_meta) = (written.metadata(), opened.metadata());
-        let (Ok(written_meta), Ok(opened_meta)) = (written_meta, opened_meta) else {
-            return Err(installed_identity_error(
-                dest,
-                "cannot stat the installed file",
-            ));
-        };
-        if written_meta.dev() != opened_meta.dev() || written_meta.ino() != opened_meta.ino() {
-            return Err(installed_identity_error(
-                dest,
-                "the installed file is not the verified file",
-            ));
-        }
-        Ok(())
+/// this re-hash turns any remaining swap into a failure instead of an
+/// unverified installation. On any mismatch the destination is removed.
+fn confirm_installed_file(dest: &Path, spec: &DownloadSpec) -> Result<VerifiedFile, Error> {
+    let mut opened = reopen_installed(dest)?;
+    let meta = opened
+        .metadata()
+        .map_err(|e| installed_file_error(dest, &format!("cannot inspect it: {e}")))?;
+    if !meta.is_file() {
+        return Err(installed_file_error(dest, "it is not a regular file"));
     }
-    #[cfg(not(unix))]
-    {
-        use std::os::windows::fs::MetadataExt;
-        let mut opened = File::open(dest)
-            .map_err(|e| installed_identity_error(dest, &format!("cannot reopen it: {e}")))?;
-        let (written_meta, opened_meta) = (written.metadata(), opened.metadata());
-        let (Ok(written_meta), Ok(opened_meta)) = (written_meta, opened_meta) else {
-            return Err(installed_identity_error(
-                dest,
-                "cannot stat the installed file",
-            ));
-        };
-        match (
-            written_meta.volume_serial_number(),
-            written_meta.file_index(),
-            opened_meta.volume_serial_number(),
-            opened_meta.file_index(),
-        ) {
-            (
-                Some(written_volume),
-                Some(written_index),
-                Some(opened_volume),
-                Some(opened_index),
-            ) if written_volume == opened_volume && written_index == opened_index => Ok(()),
-            (Some(_), Some(_), Some(_), Some(_)) => Err(installed_identity_error(
-                dest,
-                "the installed file is not the verified file",
-            )),
-            // The volume cannot identify open files by index (for example
-            // FAT32): fall back to re-hashing the installed file and
-            // comparing it with the digest verified while streaming.
-            _ => {
-                let digest = sha256_reader(&mut opened).map_err(|e| {
-                    installed_identity_error(dest, &format!("cannot re-hash it: {e}"))
-                })?;
-                if digest != expected_sha256 {
-                    return Err(installed_identity_error(
-                        dest,
-                        "the installed file is not the verified file",
-                    ));
-                }
-                Ok(())
-            }
-        }
+    if meta.len() != spec.size_bytes {
+        return Err(installed_file_mismatch(
+            dest,
+            &format!(
+                "it is {} bytes after installation; the catalog expects {}",
+                meta.len(),
+                spec.size_bytes
+            ),
+        ));
     }
+    let digest = sha256_reader(&mut opened)
+        .map_err(|e| installed_file_error(dest, &format!("cannot re-hash it: {e}")))?;
+    if digest != spec.sha256 {
+        return Err(installed_file_mismatch(
+            dest,
+            "its hash changed between verification and installation",
+        ));
+    }
+    Ok(VerifiedFile {
+        bytes: meta.len(),
+        sha256: digest,
+    })
 }
 
-fn installed_identity_error(dest: &Path, reason: &str) -> Error {
+/// Reopens the installed path without following links. On Unix this is
+/// `O_NOFOLLOW`. On Windows the standard library offers no no-follow open,
+/// so the path is rejected before the open when it is a reparse point (or
+/// not a regular file) and the opened handle is checked after the open —
+/// a link swapped in between is then caught by its own metadata.
+#[cfg(unix)]
+fn reopen_installed(dest: &Path) -> Result<File, Error> {
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(dest)
+        .map_err(|e| installed_file_error(dest, &format!("cannot reopen it: {e}")))
+}
+
+#[cfg(not(unix))]
+fn reopen_installed(dest: &Path) -> Result<File, Error> {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    let reject = || {
+        installed_file_error(
+            dest,
+            "it is not a regular file (symlink, junction, directory or FIFO)",
+        )
+    };
+    match std::fs::symlink_metadata(dest) {
+        Ok(meta) => {
+            if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !meta.is_file() {
+                return Err(reject());
+            }
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(reject()),
+        Err(e) => {
+            return Err(installed_file_error(
+                dest,
+                &format!("cannot inspect it: {e}"),
+            ));
+        }
+    }
+    let file = File::open(dest)
+        .map_err(|e| installed_file_error(dest, &format!("cannot reopen it: {e}")))?;
+    let meta = file
+        .metadata()
+        .map_err(|e| installed_file_error(dest, &format!("cannot inspect the opened file: {e}")))?;
+    if !meta.is_file() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(installed_file_error(
+            dest,
+            "the opened file is not a regular file (symlink, junction, directory or FIFO)",
+        ));
+    }
+    Ok(file)
+}
+
+fn installed_file_error(dest: &Path, reason: &str) -> Error {
     let _ = std::fs::remove_file(dest);
     Error::download_failed(format!(
-        "installed file {} failed the identity check ({reason}); the verified file was replaced during installation",
+        "installed file {} failed the post-install verification ({reason}); the verified file was replaced during installation",
+        dest.display()
+    ))
+}
+
+fn installed_file_mismatch(dest: &Path, reason: &str) -> Error {
+    let _ = std::fs::remove_file(dest);
+    Error::checksum_mismatch(format!(
+        "installed file {} failed the post-install verification ({reason}); the verified file was replaced during installation",
         dest.display()
     ))
 }
@@ -1396,7 +1417,7 @@ mod tests {
     /// The review's substitution probe: while bytes stream, another writer of
     /// the models directory moves the real `.part` aside and drops a
     /// different file under the staging name. The rename then installs the
-    /// unverified file; the identity check must catch that, remove the
+    /// unverified file; the post-install re-hash must catch that, remove the
     /// destination and fail.
     #[cfg(unix)]
     #[test]
@@ -1434,9 +1455,9 @@ mod tests {
             .unwrap_err();
 
         assert!(swapped, "the probe must have replaced the staging file");
-        assert_eq!(err.code, ErrorCode::DownloadFailed);
+        assert_eq!(err.code, ErrorCode::ChecksumMismatch);
         assert!(
-            err.message.contains("identity"),
+            err.message.contains("post-install verification"),
             "unexpected message: {}",
             err.message
         );
