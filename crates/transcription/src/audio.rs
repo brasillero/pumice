@@ -1391,6 +1391,7 @@ mod tests {
         assert!((decoded.samples.len() as f64 / 16_000.0 - 14.19).abs() < 0.5);
     }
 
+    #[cfg(not(feature = "opus"))]
     #[test]
     fn ogg_opus_rejected_as_unsupported() {
         let err = decode_audio(std::io::Cursor::new(read_fixture("sample-pt.opus"))).unwrap_err();

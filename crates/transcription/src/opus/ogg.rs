@@ -70,6 +70,7 @@ fn crc32(bytes: &[u8]) -> u32 {
     crc
 }
 
+#[derive(Debug)]
 struct PageValidation {
     /// Completed packets in the stream (header packets included).
     packets: usize,
@@ -134,6 +135,17 @@ fn validate_pages(bytes: &[u8]) -> Result<PageValidation, Error> {
             return Err(Error::invalid_input("ogg page checksum mismatch"));
         }
 
+        let continued = flags & FLAG_CONTINUED != 0;
+        let bos = flags & FLAG_BOS != 0;
+        let eos = flags & FLAG_EOS != 0;
+        // Chained streams are a format limitation (like the existing Vorbis
+        // behavior), so this is checked before the structural serial and
+        // sequence rules.
+        if seen_eos || (bos && seen_bos) {
+            return Err(Error::unsupported_format(
+                "chained ogg streams are not supported",
+            ));
+        }
         match serial {
             Some(expected) if expected != page_serial => {
                 return Err(Error::invalid_input("ogg stream changes serial number"));
@@ -151,21 +163,11 @@ fn validate_pages(bytes: &[u8]) -> Result<PageValidation, Error> {
         }
         expected_seq = expected_seq.wrapping_add(1);
 
-        let continued = flags & FLAG_CONTINUED != 0;
-        let bos = flags & FLAG_BOS != 0;
-        let eos = flags & FLAG_EOS != 0;
         if bos {
-            if seen_bos || expected_seq != 1 || continued {
-                return Err(Error::unsupported_format(
-                    "chained ogg streams are not supported",
-                ));
+            if continued {
+                return Err(Error::invalid_input("ogg packet continuation mismatch"));
             }
             seen_bos = true;
-        }
-        if seen_eos {
-            return Err(Error::unsupported_format(
-                "chained ogg streams are not supported",
-            ));
         }
         if continued != packet_open {
             return Err(Error::invalid_input("ogg packet continuation mismatch"));
@@ -294,4 +296,216 @@ pub(crate) fn decode_ogg_opus(
         ));
     }
     Ok(decoded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::opus::tests::fixture;
+
+    fn opus_fixture() -> Vec<u8> {
+        fixture("sample-pt-48k.opus")
+    }
+
+    /// Offset of each Ogg page start.
+    fn page_offsets(bytes: &[u8]) -> Vec<usize> {
+        let mut offsets = Vec::new();
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            assert_eq!(&bytes[offset..offset + 4], b"OggS");
+            let segments = usize::from(bytes[offset + 26]);
+            let body_len: usize = bytes[offset + 27..offset + 27 + segments]
+                .iter()
+                .map(|&v| usize::from(v))
+                .sum();
+            offsets.push(offset);
+            offset += 27 + segments + body_len;
+        }
+        offsets
+    }
+
+    /// Rewrites the stored CRC of every page after `from` so mutations in
+    /// page bodies stay CRC-consistent.
+    fn fix_crcs(bytes: &mut [u8], from: usize) {
+        for &offset in &page_offsets(bytes) {
+            if offset < from {
+                continue;
+            }
+            let segments = usize::from(bytes[offset + 26]);
+            let body_len: usize = bytes[offset + 27..offset + 27 + segments]
+                .iter()
+                .map(|&v| usize::from(v))
+                .sum();
+            let page_len = 27 + segments + body_len;
+            bytes[offset + 22..offset + 26].fill(0);
+            let crc = crc32(&bytes[offset..offset + page_len]);
+            bytes[offset + 22..offset + 26].copy_from_slice(&crc.to_le_bytes());
+        }
+    }
+
+    fn err_code(bytes: &[u8]) -> ErrorCode {
+        validate_pages(bytes).unwrap_err().code
+    }
+
+    #[test]
+    fn detects_ogg_opus_only() {
+        assert!(is_ogg_opus(&opus_fixture()));
+        assert!(!is_ogg_opus(&fixture("sample-pt.ogg")));
+        assert!(!is_ogg_opus(&fixture("sample-pt.webm")));
+        assert!(!is_ogg_opus(b""));
+        assert!(!is_ogg_opus(b"OggS"));
+        assert!(!is_ogg_opus(b"OggS\x00\x00\x00"));
+    }
+
+    #[test]
+    fn crc32_matches_ogg_spec() {
+        // Ogg CRC of "123456789" (poly 0x04C11DB7, init 0, no reflection,
+        // no final xor).
+        assert_eq!(crc32(b"123456789"), 0x89A1_897F);
+        assert_eq!(crc32(b""), 0);
+    }
+
+    #[test]
+    fn valid_fixture_passes_page_validation() {
+        let bytes = opus_fixture();
+        let validation = validate_pages(&bytes).unwrap();
+        assert_eq!(validation.packets, 712);
+        assert_eq!(validation.final_granule, 681_432);
+    }
+
+    #[test]
+    fn rejects_corrupted_page_payload() {
+        let mut bytes = opus_fixture();
+        let second = page_offsets(&bytes)[2];
+        bytes[second + 40] ^= 0x01;
+        assert_eq!(err_code(&bytes), ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn rejects_corrupted_page_header() {
+        let mut bytes = opus_fixture();
+        // Break the capture pattern; the CRC would still match because the
+        // header bytes are covered... so also fix nothing: validation must
+        // fail on the capture check before CRC.
+        let third = page_offsets(&bytes)[3];
+        bytes[third] = b'X';
+        assert_eq!(err_code(&bytes), ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn rejects_page_sequence_gap() {
+        let mut bytes = opus_fixture();
+        let offsets = page_offsets(&bytes);
+        // Drop the third page entirely: the following page's sequence number
+        // no longer matches.
+        let start = offsets[2];
+        let end = offsets[3];
+        bytes.drain(start..end);
+        assert_eq!(err_code(&bytes), ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn rejects_truncated_final_page() {
+        let mut bytes = opus_fixture();
+        bytes.truncate(bytes.len() - 30);
+        assert_eq!(err_code(&bytes), ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn rejects_missing_eos_page() {
+        let mut bytes = opus_fixture();
+        let offsets = page_offsets(&bytes);
+        bytes.truncate(offsets[offsets.len() - 1]);
+        assert_eq!(err_code(&bytes), ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn rejects_chained_stream() {
+        let mut bytes = opus_fixture();
+        bytes.extend(opus_fixture());
+        assert_eq!(err_code(&bytes), ErrorCode::UnsupportedFormat);
+    }
+
+    #[test]
+    fn rejects_data_after_eos() {
+        // A complete page (the original BOS page) appended after the EOS
+        // page is a chained stream.
+        let mut bytes = opus_fixture();
+        let first_page_len = page_offsets(&bytes)[1];
+        bytes.extend_from_slice(&opus_fixture()[..first_page_len]);
+        assert_eq!(err_code(&bytes), ErrorCode::UnsupportedFormat);
+    }
+
+    #[test]
+    fn rejects_stream_ending_mid_packet() {
+        let mut bytes = opus_fixture();
+        let offsets = page_offsets(&bytes);
+        // Replace the final page with one whose single lacing value (255)
+        // leaves a packet open at the EOS flag.
+        let last = *offsets.last().unwrap();
+        bytes.truncate(last);
+        let sequence = offsets.len() as u32;
+        let mut page = Vec::new();
+        page.extend_from_slice(b"OggS");
+        page.push(0);
+        page.push(FLAG_EOS);
+        page.extend_from_slice(&(-1i64).to_le_bytes());
+        page.extend_from_slice(&0u32.to_le_bytes()); // serial; fixed below
+        page.extend_from_slice(&sequence.to_le_bytes());
+        page.extend_from_slice(&0u32.to_le_bytes()); // crc placeholder
+        page.push(1); // one segment
+        page.push(255);
+        page.extend_from_slice(&[0x55u8; 100]); // unfinished packet body
+        let serial = u32::from_le_bytes(bytes[14..18].try_into().unwrap());
+        page[14..18].copy_from_slice(&serial.to_le_bytes());
+        let crc = crc32(&page);
+        page[22..26].copy_from_slice(&crc.to_le_bytes());
+        bytes.extend_from_slice(&page);
+        assert_eq!(err_code(&bytes), ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn rejects_backwards_granule() {
+        let mut bytes = opus_fixture();
+        let offsets = page_offsets(&bytes);
+        let last = *offsets.last().unwrap();
+        let previous = offsets[offsets.len() - 2];
+        let previous_granule =
+            i64::from_le_bytes(bytes[previous + 6..previous + 14].try_into().unwrap());
+        // Set the final page's granule below the previous page's.
+        let stale = previous_granule - 1;
+        bytes[last + 6..last + 14].copy_from_slice(&stale.to_le_bytes());
+        fix_crcs(&mut bytes, last);
+        assert_eq!(err_code(&bytes), ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn rejects_cropped_initial_granule() {
+        let mut bytes = opus_fixture();
+        bytes[6..14].copy_from_slice(&3840i64.to_le_bytes());
+        fix_crcs(&mut bytes, 0);
+        assert_eq!(err_code(&bytes), ErrorCode::UnsupportedFormat);
+    }
+
+    #[test]
+    fn rejects_multiplexed_serial() {
+        let mut bytes = opus_fixture();
+        let offsets = page_offsets(&bytes);
+        let third = offsets[2];
+        bytes[third + 14..third + 18].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
+        fix_crcs(&mut bytes, third);
+        assert_eq!(err_code(&bytes), ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn rejects_bad_version_and_flags() {
+        let mut bytes = opus_fixture();
+        bytes[4] = 1;
+        assert_eq!(err_code(&bytes), ErrorCode::InvalidInput);
+
+        let mut bytes = opus_fixture();
+        bytes[5] = 0x08;
+        fix_crcs(&mut bytes, 0);
+        assert_eq!(err_code(&bytes), ErrorCode::InvalidInput);
+    }
 }

@@ -25,6 +25,7 @@ const MAX_OUTPUT_FRAMES: usize = 5_760_000; // 120 s * 48 kHz
 /// Trims come from the container (Ogg end granule, WebM DiscardPadding); the
 /// stream-level pre-skip is applied separately, exactly once, in
 /// [`decode_packets`].
+#[derive(Clone)]
 pub(crate) struct OpusPacket {
     pub data: Box<[u8]>,
     pub trim_start: usize,
@@ -32,6 +33,7 @@ pub(crate) struct OpusPacket {
 }
 
 /// A validated `OpusHead` (RFC 7845 section 5).
+#[derive(Debug)]
 pub(crate) struct OpusHead {
     channels: u16,
     pre_skip: usize,
@@ -229,4 +231,297 @@ pub(crate) fn decode_packets(
         sample_rate: OPUS_SAMPLE_RATE,
         channels: head.channels,
     })
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::ErrorCode;
+
+    /// Reads a fixture from the crate's fixture directory.
+    pub(crate) fn fixture(name: &str) -> Vec<u8> {
+        std::fs::read(format!(
+            "{}/tests/fixtures/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    }
+
+    /// Extracts every Ogg packet payload (header packets included) by
+    /// walking pages. Test-only; production demux goes through
+    /// `ogg::decode_ogg_opus`.
+    pub(crate) fn ogg_packets(bytes: &[u8]) -> Vec<Box<[u8]>> {
+        let mut packets = Vec::new();
+        let mut offset = 0usize;
+        let mut current: Vec<u8> = Vec::new();
+        while offset + 27 <= bytes.len() {
+            assert_eq!(&bytes[offset..offset + 4], b"OggS");
+            let segments = usize::from(bytes[offset + 26]);
+            let table = &bytes[offset + 27..offset + 27 + segments];
+            let body_len: usize = table.iter().map(|&v| usize::from(v)).sum();
+            let body =
+                &bytes[offset + 27 + segments..offset + 27 + segments + body_len];
+            let mut pos = 0usize;
+            for &lace in table {
+                let take = usize::from(lace).min(body.len() - pos);
+                current.extend_from_slice(&body[pos..pos + take]);
+                pos += take;
+                if lace < 255 {
+                    packets.push(std::mem::take(&mut current).into_boxed_slice());
+                }
+            }
+            offset += 27 + segments + body_len;
+        }
+        packets
+    }
+
+    /// A few real Opus audio packets (header packets skipped).
+    pub(crate) fn audio_packets(count: usize) -> Vec<OpusPacket> {
+        let bytes = fixture("sample-pt-48k.opus");
+        let packets = ogg_packets(&bytes);
+        packets[2..2 + count]
+            .iter()
+            .map(|data| OpusPacket {
+                data: data.clone(),
+                trim_start: 0,
+                trim_end: 0,
+            })
+            .collect()
+    }
+
+    fn family0_head(pre_skip: usize, gain_db_q8: i16) -> OpusHead {
+        OpusHead {
+            channels: 1,
+            pre_skip,
+            gain_db_q8,
+        }
+    }
+
+    fn rms(samples: &[f32]) -> f64 {
+        (samples.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>()
+            / samples.len() as f64)
+            .sqrt()
+    }
+
+    #[test]
+    fn opus_head_parses_family0() {
+        let bytes = fixture("sample-pt.webm");
+        let at = bytes.windows(8).position(|w| w == b"OpusHead").unwrap();
+        let head = OpusHead::parse(&bytes[at..at + 19]).unwrap();
+        assert_eq!(head.channels, 1);
+        assert_eq!(head.pre_skip, 312);
+        assert_eq!(head.gain_db_q8, 0);
+    }
+
+    #[test]
+    fn opus_head_rejects_bad_inputs() {
+        let bytes = fixture("sample-pt.webm");
+        let at = bytes.windows(8).position(|w| w == b"OpusHead").unwrap();
+        let valid = &bytes[at..at + 19];
+
+        let mut wrong_version = valid.to_vec();
+        wrong_version[8] = 2;
+        assert_eq!(
+            OpusHead::parse(&wrong_version).unwrap_err().code,
+            ErrorCode::InvalidInput
+        );
+
+        let mut bad_magic = valid.to_vec();
+        bad_magic[0] = b'X';
+        assert_eq!(
+            OpusHead::parse(&bad_magic).unwrap_err().code,
+            ErrorCode::InvalidInput
+        );
+
+        for channels in [0u8, 3, 6] {
+            let mut bad = valid.to_vec();
+            bad[9] = channels;
+            assert_eq!(
+                OpusHead::parse(&bad).unwrap_err().code,
+                ErrorCode::UnsupportedFormat
+            );
+        }
+
+        let mut family2 = valid.to_vec();
+        family2[18] = 2;
+        assert_eq!(
+            OpusHead::parse(&family2).unwrap_err().code,
+            ErrorCode::UnsupportedFormat
+        );
+
+        // Family 0 with trailing bytes is malformed.
+        let mut trailing = valid.to_vec();
+        trailing.push(0);
+        assert_eq!(
+            OpusHead::parse(&trailing).unwrap_err().code,
+            ErrorCode::InvalidInput
+        );
+
+        assert_eq!(
+            OpusHead::parse(&valid[..10]).unwrap_err().code,
+            ErrorCode::InvalidInput
+        );
+    }
+
+    #[test]
+    fn opus_head_family1_canonical_mono_and_stereo() {
+        // Base: 19-byte family 0 header fields, family patched per case.
+        let mut base = b"OpusHead".to_vec();
+        base.extend([1, 1, 0x38, 0x01]); // version 1, 1 ch, pre-skip 312
+        base.extend([0x80, 0xBB, 0, 0]); // 48 kHz input rate
+        base.extend([0, 0]); // gain 0
+        base.push(1); // family 1
+
+        // Mono: 1 stream, 0 coupled, mapping [0].
+        let mut mono = base.clone();
+        mono.extend([1, 0, 0]);
+        let head = OpusHead::parse(&mono).unwrap();
+        assert_eq!(head.channels, 1);
+
+        // Stereo: 1 stream, 1 coupled, mapping [0, 1].
+        let mut stereo = base;
+        stereo[9] = 2;
+        stereo.extend([1, 1, 0, 1]);
+        let head = OpusHead::parse(&stereo).unwrap();
+        assert_eq!(head.channels, 2);
+
+        // Non-canonical stereo mapping (streams swapped) is rejected.
+        let mut swapped = stereo.clone();
+        let n = swapped.len();
+        swapped[n - 2] = 1;
+        swapped[n - 1] = 0;
+        assert_eq!(
+            OpusHead::parse(&swapped).unwrap_err().code,
+            ErrorCode::UnsupportedFormat
+        );
+
+        // Family 1 claiming two streams needs a multistream decoder.
+        let mut multi = stereo.clone();
+        multi[19] = 2;
+        assert_eq!(
+            OpusHead::parse(&multi).unwrap_err().code,
+            ErrorCode::UnsupportedFormat
+        );
+    }
+
+    #[test]
+    fn ns_to_samples_converts_and_rounds() {
+        assert_eq!(ns_to_samples(6_500_000).unwrap(), 312);
+        assert_eq!(ns_to_samples(3_500_000).unwrap(), 168);
+        assert_eq!(ns_to_samples(-3_500_000).unwrap(), -168);
+        assert_eq!(ns_to_samples(0).unwrap(), 0);
+        assert_eq!(ns_to_samples(10_416_667).unwrap(), 500);
+        assert_eq!(ns_to_samples(-10_416_667).unwrap(), -500);
+    }
+
+    #[test]
+    fn decode_applies_pre_skip_across_packets_exactly_once() {
+        let packets = audio_packets(4);
+        let frames_per_packet = 960; // 20 ms at 48 kHz
+        let total = frames_per_packet * packets.len();
+
+        // Pre-skip smaller than one packet.
+        let decoded = decode_packets(
+            &family0_head(100, 0),
+            &packets,
+            &CancelToken::new(),
+        )
+        .unwrap();
+        assert_eq!(decoded.samples.len(), total - 100);
+
+        // Pre-skip spanning three whole packets plus a remainder.
+        let skip = frames_per_packet * 3 + 17;
+        let decoded = decode_packets(
+            &family0_head(skip, 0),
+            &packets,
+            &CancelToken::new(),
+        )
+        .unwrap();
+        assert_eq!(decoded.samples.len(), total - skip);
+
+        // A pre-skip beyond the stream is truncated input.
+        let err = decode_packets(
+            &family0_head(total + 1, 0),
+            &packets,
+            &CancelToken::new(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn decode_rejects_trim_exceeding_packet() {
+        let packets = audio_packets(2);
+        let mut bad = packets.clone();
+        bad[0].trim_end = 961; // packet decodes to 960 frames
+        let err = decode_packets(&family0_head(0, 0), &bad, &CancelToken::new()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+
+        let mut bad = packets;
+        bad[0].trim_start = usize::MAX - 10;
+        let err = decode_packets(&family0_head(0, 0), &bad, &CancelToken::new()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn decode_enforces_120_second_cap_per_packet() {
+        let one = audio_packets(1).pop().unwrap();
+        let frames: usize = 960;
+        // 120 s / 20 ms = 6,000 packets; the 6,001st must fail, checked
+        // before it is decoded.
+        let mut packets: Vec<OpusPacket> = std::iter::repeat_n(one.clone(), 6_001).collect();
+        for packet in &mut packets {
+            packet.trim_start = 0;
+            packet.trim_end = 0;
+        }
+        let err = decode_packets(&family0_head(0, 0), &packets, &CancelToken::new()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::AudioTooLong);
+
+        // Exactly 120 s still passes the cap (and then fails the strict
+        // length check in normalize_and_validate, not here).
+        let mut packets: Vec<OpusPacket> = std::iter::repeat_n(one, 6_000).collect();
+        for packet in &mut packets {
+            packet.trim_start = 0;
+            packet.trim_end = 0;
+        }
+        let decoded = decode_packets(&family0_head(0, 0), &packets, &CancelToken::new()).unwrap();
+        assert_eq!(decoded.samples.len(), frames * 6_000);
+        let _ = frames;
+    }
+
+    #[test]
+    fn decode_honours_cancellation_between_packets() {
+        let one = audio_packets(1).pop().unwrap();
+        let mut packets: Vec<OpusPacket> = std::iter::repeat_n(one, 16).collect();
+        for packet in &mut packets {
+            packet.trim_start = 0;
+            packet.trim_end = 0;
+        }
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let err = decode_packets(&family0_head(0, 0), &packets, &cancel).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Cancelled);
+    }
+
+    #[test]
+    fn decode_applies_output_gain() {
+        let packets = audio_packets(8);
+        let flat = family0_head(0, 0);
+        let boosted = family0_head(0, 256); // +1 dB
+        let plain = decode_packets(&flat, &packets, &CancelToken::new()).unwrap();
+        let loud = decode_packets(&boosted, &packets, &CancelToken::new()).unwrap();
+        let ratio = rms(&loud.samples) / rms(&plain.samples);
+        assert!((ratio - 10f64.powf(1.0 / 20.0)).abs() < 1e-3, "ratio {ratio}");
+    }
+
+    #[test]
+    fn decode_rejects_empty_packet_list_and_empty_packet() {
+        let err = decode_packets(&family0_head(0, 0), &[], &CancelToken::new()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+
+        let mut packets = audio_packets(1);
+        packets[0].data = Box::from([] as [u8; 0]);
+        let err = decode_packets(&family0_head(0, 0), &packets, &CancelToken::new()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+    }
 }
