@@ -79,3 +79,59 @@ jobs:
           assert data['result']['text'], data
           print('smoke ok')
           " "$out_file"
+
+  transcription-cpu-variants:
+    name: Transcription runtime CPU variants (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cpu-variants
+
+      - name: cargo clippy -p pumice-transcription --features cpu-variants
+        run: cargo clippy -p pumice-transcription --features cpu-variants --all-targets --locked -- -D warnings
+
+      - name: Build and stage cpu-variants
+        run: crates/transcription/scripts/build-cpu-variants.sh
+
+      - name: Cache Whisper tiny Q8_0 model
+        id: cache-model
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.MODEL_DIR }}
+          key: whisper-tiny-q8_0-cpu-variants-${{ env.MODEL_SHA256 }}
+
+      - name: Download and verify model
+        if: steps.cache-model.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$MODEL_DIR"
+          curl -L --fail -o "$MODEL_DIR/whisper-tiny-Q8_0.gguf" "$MODEL_URL"
+          echo "$MODEL_SHA256  $MODEL_DIR/whisper-tiny-Q8_0.gguf" | sha256sum -c -
+
+      - name: Verify cached model
+        if: steps.cache-model.outputs.cache-hit == 'true'
+        run: echo "$MODEL_SHA256  $MODEL_DIR/whisper-tiny-Q8_0.gguf" | sha256sum -c -
+
+      - name: Smoke test staged binary with tiny model
+        run: |
+          bin="target/cpu-variants/stage/pumice-transcribe"
+          out_file="${RUNNER_TEMP}/transcribe-cpu-variants-out.json"
+          "$bin" file crates/transcription/tests/fixtures/sample-pt.wav \
+            --model-file "$MODEL_DIR/whisper-tiny-Q8_0.gguf" --json > "$out_file"
+          python3 -c "
+          import json, sys
+          with open(sys.argv[1]) as f:
+              data = json.load(f)
+          assert data.get('schema_version') == 1, data
+          assert data.get('ok') is True, data
+          assert data['result']['language'] == 'pt', data
+          assert data['result']['text'], data
+          assert data['result']['backend'].startswith('CPU'), data
+          print('smoke ok')
+          " "$out_file"
