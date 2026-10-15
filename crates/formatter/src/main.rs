@@ -5,8 +5,5 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    // The full CLI lands with the formatter commands; until then there is
-    // nothing to run.
-    eprintln!("error: pumice-format has no commands yet");
-    ExitCode::from(2)
+    pumice_formatter::cli::run()
 }

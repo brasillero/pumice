@@ -8,6 +8,7 @@
 //! in-process `pumice format …` subcommand (D13).
 
 pub mod builtins;
+pub mod cli;
 pub mod config;
 pub mod definition;
 pub mod error;

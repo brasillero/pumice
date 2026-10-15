@@ -28,6 +28,15 @@ pub enum ConflictPolicy {
     Append,
 }
 
+impl std::fmt::Display for ConflictPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ConflictPolicy::Reject => "reject",
+            ConflictPolicy::Append => "append",
+        })
+    }
+}
+
 /// Applies `formatter` to one chat request, returning the transformed
 /// request.
 ///
