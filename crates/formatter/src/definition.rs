@@ -51,6 +51,16 @@ impl std::fmt::Debug for FormatterDefinition {
 /// Every error carries this file's path; semantic errors carry the
 /// line:column of the offending value inside this file.
 pub fn load_definition_file(path: &Path) -> Result<FormatterDefinition, ConfigError> {
+    let (_, definition) = load_definition_file_located(path)?;
+    Ok(definition)
+}
+
+/// [`load_definition_file`] plus the source position of the `id` value, so
+/// callers (the `formatter.yml` loader) can report duplicate ids with a
+/// position inside the definition file.
+pub(crate) fn load_definition_file_located(
+    path: &Path,
+) -> Result<(serde_saphyr::Location, FormatterDefinition), ConfigError> {
     let text = std::fs::read_to_string(path).map_err(|error| {
         ConfigError::file(path, format!("cannot read formatter definition: {error}"))
     })?;
@@ -62,7 +72,7 @@ pub fn load_definition_file(path: &Path) -> Result<FormatterDefinition, ConfigEr
     validate(raw.unwrap_or_default()).map_err(|error| error.with_file(path))
 }
 
-fn validate(raw: RawDefinition) -> Result<FormatterDefinition, ConfigError> {
+fn validate(raw: RawDefinition) -> Result<(serde_saphyr::Location, FormatterDefinition), ConfigError> {
     match &raw.schema_version {
         None => {
             return Err(ConfigError::general(
@@ -152,11 +162,17 @@ fn validate(raw: RawDefinition) -> Result<FormatterDefinition, ConfigError> {
         ));
     }
 
-    Ok(FormatterDefinition {
-        id: id.value.clone(),
-        description: description.value.clone(),
-        system: system.value.clone(),
-    })
+    Ok((
+        raw.id
+            .as_ref()
+            .map(|id| id.referenced)
+            .unwrap_or(serde_saphyr::Location::UNKNOWN),
+        FormatterDefinition {
+            id: id.value.clone(),
+            description: description.value.clone(),
+            system: system.value.clone(),
+        },
+    ))
 }
 
 /// Ids are `[a-z0-9-]+` (non-empty), matching the formatter config contract.

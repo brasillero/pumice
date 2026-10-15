@@ -98,6 +98,18 @@ impl Error {
         )
     }
 
+    pub fn invalid_config(config_error: crate::config::ConfigError) -> Self {
+        Self {
+            code: ErrorCode::InvalidConfig,
+            message: config_error.to_string(),
+            location: config_error.path().map(|file| ErrorLocation {
+                file: file.to_path_buf(),
+                line: config_error.line(),
+                column: config_error.column(),
+            }),
+        }
+    }
+
     pub fn formatter_not_found(id: &str) -> Self {
         Self::new(
             ErrorCode::FormatterNotFound,

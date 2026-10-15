@@ -13,6 +13,8 @@ pub mod definition;
 pub mod error;
 
 pub use builtins::{BUILTIN_CLEAN, builtin_clean};
-pub use config::ConfigError;
+pub use config::{
+    Config, ConfigError, ConfigSource, FormatterEntry, LoadedConfig, load, load_with_env,
+};
 pub use definition::{FormatterDefinition, load_definition_file};
 pub use error::{Error, ErrorCode, JsonError};
