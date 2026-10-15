@@ -1380,8 +1380,12 @@ fn failure_never_prints_the_raw_transcript_as_the_result() {
     let stderr = stderr_text(&output);
     assert!(stderr.contains("relay_not_logged_in"), "{stderr}");
     assert!(
-        stderr.contains("--json"),
-        "points at the recovery path: {stderr}"
+        stderr.contains("--json") && stderr.contains("repeats the whole flow"),
+        "says where the transcript is and what a rerun costs: {stderr}"
+    );
+    assert!(
+        !stderr.contains("preserved"),
+        "claims no stored transcript: {stderr}"
     );
     assert!(!stderr.contains("S3NT1NEL"), "{stderr}");
 }

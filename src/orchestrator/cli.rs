@@ -192,8 +192,12 @@ fn report(output: RunOutput, json: bool) -> ExitCode {
         (_, Some(error)) => {
             eprintln!("error: {}: {}", error.code, error.message);
             if output.transcript.is_some() {
+                // Nothing is stored: a rerun transcribes again and may make
+                // another paid provider call.
                 eprintln!(
-                    "note: the raw transcript was preserved; rerun with --json to retrieve it"
+                    "note: on failures the raw transcript is included only in the --json \
+                     envelope; rerunning repeats the whole flow (a new transcription and \
+                     possibly another paid provider call)"
                 );
             }
             ExitCode::from(exit)

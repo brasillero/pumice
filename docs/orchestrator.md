@@ -89,15 +89,20 @@ own timeouts) can only shorten a stage further. A spent overall budget is
 Ctrl-C (and SIGTERM on Unix) cancel the run at any point: the current stage
 stops, every child process tree — transcription or provider CLI, including
 anything they spawned — is killed and reaped, and a cancelled result is
-still reported (exit code 130 for Ctrl-C, 143 for SIGTERM). A completed
-transcript is preserved in the cancelled result.
+still reported (exit code 130 for Ctrl-C, 143 for SIGTERM). Under `--json`,
+a completed transcript is included in the cancelled result.
 
 ## Results, errors and exit codes
 
 Without `--json`, stdout carries only the final text on success and stays
-empty on failure; stderr explains the failure with its code and, when the
-dictation survived a later failure, notes that `--json` returns the raw
-transcript. The raw transcript is never printed as if it were the result.
+empty on failure; stderr explains the failure with its code. When
+transcription succeeded but a later stage failed, stderr also notes that the
+raw transcript is included only in the `--json` envelope. `pumice run`
+stores nothing, so that transcript cannot be retrieved afterwards: rerunning
+with `--json` repeats the whole flow — a new transcription and possibly
+another paid provider call. Callers that must keep the dictation on failure
+should use `--json`. The raw transcript is never printed as if it were the
+result.
 
 With `--json`, stdout carries exactly one `schema_version: 1` document,
 success or failure alike:
