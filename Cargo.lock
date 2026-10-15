@@ -1216,6 +1216,7 @@ dependencies = [
  "libc",
  "pumice-relay",
  "tempfile",
+ "windows-sys",
 ]
 
 [[package]]

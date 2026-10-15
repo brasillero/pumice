@@ -62,11 +62,19 @@ bench = false
 [dependencies]
 pumice-relay = { path = "crates/relay" }
 
-[target.'cfg(unix)'.dependencies]
-libc = { workspace = true }
+[target.'cfg(windows)'.dependencies]
+# Console control handler for the transcription dispatch wait (D4).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+# The dispatcher tests deliver a signal to the exec'd sibling by PID.
+libc = { workspace = true }
 
 [profile.release]
 lto = true

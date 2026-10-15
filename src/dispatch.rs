@@ -2,6 +2,14 @@
 //! subcommand to its module. The relay runs in-process from its library
 //! (staying inside this single executable); transcription runs as the
 //! `pumice-transcribe` program installed next to this executable.
+//!
+//! On Unix `pumice transcribe` replaces itself with the sibling program
+//! (`CommandExt::exec`), so arguments (as `OsString`), signals and the exit
+//! status behave exactly as if the sibling had been run directly, with no
+//! forwarding layer in between (p10-pumice-entry/D4). On Windows, where exec
+//! does not exist, it spawns the sibling, keeps itself alive through console
+//! Ctrl-C/Ctrl-Break with a control handler while the child receives the
+//! event, and exits with the child's full exit code.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -24,32 +32,20 @@ The relay's own options (and transcription's) are documented under
 ";
 
 pub fn run() -> ExitCode {
-    // `std::env::args` panics on an argument that is not valid Unicode.
-    let Some(args) = std::env::args_os()
-        .skip(1)
-        .map(|arg| arg.into_string().ok())
-        .collect::<Option<Vec<String>>>()
-    else {
-        eprintln!("error: arguments must be valid Unicode\n");
-        eprint!("{OVERVIEW}");
-        return ExitCode::from(2);
-    };
-    match args
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .as_slice()
-    {
-        ["-h" | "--help"] => {
+    // `std::env::args` panics on an argument that is not valid Unicode;
+    // everything here stays an `OsString` and reaches the sibling unchanged.
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    match args.as_slice() {
+        [flag] if flag == "-h" || flag == "--help" => {
             print!("{OVERVIEW}");
             ExitCode::SUCCESS
         }
-        ["-V" | "--version"] => {
+        [flag] if flag == "-V" || flag == "--version" => {
             println!("pumice {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        ["relay", rest @ ..] => relay(rest),
-        ["transcribe", rest @ ..] => transcribe(rest),
+        [command, rest @ ..] if command == "relay" => relay(rest),
+        [command, rest @ ..] if command == "transcribe" => transcribe(rest),
         [] => {
             // Bare `pumice` is the future orchestrator; until the stack
             // exists there is nothing to run, so say so instead of silently
@@ -58,7 +54,7 @@ pub fn run() -> ExitCode {
             ExitCode::from(2)
         }
         [first, ..] => {
-            eprintln!("error: unknown command '{first}'\n");
+            eprintln!("error: unknown command '{}'\n", first.to_string_lossy());
             eprint!("{OVERVIEW}");
             ExitCode::from(2)
         }
@@ -67,31 +63,56 @@ pub fn run() -> ExitCode {
 
 /// Runs the relay CLI in-process with the same argument handling as the
 /// standalone `pumice-relay` binary; a bare `relay` starts the service.
-fn relay(args: &[&str]) -> ExitCode {
-    pumice_relay::cli::run_with("pumice relay", args.iter().map(OsString::from))
+fn relay(args: &[OsString]) -> ExitCode {
+    pumice_relay::cli::run_with("pumice relay", args.iter().cloned())
 }
 
-/// Runs the `pumice-transcribe` executable that sits next to the running
-/// `pumice`, forwarding arguments, stdio and the exit status. PATH and the
-/// working directory are never searched (p10-pumice-entry/D2).
-fn transcribe(args: &[&str]) -> ExitCode {
-    let Some(path) = transcribe_path() else {
-        eprintln!("error: cannot locate the running pumice executable");
+#[cfg(unix)]
+fn transcribe(args: &[OsString]) -> ExitCode {
+    use std::os::unix::process::CommandExt;
+
+    let Ok(path) = transcribe_path() else {
         return ExitCode::from(1);
     };
-    if !path.is_file() {
-        let dir = path
-            .parent()
-            .map(Path::display)
-            .map(|dir| dir.to_string())
-            .unwrap_or_default();
-        eprintln!(
-            "error: pumice-transcribe is not installed next to pumice ({dir}); \
-             install it with the Pumice transcription archive (see docs/transcription.md) \
-             or `cargo install --path crates/transcription --features engine --locked`"
-        );
+    let error = Command::new(&path)
+        .args(args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        // Only returns when the exec itself failed; otherwise this process
+        // is now the sibling, with its arguments, signals and exit status.
+        .exec();
+    eprintln!("error: cannot start {}: {error}", path.display());
+    ExitCode::from(1)
+}
+
+#[cfg(windows)]
+fn transcribe(args: &[OsString]) -> ExitCode {
+    let Ok(path) = transcribe_path() else {
+        return ExitCode::from(1);
+    };
+
+    // A console Ctrl-C/Ctrl-Break reaches every process sharing the console.
+    // This process must keep waiting for the child while the child shuts
+    // down, so a control-handler function reports the event as handled
+    // (keeping this process alive) instead of the default handler exiting it
+    // mid-shutdown. The NULL-handler "ignore" mode is deliberately not used:
+    // that state is inherited by the child, which would then never receive
+    // the event (SetConsoleCtrlHandler documentation).
+    unsafe extern "system" fn keep_waiting(_ctrl_event: u32) -> i32 {
+        windows_sys::Win32::Foundation::TRUE
+    }
+    let installed = unsafe {
+        windows_sys::Win32::System::Console::SetConsoleCtrlHandler(
+            Some(keep_waiting),
+            windows_sys::Win32::Foundation::TRUE,
+        )
+    };
+    if installed == 0 {
+        eprintln!("error: cannot install the console control handler");
         return ExitCode::from(1);
     }
+
     let mut command = Command::new(&path);
     command
         .args(args)
@@ -105,29 +126,45 @@ fn transcribe(args: &[&str]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    #[cfg(unix)]
-    let child_pid = child.id() as i32;
-    #[cfg(unix)]
-    signals::forward_to_child(child_pid);
-    match child.wait() {
-        Ok(status) => {
-            #[cfg(unix)]
-            signals::clear_child();
-            exit_code(status)
-        }
+    let status = match child.wait() {
+        Ok(status) => status,
         Err(error) => {
-            #[cfg(unix)]
-            signals::clear_child();
             eprintln!("error: cannot wait for {}: {error}", path.display());
-            ExitCode::from(1)
+            return ExitCode::from(1);
         }
-    }
+    };
+    // `ExitCode` would truncate the status to eight bits; `process::exit`
+    // forwards the child's full exit code to the OS.
+    std::process::exit(status.code().unwrap_or(1));
 }
 
-/// The transcription executable next to the real path of the running
-/// `pumice` (canonicalized, so a symlinked `pumice` still resolves its own
-/// install directory).
-fn transcribe_path() -> Option<PathBuf> {
+/// Resolves the transcription executable next to the real path of the
+/// running `pumice` (canonicalized, so a symlinked `pumice` still resolves
+/// its own install directory), printing the reason and `Err(())` when it
+/// cannot run. PATH and the working directory are never searched
+/// (p10-pumice-entry/D2).
+fn transcribe_path() -> Result<PathBuf, ()> {
+    let Some(path) = sibling_transcribe_path() else {
+        eprintln!("error: cannot locate the running pumice executable");
+        return Err(());
+    };
+    if !path.is_file() {
+        let dir = path
+            .parent()
+            .map(Path::display)
+            .map(|dir| dir.to_string())
+            .unwrap_or_default();
+        eprintln!(
+            "error: pumice-transcribe is not installed next to pumice ({dir}); \
+             install it with the Pumice transcription archive (see docs/transcription.md) \
+             or `cargo install --path crates/transcription --features engine --locked`"
+        );
+        return Err(());
+    }
+    Ok(path)
+}
+
+fn sibling_transcribe_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
     let dir = exe.parent()?;
     let name = if cfg!(windows) {
@@ -136,56 +173,4 @@ fn transcribe_path() -> Option<PathBuf> {
         "pumice-transcribe"
     };
     Some(dir.join(name))
-}
-
-#[cfg(unix)]
-fn exit_code(status: std::process::ExitStatus) -> ExitCode {
-    use std::os::unix::process::ExitStatusExt;
-    match status.code() {
-        Some(code) => ExitCode::from(code as u8),
-        // A signal death becomes the conventional 128+signal status.
-        None => ExitCode::from(128 + status.signal().unwrap_or(0) as u8),
-    }
-}
-
-#[cfg(not(unix))]
-fn exit_code(status: std::process::ExitStatus) -> ExitCode {
-    ExitCode::from(status.code().unwrap_or(1) as u8)
-}
-
-/// On Unix, Ctrl-C and SIGTERM reach the whole foreground process group, so
-/// the child already gets them; without a handler this process would still
-/// die at once and abandon the child mid-shutdown. Forward both signals to
-/// the child and keep waiting: the exit status then reports the child's
-/// signal death as 128+signal, exactly as if it had been run directly.
-#[cfg(unix)]
-mod signals {
-    use std::sync::atomic::{AtomicI32, Ordering};
-
-    static CHILD_PID: AtomicI32 = AtomicI32::new(0);
-
-    extern "C" fn forward(signal: libc::c_int) {
-        let child = CHILD_PID.load(Ordering::SeqCst);
-        if child > 0 {
-            unsafe {
-                libc::kill(child, signal);
-            }
-        }
-    }
-
-    pub fn forward_to_child(pid: i32) {
-        CHILD_PID.store(pid, Ordering::SeqCst);
-        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
-        action.sa_sigaction = forward as *const () as libc::sighandler_t;
-        let _ = unsafe { libc::sigemptyset(&mut action.sa_mask) };
-        for signal in [libc::SIGINT, libc::SIGTERM] {
-            let _ = unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) };
-        }
-    }
-
-    /// Stops forwarding: the child is reaped, so its pid must never be
-    /// signaled again (pid recycling).
-    pub fn clear_child() {
-        CHILD_PID.store(0, Ordering::SeqCst);
-    }
 }
