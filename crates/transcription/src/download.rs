@@ -32,6 +32,18 @@ use std::time::Duration;
 /// How many redirects one download follows at most.
 const MAX_REDIRECTS: u32 = 5;
 
+/// Windows attribute/flag constants (winapi `winbase.h` /
+/// `FileApi.h`); the std equivalents of the open flag are not exposed.
+#[cfg(windows)]
+mod win {
+    /// `FILE_ATTRIBUTE_REPARSE_POINT`: the entry is a reparse point
+    /// (symlink, junction, …).
+    pub const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    /// `FILE_FLAG_OPEN_REPARSE_POINT`: open the reparse point itself instead
+    /// of following it to its target.
+    pub const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+}
+
 /// Buffer size while streaming bytes to disk.
 const BUFFER_SIZE: usize = 64 * 1024;
 
@@ -630,6 +642,13 @@ fn open_lock_file(path: &Path) -> Result<File, Error> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Open the leaf as itself: a reparse point swapped in after the
+        // pre-check must not be followed to its target.
+        options.custom_flags(win::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
     let file = options.open(path).map_err(|e| {
         Error::download_failed(format!("cannot open lock file {}: {e}", path.display()))
     })?;
@@ -638,6 +657,13 @@ fn open_lock_file(path: &Path) -> Result<File, Error> {
     let meta = file.metadata().map_err(|e| {
         Error::download_failed(format!("cannot inspect lock file {}: {e}", path.display()))
     })?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if meta.file_attributes() & win::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(non_regular_lock_error(path));
+        }
+    }
     if !meta.file_type().is_file() {
         return Err(non_regular_lock_error(path));
     }
@@ -660,8 +686,7 @@ fn reject_non_regular_lock_path(path: &Path) -> Result<(), Error> {
         use std::os::windows::fs::MetadataExt;
         // Any reparse point (symlink, junction, …) is rejected even when it
         // resolves to a regular file.
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        if meta.file_attributes() & win::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
             return Err(non_regular_lock_error(path));
         }
     }
@@ -696,11 +721,17 @@ fn create_part_file(path: &Path) -> Result<File, Error> {
 
 #[cfg(not(unix))]
 fn create_part_file(path: &Path) -> Result<File, Error> {
-    // `create_new` maps to CREATE_NEW, which refuses to open an existing
-    // name, including a reparse point.
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // `create_new` maps to CREATE_NEW, which refuses to open an existing
+        // name, including a reparse point; opening with the flag keeps the
+        // leaf itself from being followed in every case.
+        options.custom_flags(win::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options
         .open(path)
         .map_err(|e| Error::download_failed(format!("cannot create {}: {e}", path.display())))
 }
@@ -745,10 +776,11 @@ fn confirm_installed_file(dest: &Path, spec: &DownloadSpec) -> Result<VerifiedFi
 }
 
 /// Reopens the installed path without following links. On Unix this is
-/// `O_NOFOLLOW`. On Windows the standard library offers no no-follow open,
-/// so the path is rejected before the open when it is a reparse point (or
-/// not a regular file) and the opened handle is checked after the open —
-/// a link swapped in between is then caught by its own metadata.
+/// `O_NOFOLLOW`. On Windows the open carries `FILE_FLAG_OPEN_REPARSE_POINT`,
+/// so a symlink or junction swapped in between the pre-check and the open is
+/// opened as itself instead of being followed to its target; the opened
+/// handle's own attributes then reject it (and any non-regular file) before
+/// re-hashing.
 #[cfg(unix)]
 fn reopen_installed(dest: &Path) -> Result<File, Error> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -761,8 +793,7 @@ fn reopen_installed(dest: &Path) -> Result<File, Error> {
 
 #[cfg(not(unix))]
 fn reopen_installed(dest: &Path) -> Result<File, Error> {
-    use std::os::windows::fs::MetadataExt;
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
     let reject = || {
         installed_file_error(
             dest,
@@ -771,7 +802,7 @@ fn reopen_installed(dest: &Path) -> Result<File, Error> {
     };
     match std::fs::symlink_metadata(dest) {
         Ok(meta) => {
-            if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !meta.is_file() {
+            if meta.file_attributes() & win::FILE_ATTRIBUTE_REPARSE_POINT != 0 || !meta.is_file() {
                 return Err(reject());
             }
         }
@@ -783,12 +814,20 @@ fn reopen_installed(dest: &Path) -> Result<File, Error> {
             ));
         }
     }
-    let file = File::open(dest)
+    // Without this flag CreateFile follows a symlink substituted after the
+    // pre-check above; the handle would then describe the target and the
+    // attribute check could not see the link.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(win::FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(dest)
         .map_err(|e| installed_file_error(dest, &format!("cannot reopen it: {e}")))?;
+    // The handle's own attributes, not the path's: this is what catches the
+    // raced-in reparse point.
     let meta = file
         .metadata()
         .map_err(|e| installed_file_error(dest, &format!("cannot inspect the opened file: {e}")))?;
-    if !meta.is_file() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+    if !meta.is_file() || meta.file_attributes() & win::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(installed_file_error(
             dest,
             "the opened file is not a regular file (symlink, junction, directory or FIFO)",
@@ -1664,5 +1703,43 @@ mod tests {
             "the symlinked file must be untouched"
         );
         assert_eq!(std::fs::read(&dest).unwrap(), b"corrupt");
+    }
+
+    /// The review's raced-in reparse-point probe (Windows): the post-install
+    /// reopen must open the installed leaf without following links. A
+    /// symlink whose target has the exact catalog bytes must still fail the
+    /// post-install verification. Skipped when the sandbox lacks the
+    /// privilege to create symlinks.
+    #[cfg(windows)]
+    #[test]
+    fn symlinked_install_is_rejected_even_with_matching_target_bytes() {
+        let tmp = private_dir();
+        let target = tmp.path().join("target.gguf");
+        std::fs::write(&target, TEST_BYTES).unwrap();
+        let dest = tmp.path().join("model.gguf");
+        if std::os::windows::fs::symlink_file(&target, &dest).is_err() {
+            eprintln!("skipping: no privilege to create symlinks");
+            return;
+        }
+        let spec = DownloadSpec {
+            url: "http://127.0.0.1:1/file".to_string(),
+            file_name: "model.gguf".to_string(),
+            size_bytes: TEST_BYTES.len() as u64,
+            sha256: sha256_of(TEST_BYTES),
+        };
+
+        let err = confirm_installed_file(&dest, &spec).unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::DownloadFailed);
+        assert!(
+            err.message.contains("post-install verification"),
+            "unexpected message: {}",
+            err.message
+        );
+        assert!(
+            std::fs::symlink_metadata(&dest).is_ok(),
+            "the link itself must be removed, not the target"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), TEST_BYTES);
     }
 }
