@@ -179,24 +179,33 @@ pub struct VerifiedFile {
 /// Blocking downloader for catalog models using ureq with rustls. A single
 /// `Downloader` is cheap; build one per command.
 pub struct Downloader {
-    agent: ureq::Agent,
     redirect_policy: RedirectPolicy,
     timeouts: Timeouts,
 }
 
 impl Downloader {
     pub fn new(redirect_policy: RedirectPolicy, timeouts: Timeouts) -> Self {
-        let agent = ureq::AgentBuilder::new()
-            .user_agent(concat!("pumice-transcribe/", env!("CARGO_PKG_VERSION")))
-            .timeout_connect(timeouts.connect)
-            .timeout_read(timeouts.read_stall)
-            .redirects(0)
-            .build();
         Self {
-            agent,
             redirect_policy,
             timeouts,
         }
+    }
+
+    /// Builds the HTTP client for one download. The overall per-request
+    /// timeout carries the computed deadline, so DNS, connect, redirects,
+    /// response headers and body reads all share one budget: ureq checks the
+    /// remaining time around every socket operation, capping the per-read
+    /// stall at whatever is left. A blocked DNS query itself cannot be
+    /// interrupted, so it can overshoot the budget — the deadline is
+    /// rechecked right before installation to close that gap.
+    fn agent(&self, deadline: Duration) -> ureq::Agent {
+        ureq::AgentBuilder::new()
+            .user_agent(concat!("pumice-transcribe/", env!("CARGO_PKG_VERSION")))
+            .timeout_connect(self.timeouts.connect)
+            .timeout_read(self.timeouts.read_stall)
+            .timeout(deadline)
+            .redirects(0)
+            .build()
     }
 
     /// Downloads `spec` into `models_dir`, unless a verified file is already
@@ -291,17 +300,22 @@ impl Downloader {
         }
 
         let mut file = create_part_file(&part)?;
-        #[cfg(not(unix))]
-        let _ = models_dir; // only the Unix directory sync uses it
+
+        let started = std::time::Instant::now();
+        let deadline = self.timeouts.total_deadline(spec.size_bytes);
 
         // `dest` does not exist here (see `fetch`): until the rename installs
         // our file, removing it is a no-op; afterwards it undoes the
         // installation.
         let outcome = (|| {
-            let sha256 = self.stream_to_file(spec, &mut file, on_event)?;
+            let sha256 = self.stream_to_file(spec, &mut file, started, deadline, on_event)?;
             file.sync_all().map_err(|e| {
                 Error::download_failed(format!("cannot sync {}: {e}", part.display()))
             })?;
+            // The transfer can overshoot the deadline without a read stall
+            // or a socket error (a stalled resolver, slow disk): an expired
+            // budget must never install.
+            check_deadline(started, deadline, spec.size_bytes)?;
             on_event(DownloadEvent::State(DownloadState::Installing));
             std::fs::rename(&part, dest).map_err(|e| {
                 Error::download_failed(format!("cannot move {} into place: {e}", part.display()))
@@ -333,21 +347,24 @@ impl Downloader {
     /// Performs the HTTP GET (following redirects by hand, so the policy and
     /// the limit are testable) and writes the body to `file`, hashing on the
     /// way. Enforces the exact expected size: more bytes, fewer bytes or a
-    /// wrong `Content-Length` are all failures.
+    /// wrong `Content-Length` are all failures. The overall deadline bounds
+    /// DNS, connect, redirects, headers and body through the agent's
+    /// per-request timeout and is also polled around body reads.
     fn stream_to_file(
         &self,
         spec: &DownloadSpec,
         file: &mut File,
+        started: std::time::Instant,
+        deadline: Duration,
         on_event: &mut dyn FnMut(DownloadEvent),
     ) -> Result<String, Error> {
-        let started = std::time::Instant::now();
-        let deadline = self.timeouts.total_deadline(spec.size_bytes);
+        let agent = self.agent(deadline);
         let mut url = url::Url::parse(&spec.url)
             .map_err(|e| Error::download_failed(format!("invalid download URL: {e}")))?;
         let mut redirects = 0u32;
         on_event(DownloadEvent::State(DownloadState::Connecting));
         let response = loop {
-            let (status, response) = match self.agent.get(url.as_str()).call() {
+            let (status, response) = match agent.get(url.as_str()).call() {
                 Ok(response) => (response.status(), response),
                 Err(ureq::Error::Status(status, response)) => (status, response),
                 Err(ureq::Error::Transport(transport)) => {
@@ -406,12 +423,7 @@ impl Downloader {
         let mut written = 0u64;
         let mut buffer = vec![0u8; BUFFER_SIZE];
         loop {
-            if started.elapsed() > deadline {
-                return Err(Error::download_failed(format!(
-                    "download exceeded its time budget of {deadline:?} for {} bytes",
-                    spec.size_bytes
-                )));
-            }
+            check_deadline(started, deadline, spec.size_bytes)?;
             let n = reader
                 .read(&mut buffer)
                 .map_err(|e| Error::download_failed(format!("download interrupted: {e}")))?;
@@ -788,6 +800,20 @@ fn installed_file_mismatch(dest: &Path, reason: &str) -> Error {
         "installed file {} failed the post-install verification ({reason}); the verified file was replaced during installation",
         dest.display()
     ))
+}
+
+/// Fails once `started` has outrun the per-download `deadline`.
+fn check_deadline(
+    started: std::time::Instant,
+    deadline: Duration,
+    size_bytes: u64,
+) -> Result<(), Error> {
+    if started.elapsed() > deadline {
+        return Err(Error::download_failed(format!(
+            "download exceeded its time budget of {deadline:?} for {size_bytes} bytes"
+        )));
+    }
+    Ok(())
 }
 
 /// The temporary name for a download in progress, next to the final file on
@@ -1358,11 +1384,100 @@ mod tests {
             .fetch(&spec, tmp.path(), false, &mut |_| {})
             .unwrap_err();
 
+        // The overall deadline trips in the HTTP layer (the agent's
+        // per-request timeout) or in the read loop; either is a typed
+        // failure with full cleanup.
         assert_eq!(err.code, ErrorCode::DownloadFailed);
-        assert!(err.message.contains("time budget"));
         let dest = tmp.path().join("model.gguf");
         assert!(!dest.exists());
         assert!(!part_path(&dest).exists());
+    }
+
+    /// Header fragments that each arrive well within the read-stall timeout
+    /// but add up past the overall deadline must fail: the deadline is
+    /// applied to the whole request (headers included), not polled only
+    /// between body reads.
+    #[test]
+    fn header_trickle_past_deadline_fails_and_cleans_up() {
+        let tmp = private_dir();
+        let (base, _) = serve(|_, stream| {
+            use std::io::Write as _;
+            stream.write_all(b"HTTP/1.1 200 OK\r\n").unwrap();
+            for i in 0..10 {
+                stream
+                    .write_all(format!("x-trickle-{i}: {i}\r\n").as_bytes())
+                    .unwrap();
+                stream.flush().unwrap();
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            stream
+                .write_all(format!("content-length: {}\r\n\r\n", TEST_BYTES.len()).as_bytes())
+                .unwrap();
+            stream.write_all(TEST_BYTES).unwrap();
+        });
+        let spec = spec_for(&base, TEST_BYTES);
+        let timeouts = Timeouts {
+            connect: Duration::from_secs(5),
+            read_stall: Duration::from_secs(5),
+            total: Duration::from_millis(200),
+        };
+
+        let err = Downloader::new(RedirectPolicy::AllowHttp, timeouts)
+            .fetch(&spec, tmp.path(), false, &mut |_| {})
+            .unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::DownloadFailed);
+        let dest = tmp.path().join("model.gguf");
+        assert!(!dest.exists(), "a late response must not install");
+        assert!(!part_path(&dest).exists());
+    }
+
+    /// A close-delimited body whose bytes all arrive quickly but whose EOF
+    /// arrives after the overall deadline must not install: the transfer
+    /// only completes once the deadline has already expired, and the
+    /// pre-install recheck refuses to rename it into place.
+    #[test]
+    fn body_completing_after_deadline_is_not_installed() {
+        let tmp = private_dir();
+        let (base, _) = serve(|_, stream| {
+            use std::io::Write as _;
+            // No Content-Length: the body ends at EOF, which is delayed
+            // beyond the deadline even though every byte arrived early.
+            stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
+            stream.write_all(TEST_BYTES).unwrap();
+            stream.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(2500));
+        });
+        let spec = spec_for(&base, TEST_BYTES);
+        let timeouts = Timeouts {
+            connect: Duration::from_secs(5),
+            read_stall: Duration::from_secs(5),
+            total: Duration::from_millis(200),
+        };
+
+        let err = Downloader::new(RedirectPolicy::AllowHttp, timeouts)
+            .fetch(&spec, tmp.path(), false, &mut |_| {})
+            .unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::DownloadFailed);
+        let dest = tmp.path().join("model.gguf");
+        assert!(!dest.exists(), "an over-deadline body must not install");
+        assert!(!part_path(&dest).exists());
+    }
+
+    /// Direct check of the deadline guard that runs right before
+    /// installation: an expired budget fails even when the transfer itself
+    /// produced no error.
+    #[test]
+    fn expired_deadline_blocks_installation() {
+        let started = std::time::Instant::now();
+        check_deadline(started, Duration::from_secs(60), TEST_BYTES.len() as u64).unwrap();
+
+        std::thread::sleep(Duration::from_millis(20));
+        let err =
+            check_deadline(started, Duration::from_millis(5), TEST_BYTES.len() as u64).unwrap_err();
+        assert_eq!(err.code, ErrorCode::DownloadFailed);
+        assert!(err.message.contains("time budget"));
     }
 
     #[cfg(unix)]
