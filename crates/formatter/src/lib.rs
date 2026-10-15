@@ -2,8 +2,10 @@
 //!
 //! The formatter injects an explicitly selected formatter's rules, as one
 //! `system` message, into an OpenAI-shaped chat request before it reaches the
-//! relay (`arch-modules/D3`). It never calls a provider, rewrites the model or
-//! touches anything but the `messages` array; the relay stays pass-through.
+//! relay (`arch-modules/D3`). It never calls a provider or rewrites the model:
+//! besides inserting into the `messages` array it only normalizes top-level
+//! key names, and every value is re-emitted byte for byte; the relay stays
+//! pass-through.
 //! The library powers both the standalone `pumice-format` binary and the
 //! in-process `pumice format …` subcommand (D13).
 
