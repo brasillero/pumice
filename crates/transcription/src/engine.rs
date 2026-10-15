@@ -115,14 +115,23 @@ pub mod cpp {
             // Bridge our CancelToken into the native cancel callback on a short
             // polling thread; cooperative cancellation is the only safe way to
             // stop an in-flight native run.
-            let bridge_token = cpp_token.clone();
-            let watch_cancel = cancel.clone();
-            let _watcher = std::thread::spawn(move || {
-                while !watch_cancel.is_cancelled() {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                bridge_token.cancel();
-            });
+            // The watcher stops as soon as the run ends and is joined below, so no
+            // thread outlives the call.
+            let finished = Arc::new(AtomicBool::new(false));
+            let watcher = {
+                let finished = Arc::clone(&finished);
+                let native_token = cpp_token.clone();
+                let cancel = cancel.clone();
+                std::thread::spawn(move || {
+                    while !finished.load(Ordering::SeqCst) {
+                        if cancel.is_cancelled() {
+                            native_token.cancel();
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                })
+            };
 
             let mut whisper_ext = WhisperRunOptions::default();
             if let Some(prompt) = &options.prompt {
@@ -138,9 +147,14 @@ pub mod cpp {
                 ..Default::default()
             };
 
-            let result = session
-                .run(pcm_16khz_mono, &run_options)
-                .map_err(|_| EngineError::Failed)?;
+            let run = session.run(pcm_16khz_mono, &run_options);
+            finished.store(true, Ordering::SeqCst);
+            let _ = watcher.join();
+
+            if cancel.is_cancelled() {
+                return Err(EngineError::Cancelled);
+            }
+            let result = run.map_err(|_| EngineError::Failed)?;
 
             Ok(Transcript {
                 text: result.text,
