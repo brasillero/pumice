@@ -21,8 +21,11 @@ the same.
 
 `pumice run` reads exactly one configuration file: `--config <FILE>`, else
 the per-user `orchestrator.yml` (`$XDG_CONFIG_HOME/pumice` or `~/.config/pumice`
-on Linux and macOS, `%APPDATA%\pumice` on Windows). There is no built-in
-default; a missing file is an error. The file names the module
+on Linux and macOS, `%APPDATA%\pumice` on Windows). These bases must be
+nonempty absolute paths: a relative `XDG_CONFIG_HOME` is ignored in favour
+of `~/.config`, and with no usable base the lookup is unavailable and
+`--config` is required. There is no built-in default; a missing file is an
+error. The file names the module
 configurations and the flows:
 
 ```yaml

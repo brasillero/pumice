@@ -32,7 +32,7 @@
 //! explicit (D4). Validation reports `file:line:column` like the other
 //! modules; relative module paths resolve against this file's directory.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -185,7 +185,8 @@ pub fn load_with_env(
             None => {
                 return Err(ConfigError::general(
                     "no per-user configuration directory found \
-                     (XDG_CONFIG_HOME, HOME or APPDATA); pass --config <FILE>",
+                     (XDG_CONFIG_HOME, HOME or APPDATA must be a nonempty \
+                     absolute path); pass --config <FILE>",
                 ));
             }
         },
@@ -586,7 +587,10 @@ fn strip_location_suffix(text: &str) -> String {
 
 /// The per-user orchestrator file, when the platform's conventions place
 /// one: `<base>/pumice/orchestrator.yml` under XDG_CONFIG_HOME, ~/.config or
-/// %APPDATA%, mirroring the relay and formatter lookup (D6).
+/// %APPDATA%, mirroring the relay and formatter lookup (D6). A base must be
+/// a nonempty absolute path: an empty or relative value would turn the
+/// lookup into one relative to the working directory, so it makes the
+/// per-user lookup unavailable (`--config` is then required).
 pub fn per_user_config_path(get_env: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     per_user_config_path_for(get_env, cfg!(windows))
 }
@@ -598,29 +602,38 @@ fn per_user_config_path_for(
     windows: bool,
 ) -> Option<PathBuf> {
     let base = if windows {
-        get_env("APPDATA")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
+        get_env("APPDATA").filter(|value| is_absolute_for(value, true))
     } else {
-        match get_env("XDG_CONFIG_HOME") {
-            // The XDG spec requires an absolute path; ignore relative values.
-            Some(value) if !value.is_empty() => {
-                let path = PathBuf::from(&value);
-                if path.is_absolute() {
-                    Some(path)
-                } else {
-                    home_config_dir(get_env)
-                }
-            }
-            _ => home_config_dir(get_env),
-        }
+        // The XDG spec: a relative XDG_CONFIG_HOME is ignored and the
+        // lookup falls back to ~/.config.
+        get_env("XDG_CONFIG_HOME")
+            .filter(|value| is_absolute_for(value, false))
+            .or_else(|| {
+                get_env("HOME")
+                    .filter(|value| is_absolute_for(value, false))
+                    .map(|home| PathBuf::from(home).join(".config").into_os_string())
+            })
     }?;
-    Some(base.join("pumice").join(PER_USER_FILE))
+    Some(PathBuf::from(base).join("pumice").join(PER_USER_FILE))
 }
 
-/// `~/.config` on Linux and macOS.
-fn home_config_dir(get_env: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
-    get_env("HOME").map(|home| PathBuf::from(home).join(".config"))
+/// Whether `value` is a nonempty absolute path under the given platform's
+/// rules, checked textually so both rules hold on every host: `/…` on Unix;
+/// a drive root (`C:\` or `C:/`) or a UNC path (`\\server\share`) on
+/// Windows.
+fn is_absolute_for(value: &OsStr, windows: bool) -> bool {
+    let text = value.to_string_lossy();
+    let bytes = text.as_bytes();
+    if windows {
+        let drive_root = bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/');
+        let unc = bytes.len() > 2 && bytes.starts_with(br"\\") && bytes[2] != b'\\';
+        drive_root || unc
+    } else {
+        bytes.first() == Some(&b'/')
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1236,5 +1249,72 @@ flows:
         );
 
         assert!(per_user_config_path(&no_env).is_none());
+    }
+
+    #[test]
+    fn empty_or_relative_bases_disable_the_per_user_lookup() {
+        let lookup = |pairs: &'static [(&'static str, &'static str)], windows: bool| {
+            per_user_config_path_for(
+                &|key| {
+                    pairs
+                        .iter()
+                        .find(|(name, _)| *name == key)
+                        .map(|(_, value)| OsString::from(value))
+                },
+                windows,
+            )
+        };
+
+        // Unix: an empty or relative HOME never yields a path relative to
+        // the working directory.
+        assert_eq!(lookup(&[("HOME", "")], false), None);
+        assert_eq!(lookup(&[("HOME", "home/me")], false), None);
+        assert_eq!(lookup(&[("HOME", ".")], false), None);
+        // An empty or relative XDG_CONFIG_HOME is ignored (XDG spec) and the
+        // lookup falls back to HOME — only when HOME is absolute.
+        assert_eq!(
+            lookup(&[("XDG_CONFIG_HOME", ""), ("HOME", "")], false),
+            None
+        );
+        assert_eq!(
+            lookup(&[("XDG_CONFIG_HOME", "cfg"), ("HOME", "rel")], false),
+            None
+        );
+        assert_eq!(
+            lookup(&[("XDG_CONFIG_HOME", ""), ("HOME", "/home/me")], false),
+            Some(
+                PathBuf::from("/home/me")
+                    .join(".config")
+                    .join("pumice")
+                    .join("orchestrator.yml")
+            )
+        );
+
+        // Windows: APPDATA must be a drive root or UNC path.
+        for appdata in ["", "AppData", r"C:", r"C:AppData", r"\AppData", "/x"] {
+            let path = per_user_config_path_for(
+                &|key| (key == "APPDATA").then(|| OsString::from(appdata)),
+                true,
+            );
+            assert_eq!(path, None, "APPDATA={appdata:?}");
+        }
+        for appdata in [r"C:\Users\me", "D:/roaming", r"\\server\share"] {
+            let path = per_user_config_path_for(
+                &|key| (key == "APPDATA").then(|| OsString::from(appdata)),
+                true,
+            );
+            assert!(path.is_some(), "APPDATA={appdata:?}");
+        }
+
+        // With no usable base, loading asks for --config.
+        let err = load_with_env(None, |key: &str| match key {
+            "HOME" => Some(OsString::from("")),
+            "XDG_CONFIG_HOME" | "APPDATA" => Some(OsString::from("relative")),
+            _ => None,
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no per-user configuration directory"), "{err}");
+        assert!(err.contains("--config"), "{err}");
     }
 }
