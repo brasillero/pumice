@@ -7,7 +7,7 @@
 //! provider CLI is ever invoked — `check-config` only validates YAML.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output};
 
 use tempfile::TempDir;

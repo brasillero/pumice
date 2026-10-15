@@ -34,7 +34,12 @@ pub fn run() -> ExitCode {
         eprint!("{OVERVIEW}");
         return ExitCode::from(2);
     };
-    match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+    match args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
         ["-h" | "--help"] => {
             print!("{OVERVIEW}");
             ExitCode::SUCCESS
@@ -63,10 +68,7 @@ pub fn run() -> ExitCode {
 /// Runs the relay CLI in-process with the same argument handling as the
 /// standalone `pumice-relay` binary; a bare `relay` starts the service.
 fn relay(args: &[&str]) -> ExitCode {
-    pumice_relay::cli::run_with(
-        "pumice relay",
-        args.iter().map(|arg| OsString::from(arg)),
-    )
+    pumice_relay::cli::run_with("pumice relay", args.iter().map(OsString::from))
 }
 
 /// Runs the `pumice-transcribe` executable that sits next to the running
