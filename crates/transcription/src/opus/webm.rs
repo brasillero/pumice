@@ -3,7 +3,7 @@
 //! webm-iterable alone would auto-close over; webm-iterable then does the
 //! typed demux on data already proven structurally complete.
 
-use super::{OpusHead, OpusPacket, decode_packets, ns_to_samples};
+use super::{OPUS_SAMPLE_RATE, OpusHead, OpusPacket, decode_packets, ns_to_samples, packet_frames};
 use crate::audio::DecodedAudio;
 use crate::engine::CancelToken;
 use crate::{Error, ErrorCode};
@@ -36,11 +36,21 @@ const ID_BLOCK: u64 = 0xA1;
 const ID_DISCARD_PADDING: u64 = 0x75A2;
 const ID_BLOCK_DURATION: u64 = 0x9B;
 const ID_REFERENCE_BLOCK: u64 = 0xFB;
+const ID_INFO_TIMESTAMP_SCALE: u64 = 0x2AD7_B1;
+const ID_AUDIO: u64 = 0xE1;
+const ID_CHANNELS: u64 = 0x9F;
+const ID_SAMPLING_FREQUENCY: u64 = 0xB5;
 const ID_VOID: u64 = 0xEC;
 const ID_CRC32: u64 = 0xBF;
 
 /// Lacing mode bits in a block flags byte. All lacing is rejected for now.
 const LACING_FLAGS: u8 = 0x06;
+
+/// Matroska default TimestampScale: one timestamp tick is 1 ms.
+const DEFAULT_TIMESTAMP_SCALE: u64 = 1_000_000;
+
+/// Nanoseconds per second, for converting Opus durations to timestamp ticks.
+const NS_PER_SECOND: i128 = 1_000_000_000;
 
 /// Backstop against element-count exhaustion; the 25 MB budget bounds a valid
 /// file to far fewer elements than this.
@@ -211,11 +221,68 @@ struct WebmInfo {
     track_number: u64,
     codec_private: Vec<u8>,
     codec_delay_ns: Option<u64>,
+    /// TimestampScale in nanoseconds per tick (Matroska default 1 ms).
+    timestamp_scale: u64,
     block_count: usize,
 }
 
-/// Validates a block element and returns its (cluster-relative) timestamp.
-fn block_timestamp(bytes: &[u8], element: &Element) -> Result<i16, Error> {
+/// The codec timeline across blocks. Each block's absolute timestamp (in
+/// ticks) must continue the previous block by that packet's actual Opus
+/// duration; durations are converted with checked rational arithmetic so an
+/// unsupported timebase fails loudly instead of rounding.
+#[derive(Debug)]
+struct Timeline {
+    tick_scale_ns: u64,
+    /// Absolute timestamp and 48 kHz frame count of the previous block.
+    last: Option<(i128, usize)>,
+}
+
+impl Timeline {
+    fn new(tick_scale_ns: u64) -> Self {
+        Self {
+            tick_scale_ns,
+            last: None,
+        }
+    }
+
+    fn note(&mut self, absolute: i128, payload: &[u8]) -> Result<(), Error> {
+        let duration = packet_frames(payload)?;
+        if let Some((last_timestamp, last_duration)) = self.last {
+            // Expected continuation in ticks: last_duration frames at 48 kHz,
+            // one tick is tick_scale_ns nanoseconds. Compare
+            // |diff * denominator - numerator| against half a packet with i128
+            // checked math. Tolerance justification: real muxers timestamp
+            // blocks on a wall clock, and Chrome MediaRecorder recordings
+            // deviate from the nominal grid by up to ~8 ms on 60 ms packets;
+            // a lost or fabricated block, or a packet whose duration was
+            // altered, shifts the timeline by at least a whole packet, which
+            // half a packet of tolerance cannot absorb.
+            let numerator = i128::from(last_duration as u64) * NS_PER_SECOND;
+            let denominator = i128::from(self.tick_scale_ns)
+                .checked_mul(i128::from(OPUS_SAMPLE_RATE))
+                .ok_or_else(|| Error::invalid_input("webm timestamp scale out of range"))?;
+            let diff = absolute
+                .checked_sub(last_timestamp)
+                .ok_or_else(|| Error::invalid_input("webm timestamps out of range"))?;
+            let delta = diff
+                .checked_mul(denominator)
+                .and_then(|scaled| scaled.checked_sub(numerator))
+                .ok_or_else(|| Error::invalid_input("webm timestamps out of range"))?;
+            let tolerance = numerator / 2;
+            if delta.abs() > tolerance {
+                return Err(Error::invalid_input(
+                    "webm block timestamps do not match the packet durations",
+                ));
+            }
+        }
+        self.last = Some((absolute, duration));
+        Ok(())
+    }
+}
+
+/// Validates a block element and returns its (cluster-relative) timestamp
+/// and Opus payload.
+fn block_parts<'a>(bytes: &'a [u8], element: &Element) -> Result<(i16, &'a [u8]), Error> {
     let data = element_slice(bytes, element)?;
     if data.len() < 4 {
         return Err(Error::invalid_input("truncated webm block"));
@@ -229,22 +296,20 @@ fn block_timestamp(bytes: &[u8], element: &Element) -> Result<i16, Error> {
             "laced webm blocks are not supported",
         ));
     }
-    Ok(i16::from_be_bytes([data[track_len], data[track_len + 1]]))
+    let timestamp = i16::from_be_bytes([data[track_len], data[track_len + 1]]);
+    Ok((timestamp, &data[track_len + 3..]))
 }
 
 fn note_block(
     bytes: &[u8],
     element: &Element,
     cluster_ts: i128,
+    timeline: &mut Timeline,
     block_count: &mut usize,
-    last_timestamp: &mut i128,
 ) -> Result<(), Error> {
-    let timestamp = block_timestamp(bytes, element)?;
+    let (timestamp, payload) = block_parts(bytes, element)?;
     let absolute = cluster_ts + i128::from(timestamp);
-    if absolute < *last_timestamp {
-        return Err(Error::invalid_input("webm block timestamps move backwards"));
-    }
-    *last_timestamp = absolute;
+    timeline.note(absolute, payload)?;
     *block_count += 1;
     Ok(())
 }
@@ -300,14 +365,14 @@ fn walk_block_group(
     element: &Element,
     cluster_ts: i128,
     block_count: &mut usize,
-    last_timestamp: &mut i128,
+    timeline: &mut Timeline,
 ) -> Result<(), Error> {
     let mut reader = Reader::new(bytes, element.data_start, element.data_end);
     let mut blocks = 0usize;
     while let Some(child) = reader.next()? {
         match child.id {
             ID_BLOCK => {
-                note_block(bytes, &child, cluster_ts, &mut blocks, last_timestamp)?;
+                note_block(bytes, &child, cluster_ts, timeline, &mut blocks)?;
             }
             ID_DISCARD_PADDING | ID_BLOCK_DURATION | ID_REFERENCE_BLOCK | ID_VOID | ID_CRC32 => {}
             _ => {
@@ -335,7 +400,7 @@ fn walk_cluster(
     element: &Element,
     parent: &mut Reader<'_>,
     block_count: &mut usize,
-    last_timestamp: &mut i128,
+    timeline: &mut Timeline,
 ) -> Result<(), Error> {
     let mut reader = Reader::new(bytes, element.data_start, element.data_end);
     let mut cluster_ts = 0i128;
@@ -352,10 +417,10 @@ fn walk_cluster(
                 cluster_ts = i128::from(read_uint(bytes, &child)?);
             }
             ID_SIMPLE_BLOCK => {
-                note_block(bytes, &child, cluster_ts, block_count, last_timestamp)?;
+                note_block(bytes, &child, cluster_ts, timeline, block_count)?;
             }
             ID_BLOCK_GROUP => {
-                walk_block_group(bytes, &child, cluster_ts, block_count, last_timestamp)?;
+                walk_block_group(bytes, &child, cluster_ts, block_count, timeline)?;
             }
             ID_VOID | ID_CRC32 => {}
             _ => return Err(Error::invalid_input("unexpected element in webm cluster")),
@@ -417,15 +482,45 @@ fn validate(bytes: &[u8]) -> Result<WebmInfo, Error> {
         track_number: 0,
         codec_private: Vec::new(),
         codec_delay_ns: None,
+        timestamp_scale: DEFAULT_TIMESTAMP_SCALE,
         block_count: 0,
     };
     let mut track_entries = 0usize;
-    let mut last_timestamp = i128::MIN;
+    let mut timeline: Option<Timeline> = None;
     let mut segment_reader = Reader::new(bytes, segment_start, segment_end);
     while let Some(element) = segment_reader.next()? {
         match element.id {
             ID_SEEKHEAD => segment_reader.pos = element.data_end,
-            ID_INFO => segment_reader.pos = element.data_end,
+            ID_INFO => {
+                // The TimestampScale here decides what one timestamp tick
+                // means for the cluster timeline, so Info must precede the
+                // clusters; every other Info child is informational.
+                if timeline.is_some() {
+                    return Err(Error::invalid_input("webm info appears after its clusters"));
+                }
+                let mut scale: Option<u64> = None;
+                let mut info_reader = Reader::new(bytes, element.data_start, element.data_end);
+                while let Some(child) = info_reader.next()? {
+                    if child.id == ID_INFO_TIMESTAMP_SCALE {
+                        let value = read_uint(bytes, &child)?;
+                        if value == 0 {
+                            return Err(Error::invalid_input(
+                                "webm timestamp scale must not be zero",
+                            ));
+                        }
+                        if scale.replace(value).is_some() {
+                            return Err(Error::invalid_input(
+                                "duplicate webm timestamp scale",
+                            ));
+                        }
+                    }
+                    info_reader.pos = child.data_end;
+                }
+                if let Some(value) = scale {
+                    info.timestamp_scale = value;
+                }
+                segment_reader.pos = element.data_end;
+            }
             ID_TRACKS => {
                 if track_entries > 0 {
                     return Err(Error::unsupported_format(
@@ -447,13 +542,16 @@ fn validate(bytes: &[u8]) -> Result<WebmInfo, Error> {
                 }
                 segment_reader.pos = element.data_end;
             }
-            ID_CLUSTER => walk_cluster(
-                bytes,
-                &element,
-                &mut segment_reader,
-                &mut info.block_count,
-                &mut last_timestamp,
-            )?,
+            ID_CLUSTER => {
+                let timeline = timeline.get_or_insert_with(|| Timeline::new(info.timestamp_scale));
+                walk_cluster(
+                    bytes,
+                    &element,
+                    &mut segment_reader,
+                    &mut info.block_count,
+                    timeline,
+                )?
+            }
             ID_CUES | ID_ATTACHMENTS | ID_CHAPTERS | ID_TAGS | ID_VOID | ID_CRC32 => {
                 segment_reader.pos = element.data_end;
             }
@@ -856,7 +954,8 @@ mod tests {
         file.extend_from_slice(SEGMENT);
         file.extend_from_slice(UNKNOWN_SIZE);
         file.extend(el(TRACKS, &track_entry("A_OPUS", &opus_head_bytes())));
-        for base in [0u64, 1000, 2000] {
+        // Each 20 ms packet advances the timestamp by 20 ticks (1 ms each).
+        for base in [0u64, 20, 40] {
             let mut cluster = uint(TIMESTAMP, base);
             cluster.extend(simple_block(0, 0, &opus_packet_bytes()));
             file.extend_from_slice(CLUSTER);
@@ -1043,5 +1142,112 @@ mod tests {
         let bytes = fixture("silence121.webm");
         let err = decode_webm_opus(bytes, &CancelToken::new()).unwrap_err();
         assert_eq!(err.code, ErrorCode::AudioTooLong);
+    }
+
+    /// Offsets of every Cluster element, following the same unknown-size
+    /// sibling-boundary walk as the validator.
+    fn cluster_offsets(bytes: &[u8]) -> Vec<usize> {
+        let mut reader = Reader::new(bytes, 0, bytes.len());
+        let header = reader.next().unwrap().unwrap();
+        reader.pos = header.data_end;
+        let mut segment = None;
+        while let Some(element) = reader.next().unwrap() {
+            if element.id == ID_SEGMENT {
+                segment = Some((element.data_start, element.data_end));
+            }
+            reader.pos = element.data_end;
+        }
+        let (start, end) = segment.unwrap();
+        let mut offsets = Vec::new();
+        let mut pos = start;
+        while pos < end {
+            let mut segment_reader = Reader::new(bytes, pos, end);
+            let Some(element) = segment_reader.next().unwrap() else {
+                break;
+            };
+            if element.id == ID_CLUSTER {
+                offsets.push(element.start);
+                if element.size.is_none() {
+                    // The cluster ends at the first Segment-level sibling.
+                    let mut inner = Reader::new(bytes, element.data_start, element.data_end);
+                    while inner.pos < element.data_end {
+                        let Some(child) = inner.next().unwrap() else { break };
+                        if is_segment_level(child.id) {
+                            inner.pos = child.start;
+                            break;
+                        }
+                        inner.pos = child.data_end;
+                    }
+                    pos = inner.pos;
+                    continue;
+                }
+            }
+            pos = element.data_end;
+        }
+        offsets
+    }
+
+    #[test]
+    fn rejects_removed_middle_cluster_in_real_fixtures() {
+        // Dropping a whole middle cluster leaves every later timestamp in
+        // place; the timeline check must notice the gap. Review cases
+        // chrome-missing-middle-cluster.webm and live-missing-middle-cluster
+        // .webm, built here from the pristine fixtures.
+        for name in ["chrome-mediarecorder.webm", "sample-pt-live.webm"] {
+            let bytes = fixture(name);
+            let offsets = cluster_offsets(&bytes);
+            assert!(offsets.len() > 6, "{name}: {}", offsets.len());
+            let mut mutated = bytes[..offsets[5]].to_vec();
+            mutated.extend_from_slice(&bytes[offsets[6]..]);
+            assert_eq!(
+                decode_webm_opus(mutated, &CancelToken::new())
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidInput,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_timestamp_gap_between_blocks() {
+        // Two 20 ms packets whose timestamps are 1000 ms apart: the gap is
+        // far beyond half a packet of tolerance, so the file cannot be
+        // silently compressed. Review reproduction.
+        let mut file = ebml_header("webm");
+        file.extend_from_slice(SEGMENT);
+        file.extend_from_slice(UNKNOWN_SIZE);
+        file.extend(el(TRACKS, &track_entry("A_OPUS", &opus_head_bytes())));
+        let mut cluster = uint(TIMESTAMP, 0);
+        cluster.extend(simple_block(0, 0, &opus_packet_bytes()));
+        cluster.extend(simple_block(1000, 0, &opus_packet_bytes()));
+        file.extend(el(CLUSTER, &cluster));
+        assert_eq!(validate_code(&file), ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn rejects_toc_mutations_with_shorter_packet_duration() {
+        // Randomized review cases 1544 and 3176: flipping one Opus TOC byte
+        // shortens that packet by 720 frames, so the following block
+        // timestamp no longer matches the packet durations.
+        let mut bytes = fixture("sample-pt-live.webm");
+        assert_eq!(bytes[98_850], 0xf8);
+        bytes[98_850] = 0xe8;
+        assert_eq!(
+            decode_webm_opus(bytes, &CancelToken::new())
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidInput
+        );
+
+        let mut bytes = fixture("sample-pt.webm");
+        assert_eq!(bytes[38_403], 0xf8);
+        bytes[38_403] = 0xe8;
+        assert_eq!(
+            decode_webm_opus(bytes, &CancelToken::new())
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidInput
+        );
     }
 }
