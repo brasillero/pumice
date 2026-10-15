@@ -52,6 +52,10 @@ description = "Connects dictation apps to the AI assistants you already use"
 license = "MIT"
 default-run = "pumice"
 
+[lib]
+name = "pumice"
+path = "src/lib.rs"
+
 [[bin]]
 name = "pumice"
 path = "src/main.rs"

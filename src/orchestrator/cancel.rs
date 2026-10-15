@@ -25,11 +25,9 @@ pub enum CancelReason {
     Terminate,
     /// The service owning the operation is shutting down.
     // Constructed by `pumice serve` (P13.3); only tests use it until then.
-    #[cfg_attr(not(test), allow(dead_code))]
     Shutdown,
     /// The client that asked for the operation went away.
     // Constructed by `pumice serve` (P13.4); only tests use it until then.
-    #[cfg_attr(not(test), allow(dead_code))]
     ClientDisconnected,
 }
 
