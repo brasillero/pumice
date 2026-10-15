@@ -47,8 +47,10 @@ pub struct ModelEntry {
 }
 
 /// How a call into the transcription sibling failed. Child error *messages*
-/// are module-generated and safe to show; anything malformed collapses to a
-/// fixed `Protocol` message instead.
+/// are never forwarded: the orchestrator reports a fixed message chosen by
+/// the child's error code, so dictated text a misbehaving build put into its
+/// message cannot leak. Only a validated error location (the configuration
+/// file the child was given) is kept.
 #[derive(Debug)]
 pub enum SttFailure {
     /// The sibling executable was not found or could not start.
@@ -63,7 +65,6 @@ pub enum SttFailure {
     /// The child reported a typed error envelope (`ok: false`).
     Module {
         code: String,
-        message: Option<String>,
         location: Option<ErrorLocation>,
     },
 }
@@ -115,7 +116,7 @@ impl Transcribe {
                     })
                     .collect())
             }
-            false => module_error(envelope, status),
+            false => self.module_error(envelope, status),
         }
     }
 
@@ -164,7 +165,7 @@ impl Transcribe {
                     transcription_ms: result.transcription_ms,
                 })
             }
-            false => module_error(envelope, status),
+            false => self.module_error(envelope, status),
         }
     }
 
@@ -211,6 +212,60 @@ impl Transcribe {
                 "I/O error while reading the transcription module",
             )),
         }
+    }
+
+    /// A typed `ok: false` envelope. Unknown child codes are never inferred
+    /// from their text: they become a protocol error (design §4). The child's
+    /// message is dropped — the caller reports a fixed message per code — and
+    /// the location is kept only when it names the configuration file the
+    /// child was launched with, so a hostile or broken build cannot leak
+    /// dictated text through either field.
+    fn module_error<T>(
+        &self,
+        envelope: Envelope,
+        status: std::process::ExitStatus,
+    ) -> Result<T, SttFailure> {
+        if status.success() {
+            return Err(SttFailure::Protocol(
+                "the transcription module reported an error but exited successfully",
+            ));
+        }
+        let Some(error) = envelope.error else {
+            return Err(SttFailure::Protocol(
+                "the transcription module's error envelope has no error",
+            ));
+        };
+        let known = matches!(
+            error.code.as_str(),
+            "invalid_arguments"
+                | "invalid_input"
+                | "input_too_large"
+                | "audio_too_long"
+                | "unsupported_format"
+                | "invalid_config"
+                | "model_not_found"
+                | "engine_not_available"
+                | "engine_failed"
+                | "model_load_failed"
+                | "internal"
+        );
+        if !known {
+            return Err(SttFailure::Protocol(
+                "the transcription module returned an unknown error code",
+            ));
+        }
+        let location = error
+            .location
+            .filter(|location| location.file == self.config)
+            .map(|location| ErrorLocation {
+                file: location.file,
+                line: location.line,
+                column: location.column,
+            });
+        Err(SttFailure::Module {
+            code: error.code,
+            location,
+        })
     }
 }
 
@@ -341,7 +396,8 @@ struct Envelope {
 #[derive(Debug, Deserialize)]
 struct EnvelopeError {
     code: String,
-    message: Option<String>,
+    // The child's `message` is deliberately not even parsed into a field:
+    // it is never shown (see `module_error`).
     location: Option<EnvelopeLocation>,
 }
 
@@ -395,61 +451,5 @@ fn parse_result<T: for<'de> Deserialize<'de>>(
     };
     serde_json::from_value(result).map_err(|_| {
         SttFailure::Protocol("the transcription module's result has an unexpected shape")
-    })
-}
-
-/// A typed `ok: false` envelope. Unknown child codes are never inferred from
-/// their text: they become a protocol error (design §4).
-fn module_error<T>(envelope: Envelope, status: std::process::ExitStatus) -> Result<T, SttFailure> {
-    if status.success() {
-        return Err(SttFailure::Protocol(
-            "the transcription module reported an error but exited successfully",
-        ));
-    }
-    let Some(error) = envelope.error else {
-        return Err(SttFailure::Protocol(
-            "the transcription module's error envelope has no error",
-        ));
-    };
-    let known = matches!(
-        error.code.as_str(),
-        "invalid_arguments"
-            | "invalid_input"
-            | "input_too_large"
-            | "audio_too_long"
-            | "unsupported_format"
-            | "invalid_config"
-            | "model_not_found"
-            | "engine_not_available"
-            | "engine_failed"
-            | "model_load_failed"
-            | "internal"
-    );
-    if !known {
-        return Err(SttFailure::Protocol(
-            "the transcription module returned an unknown error code",
-        ));
-    }
-    // The module's own messages are designed to be safe; still bound them.
-    let message = error.message.map(|message| {
-        const MAX_MESSAGE: usize = 400;
-        if message.len() > MAX_MESSAGE {
-            let mut end = MAX_MESSAGE;
-            while !message.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!("{}…", &message[..end])
-        } else {
-            message
-        }
-    });
-    Err(SttFailure::Module {
-        code: error.code,
-        message,
-        location: error.location.map(|location| ErrorLocation {
-            file: location.file,
-            line: location.line,
-            column: location.column,
-        }),
     })
 }

@@ -270,6 +270,24 @@ impl Rig {
             .unwrap_or(0)
     }
 
+    /// The transcription config path the orchestrator hands the sibling.
+    fn transcribe_yml(&self) -> PathBuf {
+        self.cfg.join("transcribe.yml")
+    }
+
+    /// Rewrites one call of the stub's scenario after the rig exists (for
+    /// envelopes that name rig paths).
+    fn set_stub_behavior(&self, call: &str, behavior: Value) {
+        let stub = self.install.join(exe("pumice-transcribe"));
+        let mut path = stub.as_os_str().to_owned();
+        path.push(".scenario.json");
+        let mut scenario: Value =
+            serde_json::from_slice(&fs::read(PathBuf::from(path)).expect("read scenario"))
+                .expect("scenario is JSON");
+        scenario[call] = behavior;
+        write_scenario(&stub, &scenario);
+    }
+
     fn stub_file_report(&self) -> Option<Value> {
         let path = self.keep.path().join("stub-file-report.json");
         fs::read(&path)
@@ -1043,7 +1061,8 @@ fn stt_oversized_stdout_is_a_protocol_error() {
 
 #[test]
 fn stt_module_errors_map_to_stable_codes() {
-    // An engine failure: runtime error, exit 1, message forwarded.
+    // An engine failure: runtime error, exit 1, a fixed message per code —
+    // the child's own message is never forwarded.
     let rig = make_rig(&stub_with_file_behavior(json!({
         "stdout": "{\"schema_version\":1,\"ok\":false,\"error\":{\"code\":\"engine_failed\",\"message\":\"the engine exploded\"}}\n",
         "exit_code": 1,
@@ -1057,7 +1076,10 @@ fn stt_module_errors_map_to_stable_codes() {
         "transcription",
     );
     assert_eq!(envelope["error"]["cause_code"], "engine_failed");
-    assert_eq!(envelope["error"]["message"], "the engine exploded");
+    assert_eq!(
+        envelope["error"]["message"], "the transcription engine failed",
+        "the fixed message, not the child's: {envelope}"
+    );
     assert!(envelope.get("transcript").is_none());
 
     // A missing model file: input/config class, exit 2.
@@ -1094,6 +1116,77 @@ fn stt_module_errors_map_to_stable_codes() {
 }
 
 #[test]
+fn hostile_child_messages_never_reach_stderr_or_the_envelope() {
+    // A misbehaving build puts dictated text into its error message for
+    // every recognized code: the orchestrator reports a fixed message per
+    // code, in both modes, and never the child's.
+    const SENTINEL: &str = "PRIVATE_TRANSCRIPT_SENTINEL";
+    for (code, exit) in [
+        ("engine_failed", 1),
+        ("model_load_failed", 1),
+        ("engine_not_available", 1),
+        ("internal", 1),
+        ("invalid_arguments", 2),
+        ("invalid_input", 2),
+        ("input_too_large", 2),
+        ("audio_too_long", 2),
+        ("unsupported_format", 2),
+        ("invalid_config", 2),
+        ("model_not_found", 2),
+    ] {
+        let child = json!({"schema_version": 1, "ok": false, "error": {
+            "code": code,
+            "message": format!("failed on: {SENTINEL} {RAW}"),
+        }});
+        let rig = make_rig(&stub_with_file_behavior(json!({
+            "stdout": format!("{child}\n"),
+            "exit_code": exit,
+        })));
+
+        let (output, envelope) = rig.run_json("clean");
+        assert_eq!(output.status.code(), Some(exit), "{code}: {envelope}");
+        assert_eq!(envelope["error"]["cause_code"], code, "{envelope}");
+        assert!(
+            !stdout_text(&output).contains(SENTINEL),
+            "{code}: the child's message is not in the envelope: {envelope}"
+        );
+        assert!(
+            !stderr_text(&output).contains(SENTINEL),
+            "{code}: nor in the events: {}",
+            stderr_text(&output)
+        );
+        assert_events_metadata_only(&output, &envelope);
+
+        let output = rig.run("clean", &[], false);
+        assert_eq!(output.status.code(), Some(exit), "{code}");
+        let stderr = stderr_text(&output);
+        assert!(!stderr.is_empty(), "{code}: plain mode reports on stderr");
+        assert!(
+            !stderr.contains(SENTINEL) && !stderr.contains("S3NT1NEL"),
+            "{code}: plain stderr never carries the child's message: {stderr}"
+        );
+        assert!(stdout_text(&output).is_empty(), "{code}: no result");
+    }
+
+    // The same holds for the preflight `models list` call.
+    let mut script = Script::default();
+    script.stub["models_list"] = json!({
+        "stdout": format!("{}\n", json!({"schema_version": 1, "ok": false, "error": {
+            "code": "invalid_config",
+            "message": SENTINEL,
+        }})),
+        "exit_code": 2,
+    });
+    let rig = make_rig(&script);
+    let (output, envelope) = rig.run_json("clean");
+    assert_failure(&output, &envelope, 2, "invalid_config", "prepare");
+    assert!(!stdout_text(&output).contains(SENTINEL), "{envelope}");
+    assert!(!stderr_text(&output).contains(SENTINEL));
+    let output = rig.run("clean", &[], false);
+    assert!(!stderr_text(&output).contains(SENTINEL));
+}
+
+#[test]
 fn stt_extra_stderr_is_discarded() {
     let rig = make_rig(&stub_with_file_behavior(json!({
         "stdout": format!("{}\n", json!({"schema_version":1,"ok":true,"result":{"text":"hi there","language":"en","audio_seconds":1.0}})),
@@ -1118,19 +1211,45 @@ fn stt_extra_stderr_is_discarded() {
 fn models_list_failures_happen_in_preflight() {
     // The transcription config is invalid: the sibling says so and the flow
     // stops before any inference.
+    let rig = make_rig(&Script::default());
+    rig.set_stub_behavior(
+        "models_list",
+        json!({
+            "stdout": format!(
+                "{}\n",
+                json!({"schema_version": 1, "ok": false, "error": {
+                    "code": "invalid_config",
+                    "message": "bad model entry",
+                    "location": {"file": rig.transcribe_yml(), "line": 4, "column": 2},
+                }})
+            ),
+            "exit_code": 2,
+        }),
+    );
+    let (output, envelope) = rig.run_json("clean");
+    assert_failure(&output, &envelope, 2, "invalid_config", "prepare");
+    assert_eq!(envelope["error"]["cause_code"], "invalid_config");
+    assert_eq!(
+        envelope["error"]["location"]["file"],
+        json!(rig.transcribe_yml().display().to_string())
+    );
+    assert_eq!(envelope["error"]["location"]["line"], 4);
+    assert_eq!(envelope["error"]["location"]["column"], 2);
+    assert!(rig.stub_file_report().is_none(), "no file call");
+    assert_eq!(rig.fake_calls(), 0);
+
+    // A location naming any other file is not the child's config: dropped,
+    // since its path could carry anything.
     let mut script = Script::default();
     script.stub["models_list"] = json!({
-        "stdout": "{\"schema_version\":1,\"ok\":false,\"error\":{\"code\":\"invalid_config\",\"message\":\"bad model entry\",\"location\":{\"file\":\"/cfg/transcribe.yml\",\"line\":4,\"column\":2}}}\n",
+        "stdout": "{\"schema_version\":1,\"ok\":false,\"error\":{\"code\":\"invalid_config\",\"message\":\"bad\",\"location\":{\"file\":\"/S3NT1NEL/transcribe.yml\",\"line\":4,\"column\":2}}}\n",
         "exit_code": 2,
     });
     let rig = make_rig(&script);
     let (output, envelope) = rig.run_json("clean");
     assert_failure(&output, &envelope, 2, "invalid_config", "prepare");
-    assert_eq!(envelope["error"]["cause_code"], "invalid_config");
-    assert_eq!(envelope["error"]["location"]["file"], "/cfg/transcribe.yml");
-    assert_eq!(envelope["error"]["location"]["line"], 4);
-    assert!(rig.stub_file_report().is_none(), "no file call");
-    assert_eq!(rig.fake_calls(), 0);
+    assert!(envelope["error"].get("location").is_none(), "{envelope}");
+    assert!(!stdout_text(&output).contains("S3NT1NEL"), "{envelope}");
 
     // The flow names a model the transcription config does not have.
     let rig2 = make_rig(&Script {

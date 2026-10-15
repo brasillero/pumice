@@ -149,6 +149,20 @@ impl StageError {
         self.location = Some(Box::new(location));
     }
 
+    /// Attaches `location` and prefixes the message with it in the
+    /// configuration-error style (`file:line:column: message`), so plain
+    /// mode names the position as `invalid_config` errors do.
+    pub fn locate(&mut self, location: crate::orchestrator::result::ErrorLocation) {
+        self.message = ConfigError::at_file(
+            location.file.clone(),
+            location.line,
+            location.column,
+            std::mem::take(&mut self.message),
+        )
+        .to_string();
+        self.set_location(location);
+    }
+
     /// A configuration error with its `file:line:column` position, shared by
     /// the orchestrator's own config errors and the modules'.
     pub fn invalid_config(error: &ConfigError) -> StageError {

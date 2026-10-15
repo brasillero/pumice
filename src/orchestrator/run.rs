@@ -699,12 +699,10 @@ impl Execution<'_> {
             SttFailure::Protocol(message) => {
                 StageError::new(stage_name, "transcription_protocol_error", message, 1)
             }
-            SttFailure::Module {
-                code,
-                message,
-                location,
-            } => {
-                let fallback = match code.as_str() {
+            SttFailure::Module { code, location } => {
+                // The child's own message is never forwarded (it could carry
+                // dictated text): a fixed message per recognized code.
+                let message = match code.as_str() {
                     "invalid_arguments" => "invalid arguments to the transcription module",
                     "invalid_config" => "the transcription configuration is invalid",
                     "invalid_input" | "input_too_large" | "audio_too_long"
@@ -720,15 +718,10 @@ impl Execution<'_> {
                     "model_not_found" => ("transcription_model_not_found", 2),
                     _ => ("transcription_engine_failed", 1),
                 };
-                let mut error = StageError::new(
-                    stage_name,
-                    code_out,
-                    message.unwrap_or_else(|| fallback.to_owned()),
-                    exit,
-                )
-                .with_cause(code);
+                let mut error =
+                    StageError::new(stage_name, code_out, message, exit).with_cause(code);
                 if let Some(location) = location {
-                    error.set_location(location);
+                    error.locate(location);
                 }
                 error
             }
