@@ -709,6 +709,7 @@ models:
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn catalog_entry_falls_back_to_xdg_data_home() {
         let tmp = tempfile::tempdir().unwrap();
@@ -729,6 +730,33 @@ models:
         assert_eq!(
             loaded.config.models[0].path,
             xdg.join("pumice")
+                .join("models")
+                .join("whisper-tiny-Q8_0.gguf")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn catalog_entry_falls_back_to_localappdata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_config(
+            &tmp,
+            r#"schema_version: 1
+models:
+  - id: tiny
+    catalog: whisper-tiny-q8_0
+"#,
+        );
+        let local = tmp.path().join("local");
+        let env_value = local.clone().into_os_string();
+        let loaded = load_with_env(Some(&path), |key| {
+            (key == "LOCALAPPDATA").then(|| env_value.clone())
+        })
+        .unwrap();
+        assert_eq!(
+            loaded.config.models[0].path,
+            local
+                .join("pumice")
                 .join("models")
                 .join("whisper-tiny-Q8_0.gguf")
         );

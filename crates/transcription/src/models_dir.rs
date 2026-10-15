@@ -74,6 +74,8 @@ mod tests {
         }
     }
 
+    // `/tmp/xdg` is only absolute on Unix hosts.
+    #[cfg(unix)]
     #[test]
     fn linux_honours_absolute_xdg_data_home() {
         let dir = default_models_dir_for(&env_of(&[("XDG_DATA_HOME", "/tmp/xdg")]), false, false);
@@ -117,6 +119,8 @@ mod tests {
         );
     }
 
+    // `/tmp/xdg` is only absolute on Unix hosts.
+    #[cfg(unix)]
     #[test]
     fn macos_honours_absolute_xdg_data_home() {
         let dir = default_models_dir_for(
