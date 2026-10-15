@@ -275,7 +275,7 @@ pub mod cpp {
         }
 
         fn contains_backend_modules(dir: &Path) -> bool {
-            std::fs::read_dir(dir).map_or(false, |entries| {
+            std::fs::read_dir(dir).is_ok_and(|entries| {
                 entries.flatten().any(|entry| {
                     let name = entry.file_name();
                     let name = name.to_string_lossy();
