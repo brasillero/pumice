@@ -206,20 +206,88 @@ pub mod cpp {
     }
 
     /// Name of the dlopen'd ggml CPU variant module (e.g. `haswell`), read
-    /// from /proc/self/maps. ggml picks the module by runtime CPU feature
-    /// scoring, and the safe bindings expose no direct "which variant" query;
-    /// the mapped file is the ground truth. `None` outside Linux or when no
-    /// variant module is mapped.
+    /// from /proc/self/maps. The safe bindings expose no direct "which
+    /// variant" query; the mapped file is the ground truth. `None` outside
+    /// Linux or when no variant module is mapped.
     #[cfg(target_os = "linux")]
     fn selected_cpu_variant() -> Option<String> {
         let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
-        maps.lines().find_map(|line| {
-            let path = line.split_whitespace().nth(5)?;
-            let file = path.rsplit('/').next()?;
-            file.strip_prefix("libggml-cpu-")
-                .and_then(|rest| rest.strip_suffix(".so"))
-                .map(str::to_string)
-        })
+        maps.lines().find_map(variant_from_maps_line)
+    }
+
+    /// Extracts the variant name from one /proc/self/maps line. The pathname
+    /// is everything after the five metadata columns (address, perms, offset,
+    /// dev, inode) and may itself contain spaces and end in " (deleted)" for
+    /// removed files, so it cannot be split on whitespace.
+    #[cfg(target_os = "linux")]
+    fn variant_from_maps_line(line: &str) -> Option<String> {
+        let path = maps_pathname(line)?;
+        let file = path.rsplit('/').next()?;
+        let file = file.strip_suffix(" (deleted)").unwrap_or(file);
+        file.strip_prefix("libggml-cpu-")
+            .and_then(|rest| rest.strip_suffix(".so"))
+            .map(str::to_string)
+    }
+
+    /// The pathname of one /proc/self/maps line: the remainder after the five
+    /// whitespace-separated metadata columns. Returns `None` for anonymous
+    /// mappings (no pathname).
+    #[cfg(target_os = "linux")]
+    fn maps_pathname(line: &str) -> Option<&str> {
+        let mut rest = line;
+        for _ in 0..5 {
+            rest = rest.trim_start();
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            rest = &rest[end..];
+        }
+        let path = rest.trim_start();
+        (!path.is_empty()).then_some(path)
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    mod maps_tests {
+        use super::*;
+
+        #[test]
+        fn variant_is_found_in_a_plain_mapping() {
+            let line = "7f8a1c000000-7f8a1d200000 r-xp 00000000 103:05 1234567 \
+                        /opt/pumice/lib/libggml-cpu-haswell.so";
+            assert_eq!(variant_from_maps_line(line).as_deref(), Some("haswell"));
+        }
+
+        #[test]
+        fn pathname_with_spaces_is_preserved() {
+            let line = "7f8a1c000000-7f8a1d200000 r-xp 00000000 103:05 1234567 \
+                        /tmp/stage with spaces/libggml-cpu-alderlake.so";
+            assert_eq!(variant_from_maps_line(line).as_deref(), Some("alderlake"));
+        }
+
+        #[test]
+        fn deleted_mapping_is_still_recognized() {
+            let line = "7f8a1c000000-7f8a1d200000 r-xp 00000000 103:05 1234567 \
+                        /opt/pumice/lib/libggml-cpu-x64.so (deleted)";
+            assert_eq!(variant_from_maps_line(line).as_deref(), Some("x64"));
+        }
+
+        #[test]
+        fn anonymous_mapping_has_no_variant() {
+            let line = "7f8a1c000000-7f8a1d200000 rw-p 00000000 00:00 0";
+            assert_eq!(variant_from_maps_line(line), None);
+        }
+
+        #[test]
+        fn non_module_path_has_no_variant() {
+            let line = "55d0f1200000-55d0f1221000 r-xp 00000000 103:05 7654321 \
+                        /opt/pumice/bin/pumice-transcribe";
+            assert_eq!(variant_from_maps_line(line), None);
+        }
+
+        #[test]
+        fn core_library_path_has_no_variant() {
+            let line = "7f8a1c000000-7f8a1d200000 r-xp 00000000 103:05 1234567 \
+                        /opt/pumice/lib/libggml-base.so.0";
+            assert_eq!(variant_from_maps_line(line), None);
+        }
     }
 
     /// Runtime CPU-variant backend initialization (`cpu-variants` feature,
