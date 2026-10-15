@@ -13,7 +13,9 @@ pub use service::{
     normalize_language, normalize_threads, resolve_model_id, transcribe_pcm_from_reader,
 };
 
-#[derive(Debug, Clone)]
+/// Options passed to the engine. No `Debug`: `prompt` is client text that must
+/// never reach a log by accident.
+#[derive(Clone, Default)]
 pub struct TranscriptionOptions {
     pub language: Option<String>,
     pub prompt: Option<String>,
@@ -36,10 +38,7 @@ pub enum EngineError {
 impl EngineError {
     pub fn to_error(self) -> Error {
         match self {
-            Self::Cancelled => Error::new(
-                error::ErrorCode::EngineFailed,
-                "transcription was cancelled",
-            ),
+            Self::Cancelled => Error::cancelled(),
             Self::Failed => Error::engine_failed(),
             Self::ModelLoadFailed => Error::model_load_failed(),
         }

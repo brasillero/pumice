@@ -13,6 +13,7 @@ pub enum ErrorCode {
     EngineFailed,
     ModelLoadFailed,
     ModelNotFound,
+    Cancelled,
     Internal,
 }
 
@@ -29,6 +30,7 @@ impl ErrorCode {
             Self::EngineFailed => "engine_failed",
             Self::ModelLoadFailed => "model_load_failed",
             Self::ModelNotFound => "model_not_found",
+            Self::Cancelled => "cancelled",
             Self::Internal => "internal",
         }
     }
@@ -147,6 +149,10 @@ impl Error {
             ErrorCode::ModelNotFound,
             format!("model file not found: {}", path.display()),
         )
+    }
+
+    pub fn cancelled() -> Self {
+        Self::new(ErrorCode::Cancelled, "transcription was cancelled")
     }
 
     pub fn internal(message: impl Into<String>) -> Self {

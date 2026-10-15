@@ -1,5 +1,6 @@
 use crate::audio::{
-    MAX_AUDIO_SECONDS, MAX_FILE_BYTES, decode_audio, normalize_and_validate, resample_to_target,
+    MAX_AUDIO_SECONDS, MAX_FILE_BYTES, decode_audio_with_cancel, normalize_and_validate,
+    resample_to_target,
 };
 use crate::config::{Config, validate_language};
 use crate::engine::{CancelToken, Engine};
@@ -19,11 +20,24 @@ pub struct TranscriptionResult {
 pub fn decode_audio_from_reader<R: Read + Send + Sync>(
     reader: R,
 ) -> Result<(Vec<f32>, f64), Error> {
+    decode_audio_from_reader_with_cancel(reader, &CancelToken::new())
+}
+
+/// [`decode_audio_from_reader`] that stops between decoder packets and between
+/// stages once `cancel` is set.
+pub fn decode_audio_from_reader_with_cancel<R: Read + Send + Sync>(
+    reader: R,
+    cancel: &CancelToken,
+) -> Result<(Vec<f32>, f64), Error> {
     let budgeted = BudgetReader::new(reader, MAX_FILE_BYTES);
-    let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decode_audio(budgeted)))
-        .map_err(|_| Error::invalid_input("audio decoding panicked"))?
-        .map_err(map_budget_error)?;
+    let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        decode_audio_with_cancel(budgeted, cancel)
+    }))
+    .map_err(|_| Error::invalid_input("audio decoding panicked"))?
+    .map_err(map_budget_error)?;
+    check_cancel(cancel)?;
     let resampled = resample_to_target(&decoded.samples, decoded.sample_rate)?;
+    check_cancel(cancel)?;
     let pcm = normalize_and_validate(resampled)?;
     let audio_seconds = pcm.len() as f64 / 16_000.0;
     Ok((pcm, audio_seconds))
@@ -50,8 +64,11 @@ pub fn transcribe_pcm_from_reader<R: Read + Send + Sync>(
     options: &TranscriptionOptions,
     cancel: &CancelToken,
 ) -> Result<TranscriptionResult, Error> {
-    let (pcm, audio_seconds) = decode_audio_from_reader(reader)?;
+    let (pcm, audio_seconds) = decode_audio_from_reader_with_cancel(reader, cancel)?;
+    check_cancel(cancel)?;
     let transcript = transcribe_pcm(engine, &pcm, options, cancel)?;
+    // A run that finished after cancellation is discarded, never published.
+    check_cancel(cancel)?;
     Ok(TranscriptionResult {
         transcript,
         audio_seconds,
@@ -132,6 +149,14 @@ pub fn normalize_threads(threads: Option<usize>) -> Result<i32, Error> {
         None => Ok(std::thread::available_parallelism()
             .map(|p| (p.get() as i32).min(MAX_THREADS))
             .unwrap_or(1)),
+    }
+}
+
+fn check_cancel(cancel: &CancelToken) -> Result<(), Error> {
+    if cancel.is_cancelled() {
+        Err(Error::cancelled())
+    } else {
+        Ok(())
     }
 }
 
