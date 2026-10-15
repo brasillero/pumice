@@ -150,11 +150,13 @@ and data directories) are trusted: the downloader does not validate them, on
 the grounds that a writer able to rename those can already replace anything
 the user runs. The file is renamed into place only when both the exact byte
 size and the catalog SHA-256 match, and the installed file is then reopened
-without following links and re-read and re-hashed against the catalog — a
-swap between hashing and rename removes the installed file and fails. On
-Unix the models directory is synced before success is reported, so the
-rename survives a power loss; on Windows there is no directory sync — the
-rename is the commit point.
+without following links — on Unix with `O_NOFOLLOW`, on Windows by opening
+the leaf with `FILE_FLAG_OPEN_REPARSE_POINT` so a symlink or junction is
+opened as itself and rejected — and re-read and re-hashed against the
+catalog: a swap between hashing and rename removes the installed file and
+fails. On Unix the models directory is synced before success is reported, so
+the rename survives a power loss; on Windows there is no directory sync —
+the rename is the commit point.
 
 On any error (network error, HTTP error status, wrong size, wrong hash,
 timeout) the partial file is deleted and nothing is left looking installed.
@@ -171,17 +173,21 @@ When the file is already installed and verifies, `models download` reports
 exists but fails verification (corrupt or modified), the command reports it
 and requires `--force` to replace it.
 
-Timeouts: 30 s to connect, 60 s of read stall, and an overall deadline of
-at least 10 minutes that grows with the model size
-(`max(10 min, size / 256 KiB per s)`). The deadline is applied to the whole
-HTTP request (ureq's overall request timeout), so it bounds DNS resolution,
-connecting, redirects, receiving the response headers and reading the body;
-it is also checked once more right before the verified file is renamed into
-place, so a transfer that only finished after the deadline is never
-installed. One caveat: the blocking DNS lookup itself cannot be interrupted,
-so a stalled resolver can overshoot the deadline slightly before the check
-runs. The connect and read-stall timeouts still bound their individual
-socket operations. The only request header is `User-Agent:
+Timeouts: 30 s to connect, and one overall per-download deadline of at
+least 10 minutes that grows with the model size
+(`max(10 min, size / 256 KiB per s)`). The deadline is a single absolute
+budget computed when the download starts: every HTTP request the download
+makes — including each redirect hop, which gets only the time remaining, so
+a chain of redirects cannot extend the budget — carries the remaining time
+as its overall timeout, and it bounds DNS resolution, connecting, receiving
+the response headers and reading the body. There is no separate read-stall
+limit. The deadline is an HTTP transfer/install-admission budget: disk
+writes, the post-install re-hash and the directory sync are not
+wall-clock-interruptible, and the budget is checked once more right before
+the verified file is renamed into place, so a transfer that only finished
+after the deadline is never installed. One caveat: the blocking DNS lookup
+itself cannot be interrupted, so a stalled resolver is only stopped once it
+returns. The only request header is `User-Agent:
 pumice-transcribe/<version>`; no credentials are sent.
 
 Progress (designed for a future UI, `arch-modules/D10`): with `--json`,
