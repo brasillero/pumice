@@ -21,6 +21,7 @@ use tokio::time::Instant;
 use pumice_relay::process::ProcessTree;
 
 use crate::orchestrator::cancel::{self, CancelGuard, CancelReason};
+use crate::orchestrator::flow::{AudioSource, Transcriber};
 use crate::orchestrator::result::ErrorLocation;
 
 /// Maximum stdout captured from the transcription child: 1 MiB.
@@ -266,6 +267,21 @@ impl Transcribe {
             code: error.code,
             location,
         })
+    }
+}
+
+/// The `pumice run` transport: one `file --json` subprocess per operation.
+impl Transcriber for Transcribe {
+    async fn transcribe(
+        &self,
+        audio: &AudioSource,
+        model: &str,
+        deadline: Instant,
+        cancel: &CancelGuard,
+    ) -> Result<TranscriptOutput, SttFailure> {
+        match audio {
+            AudioSource::File(path) => self.transcribe_file(path, model, deadline, cancel).await,
+        }
     }
 }
 

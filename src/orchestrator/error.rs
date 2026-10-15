@@ -183,17 +183,33 @@ impl StageError {
         stage_error
     }
 
-    /// The run was cancelled by a signal; the exit code follows the shell
-    /// convention (130 for Ctrl-C, 143 for SIGTERM).
+    /// The operation was cancelled. A signal follows the shell convention
+    /// (130 for Ctrl-C, 143 for SIGTERM) and carries no cause; a service's
+    /// own reasons keep the code `cancelled` and name themselves in
+    /// `cause_code`, so a presenter can tell a shutdown from a client that
+    /// went away.
     pub fn cancelled(
         stage: &'static str,
         reason: crate::orchestrator::cancel::CancelReason,
     ) -> StageError {
-        let message = match reason {
-            crate::orchestrator::cancel::CancelReason::Interrupt => "cancelled by Ctrl-C",
-            crate::orchestrator::cancel::CancelReason::Terminate => "cancelled by SIGTERM",
+        use crate::orchestrator::cancel::CancelReason;
+        let (message, cause) = match reason {
+            CancelReason::Interrupt => ("cancelled by Ctrl-C", None),
+            CancelReason::Terminate => ("cancelled by SIGTERM", None),
+            CancelReason::Shutdown => (
+                "cancelled because the service is shutting down",
+                Some("service_shutdown"),
+            ),
+            CancelReason::ClientDisconnected => (
+                "cancelled because the client disconnected",
+                Some("client_disconnected"),
+            ),
         };
-        StageError::new(stage, "cancelled", message, reason.exit_code())
+        let error = StageError::new(stage, "cancelled", message, reason.exit_code());
+        match cause {
+            Some(cause) => error.with_cause(cause),
+            None => error,
+        }
     }
 }
 
@@ -217,5 +233,32 @@ mod tests {
         assert_eq!(file_only.to_string(), "orchestrator.yml: cannot read");
         let bare = ConfigError::general("nothing at all");
         assert_eq!(bare.to_string(), "nothing at all");
+    }
+
+    #[test]
+    fn cancellation_reasons_stay_distinguishable() {
+        use crate::orchestrator::cancel::CancelReason;
+        use crate::orchestrator::result::stage;
+
+        // The P12 signal mapping is unchanged: no cause, shell exit codes.
+        let interrupt = StageError::cancelled(stage::RELAY, CancelReason::Interrupt);
+        assert_eq!(interrupt.code, "cancelled");
+        assert_eq!(interrupt.message, "cancelled by Ctrl-C");
+        assert_eq!(interrupt.exit, 130);
+        assert!(interrupt.cause_code.is_none());
+        let terminate = StageError::cancelled(stage::RELAY, CancelReason::Terminate);
+        assert_eq!(terminate.message, "cancelled by SIGTERM");
+        assert_eq!(terminate.exit, 143);
+        assert!(terminate.cause_code.is_none());
+
+        let shutdown = StageError::cancelled(stage::TRANSCRIPTION, CancelReason::Shutdown);
+        assert_eq!(shutdown.code, "cancelled");
+        assert_eq!(shutdown.stage, stage::TRANSCRIPTION);
+        assert_eq!(shutdown.cause_code.as_deref(), Some("service_shutdown"));
+        assert_eq!(shutdown.exit, 1);
+        let gone = StageError::cancelled(stage::RELAY, CancelReason::ClientDisconnected);
+        assert_eq!(gone.code, "cancelled");
+        assert_eq!(gone.cause_code.as_deref(), Some("client_disconnected"));
+        assert_eq!(gone.exit, 1);
     }
 }

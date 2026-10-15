@@ -15,9 +15,9 @@ use std::process::ExitCode;
 
 use crate::orchestrator::events::{self, EventWriter};
 use crate::orchestrator::result::{
-    MODULE, RunEnvelope, SCHEMA_VERSION, StageReports, Timings, stage,
+    MODULE, RunEnvelope, RunOutput, SCHEMA_VERSION, StageReports, Timings, stage,
 };
-use crate::orchestrator::run::{self, RunOutput, RunParams};
+use crate::orchestrator::run::{self, RunParams};
 
 const USAGE: &str = "\
 usage: pumice run <AUDIO> --flow <ID> [--config <FILE>] [--json]
