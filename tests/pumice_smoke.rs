@@ -396,7 +396,7 @@ fn transcribe_without_a_sibling_fails_with_an_install_message() {
         "names the problem: {stderr}"
     );
     assert!(
-        stderr.contains(&install.dir.display().to_string()),
+        stderr.contains(&user_facing(&install.dir)),
         "names the directory it looked in: {stderr}"
     );
 }
@@ -440,4 +440,17 @@ fn transcribe_neither_searches_path_nor_the_working_directory() {
         "no decoy may run: {:?}",
         output.stdout
     );
+}
+
+/// The install directory as `pumice` reports it: resolved (Windows expands
+/// short 8.3 names) and without the Windows verbatim `\\?\` prefix.
+fn user_facing(dir: &std::path::Path) -> String {
+    let text = dir
+        .canonicalize()
+        .expect("canonicalize install dir")
+        .display()
+        .to_string();
+    text.strip_prefix(r"\\?\")
+        .map(str::to_string)
+        .unwrap_or(text)
 }

@@ -149,11 +149,7 @@ fn transcribe_path() -> Result<PathBuf, ()> {
         return Err(());
     };
     if !path.is_file() {
-        let dir = path
-            .parent()
-            .map(Path::display)
-            .map(|dir| dir.to_string())
-            .unwrap_or_default();
+        let dir = path.parent().map(display_dir).unwrap_or_default();
         eprintln!(
             "error: pumice-transcribe is not installed next to pumice ({dir}); \
              install it with the Pumice transcription archive (see docs/transcription.md) \
@@ -162,6 +158,22 @@ fn transcribe_path() -> Result<PathBuf, ()> {
         return Err(());
     }
     Ok(path)
+}
+
+/// The directory as a user would type it: on Windows, `canonicalize` returns
+/// a verbatim path (`\\?\C:\...`, `\\?\UNC\server\share\...`), which is
+/// shown without the verbatim prefix.
+fn display_dir(dir: &Path) -> String {
+    let text = dir.display().to_string();
+    if cfg!(windows) {
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{rest}");
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            return rest.to_string();
+        }
+    }
+    text
 }
 
 fn sibling_transcribe_path() -> Option<PathBuf> {
