@@ -92,17 +92,16 @@ complete pair.
 
 ## Commands
 
-All commands accept `--config FILE`. Every command except `apply` supports
-`--json`, which wraps the result or error in an envelope
+All commands accept `--config FILE`. Every command supports `--json`, which
+wraps the result or error in an envelope
 `{"schema_version":1,"ok":bool,"result":…|,"error":{"code","message"}|}`.
-`apply`'s stdout is the transformed request JSON itself (or the envelope
-with `--json`).
+Without `--json`, `apply`'s stdout is the transformed request JSON itself.
 
 | Command | Purpose |
 | --- | --- |
 | `list [--json]` | Built-ins and configured formatters, marking the default |
 | `show <id> [--json]` | Print one definition as an editable YAML file |
-| `apply [--formatter ID] [--on-conflict reject\|append] [--request FILE\|-]` | Transform one request |
+| `apply [--formatter ID] [--on-conflict reject\|append] [--request FILE\|-] [--json]` | Transform one request |
 | `check-config [--json]` | Validate the configuration and exit |
 
 `show` prints a definition you can redirect to a file: built-ins get a
@@ -120,15 +119,19 @@ pumice format apply < request.json          # uses the configured `default`
 
 Reads one JSON request from the file given with `--request` (or stdin, the
 default), bounded to 1 MiB, and writes the transformed request JSON to
-stdout. Failed runs write nothing to stdout.
+stdout. Without `--json`, failed runs write nothing to stdout (the error goes
+to stderr); with `--json`, failures print the error envelope to stdout
+instead.
 
-**Conflict policy.** If the request already contains a non-empty
-`system` or `developer` message, `apply` refuses with the error
-`formatter_instruction_conflict`: the client's own instructions are never
-silently replaced or overridden. With `--on-conflict append` the existing
-instructions are kept and the formatter's message is inserted right after
-the leading `system`/`developer` messages, before the user content. Empty or
-whitespace-only instruction messages do not conflict.
+**Conflict policy.** If any `system` or `developer` message anywhere in the
+conversation — not just at the start — carries non-empty content, `apply`
+refuses with the error `formatter_instruction_conflict`: the client's own
+instructions are never silently replaced or overridden. The check is
+conservative: any non-empty content array conflicts, even one holding only
+empty text parts. Absent, null, empty-string and whitespace-only content do
+not conflict. With `--on-conflict append` the existing instructions are kept
+and the formatter's message is inserted right after the leading
+`system`/`developer` messages, before the user content.
 
 ## Exit codes
 
