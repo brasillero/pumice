@@ -1138,10 +1138,17 @@ flows:
         let tmp = tempfile::tempdir().unwrap();
         let xdg = tmp.path().join("xdg");
         let xdg_value = xdg.clone().into_os_string();
+        // The lookup's environment variable is platform-specific: APPDATA on
+        // Windows, XDG_CONFIG_HOME on Linux and macOS.
+        let base_key = if cfg!(windows) {
+            "APPDATA"
+        } else {
+            "XDG_CONFIG_HOME"
+        };
 
         // Without a per-user file the lookup names the missing file.
         let err = load_with_env(None, |key: &str| {
-            (key == "XDG_CONFIG_HOME").then(|| xdg_value.clone())
+            (key == base_key).then(|| xdg_value.clone())
         })
         .unwrap_err()
         .to_string();
@@ -1160,7 +1167,7 @@ flows:
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("orchestrator.yml"), VALID).unwrap();
         let loaded = load_with_env(None, |key: &str| {
-            (key == "XDG_CONFIG_HOME").then(|| xdg_value.clone())
+            (key == base_key).then(|| xdg_value.clone())
         })
         .unwrap();
         assert_eq!(loaded.config.flows.len(), 2);
