@@ -1,11 +1,11 @@
 ---
 title: P4b: transcription config file, model list and user guide
-state: In progress
+state: Done
 ticket: —
 branch: p4b-transcribe-config
-mr: —
+mr: PR #96
 start: 2026-10-14
-end: —
+end: 2026-10-14
 ---
 
-Follow-up to `p4-transcribe-cpu`, picking up the config and docs part of its deferred item: a `transcribe.yml` for `pumice-transcribe` with named local models, a default model, language and threads, validated with exact file and line on errors; `check-config` and `models list` commands with JSON output; and a user guide in `docs/transcription.md`. Kimi (`kimi-k2.7-code-highspeed`) writes the code, Codex reviews and revises, the orchestrator does the final review. Implementation starting.
+Follow-up to `p4-transcribe-cpu`: `pumice-transcribe` reads a strict `transcribe.yml` (named models, default model, language, threads; errors with file:line:column), selects models with `--model ID` or `--model-file PATH`, and has `check-config` and `models list` with JSON output. Example config at the root and a user guide in `docs/transcription.md`. Implemented by Kimi (`kimi-k2.7-code-highspeed`), reviewed and revised by Codex (one round, fixes in `352f03e`), final review by the orchestrator: approved. Merged through PR #96; the release archive and Windows/macOS builds continue in #2.
