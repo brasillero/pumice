@@ -1,8 +1,8 @@
 //! The `pumice-format` CLI: `list`, `show`, `apply` and `check-config`.
 //!
 //! Designed so a UI can drive it later (arch-modules/D10): every command
-//! supports `--json` (except `apply`, whose stdout already is the
-//! transformed request JSON), one-shot runs exit after printing, stdout
+//! supports `--json` (`apply` without it prints the bare transformed
+//! request JSON), one-shot runs exit after printing, stdout
 //! carries only the result, and exit codes are 0 (success), 2 (invalid
 //! arguments, config or input — including an instruction conflict) and 1
 //! (operational failure). Errors never contain request text.
@@ -15,7 +15,7 @@ use std::process::ExitCode;
 use clap::{Args as ClapArgs, CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde::Serialize;
 
-use crate::builtins::{BUILTIN_CLEAN, builtin_clean};
+use crate::builtins::{BUILTIN_CLEAN, HANDY_MIT_NOTICE, builtin_clean};
 use crate::config::{self, Config, ConfigSource, LoadedConfig};
 use crate::definition::FormatterDefinition;
 use crate::error::{Error, ErrorCode, JsonError};
@@ -409,20 +409,32 @@ fn build_list(config: &Config) -> Vec<ListEntry> {
 
 /// Renders a built-in definition as an editable file: `show builtin:clean >
 /// my.yaml` must produce a valid definition the user can register, so the
-/// reserved `builtin:` id is replaced by a placeholder and the Handy
-/// attribution travels with the copy.
+/// reserved `builtin:` id is replaced by a placeholder. The full Handy MIT
+/// notice travels with the copy, as the license requires.
 fn render_builtin_definition(definition: &FormatterDefinition) -> String {
-    render_definition_yaml(
-        definition,
-        "my-clean",
+    let mut header = String::from(
         "# Pumice formatter definition (schema_version: 1).\n\
          # Adapted from the default cleanup prompt of Handy\n\
-         # (https://github.com/cjpais/Handy, MIT).\n\
-         #\n\
+         # (https://github.com/cjpais/Handy), used under the MIT license:\n\
+         #\n",
+    );
+    for line in HANDY_MIT_NOTICE.lines() {
+        // Keep blank license lines bare so they stay valid YAML comments.
+        if line.is_empty() {
+            header.push_str("#\n");
+        } else {
+            header.push_str("# ");
+            header.push_str(line);
+            header.push('\n');
+        }
+    }
+    header.push_str(
+        "#\n\
          # Choose a new id below (lowercase letters, digits and '-'; ids\n\
          # starting with \"builtin:\" are reserved), then register the file\n\
          # in formatter.yml.",
-    )
+    );
+    render_definition_yaml(definition, "my-clean", &header)
 }
 
 /// Renders a registered definition back into the file's own shape, noting
@@ -445,52 +457,28 @@ fn render_definition_yaml(definition: &FormatterDefinition, id: &str, header: &s
         out.push_str(line);
         out.push('\n');
     }
-    out.push_str("schema_version: 1\n");
-    out.push_str(&format!("id: {id}\n"));
-    out.push_str(&format!(
-        "description: {}\n",
-        yaml_scalar(&definition.description)
-    ));
-    // Clip/keep the exact trailing-newline shape of the original text.
-    let trailing_breaks = definition
-        .system
-        .chars()
-        .rev()
-        .take_while(|ch| *ch == '\n')
-        .count();
-    let block = match trailing_breaks {
-        0 => "|-",
-        1 => "|",
-        _ => "|+",
+    let rendered = RenderedDefinition {
+        schema_version: 1,
+        id,
+        description: &definition.description,
+        system: &definition.system,
     };
-    out.push_str(&format!("system: {block}\n"));
-    for line in definition.system.split('\n') {
-        out.push_str("  ");
-        out.push_str(line);
-        out.push('\n');
-    }
+    out.push_str(
+        &serde_saphyr::to_string(&rendered).expect("a formatter definition always serializes"),
+    );
     out
 }
 
-/// Plain YAML scalar when safe, double-quoted (JSON escaping is valid YAML)
-/// otherwise.
-fn yaml_scalar(text: &str) -> String {
-    let plain_safe = !text.is_empty()
-        && text.trim() == text
-        && !text.contains(": ")
-        && !text.contains(" #")
-        && text.bytes().all(|b| {
-            b.is_ascii_alphanumeric()
-                || matches!(
-                    b,
-                    b' ' | b'.' | b',' | b'(' | b')' | b'-' | b'/' | b'\'' | b'+' | b'_'
-                )
-        });
-    if plain_safe {
-        text.to_owned()
-    } else {
-        serde_json::to_string(text).unwrap()
-    }
+/// The YAML shape of one definition file. `show` serializes through
+/// serde-saphyr — the same crate that loads definitions — so the output is
+/// always a valid file that reloads to the exact same text, including
+/// leading whitespace, carriage returns and trailing newlines.
+#[derive(Serialize)]
+struct RenderedDefinition<'a> {
+    schema_version: u32,
+    id: &'a str,
+    description: &'a str,
+    system: &'a str,
 }
 
 fn print_list(entries: &[ListEntry], json: bool, stdout: &mut dyn Write) -> io::Result<()> {
@@ -602,34 +590,26 @@ fn json_flag(args: &Args) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn yaml_scalar_stays_plain_when_safe() {
-        assert_eq!(
-            yaml_scalar("Light dictation correction"),
-            "Light dictation correction"
-        );
-        assert_eq!(yaml_scalar("clean-v2 notes (pt)"), "clean-v2 notes (pt)");
-    }
-
-    #[test]
-    fn yaml_scalar_quotes_colons_and_hashes() {
-        assert_eq!(
-            yaml_scalar("Clean up: fix spelling #1"),
-            serde_json::to_string("Clean up: fix spelling #1").unwrap()
-        );
-        assert_eq!(
-            yaml_scalar("trailing "),
-            serde_json::to_string("trailing ").unwrap()
-        );
-        assert_eq!(yaml_scalar(""), serde_json::to_string("").unwrap());
+    /// `show` output must be a definition file that reloads to the exact
+    /// same text it was rendered from.
+    fn assert_show_round_trip(definition: &FormatterDefinition) {
+        let rendered = render_file_definition(definition, Path::new("formatters/x.yml"));
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("x.yml");
+        std::fs::write(&path, &rendered).unwrap();
+        let loaded = crate::load_definition_file(&path).unwrap();
+        assert_eq!(&loaded, definition, "rendered:\n{rendered}");
     }
 
     #[test]
     fn builtin_render_carries_a_new_id_placeholder() {
         let rendered = render_builtin_definition(&builtin_clean());
-        assert!(rendered.contains("id: my-clean\n"), "{rendered}");
+        assert!(rendered.contains("id: my-clean"), "{rendered}");
         assert!(rendered.contains("Handy"), "attribution kept: {rendered}");
-        assert!(rendered.contains("system: |\n"), "{rendered}");
+        assert!(
+            rendered.contains("# Copyright (c) 2025 CJ Pais"),
+            "full MIT notice kept: {rendered}"
+        );
         // The rendered copy is a valid definition under its placeholder id.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("my.yaml");
@@ -647,11 +627,51 @@ mod tests {
             system: "Rule one.\nRule two.".to_owned(),
         };
         let rendered = render_file_definition(&definition, Path::new("formatters/clean.yml"));
-        assert!(rendered.contains("id: clean\n"), "{rendered}");
+        assert!(rendered.contains("id: clean"), "{rendered}");
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("clean.yml");
         std::fs::write(&path, &rendered).unwrap();
         let loaded = crate::load_definition_file(&path).unwrap();
         assert_eq!(loaded, definition);
+    }
+
+    #[test]
+    fn show_round_trips_leading_whitespace_lines() {
+        assert_show_round_trip(&FormatterDefinition {
+            id: "indent".to_owned(),
+            description: "Indented first line".to_owned(),
+            system: "  first\nsecond".to_owned(),
+        });
+    }
+
+    #[test]
+    fn show_round_trips_embedded_carriage_returns() {
+        assert_show_round_trip(&FormatterDefinition {
+            id: "crlf".to_owned(),
+            description: "Carriage returns".to_owned(),
+            system: "Rule\r\nSecond\rline".to_owned(),
+        });
+    }
+
+    #[test]
+    fn show_round_trips_trailing_blank_lines() {
+        assert_show_round_trip(&FormatterDefinition {
+            id: "trailing".to_owned(),
+            description: "Trailing blank lines".to_owned(),
+            system: "Rule\n\n".to_owned(),
+        });
+        assert_show_round_trip(&FormatterDefinition {
+            id: "no-trailing".to_owned(),
+            description: "No trailing newline".to_owned(),
+            system: "Rule".to_owned(),
+        });
+    }
+
+    #[test]
+    fn show_round_trips_builtin_clean_exactly() {
+        assert_show_round_trip(&FormatterDefinition {
+            id: "clean".to_owned(),
+            ..builtin_clean()
+        });
     }
 }

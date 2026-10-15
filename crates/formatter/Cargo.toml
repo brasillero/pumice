@@ -16,7 +16,9 @@ path = "src/main.rs"
 [dependencies]
 clap = { workspace = true }
 serde = { workspace = true }
-serde-saphyr = { workspace = true }
+# serialize: `show` renders definitions back to YAML with the same crate
+# that loads them, instead of hand-writing YAML text.
+serde-saphyr = { workspace = true, features = ["serialize"] }
 serde_json = { workspace = true }
 
 [dev-dependencies]

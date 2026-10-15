@@ -140,6 +140,13 @@ class PackageNpmTests(unittest.TestCase):
             members["package/LICENSE"],
             (REPO_ROOT / "LICENSE").read_bytes(),
         )
+        self.assertEqual(
+            members["package/THIRD_PARTY_NOTICES.md"],
+            (REPO_ROOT / "crates" / "formatter" / "THIRD_PARTY_NOTICES.md").read_bytes(),
+        )
+        self.assertIn(
+            b"Copyright (c) 2025 CJ Pais", members["package/THIRD_PARTY_NOTICES.md"]
+        )
 
     def test_native_tarballs_have_exact_binary_and_selectors(self):
         self.pack()
@@ -154,6 +161,10 @@ class PackageNpmTests(unittest.TestCase):
             self.assertEqual(manifest["cpu"], [npm_cpu])
             binary = members[f"package/bin/{executable}"]
             self.assertEqual(binary, b"#!/bin/sh\necho pumice %s\n")
+            self.assertIn(
+                b"Copyright (c) 2025 CJ Pais",
+                members["package/THIRD_PARTY_NOTICES.md"],
+            )
 
     def test_missing_archive_fails(self):
         (self.dist / package_release.archive_name(VERSION, "aarch64-apple-darwin")).unlink()

@@ -55,4 +55,6 @@ In Handy, set the post-processing endpoint to `http://127.0.0.1:7567/v1`
 
 - `pumice` (or `pumice.exe`) — the service executable
 - `LICENSE` — MIT license
+- `THIRD_PARTY_NOTICES.md` — license notices for adapted third-party content
+  in the executable (the Handy-derived built-in formatter prompt)
 - `relay.example.yml` — commented reference configuration (optional)

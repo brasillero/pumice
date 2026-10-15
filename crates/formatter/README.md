@@ -39,7 +39,10 @@ instructions), `--json` envelopes and exit codes.
 The built-in `builtin:clean` formatter is adapted from the default
 transcript-cleanup prompt of
 [Handy](https://github.com/cjpais/Handy) by CJ Pais, used under the
-[MIT license](https://github.com/cjpais/Handy/blob/master/LICENSE) with
-attribution. The adaptation rewords the prompt as a system message for
-dictation that arrives as the user message and drops the `<transcript>`
-envelope wording (p11-formatter/D1).
+[MIT license](https://github.com/cjpais/Handy/blob/main/LICENSE)
+(`Copyright (c) 2025 CJ Pais`). The full license text is in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) in this crate, which ships
+with every release archive and npm package, and is repeated as YAML comments
+in the output of `show builtin:clean`. The adaptation rewords the prompt as a
+system message for dictation that arrives as the user message and drops the
+`<transcript>` envelope wording (p11-formatter/D1).

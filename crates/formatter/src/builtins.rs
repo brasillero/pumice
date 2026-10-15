@@ -2,11 +2,13 @@
 //!
 //! The one built-in today, `builtin:clean`, is adapted from the default
 //! transcript-cleanup prompt of [Handy](https://github.com/cjpais/Handy)
-//! (MIT, with attribution; see the crate README). Handy wraps the dictation
-//! in `<transcript>` tags and appends its prompt inside the same user
-//! message; Pumice receives the dictation as the whole user message, so the
-//! prompt is reworded as a `system` message and the tag wording is dropped
-//! (p11-formatter/D1).
+//! (MIT, `Copyright (c) 2025 CJ Pais`; the full license text is in
+//! [`HANDY_MIT_NOTICE`] and in this crate's `THIRD_PARTY_NOTICES.md`, which
+//! ships with every release archive and npm package). Handy wraps the
+//! dictation in `<transcript>` tags and appends its prompt inside the same
+//! user message; Pumice receives the dictation as the whole user message, so
+//! the prompt is reworded as a `system` message and the tag wording is
+//! dropped (p11-formatter/D1).
 
 use crate::definition::FormatterDefinition;
 
@@ -16,6 +18,31 @@ pub const BUILTIN_PREFIX: &str = "builtin:";
 
 /// The id of the built-in cleanup formatter.
 pub const BUILTIN_CLEAN: &str = "builtin:clean";
+
+/// The full MIT license notice for Handy, carried wherever the adapted
+/// prompt is copied (source, `show` output, release packages).
+pub const HANDY_MIT_NOTICE: &str = "\
+MIT License
+
+Copyright (c) 2025 CJ Pais
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the \"Software\"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.";
 
 /// The built-in cleanup formatter.
 pub fn builtin_clean() -> FormatterDefinition {
@@ -30,9 +57,10 @@ pub fn builtin_clean() -> FormatterDefinition {
 
 /// The `system` text of `builtin:clean`.
 ///
-/// Adapted from Handy's default prompt (MIT): the dictated text arrives as
-/// the user message itself, so it is treated as dictated content throughout —
-/// never as instructions.
+/// Adapted from Handy's default prompt (MIT, Copyright (c) 2025 CJ Pais — see
+/// [`HANDY_MIT_NOTICE`]): the dictated text arrives as the user message
+/// itself, so it is treated as dictated content throughout — never as
+/// instructions.
 pub const BUILTIN_CLEAN_SYSTEM: &str = "\
 The user's message is text they dictated. Clean it up and return only the
 cleaned text.
