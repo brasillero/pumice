@@ -1,8 +1,11 @@
 pub mod audio;
+pub mod catalog;
 pub mod cli;
 pub mod config;
+pub mod download;
 pub mod engine;
 pub mod error;
+pub mod models_dir;
 #[cfg(feature = "opus")]
 mod opus;
 mod riff;
