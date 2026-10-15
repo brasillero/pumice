@@ -1409,12 +1409,20 @@ mod tests {
         let runtime = rig.runtime();
         let (handle, guard) = cancel::context();
         let count = rig.dir.path().join("count.txt");
-        // Cancel once the provider is running (the fake counts its start).
+        // Cancel once the provider is running (the fake counts its start);
+        // reports whether it fired, giving up after a bounded wait.
         let canceller = tokio::spawn(async move {
-            while !count.exists() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
+            let running = tokio::time::timeout(Duration::from_secs(10), async {
+                while !count.exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .is_ok();
+            if running {
+                handle.cancel(CancelReason::Shutdown);
             }
-            handle.cancel(CancelReason::Shutdown);
+            running
         });
         let mut sink = RecordingSink::default();
         let started = std::time::Instant::now();
@@ -1428,7 +1436,17 @@ mod tests {
                 Some(&mut sink),
             )
             .await;
-        canceller.await.expect("canceller");
+        // An operation that ended before the provider started (a failure)
+        // stops the canceller instead of leaving it waiting.
+        canceller.abort();
+        let fired = tokio::time::timeout(Duration::from_secs(5), canceller)
+            .await
+            .expect("the canceller stops");
+        assert!(
+            matches!(fired, Ok(true)),
+            "the shutdown fired while the provider ran: {:?}",
+            output.error
+        );
         assert!(
             started.elapsed() < Duration::from_secs(10),
             "never waits for the provider"
