@@ -20,6 +20,12 @@ language: pt
 # Optional default thread count for inference (1-32).
 threads: 8
 
+# Optional HTTP server settings. Only used by `pumice-transcribe serve`.
+server:
+  # Port to listen on. The server always binds 127.0.0.1 only.
+  # Override with: pumice-transcribe serve --port PORT
+  port: 17568
+
 # Explicit model list. Nothing is enabled implicitly.
 models:
   # whisper-large-v3-turbo-Q8_0.gguf: larger, slower, more accurate.

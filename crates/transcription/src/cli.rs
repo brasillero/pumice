@@ -1,14 +1,18 @@
-use crate::audio::{MAX_FILE_BYTES, decode_audio, normalize_and_validate, resample_to_target};
-use crate::config::{self, Config, ConfigSource, LoadedConfig, validate_language};
-use crate::engine::Engine;
+use crate::config::{self, Config, ConfigSource, LoadedConfig};
+use crate::engine::{CancelToken, Engine};
+use crate::service::{
+    decode_audio_from_reader, normalize_language, normalize_threads, resolve_model_id,
+    transcribe_pcm,
+};
 use crate::{Error, ErrorCode, JsonError, TranscriptionOptions};
 use clap::error::ErrorKind;
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use serde::Serialize;
 use std::ffi::OsString;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Parser, Debug)]
@@ -30,6 +34,8 @@ pub struct Args {
 pub enum Command {
     /// Transcribe an audio file.
     File(FileArgs),
+    /// Serve the HTTP API.
+    Serve(ServeArgs),
     /// Validate the configuration file and exit.
     CheckConfig(CheckConfigArgs),
     /// Inspect configured models.
@@ -73,6 +79,17 @@ pub struct CheckConfigArgs {
     /// Output a JSON envelope instead of plain text.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(ClapArgs, Debug)]
+pub struct ServeArgs {
+    /// Model id to serve. Defaults to the configured `default_model`.
+    #[arg(long, value_name = "ID")]
+    model: Option<String>,
+
+    /// Port to listen on. Overrides `server.port` in the configuration file.
+    #[arg(long, value_name = "PORT")]
+    port: Option<u16>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -126,6 +143,7 @@ enum CommandOutput {
     Transcription(SuccessOutput),
     CheckConfig(Option<PathBuf>),
     ModelsList(Vec<ModelListEntry>),
+    None,
 }
 
 impl From<SuccessOutput> for serde_json::Value {
@@ -201,6 +219,7 @@ where
                 }
             }
         }
+        Ok(CommandOutput::None) => ExitCode::SUCCESS,
         Err(e) => match print_error(&e, json, &mut stdout, &mut stderr) {
             Ok(()) => exit_code(&e),
             Err(_) => {
@@ -273,6 +292,10 @@ where
             let output = run_file(file_args, &loaded.config, make_engine)?;
             Ok(CommandOutput::Transcription(output))
         }
+        Command::Serve(serve_args) => {
+            run_serve(serve_args, &loaded.config, make_engine)?;
+            Ok(CommandOutput::None)
+        }
         Command::CheckConfig(_) => Ok(CommandOutput::CheckConfig(match loaded.source {
             ConfigSource::File(path) => Some(path),
             ConfigSource::NoFile => None,
@@ -283,6 +306,45 @@ where
     }
 }
 
+fn run_serve<F>(serve_args: ServeArgs, config: &Config, make_engine: F) -> Result<(), Error>
+where
+    F: FnOnce(&Path, i32) -> Result<Box<dyn Engine>, Error>,
+{
+    let threads = normalize_threads(config.threads)?;
+    let (served_model_id, model_path) =
+        resolve_model_id(config, serve_args.model.as_deref(), None)?;
+
+    if !model_path.is_file() {
+        return Err(Error::model_not_found(&model_path));
+    }
+
+    let port = serve_args.port.or(config.server_port).ok_or_else(|| {
+        Error::invalid_arguments(
+            "no port specified; use --port PORT or set server.port in transcribe.yml",
+        )
+    })?;
+
+    let start = Instant::now();
+    let engine = make_engine(&model_path, threads)?;
+    let load_ms = start.elapsed().as_millis();
+    eprintln!("loaded model `{served_model_id}` in {load_ms} ms");
+
+    let rt = tokio::runtime::Runtime::new().map_err(|e| Error::internal(format!("{e}")))?;
+    rt.block_on(async {
+        let handle = crate::server::serve(
+            port,
+            Arc::from(engine),
+            served_model_id,
+            config.language.clone(),
+            crate::server::shutdown_signal(),
+        )
+        .await
+        .map_err(|e| Error::internal(format!("failed to bind: {e}")))?;
+        let _ = handle.await;
+        Ok(())
+    })
+}
+
 fn load_config(args: &Args) -> Result<LoadedConfig, Error> {
     config::load(args.config.as_deref()).map_err(Error::invalid_config)
 }
@@ -291,24 +353,22 @@ fn run_file<F>(file_args: FileArgs, config: &Config, make_engine: F) -> Result<S
 where
     F: FnOnce(&Path, i32) -> Result<Box<dyn Engine>, Error>,
 {
-    let language = effective_language(file_args.language, config.language.clone())?;
-    let threads = effective_threads(file_args.threads, config.threads)?;
+    let language = normalize_language(file_args.language.or_else(|| config.language.clone()))?;
+    let threads = normalize_threads(file_args.threads.or(config.threads))?;
 
-    let model_path = resolve_model_path(config, file_args.model, file_args.model_file)?;
+    let (_model_id, model_path) = resolve_model_id(
+        config,
+        file_args.model.as_deref(),
+        file_args.model_file.as_deref(),
+    )?;
 
     let file = open_regular_file(&file_args.audio)?;
     let metadata = file.metadata()?;
-    if metadata.len() > MAX_FILE_BYTES {
+    if metadata.len() > crate::audio::MAX_FILE_BYTES {
         return Err(Error::input_too_large(metadata.len()));
     }
 
-    let budgeted = BudgetReader::new(file, MAX_FILE_BYTES);
-    let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decode_audio(budgeted)))
-        .map_err(|_| Error::invalid_input("audio decoding panicked"))?
-        .map_err(map_budget_error)?;
-    let resampled = resample_to_target(&decoded.samples, decoded.sample_rate)?;
-    let pcm = normalize_and_validate(resampled)?;
-    let audio_seconds = pcm.len() as f64 / 16_000.0;
+    let (pcm, audio_seconds) = decode_audio_from_reader(file)?;
 
     if !model_path.is_file() {
         return Err(Error::model_not_found(&model_path));
@@ -319,11 +379,15 @@ where
     let model_load_ms = start.elapsed().as_millis() as u64;
 
     let start = Instant::now();
-    let transcript = engine.transcribe(
+    let transcript = transcribe_pcm(
+        engine.as_ref(),
         &pcm,
         &TranscriptionOptions {
             language: language.clone(),
+            prompt: None,
+            temperature: None,
         },
+        &CancelToken::new(),
     )?;
     let transcription_ms = start.elapsed().as_millis() as u64;
 
@@ -334,61 +398,6 @@ where
         model_load_ms,
         transcription_ms,
     })
-}
-
-fn resolve_model_path(
-    config: &Config,
-    model_id: Option<String>,
-    model_file: Option<PathBuf>,
-) -> Result<PathBuf, Error> {
-    match (model_id, model_file) {
-        (Some(_), Some(_)) => Err(Error::invalid_arguments(
-            "--model and --model-file are mutually exclusive",
-        )),
-        (None, Some(path)) => Ok(path),
-        (Some(id), None) => {
-            let entry = config
-                .models
-                .iter()
-                .find(|m| m.id == id)
-                .ok_or_else(|| Error::invalid_arguments(unknown_model_message(&id, config)))?;
-            Ok(entry.path.clone())
-        }
-        (None, None) => match &config.default_model {
-            Some(id) => {
-                let entry = config
-                    .models
-                    .iter()
-                    .find(|m| m.id == *id)
-                    .expect("default_model was validated against models");
-                Ok(entry.path.clone())
-            }
-            None => Err(Error::invalid_arguments(
-                "no model selected; use --model ID, --model-file PATH, or set default_model in transcribe.yml",
-            )),
-        },
-    }
-}
-
-fn unknown_model_message(id: &str, config: &Config) -> String {
-    let ids: Vec<&str> = config.models.iter().map(|m| m.id.as_str()).collect();
-    let list = if ids.is_empty() {
-        "(none configured)".to_string()
-    } else {
-        ids.join(", ")
-    };
-    format!("unknown model id `{id}`; configured ids: {list}")
-}
-
-fn effective_language(
-    cli: Option<String>,
-    from_config: Option<String>,
-) -> Result<Option<String>, Error> {
-    normalize_language(cli.or(from_config))
-}
-
-fn effective_threads(cli: Option<usize>, from_config: Option<usize>) -> Result<i32, Error> {
-    normalize_threads(cli.or(from_config))
 }
 
 fn build_model_list(config: &Config) -> Vec<ModelListEntry> {
@@ -446,53 +455,6 @@ fn open_with_nonblock_on_unix(path: &Path) -> Result<std::fs::File, Error> {
 #[cfg(not(unix))]
 fn open_with_nonblock_on_unix(path: &Path) -> Result<std::fs::File, Error> {
     std::fs::File::open(path).map_err(Error::from)
-}
-
-struct BudgetReader<R> {
-    inner: R,
-    budget: u64,
-    read: u64,
-    overshot: bool,
-}
-
-impl<R> BudgetReader<R> {
-    fn new(inner: R, budget: u64) -> Self {
-        Self {
-            inner,
-            budget,
-            read: 0,
-            overshot: false,
-        }
-    }
-}
-
-impl<R: Read> Read for BudgetReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.overshot {
-            return Err(io::Error::other("byte budget exceeded"));
-        }
-        if self.read >= self.budget {
-            let mut probe = [0u8; 1];
-            let n = self.inner.read(&mut probe)?;
-            if n == 0 {
-                return Ok(0);
-            }
-            self.overshot = true;
-            return Err(io::Error::other("byte budget exceeded"));
-        }
-        let max = ((self.budget - self.read) as usize).min(buf.len());
-        let n = self.inner.read(&mut buf[..max])?;
-        self.read += n as u64;
-        Ok(n)
-    }
-}
-
-fn map_budget_error(err: Error) -> Error {
-    if err.code == ErrorCode::InvalidInput && err.message.contains("byte budget exceeded") {
-        Error::input_too_large(MAX_FILE_BYTES)
-    } else {
-        err
-    }
 }
 
 pub fn print_success(output: &SuccessOutput, json: bool, stdout: &mut dyn Write) -> io::Result<()> {
@@ -614,6 +576,7 @@ pub fn exit_code(error: &Error) -> ExitCode {
         ErrorCode::EngineNotAvailable
         | ErrorCode::EngineFailed
         | ErrorCode::ModelLoadFailed
+        | ErrorCode::Cancelled
         | ErrorCode::Internal => 1,
     };
     ExitCode::from(code)
@@ -622,33 +585,11 @@ pub fn exit_code(error: &Error) -> ExitCode {
 fn json_flag(args: &Args) -> bool {
     match &args.command {
         Command::File(args) => args.json,
+        Command::Serve(_) => false,
         Command::CheckConfig(args) => args.json,
         Command::Models {
             command: ModelsCommand::List(args),
         } => args.json,
-    }
-}
-
-fn normalize_language(language: Option<String>) -> Result<Option<String>, Error> {
-    let Some(lang) = language else {
-        return Ok(None);
-    };
-    validate_language(&lang)
-        .map(Some)
-        .map_err(Error::invalid_arguments)
-}
-
-fn normalize_threads(threads: Option<usize>) -> Result<i32, Error> {
-    const MAX_THREADS: i32 = 32;
-    match threads {
-        Some(0) => Err(Error::invalid_arguments("--threads must be at least 1")),
-        Some(n) if n > MAX_THREADS as usize => {
-            Err(Error::invalid_arguments("--threads must be at most 32"))
-        }
-        Some(n) => Ok(n as i32),
-        None => Ok(std::thread::available_parallelism()
-            .map(|p| (p.get() as i32).min(MAX_THREADS))
-            .unwrap_or(1)),
     }
 }
 
@@ -715,80 +656,5 @@ mod tests {
         let mut stdout = FailingWriter;
         let mut stderr = Vec::new();
         assert!(print_error(&error, true, &mut stdout, &mut stderr).is_err());
-    }
-
-    #[test]
-    fn normalize_language_accepts_supported_code() {
-        assert_eq!(
-            normalize_language(Some("pt".to_string())).unwrap(),
-            Some("pt".to_string())
-        );
-    }
-
-    #[test]
-    fn normalize_language_uppercase_is_normalized() {
-        assert_eq!(
-            normalize_language(Some("PT".to_string())).unwrap(),
-            Some("pt".to_string())
-        );
-    }
-
-    #[test]
-    fn normalize_language_rejects_non_iso_code() {
-        assert_eq!(
-            normalize_language(Some("portuguese".to_string()))
-                .unwrap_err()
-                .code,
-            ErrorCode::InvalidArguments
-        );
-    }
-
-    #[test]
-    fn normalize_language_rejects_unknown_code() {
-        assert_eq!(
-            normalize_language(Some("zz".to_string())).unwrap_err().code,
-            ErrorCode::InvalidArguments
-        );
-    }
-
-    #[test]
-    fn normalize_threads_caps_default() {
-        let threads = normalize_threads(None).unwrap();
-        assert!((1..=32).contains(&threads));
-    }
-
-    #[test]
-    fn budget_reader_one_under_limit_reads_all() {
-        let data = vec![0u8; MAX_FILE_BYTES as usize - 1];
-        let mut reader = BudgetReader::new(std::io::Cursor::new(&data), MAX_FILE_BYTES);
-        let mut out = Vec::new();
-        reader.read_to_end(&mut out).unwrap();
-        assert_eq!(out.len(), data.len());
-    }
-
-    #[test]
-    fn budget_reader_exact_limit_reads_all() {
-        let data = vec![0u8; MAX_FILE_BYTES as usize];
-        let mut reader = BudgetReader::new(std::io::Cursor::new(&data), MAX_FILE_BYTES);
-        let mut out = Vec::new();
-        reader.read_to_end(&mut out).unwrap();
-        assert_eq!(out.len(), data.len());
-    }
-
-    #[test]
-    fn budget_reader_one_over_limit_rejects() {
-        let data = vec![0u8; MAX_FILE_BYTES as usize + 1];
-        let mut reader = BudgetReader::new(std::io::Cursor::new(&data), MAX_FILE_BYTES);
-        let mut out = Vec::new();
-        let err = reader.read_to_end(&mut out).unwrap_err();
-        assert!(err.to_string().contains("byte budget exceeded"));
-    }
-
-    #[test]
-    fn normalize_threads_rejects_too_large() {
-        assert_eq!(
-            normalize_threads(Some(33)).unwrap_err().code,
-            ErrorCode::InvalidArguments
-        );
     }
 }

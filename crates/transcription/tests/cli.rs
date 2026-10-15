@@ -2,7 +2,8 @@ use pumice_transcription::cli::{
     SuccessOutput, print_error, print_success, run_with_engine as run_with_engine_raw,
 };
 use pumice_transcription::{
-    Engine, EngineError, ErrorCode, FakeEngine, Transcript, TranscriptionOptions, config,
+    CancelToken, Engine, EngineError, ErrorCode, FakeEngine, Transcript, TranscriptionOptions,
+    config,
 };
 use std::io::Cursor;
 use std::process::Command;
@@ -143,6 +144,7 @@ impl Engine for RecordingFakeEngine {
         &self,
         pcm_16khz_mono: &[f32],
         options: &TranscriptionOptions,
+        _cancel: &CancelToken,
     ) -> Result<Transcript, EngineError> {
         *self.pcm_len.lock().unwrap() = pcm_16khz_mono.len();
         *self.language.lock().unwrap() = options.language.clone();
@@ -161,6 +163,7 @@ impl Engine for NoLanguageFakeEngine {
         &self,
         _pcm_16khz_mono: &[f32],
         _options: &TranscriptionOptions,
+        _cancel: &CancelToken,
     ) -> Result<Transcript, EngineError> {
         Ok(Transcript {
             text: "hello".to_string(),
@@ -177,6 +180,7 @@ impl Engine for FailingFakeEngine {
         &self,
         _pcm_16khz_mono: &[f32],
         _options: &TranscriptionOptions,
+        _cancel: &CancelToken,
     ) -> Result<Transcript, EngineError> {
         Err(EngineError::Failed)
     }
@@ -1349,6 +1353,44 @@ models:
     assert_eq!(err.code, ErrorCode::InvalidArguments);
     assert!(err.to_string().contains("huge"));
     assert!(err.to_string().contains("tiny"));
+}
+
+#[test]
+fn config_language_applies_without_cli_language() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
+    let model_path = tmp.path().join("tiny.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+    let config_path = write_config(
+        &tmp,
+        &format!(
+            r#"schema_version: 1
+language: pt
+models:
+  - id: tiny
+    path: {}
+"#,
+            model_path.display()
+        ),
+    );
+
+    let engine = RecordingFakeEngine::new();
+    run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "--config",
+            config_path.to_str().unwrap(),
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            "tiny",
+        ],
+        Box::new(engine.clone()),
+    )
+    .unwrap();
+
+    assert_eq!(engine.language(), Some("pt".to_string()));
 }
 
 #[test]

@@ -13,8 +13,15 @@ pub(crate) struct RawConfig {
     pub default_model: Option<Spanned<String>>,
     pub language: Option<Spanned<String>>,
     pub threads: Option<Spanned<usize>>,
+    pub server: Option<Spanned<RawServerConfig>>,
     #[serde(default)]
     pub models: Vec<Spanned<RawModelEntry>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawServerConfig {
+    pub port: Option<Spanned<u16>>,
 }
 
 #[derive(Debug, Default, Deserialize)]

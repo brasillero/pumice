@@ -1,3 +1,4 @@
+use crate::engine::CancelToken;
 use crate::{Error, ErrorCode};
 use rubato::audioadapter_buffers::owned::InterleavedOwned;
 use rubato::{
@@ -71,7 +72,15 @@ fn make_media_source(bytes: Vec<u8>) -> MediaSourceStream<'static> {
 /// Supported formats: RIFF/WAVE, MP3, FLAC and Ogg Vorbis. Ogg Opus is detected
 /// as an Ogg container but rejected with `UnsupportedFormat` because Symphonia
 /// has no Opus decoder.
-pub fn decode_audio<R: Read + Send + Sync>(mut reader: R) -> Result<DecodedAudio, Error> {
+pub fn decode_audio<R: Read + Send + Sync>(reader: R) -> Result<DecodedAudio, Error> {
+    decode_audio_with_cancel(reader, &CancelToken::new())
+}
+
+/// [`decode_audio`] that stops between packets once `cancel` is set.
+pub fn decode_audio_with_cancel<R: Read + Send + Sync>(
+    mut reader: R,
+    cancel: &CancelToken,
+) -> Result<DecodedAudio, Error> {
     // Read the whole file into memory. The caller wraps the reader in a
     // BudgetReader so this is bounded by MAX_FILE_BYTES.
     let mut bytes = Vec::new();
@@ -80,27 +89,27 @@ pub fn decode_audio<R: Read + Send + Sync>(mut reader: R) -> Result<DecodedAudio
         .map_err(|e| Error::invalid_input(format!("failed to read audio data: {e}")))?;
 
     match AudioFormat::detect(&bytes) {
-        AudioFormat::Wav => decode_wav_bytes(bytes),
+        AudioFormat::Wav => decode_wav_bytes(bytes, cancel),
         AudioFormat::Mp3 => {
             let mss = make_media_source(bytes);
             let mut format =
                 symphonia::default::formats::MpaReader::try_new(mss, FormatOptions::default())
                     .map_err(map_symphonia_error)?;
-            decode_track(&mut format, None)
+            decode_track(&mut format, None, cancel)
         }
         AudioFormat::Flac => {
             let mss = make_media_source(bytes);
             let mut format =
                 symphonia::default::formats::FlacReader::try_new(mss, FormatOptions::default())
                     .map_err(map_symphonia_error)?;
-            decode_track(&mut format, None)
+            decode_track(&mut format, None, cancel)
         }
         AudioFormat::Ogg => {
             let mss = make_media_source(bytes);
             let mut format =
                 symphonia::default::formats::OggReader::try_new(mss, FormatOptions::default())
                     .map_err(map_symphonia_error)?;
-            decode_track(&mut format, None)
+            decode_track(&mut format, None, cancel)
         }
         AudioFormat::Unknown => Err(Error::unsupported_format(
             "unknown or unsupported audio format",
@@ -109,7 +118,7 @@ pub fn decode_audio<R: Read + Send + Sync>(mut reader: R) -> Result<DecodedAudio
 }
 
 /// Decode a RIFF/WAVE file that has already passed strict pre-validation.
-fn decode_wav_bytes(bytes: Vec<u8>) -> Result<DecodedAudio, Error> {
+fn decode_wav_bytes(bytes: Vec<u8>, cancel: &CancelToken) -> Result<DecodedAudio, Error> {
     // Strict pre-validation: catch malformed RIFF/WAVE headers before Symphonia
     // sees them, so invalid input always maps to a safe typed error instead of a
     // decoder panic. Use only the canonical WAV built from validated chunks so
@@ -121,7 +130,7 @@ fn decode_wav_bytes(bytes: Vec<u8>) -> Result<DecodedAudio, Error> {
         .map_err(map_symphonia_error)?;
 
     let expected_frames = (format_info.data_bytes / u32::from(format_info.block_align)) as usize;
-    decode_track(&mut format, Some(expected_frames))
+    decode_track(&mut format, Some(expected_frames), cancel)
 }
 
 /// Decode a single audio track from any Symphonia format reader.
@@ -131,6 +140,7 @@ fn decode_wav_bytes(bytes: Vec<u8>) -> Result<DecodedAudio, Error> {
 fn decode_track(
     format: &mut dyn FormatReader,
     expected_frames: Option<usize>,
+    cancel: &CancelToken,
 ) -> Result<DecodedAudio, Error> {
     let audio_track_count = format
         .tracks()
@@ -190,6 +200,10 @@ fn decode_track(
     let mut decoded_frames: usize = 0;
 
     loop {
+        if cancel.is_cancelled() {
+            return Err(Error::cancelled());
+        }
+
         // Enforce the duration limit before decoding the next packet.
         let seconds = decoded_frames as f64 / sample_rate as f64;
         if seconds > MAX_AUDIO_SECONDS {

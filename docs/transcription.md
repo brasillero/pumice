@@ -135,6 +135,123 @@ its size in bytes when it is a regular file, and which model is the default.
 Missing paths and directories have `exists: false` and no `size` field in JSON.
 No hashing or network access is performed.
 
+### `serve`
+
+```bash
+pumice-transcribe serve --config ./transcribe.yml --model turbo --port 17568
+```
+
+Runs an OpenAI-compatible HTTP server on `127.0.0.1:PORT`. The bind address is
+always `127.0.0.1` and is not configurable. The port can also be set as
+`server.port` in `transcribe.yml`; `--port` overrides it. Port `0` is allowed
+and the actual bound address is printed on startup.
+
+`serve` loads one model at startup and keeps it in memory. The model is
+selected with `--model ID`; if omitted, the configured `default_model` is used.
+Startup load failure exits non-zero before the server starts listening.
+
+Only one transcription runs at a time. A second request is rejected
+immediately with HTTP 429 and no queue. `/v1/models` and `/health` stay
+responsive while a transcription runs.
+
+If the client disconnects, or the request hits its deadline or a shutdown, the
+transcription is cancelled and its result is discarded. The server stays busy
+until the engine actually stops. Whisper checks for cancellation between
+decoding steps, not inside its encoder, so there is no fixed bound: with Turbo
+on server-1's CPU (i5-14500T, portable build) a cancelled 14-second clip kept
+the server busy for 26 to 32 seconds, and a shutdown waited as long.
+
+#### Endpoints
+
+- `GET /health` — liveness. Returns `200 application/json`:
+  ```json
+  { "status": "ok", "version": "0.2.0" }
+  ```
+
+- `GET /v1/models` — lists only the served model id in the OpenAI list shape:
+  ```json
+  {
+    "object": "list",
+    "data": [
+      { "id": "turbo", "object": "model", "created": 0, "owned_by": "pumice" }
+    ]
+  }
+  ```
+
+- `GET /v1/models/{model}` — the served model's object, or 404
+  `model_not_found` for any other id.
+
+- `POST /v1/audio/transcriptions` — multipart/form-data transcription.
+
+  Required fields:
+  - `file`: exactly one uploaded audio file (a file part, not a text field),
+    non-empty. Its file name and declared content type are ignored; the format
+    is detected from the bytes.
+  - `model`: must equal the served model id exactly; any other id gets 404
+    `model_not_found`.
+
+  Optional fields:
+  - `language`: ISO-639-1 two-letter code (e.g. `pt`, `en`). Overrides the
+    configured default language hint.
+  - `response_format`: `json` (default) or `text`.
+  - `prompt`: client-supplied context, passed unchanged to the engine.
+  - `temperature`: finite number in `[0, 1]`.
+  - `stream`: must be absent or `false`; `true` is rejected.
+
+  Any other field, duplicate field, timestamp option, or unsupported
+  `response_format` is rejected with HTTP 400.
+
+  Responses:
+  - `json`: `200 application/json` with `{"text":"..."}`. When the engine
+    returns no text, the answer is `{"text":""}`. There is no silence detector:
+    Whisper can still produce text for very short silent clips.
+  - `text`: `200 text/plain; charset=utf-8` with the exact transcript bytes.
+
+  Limits: 25,000,000 uploaded file bytes, 26,000,000 total body bytes,
+  ≤16 KiB per text field, each parameter at most once, 120 seconds of decoded audio, 15
+  seconds to receive the body and 120 seconds for the whole response, both
+  counted from the request's arrival. The body size limit covers the whole
+  body, chunked or not, including bytes after the closing boundary.
+
+  Errors use the OpenAI error object, with `param` naming the offending
+  parameter when it is one this server accepts, and `code` set only where
+  OpenAI defines one. Text parameters must be valid UTF-8 without NUL
+  characters.
+  ```json
+  { "error": { "message": "...", "type": "invalid_request_error", "param": "file", "code": null } }
+  ```
+  - `400` `invalid_request_error`: missing, unknown or duplicate parameters,
+    malformed multipart, unsupported options, undecodable audio, unsupported
+    audio format (as OpenAI does), audio longer than 120 seconds.
+  - `404` `invalid_request_error`: model not served (`code: model_not_found`)
+    or unknown URL.
+  - `405` `invalid_request_error`: wrong HTTP method.
+  - `408` `invalid_request_error`: body not received in time.
+  - `413` `invalid_request_error`: body, file or text field too large.
+  - `429` `rate_limit_error` (`code: rate_limit_exceeded`, `Retry-After: 1`):
+    another transcription is running.
+  - `500` `server_error`: the transcription failed.
+  - `503` `server_error`: the server is shutting down.
+  - `504` `server_error`: the response deadline passed.
+
+  Official OpenAI SDKs raise their typed errors for these (`BadRequestError`,
+  `NotFoundError`, `RateLimitError`, and so on). Messages are fixed text: they
+  never include what the client sent (model names, field names, file names,
+  the prompt), the transcript, or decoder and engine messages.
+
+```bash
+curl --fail-with-body --max-time 130 \
+  http://127.0.0.1:17568/v1/audio/transcriptions \
+  -F 'file=@clip.wav' -F 'model=turbo' -F 'language=pt'
+
+curl --fail-with-body --max-time 130 \
+  http://127.0.0.1:17568/v1/audio/transcriptions \
+  -F 'file=@clip.wav' -F 'model=turbo' -F 'response_format=text'
+
+curl --fail http://127.0.0.1:17568/v1/models
+curl --fail http://127.0.0.1:17568/health
+```
+
 ## Supported formats and limits
 
 Formats are detected by content (magic bytes), not by file extension.
@@ -177,6 +294,7 @@ Failures use the same envelope with `ok: false` and `error.code`:
 | `model_not_found` | Model file does not exist | 2 |
 | `engine_not_available` | Build has no transcription engine | 1 |
 | `engine_failed` | Engine error during transcription | 1 |
+| `cancelled` | Transcription cancelled | 1 |
 | `model_load_failed` | Failed to load the model | 1 |
 | `internal` | Unexpected internal error | 1 |
 
