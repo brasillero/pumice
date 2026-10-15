@@ -154,6 +154,12 @@ Only one transcription runs at a time. A second request is rejected
 immediately with HTTP 429 and no queue. `/v1/models` and `/health` stay
 responsive while a transcription runs.
 
+If the client disconnects, or the request hits its deadline or a shutdown, the
+transcription is cancelled and its result is discarded. The server stays busy
+until the engine actually stops: Whisper checks for cancellation between
+decoding steps, not inside its encoder, so with Turbo on a CPU this can take
+up to about 25 seconds.
+
 #### Endpoints
 
 - `GET /health` — liveness. Returns `200 application/json`:
@@ -171,11 +177,17 @@ responsive while a transcription runs.
   }
   ```
 
+- `GET /v1/models/{model}` — the served model's object, or 404
+  `model_not_found` for any other id.
+
 - `POST /v1/audio/transcriptions` — multipart/form-data transcription.
 
   Required fields:
-  - `file`: exactly one uploaded audio file, non-empty.
-  - `model`: must equal the served model id exactly.
+  - `file`: exactly one uploaded audio file (a file part, not a text field),
+    non-empty. Its file name and declared content type are ignored; the format
+    is detected from the bytes.
+  - `model`: must equal the served model id exactly; any other id gets 404
+    `model_not_found`.
 
   Optional fields:
   - `language`: ISO-639-1 two-letter code (e.g. `pt`, `en`). Overrides the
@@ -189,31 +201,40 @@ responsive while a transcription runs.
   `response_format` is rejected with HTTP 400.
 
   Responses:
-  - `json`: `200 application/json` with `{"text":"..."}`. Silence returns
-    `{"text":""}`.
+  - `json`: `200 application/json` with `{"text":"..."}`. When the engine
+    returns no text, the answer is `{"text":""}`. There is no silence detector:
+    Whisper can still produce text for very short silent clips.
   - `text`: `200 text/plain; charset=utf-8` with the exact transcript bytes.
 
   Limits: 25,000,000 uploaded file bytes, 26,000,000 total body bytes, ≤32
   multipart parts, ≤16 KiB per text field, 120 seconds of decoded audio, 15
-  seconds upload deadline, 120 seconds total processing deadline. Enforced on
-  chunked bodies without unbounded buffering.
+  seconds to receive the body and 120 seconds for the whole response, both
+  counted from the request's arrival. The body size limit covers the whole
+  body, chunked or not, including bytes after the closing boundary.
 
-  Error status codes use the OpenAI JSON error envelope:
+  Errors use the OpenAI error object, with `param` naming the offending field
+  when there is one and `code` set only where OpenAI defines one:
   ```json
-  { "error": { "message": "...", "type": "...", "param": null, "code": "..." } }
+  { "error": { "message": "...", "type": "invalid_request_error", "param": "file", "code": null } }
   ```
-  - `400`: invalid request, unknown/duplicate fields, malformed multipart,
-    unsupported options, wrong model id, excess audio duration.
-  - `413`: total body or uploaded file too large.
-  - `415`: unsupported audio container/codec.
-  - `408`: upload deadline exceeded.
-  - `429`: server is already processing a transcription.
-  - `503`: server is shutting down or unavailable.
-  - `504`: total processing deadline exceeded.
-  - `500`: unexpected engine/worker failure.
+  - `400` `invalid_request_error`: missing, unknown or duplicate parameters,
+    malformed multipart, unsupported options, undecodable audio, unsupported
+    audio format (as OpenAI does), audio longer than 120 seconds.
+  - `404` `invalid_request_error`: model not served (`code: model_not_found`)
+    or unknown URL.
+  - `405` `invalid_request_error`: wrong HTTP method.
+  - `408` `invalid_request_error`: body not received in time.
+  - `413` `invalid_request_error`: body, file or text field too large.
+  - `429` `rate_limit_error` (`code: rate_limit_exceeded`, `Retry-After: 1`):
+    another transcription is running.
+  - `500` `server_error`: the transcription failed.
+  - `503` `server_error`: the server is shutting down.
+  - `504` `server_error`: the response deadline passed.
 
-  Error messages are fixed and safe: they never include file paths, filenames,
-  the dictated prompt, the transcript, or raw decoder/native strings.
+  Official OpenAI SDKs raise their typed errors for these (`BadRequestError`,
+  `NotFoundError`, `RateLimitError`, and so on). Messages are fixed text: they
+  never include what the client sent (model names, field names, file names,
+  the prompt), the transcript, or decoder and engine messages.
 
 ```bash
 curl --fail-with-body --max-time 130 \
@@ -270,6 +291,7 @@ Failures use the same envelope with `ok: false` and `error.code`:
 | `model_not_found` | Model file does not exist | 2 |
 | `engine_not_available` | Build has no transcription engine | 1 |
 | `engine_failed` | Engine error during transcription | 1 |
+| `cancelled` | Transcription cancelled | 1 |
 | `model_load_failed` | Failed to load the model | 1 |
 | `internal` | Unexpected internal error | 1 |
 
