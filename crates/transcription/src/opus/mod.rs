@@ -46,7 +46,10 @@ impl OpusHead {
         if bytes.len() < 19 || &bytes[0..8] != b"OpusHead" {
             return Err(Error::invalid_input("missing or malformed opus header"));
         }
-        if bytes[8] != 1 {
+        // RFC 7845 section 5.1: the version is major.minor in one byte;
+        // decoders must accept every minor of major 0 (minor 0 was never
+        // issued, so byte 0 is not a valid version).
+        if bytes[8] == 0 || bytes[8] & 0xF0 != 0 {
             return Err(Error::invalid_input("unsupported opus header version"));
         }
         let channels = u16::from(bytes[9]);
@@ -326,11 +329,26 @@ pub(crate) mod tests {
         let valid = &bytes[at..at + 19];
 
         let mut wrong_version = valid.to_vec();
-        wrong_version[8] = 2;
+        wrong_version[8] = 0x10; // major version 1
         assert_eq!(
             OpusHead::parse(&wrong_version).unwrap_err().code,
             ErrorCode::InvalidInput
         );
+
+        let mut zero_version = valid.to_vec();
+        zero_version[8] = 0;
+        assert_eq!(
+            OpusHead::parse(&zero_version).unwrap_err().code,
+            ErrorCode::InvalidInput
+        );
+
+        // Compatible minor versions of major 0 are accepted (RFC 7845 5.1).
+        for minor in [2u8, 15] {
+            let mut minor_version = valid.to_vec();
+            minor_version[8] = minor;
+            let head = OpusHead::parse(&minor_version).unwrap();
+            assert_eq!(head.pre_skip, 312);
+        }
 
         let mut bad_magic = valid.to_vec();
         bad_magic[0] = b'X';
