@@ -1,94 +1,129 @@
 //! OpenAI-compatible HTTP server for `pumice-transcribe serve`.
 //!
 //! Serves on IPv4 loopback only, with one model loaded at startup and one
-//! transcription admitted at a time. Dictated text never reaches ordinary logs;
-//! only request metadata (id, sizes, timings, status, error code) is logged.
+//! transcription admitted at a time. Every error body and log line is built from
+//! fixed text: nothing the client sent (model names, field names, prompts, file
+//! names) and nothing the engine produced is ever echoed or logged.
 
 use crate::audio::MAX_FILE_BYTES;
-use crate::config::Config;
-use crate::engine::Engine;
+use crate::engine::{CancelToken, Engine};
 use crate::service::transcribe_pcm_from_reader;
-use crate::{Error, ErrorCode, TranscriptionOptions};
+use crate::{ErrorCode, TranscriptionOptions};
 use axum::{
     Router,
-    extract::{DefaultBodyLimit, Request, State},
-    http::{StatusCode, header},
+    body::Body,
+    extract::{Path, Request, State},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use bytes::Bytes;
-use std::collections::HashMap;
+use http_body_util::BodyExt;
+use std::convert::Infallible;
 use std::future::Future;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
-use tokio::sync::{Semaphore, oneshot};
+use tokio::sync::Semaphore;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
-const MAX_TOTAL_BODY_BYTES: usize = 26_000_000;
+/// Whole request body, including multipart framing and any epilogue.
+const MAX_TOTAL_BODY_BYTES: u64 = 26_000_000;
 const MAX_MULTIPART_PARTS: usize = 32;
-const MAX_TEXT_FIELD_BYTES: usize = 16 * 1024;
-const UPLOAD_DEADLINE: Duration = Duration::from_secs(15);
-const TOTAL_DEADLINE: Duration = Duration::from_secs(120);
-const BUSY_RESPONSE_RETRY_AFTER: &str = "0";
+const MAX_TEXT_FIELD_BYTES: u64 = 16 * 1024;
+const BUSY_RETRY_AFTER_SECONDS: &str = "1";
 
-/// Shared server state.
+/// Time budgets, both measured from the request's arrival.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// The whole body must be received within this time.
+    pub upload_deadline: Duration,
+    /// The response (success or error) is sent within this time.
+    pub total_deadline: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            upload_deadline: Duration::from_secs(15),
+            total_deadline: Duration::from_secs(120),
+        }
+    }
+}
+
 #[derive(Clone)]
-pub struct ServerState {
+struct ServerState {
     engine: Arc<dyn Engine>,
-    served_model_id: String,
-    config: Arc<Config>,
+    served_model_id: Arc<str>,
+    default_language: Option<String>,
+    limits: Limits,
     admission: Arc<Semaphore>,
     shutdown: CancellationToken,
-    request_ids: Arc<std::sync::atomic::AtomicU64>,
+    request_ids: Arc<AtomicU64>,
 }
 
 impl ServerState {
-    fn next_id(&self) -> u64 {
-        self.request_ids
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    fn new(
+        engine: Arc<dyn Engine>,
+        served_model_id: &str,
+        default_language: Option<String>,
+        limits: Limits,
+        shutdown: CancellationToken,
+    ) -> Self {
+        Self {
+            engine,
+            served_model_id: Arc::from(served_model_id),
+            default_language,
+            limits,
+            admission: Arc::new(Semaphore::new(1)),
+            shutdown,
+            request_ids: Arc::new(AtomicU64::new(1)),
+        }
     }
 }
 
 /// Start the HTTP server on `127.0.0.1:port` and serve until `shutdown_signal`
-/// fires. Returns the local address actually bound (useful when port is 0).
+/// fires. The returned task ends after shutdown, once any transcription still
+/// running on a worker thread has finished.
 pub async fn serve(
     port: u16,
     engine: Arc<dyn Engine>,
     served_model_id: String,
-    config: Config,
+    default_language: Option<String>,
     shutdown_signal: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<tokio::task::JoinHandle<()>> {
     let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)).await?;
     let local_addr = listener.local_addr()?;
-    eprintln!(
-        "pumice-transcribe listening on http://{}/v1 (model: {})",
-        local_addr, served_model_id
-    );
+    eprintln!("pumice-transcribe listening on http://{local_addr}/v1 (model: {served_model_id})");
 
     let shutdown = CancellationToken::new();
-    let state = ServerState {
+    let state = ServerState::new(
         engine,
-        served_model_id,
-        config: Arc::new(config),
-        admission: Arc::new(Semaphore::new(1)),
-        shutdown: shutdown.clone(),
-        request_ids: Arc::new(std::sync::atomic::AtomicU64::new(1)),
-    };
-
+        &served_model_id,
+        default_language,
+        Limits::default(),
+        shutdown.clone(),
+    );
+    let admission = Arc::clone(&state.admission);
     let app = router(state);
-    let shutdown_for_serve = shutdown.clone();
+
     let handle = tokio::spawn(async move {
         let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
             shutdown_signal.await;
-            shutdown_for_serve.cancel();
+            shutdown.cancel();
         });
         if let Err(e) = serve.await {
             eprintln!("server error: {e}");
         }
+        // Drain: a cancelled worker keeps the admission permit until the
+        // engine actually returns.
+        let _ = admission.acquire().await;
     });
 
     Ok(handle)
@@ -98,255 +133,533 @@ fn router(state: ServerState) -> Router {
     Router::new()
         .route("/v1/audio/transcriptions", post(transcriptions))
         .route("/v1/models", get(list_models))
+        .route("/v1/models/{model}", get(retrieve_model))
         .route("/health", get(health))
         .fallback(not_found)
-        .layer(DefaultBodyLimit::max(MAX_TOTAL_BODY_BYTES))
+        .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
 }
 
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/// An OpenAI error object. Every field is static text by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ApiError {
+    status: StatusCode,
+    kind: &'static str,
+    code: Option<&'static str>,
+    param: Option<&'static str>,
+    message: &'static str,
+}
+
+const fn invalid(param: Option<&'static str>, message: &'static str) -> ApiError {
+    ApiError {
+        status: StatusCode::BAD_REQUEST,
+        kind: "invalid_request_error",
+        code: None,
+        param,
+        message,
+    }
+}
+
+const fn server_error(status: StatusCode, message: &'static str) -> ApiError {
+    ApiError {
+        status,
+        kind: "server_error",
+        code: None,
+        param: None,
+        message,
+    }
+}
+
+const BUSY: ApiError = ApiError {
+    status: StatusCode::TOO_MANY_REQUESTS,
+    kind: "rate_limit_error",
+    code: Some("rate_limit_exceeded"),
+    param: None,
+    message: "The server is busy with another transcription. Retry after a short wait.",
+};
+const BODY_TOO_LARGE: ApiError = ApiError {
+    status: StatusCode::PAYLOAD_TOO_LARGE,
+    kind: "invalid_request_error",
+    code: None,
+    param: None,
+    message: "The request body exceeds the maximum size of 26000000 bytes.",
+};
+const FILE_TOO_LARGE: ApiError = ApiError {
+    status: StatusCode::PAYLOAD_TOO_LARGE,
+    kind: "invalid_request_error",
+    code: None,
+    param: Some("file"),
+    message: "The uploaded file exceeds the maximum size of 25000000 bytes.",
+};
+const FIELD_TOO_LARGE: ApiError = ApiError {
+    status: StatusCode::PAYLOAD_TOO_LARGE,
+    kind: "invalid_request_error",
+    code: None,
+    param: None,
+    message: "A text field exceeds the maximum size of 16384 bytes.",
+};
+const UPLOAD_TIMEOUT: ApiError = ApiError {
+    status: StatusCode::REQUEST_TIMEOUT,
+    kind: "invalid_request_error",
+    code: None,
+    param: None,
+    message: "The request body was not received in time.",
+};
+const MODEL_NOT_FOUND: ApiError = ApiError {
+    status: StatusCode::NOT_FOUND,
+    kind: "invalid_request_error",
+    code: Some("model_not_found"),
+    param: Some("model"),
+    message: "The requested model does not exist on this server.",
+};
+const NOT_FOUND: ApiError = ApiError {
+    status: StatusCode::NOT_FOUND,
+    kind: "invalid_request_error",
+    code: None,
+    param: None,
+    message: "Invalid URL.",
+};
+const METHOD_NOT_ALLOWED: ApiError = ApiError {
+    status: StatusCode::METHOD_NOT_ALLOWED,
+    kind: "invalid_request_error",
+    code: None,
+    param: None,
+    message: "Method not allowed for this URL.",
+};
+const NOT_MULTIPART: ApiError = invalid(
+    None,
+    "The request must be multipart/form-data with a boundary.",
+);
+const MALFORMED_MULTIPART: ApiError = invalid(None, "The multipart request body is malformed.");
+const TOO_MANY_PARTS: ApiError = invalid(None, "The request has too many multipart parts.");
+const UNSUPPORTED_PARAMETER: ApiError = invalid(
+    None,
+    "Unrecognized or unsupported request parameter. Supported: file, model, language, prompt, response_format, temperature, stream.",
+);
+const DUPLICATE_PARAMETER: ApiError = invalid(None, "A request parameter was sent more than once.");
+const MISSING_FILE: ApiError = invalid(Some("file"), "You must provide a file parameter.");
+const EMPTY_FILE: ApiError = invalid(Some("file"), "The uploaded file is empty.");
+const FILE_NOT_UPLOAD: ApiError = invalid(
+    Some("file"),
+    "The file parameter must be sent as a file upload.",
+);
+const MISSING_MODEL: ApiError = invalid(Some("model"), "You must provide a model parameter.");
+const INVALID_LANGUAGE: ApiError = invalid(
+    Some("language"),
+    "language must be a supported ISO-639-1 code.",
+);
+const INVALID_RESPONSE_FORMAT: ApiError = invalid(
+    Some("response_format"),
+    "Unsupported response_format. Supported: json, text.",
+);
+const INVALID_TEMPERATURE: ApiError = invalid(
+    Some("temperature"),
+    "temperature must be a number between 0 and 1.",
+);
+const STREAM_UNSUPPORTED: ApiError = invalid(Some("stream"), "Streaming is not supported.");
+const INVALID_STREAM: ApiError = invalid(Some("stream"), "stream must be true or false.");
+const NOT_UTF8: ApiError = invalid(None, "A text parameter is not valid UTF-8.");
+const UNDECODABLE_AUDIO: ApiError = invalid(Some("file"), "The audio file could not be decoded.");
+const UNSUPPORTED_FORMAT: ApiError = invalid(
+    Some("file"),
+    "Invalid file format. Supported formats: wav, mp3, flac, ogg (Vorbis).",
+);
+const AUDIO_TOO_LONG: ApiError = invalid(
+    Some("file"),
+    "Audio longer than 120 seconds is not supported.",
+);
+const SHUTTING_DOWN: ApiError = server_error(
+    StatusCode::SERVICE_UNAVAILABLE,
+    "The server is shutting down.",
+);
+const DEADLINE_EXCEEDED: ApiError = server_error(
+    StatusCode::GATEWAY_TIMEOUT,
+    "The transcription did not finish in time.",
+);
+const TRANSCRIPTION_FAILED: ApiError = server_error(
+    StatusCode::INTERNAL_SERVER_ERROR,
+    "The transcription failed.",
+);
+
+/// Map a library error to a fixed HTTP error. The library error's own message
+/// may contain decoder or native text and is never used.
+fn map_error(code: ErrorCode) -> ApiError {
+    match code {
+        ErrorCode::InvalidInput => UNDECODABLE_AUDIO,
+        ErrorCode::InputTooLarge => FILE_TOO_LARGE,
+        ErrorCode::AudioTooLong => AUDIO_TOO_LONG,
+        ErrorCode::UnsupportedFormat => UNSUPPORTED_FORMAT,
+        ErrorCode::Cancelled => SHUTTING_DOWN,
+        ErrorCode::InvalidArguments
+        | ErrorCode::InvalidConfig
+        | ErrorCode::ModelNotFound
+        | ErrorCode::EngineNotAvailable
+        | ErrorCode::EngineFailed
+        | ErrorCode::ModelLoadFailed
+        | ErrorCode::Internal => TRANSCRIPTION_FAILED,
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let body = serde_json::json!({
+            "error": {
+                "message": self.message,
+                "type": self.kind,
+                "param": self.param,
+                "code": self.code,
+            }
+        });
+        let mut response = json_response(self.status, &body);
+        if self.status == StatusCode::TOO_MANY_REQUESTS {
+            response.headers_mut().insert(
+                header::RETRY_AFTER,
+                header::HeaderValue::from_static(BUSY_RETRY_AFTER_SECONDS),
+            );
+        }
+        response
+    }
+}
+
+fn json_response(status: StatusCode, value: &serde_json::Value) -> Response {
+    (
+        status,
+        [(header::CONTENT_TYPE, "application/json")],
+        value.to_string(),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Request log
+// ---------------------------------------------------------------------------
+
+/// One metadata line per request. Logs the disconnect if the handler is
+/// dropped before it answers.
+struct RequestLog {
+    id: u64,
+    started: Instant,
+    answered: bool,
+}
+
+impl RequestLog {
+    fn new(state: &ServerState) -> Self {
+        Self {
+            id: state.request_ids.fetch_add(1, Ordering::Relaxed),
+            started: Instant::now(),
+            answered: false,
+        }
+    }
+
+    fn answered(mut self, status: StatusCode, audio_seconds: Option<f64>) {
+        self.answered = true;
+        let ms = self.started.elapsed().as_millis();
+        match audio_seconds {
+            Some(s) => eprintln!("request {}: {status} in {ms} ms (audio {s:.2} s)", self.id),
+            None => eprintln!("request {}: {status} in {ms} ms", self.id),
+        }
+    }
+}
+
+impl Drop for RequestLog {
+    fn drop(&mut self) {
+        if !self.answered {
+            let ms = self.started.elapsed().as_millis();
+            eprintln!("request {}: client disconnected after {ms} ms", self.id);
+        }
+    }
+}
+
+/// Cancels the engine when the handler returns or is dropped (client
+/// disconnect). After a normal completion this is a harmless no-op.
+struct CancelOnDrop(CancelToken);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
 /// POST /v1/audio/transcriptions
 async fn transcriptions(State(state): State<ServerState>, request: Request) -> Response {
-    let id = state.next_id();
-    let started = Instant::now();
+    let log = RequestLog::new(&state);
+    match transcribe(&state, request).await {
+        Ok((format, text, audio_seconds)) => {
+            log.answered(StatusCode::OK, Some(audio_seconds));
+            success_response(format, text)
+        }
+        Err(error) => {
+            log.answered(error.status, None);
+            error.into_response()
+        }
+    }
+}
 
-    // Admission first: if we are busy, reject immediately without reading the body.
-    let Ok(permit) = state.admission.clone().try_acquire_owned() else {
-        log_request(id, started, StatusCode::TOO_MANY_REQUESTS, "busy", None);
-        return too_many_requests();
-    };
+async fn transcribe(
+    state: &ServerState,
+    request: Request,
+) -> Result<(ResponseFormat, String, f64), ApiError> {
+    let arrived = time::Instant::now();
+    let deadline = arrived + state.limits.total_deadline;
+    let upload_deadline = (arrived + state.limits.upload_deadline).min(deadline);
 
-    // If shutdown is already in progress, release the permit and refuse new work.
+    // Admission before reading anything: a busy server answers at once.
+    let permit = state
+        .admission
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| BUSY)?;
     if state.shutdown.is_cancelled() {
-        drop(permit);
-        log_request(
-            id,
-            started,
-            StatusCode::SERVICE_UNAVAILABLE,
-            "shutting down",
-            None,
-        );
-        return service_unavailable("the server is shutting down");
+        return Err(SHUTTING_DOWN);
     }
 
-    let request_token = state.shutdown.child_token();
-    let engine_cancel = crate::CancelToken::new();
-
-    // Bridge the request lifecycle token into the engine's CancelToken. This
-    // covers shutdown, total deadline, and client disconnect (via the watcher
-    // below).
-    let bridge_token = request_token.clone();
-    let bridge_cancel = engine_cancel.clone();
-    let _bridge = tokio::spawn(async move {
-        bridge_token.cancelled().await;
-        bridge_cancel.cancel();
-    });
-
-    // Spawn a watcher so client disconnect cancels the request token.
-    let (disconnect_tx, disconnect_rx) = oneshot::channel::<()>();
-    let cancel_for_disconnect = request_token.clone();
-    let disconnect_watcher = tokio::spawn(async move {
-        let _ = disconnect_rx.await;
-        cancel_for_disconnect.cancel();
-    });
-
-    // Extract boundary before consuming the body.
-    let content_type = match request
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-    {
-        Some(ct) => ct,
-        None => {
-            abort_watcher(disconnect_watcher);
-            drop(permit);
-            log_request(
-                id,
-                started,
-                StatusCode::BAD_REQUEST,
-                "missing content-type",
-                None,
-            );
-            return bad_request("Content-Type must be multipart/form-data with a boundary");
-        }
-    };
-    let boundary = match multer::parse_boundary(content_type) {
-        Ok(boundary) => boundary,
-        Err(_) => {
-            abort_watcher(disconnect_watcher);
-            drop(permit);
-            log_request(
-                id,
-                started,
-                StatusCode::BAD_REQUEST,
-                "invalid content-type",
-                None,
-            );
-            return bad_request("Content-Type must be multipart/form-data with a boundary");
-        }
-    };
-
-    let body = request.into_body();
-
-    // Read and validate the multipart body within the upload deadline.
-    let parsed = match time::timeout(
-        UPLOAD_DEADLINE,
-        parse_multipart(body.into_data_stream(), boundary),
-    )
-    .await
-    {
-        Ok(Ok(parsed)) => parsed,
-        Ok(Err(ParseError::TooLarge)) => {
-            abort_watcher(disconnect_watcher);
-            drop(permit);
-            log_request(
-                id,
-                started,
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "body too large",
-                None,
-            );
-            return payload_too_large();
-        }
-        Ok(Err(ParseError::Malformed(message))) => {
-            abort_watcher(disconnect_watcher);
-            drop(permit);
-            log_request(id, started, StatusCode::BAD_REQUEST, &message, None);
-            return bad_request(&message);
-        }
-        Err(_) => {
-            abort_watcher(disconnect_watcher);
-            drop(permit);
-            log_request(
-                id,
-                started,
-                StatusCode::REQUEST_TIMEOUT,
-                "upload deadline exceeded",
-                None,
-            );
-            return request_timeout();
-        }
-    };
-
-    // Validate request fields.
-    if let Err(message) = validate_model(&state.served_model_id, &parsed) {
-        abort_watcher(disconnect_watcher);
-        drop(permit);
-        log_request(id, started, StatusCode::BAD_REQUEST, &message, None);
-        return bad_request(&message);
+    let (parts, body) = request.into_parts();
+    let boundary = multipart_boundary(&parts.headers)?;
+    if declared_length(&parts.headers).is_some_and(|len| len > MAX_TOTAL_BODY_BYTES) {
+        return Err(BODY_TOO_LARGE);
     }
 
-    let language = match parsed.language {
-        Some(lang) => match crate::config::validate_language(&lang) {
-            Ok(normalized) => Some(normalized),
-            Err(_) => {
-                abort_watcher(disconnect_watcher);
-                drop(permit);
-                log_request(
-                    id,
-                    started,
-                    StatusCode::BAD_REQUEST,
-                    "invalid language",
-                    None,
-                );
-                return bad_request("language must be a supported ISO-639-1 code");
-            }
-        },
-        None => state.config.language.clone(),
+    let body = tokio::select! {
+        biased;
+        () = state.shutdown.cancelled() => return Err(SHUTTING_DOWN),
+        read = time::timeout_at(upload_deadline, read_body(body)) => {
+            read.map_err(|_| UPLOAD_TIMEOUT)??
+        }
+    };
+    let form = parse_form(body, boundary).await?;
+
+    let model = form.model.as_deref().ok_or(MISSING_MODEL)?;
+    if model != &*state.served_model_id {
+        return Err(MODEL_NOT_FOUND);
+    }
+    let language = match form.language {
+        Some(lang) => Some(crate::config::validate_language(&lang).map_err(|_| INVALID_LANGUAGE)?),
+        None => state.default_language.clone(),
     };
     let options = TranscriptionOptions {
         language,
-        prompt: parsed.prompt,
-        temperature: parsed.temperature,
+        prompt: form.prompt,
+        temperature: form.temperature,
     };
 
-    // Run decode+inference on a blocking worker, enforcing the total deadline.
+    // The worker owns the permit: a timed-out or abandoned request keeps the
+    // server busy until the engine really stops.
+    let cancel = CancelToken::new();
+    let _cancel_on_drop = CancelOnDrop(cancel.clone());
     let engine = Arc::clone(&state.engine);
-    let mut blocking = tokio::task::spawn_blocking(move || {
-        let reader = io::Cursor::new(parsed.file_bytes);
-        let result = transcribe_pcm_from_reader(reader, engine.as_ref(), &options, &engine_cancel);
-        (result, permit)
+    let worker_cancel = cancel.clone();
+    let file = form.file;
+    let worker = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        transcribe_pcm_from_reader(
+            io::Cursor::new(file),
+            engine.as_ref(),
+            &options,
+            &worker_cancel,
+        )
     });
 
-    let response = tokio::select! {
+    tokio::select! {
         biased;
-        () = request_token.cancelled() => {
-            // Cancellation fired before the worker finished. Wait for it so the
-            // permit is released and any native cleanup completes.
-            let result = blocking.await;
-            match result {
-                Ok((result, _permit)) => match result {
-                    Ok(result) => success_response(parsed.response_format, result.transcript.text),
-                    Err(_) => service_unavailable("the request was cancelled"),
-                },
-                Err(_) => service_unavailable("the request was cancelled"),
+        () = state.shutdown.cancelled() => Err(SHUTTING_DOWN),
+        () = time::sleep_until(deadline) => Err(DEADLINE_EXCEEDED),
+        joined = worker => match joined {
+            Ok(Ok(result)) => Ok((form.response_format, result.transcript.text, result.audio_seconds)),
+            Ok(Err(error)) => Err(map_error(error.code)),
+            // The worker panicked; its permit was released while unwinding.
+            Err(_) => Err(TRANSCRIPTION_FAILED),
+        },
+    }
+}
+
+fn multipart_boundary(headers: &HeaderMap) -> Result<String, ApiError> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .ok_or(NOT_MULTIPART)?;
+    multer::parse_boundary(content_type).map_err(|_| NOT_MULTIPART)
+}
+
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+}
+
+/// Read the complete body, epilogue included, failing as soon as it exceeds
+/// the size limit.
+async fn read_body(mut body: Body) -> Result<Bytes, ApiError> {
+    let mut buf = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| MALFORMED_MULTIPART)?;
+        if let Ok(data) = frame.into_data() {
+            if (buf.len() + data.len()) as u64 > MAX_TOTAL_BODY_BYTES {
+                return Err(BODY_TOO_LARGE);
             }
+            buf.extend_from_slice(&data);
         }
-        _ = time::sleep(TOTAL_DEADLINE) => {
-            request_token.cancel();
-            let _result = blocking.await;
-            log_request(id, started, StatusCode::GATEWAY_TIMEOUT, "processing deadline exceeded", None);
-            gateway_timeout()
+    }
+    Ok(Bytes::from(buf))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponseFormat {
+    Json,
+    Text,
+}
+
+struct Form {
+    file: Vec<u8>,
+    model: Option<String>,
+    language: Option<String>,
+    response_format: ResponseFormat,
+    prompt: Option<String>,
+    temperature: Option<f32>,
+}
+
+/// A single-chunk stream over the already-received body.
+struct OnceBody(Option<Bytes>);
+
+impl futures_core::Stream for OnceBody {
+    type Item = Result<Bytes, Infallible>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(self.0.take().map(Ok))
+    }
+}
+
+#[derive(Default)]
+struct Seen {
+    file: bool,
+    model: bool,
+    language: bool,
+    response_format: bool,
+    prompt: bool,
+    temperature: bool,
+    stream: bool,
+}
+
+async fn parse_form(body: Bytes, boundary: String) -> Result<Form, ApiError> {
+    let limits = multer::SizeLimit::new()
+        .whole_stream(MAX_TOTAL_BODY_BYTES)
+        .per_field(MAX_TEXT_FIELD_BYTES)
+        .for_field("file", MAX_FILE_BYTES);
+    let constraints = multer::Constraints::new().size_limit(limits);
+    let mut multipart =
+        multer::Multipart::with_constraints(OnceBody(Some(body)), boundary, constraints);
+
+    let mut seen = Seen::default();
+    let mut file = None;
+    let mut model = None;
+    let mut language = None;
+    let mut response_format = ResponseFormat::Json;
+    let mut prompt = None;
+    let mut temperature = None;
+    let mut parts = 0;
+
+    while let Some(field) = multipart.next_field().await.map_err(map_multer_error)? {
+        parts += 1;
+        if parts > MAX_MULTIPART_PARTS {
+            return Err(TOO_MANY_PARTS);
         }
-        worker_result = &mut blocking => {
-            let result = match worker_result {
-                Ok((result, _permit)) => result,
-                Err(_) => Err(Error::internal("transcription worker panicked")),
-            };
-            match result {
-                Ok(result) => {
-                    log_request(id, started, StatusCode::OK, "ok", Some(result.audio_seconds));
-                    success_response(parsed.response_format, result.transcript.text)
+        let is_upload = field.file_name().is_some();
+        let (slot, param) = match field.name() {
+            Some("file") => (&mut seen.file, "file"),
+            Some("model") => (&mut seen.model, "model"),
+            Some("language") => (&mut seen.language, "language"),
+            Some("response_format") => (&mut seen.response_format, "response_format"),
+            Some("prompt") => (&mut seen.prompt, "prompt"),
+            Some("temperature") => (&mut seen.temperature, "temperature"),
+            Some("stream") => (&mut seen.stream, "stream"),
+            _ => return Err(UNSUPPORTED_PARAMETER),
+        };
+        if std::mem::replace(slot, true) {
+            return Err(DUPLICATE_PARAMETER);
+        }
+
+        if param == "file" {
+            if !is_upload {
+                return Err(FILE_NOT_UPLOAD);
+            }
+            let data = field.bytes().await.map_err(map_multer_error)?;
+            if data.is_empty() {
+                return Err(EMPTY_FILE);
+            }
+            file = Some(data.to_vec());
+            continue;
+        }
+
+        if is_upload {
+            return Err(text_param_error(param));
+        }
+        let data = field.bytes().await.map_err(map_multer_error)?;
+        let value = String::from_utf8(data.to_vec()).map_err(|_| NOT_UTF8)?;
+        match param {
+            "model" => model = Some(value),
+            "language" => language = Some(value),
+            "prompt" => prompt = Some(value),
+            "response_format" => {
+                response_format = match value.as_str() {
+                    "json" => ResponseFormat::Json,
+                    "text" => ResponseFormat::Text,
+                    _ => return Err(INVALID_RESPONSE_FORMAT),
                 }
-                Err(error) => {
-                    let (status, message) = map_error(&error);
-                    log_request(id, started, status, &message, None);
-                    openai_error(status, &message)
+            }
+            "temperature" => {
+                let t: f32 = value.trim().parse().map_err(|_| INVALID_TEMPERATURE)?;
+                if !t.is_finite() || !(0.0..=1.0).contains(&t) {
+                    return Err(INVALID_TEMPERATURE);
                 }
+                temperature = Some(t);
             }
+            "stream" => match value.as_str() {
+                "false" => {}
+                "true" => return Err(STREAM_UNSUPPORTED),
+                _ => return Err(INVALID_STREAM),
+            },
+            _ => unreachable!("every accepted name is matched above"),
         }
-    };
+    }
 
-    abort_watcher(disconnect_watcher);
-    // Keep disconnect_tx alive until after the response is built so a late
-    // disconnect does not fire and cancel a subsequent request's token.
-    let _ = disconnect_tx;
-    response
+    Ok(Form {
+        file: file.ok_or(MISSING_FILE)?,
+        model,
+        language,
+        response_format,
+        prompt,
+        temperature,
+    })
 }
 
-fn abort_watcher(watcher: tokio::task::JoinHandle<()>) {
-    watcher.abort();
-}
-
-/// GET /v1/models: list only the served model id.
-async fn list_models(State(state): State<ServerState>) -> Response {
-    let body = serde_json::json!({
-        "object": "list",
-        "data": [
-            {
-                "id": state.served_model_id,
-                "object": "model",
-                "created": 0,
-                "owned_by": "pumice",
-            }
-        ]
-    });
-    json_response(StatusCode::OK, body)
-}
-
-/// GET /health: lightweight liveness; stays responsive during transcription.
-async fn health() -> Response {
-    let body = serde_json::json!({
-        "status": "ok",
-        "version": env!("CARGO_PKG_VERSION"),
-    });
-    json_response(StatusCode::OK, body)
-}
-
-async fn not_found() -> Response {
-    openai_error(
-        StatusCode::NOT_FOUND,
-        "the requested resource was not found",
+/// A text parameter that arrived as a file upload.
+fn text_param_error(param: &'static str) -> ApiError {
+    invalid(
+        Some(param),
+        "This parameter must be sent as a text field, not a file.",
     )
+}
+
+fn map_multer_error(error: multer::Error) -> ApiError {
+    match error {
+        multer::Error::FieldSizeExceeded { field_name, .. } => {
+            if field_name.as_deref() == Some("file") {
+                FILE_TOO_LARGE
+            } else {
+                FIELD_TOO_LARGE
+            }
+        }
+        multer::Error::StreamSizeExceeded { .. } => BODY_TOO_LARGE,
+        _ => MALFORMED_MULTIPART,
+    }
 }
 
 fn success_response(format: ResponseFormat, text: String) -> Response {
@@ -357,332 +670,51 @@ fn success_response(format: ResponseFormat, text: String) -> Response {
             text,
         )
             .into_response(),
-        ResponseFormat::Json => {
-            let body = serde_json::json!({ "text": text });
-            json_response(StatusCode::OK, body)
-        }
+        ResponseFormat::Json => json_response(StatusCode::OK, &serde_json::json!({ "text": text })),
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum ResponseFormat {
-    #[default]
-    Json,
-    Text,
-}
-
-struct ParsedRequest {
-    file_bytes: Vec<u8>,
-    model: Option<String>,
-    language: Option<String>,
-    response_format: ResponseFormat,
-    prompt: Option<String>,
-    temperature: Option<f32>,
-}
-
-#[derive(Debug)]
-enum ParseError {
-    TooLarge,
-    Malformed(String),
-}
-
-async fn parse_multipart<S, E>(stream: S, boundary: String) -> Result<ParsedRequest, ParseError>
-where
-    S: futures_core::Stream<Item = Result<Bytes, E>> + Send + Unpin + 'static,
-    E: std::error::Error + Send + Sync + 'static,
-{
-    let size_limit = multer::SizeLimit::new()
-        .whole_stream(MAX_TOTAL_BODY_BYTES as u64)
-        .per_field(MAX_TEXT_FIELD_BYTES as u64)
-        .for_field("file", MAX_FILE_BYTES);
-    let constraints = multer::Constraints::new()
-        .allowed_fields(vec![
-            "file".to_string(),
-            "model".into(),
-            "language".into(),
-            "response_format".into(),
-            "prompt".into(),
-            "temperature".into(),
-            "stream".into(),
-        ])
-        .size_limit(size_limit);
-    let mut multipart = multer::Multipart::with_constraints(stream, boundary, constraints);
-
-    let mut file_bytes: Option<Vec<u8>> = None;
-    let mut language: Option<String> = None;
-    let mut response_format = ResponseFormat::Json;
-    let mut prompt: Option<String> = None;
-    let mut temperature: Option<f32> = None;
-    let mut model: Option<String> = None;
-    let mut seen_fields: HashMap<String, usize> = HashMap::new();
-    let mut part_count: usize = 0;
-
-    while let Some(field) = multipart.next_field().await.map_err(map_multer_error)? {
-        part_count += 1;
-        if part_count > MAX_MULTIPART_PARTS {
-            return Err(ParseError::Malformed(
-                "too many multipart parts".to_string(),
-            ));
-        }
-        let name = field.name().unwrap_or("").to_string();
-        *seen_fields.entry(name.clone()).or_insert(0) += 1;
-
-        match name.as_str() {
-            "file" => {
-                if file_bytes.is_some() {
-                    return Err(ParseError::Malformed(
-                        "only one file field is allowed".to_string(),
-                    ));
-                }
-                let data = field.bytes().await.map_err(map_multer_error)?;
-                if data.is_empty() {
-                    return Err(ParseError::Malformed(
-                        "the uploaded file must not be empty".to_string(),
-                    ));
-                }
-                file_bytes = Some(data.to_vec());
-            }
-            "language" => {
-                let value = read_text_field(field).await?;
-                language = Some(value);
-            }
-            "model" => {
-                model = Some(read_text_field(field).await?);
-            }
-            "response_format" => {
-                let value = read_text_field(field).await?;
-                response_format = parse_response_format(&value)?;
-            }
-            "prompt" => {
-                prompt = Some(read_text_field(field).await?);
-            }
-            "temperature" => {
-                let value = read_text_field(field).await?;
-                temperature = Some(parse_temperature(&value)?);
-            }
-            "stream" => {
-                let value = read_text_field(field).await?;
-                if value != "false" {
-                    return Err(ParseError::Malformed(
-                        "streaming is not supported".to_string(),
-                    ));
-                }
-            }
-            _ => {
-                return Err(ParseError::Malformed(format!(
-                    "unknown or unsupported field `{name}`"
-                )));
-            }
-        }
-    }
-
-    if seen_fields.values().any(|&c| c > 1) {
-        return Err(ParseError::Malformed(
-            "duplicate fields are not allowed".to_string(),
-        ));
-    }
-
-    let file_bytes = file_bytes
-        .ok_or_else(|| ParseError::Malformed("missing required field `file`".to_string()))?;
-
-    Ok(ParsedRequest {
-        file_bytes,
-        model,
-        language,
-        response_format,
-        prompt,
-        temperature,
+fn model_object(id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "object": "model",
+        "created": 0,
+        "owned_by": "pumice",
     })
 }
 
-fn map_multer_error(e: multer::Error) -> ParseError {
-    match e {
-        multer::Error::FieldSizeExceeded { .. } | multer::Error::StreamSizeExceeded { .. } => {
-            ParseError::TooLarge
-        }
-        _ => ParseError::Malformed(format!("multipart error: {e}")),
-    }
-}
-
-async fn read_text_field(field: multer::Field<'_>) -> Result<String, ParseError> {
-    let data = field.bytes().await.map_err(map_multer_error)?;
-    String::from_utf8(data.to_vec())
-        .map_err(|_| ParseError::Malformed("text field is not valid UTF-8".to_string()))
-}
-
-fn parse_response_format(value: &str) -> Result<ResponseFormat, ParseError> {
-    match value {
-        "json" => Ok(ResponseFormat::Json),
-        "text" => Ok(ResponseFormat::Text),
-        _ => Err(ParseError::Malformed(
-            "response_format must be `json` or `text`".to_string(),
-        )),
-    }
-}
-
-fn parse_temperature(value: &str) -> Result<f32, ParseError> {
-    let value: f32 = value
-        .parse()
-        .map_err(|_| ParseError::Malformed("temperature must be a number".to_string()))?;
-    if !value.is_finite() || value < 0.0 || value > 1.0 {
-        return Err(ParseError::Malformed(
-            "temperature must be between 0 and 1".to_string(),
-        ));
-    }
-    Ok(value)
-}
-
-fn validate_model(served_model_id: &str, parsed: &ParsedRequest) -> Result<(), String> {
-    let model = parsed
-        .model
-        .as_deref()
-        .ok_or_else(|| "missing required field `model`".to_string())?;
-    if model != served_model_id {
-        return Err(format!(
-            "model `{model}` is not served; the served model is `{served_model_id}`"
-        ));
-    }
-
-    Ok(())
-}
-
-fn map_error(error: &Error) -> (StatusCode, String) {
-    match error.code {
-        ErrorCode::InvalidArguments => (StatusCode::BAD_REQUEST, "invalid request".to_string()),
-        ErrorCode::InvalidInput => (StatusCode::BAD_REQUEST, "invalid audio input".to_string()),
-        ErrorCode::InputTooLarge => (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "audio file too large".to_string(),
-        ),
-        ErrorCode::AudioTooLong => (
-            StatusCode::BAD_REQUEST,
-            "audio duration exceeds maximum".to_string(),
-        ),
-        ErrorCode::UnsupportedFormat => (
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "unsupported audio format".to_string(),
-        ),
-        ErrorCode::ModelNotFound => (StatusCode::BAD_REQUEST, "model file not found".to_string()),
-        ErrorCode::EngineFailed
-        | ErrorCode::ModelLoadFailed
-        | ErrorCode::EngineNotAvailable
-        | ErrorCode::Internal => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "transcription failed".to_string(),
-        ),
-        ErrorCode::InvalidConfig => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "invalid server configuration".to_string(),
-        ),
-    }
-}
-
-fn log_request(
-    id: u64,
-    started: Instant,
-    status: StatusCode,
-    detail: &str,
-    audio_seconds: Option<f64>,
-) {
-    let elapsed_ms = started.elapsed().as_millis();
-    match audio_seconds {
-        Some(seconds) => {
-            eprintln!("request {id}: {status} {detail} in {elapsed_ms} ms (audio {seconds:.2} s)")
-        }
-        None => eprintln!("request {id}: {status} {detail} in {elapsed_ms} ms"),
-    }
-}
-
-fn openai_error(status: StatusCode, message: &str) -> Response {
+/// GET /v1/models: only the served model.
+async fn list_models(State(state): State<ServerState>) -> Response {
     let body = serde_json::json!({
-        "error": {
-            "message": message,
-            "type": error_type(status),
-            "param": null,
-            "code": error_code(status),
-        }
+        "object": "list",
+        "data": [model_object(&state.served_model_id)],
     });
-    json_response(status, body)
+    json_response(StatusCode::OK, &body)
 }
 
-fn bad_request(message: &str) -> Response {
-    openai_error(StatusCode::BAD_REQUEST, message)
-}
-
-fn payload_too_large() -> Response {
-    openai_error(
-        StatusCode::PAYLOAD_TOO_LARGE,
-        "the request body is too large",
-    )
-}
-
-fn request_timeout() -> Response {
-    openai_error(
-        StatusCode::REQUEST_TIMEOUT,
-        "uploading the request body timed out",
-    )
-}
-
-fn too_many_requests() -> Response {
-    let body = serde_json::json!({
-        "error": {
-            "message": "the server is busy",
-            "type": "rate_limit_error",
-            "param": null,
-            "code": "rate_limit",
-        }
-    });
-    (
-        StatusCode::TOO_MANY_REQUESTS,
-        [
-            (header::CONTENT_TYPE, "application/json"),
-            (header::RETRY_AFTER, BUSY_RESPONSE_RETRY_AFTER),
-        ],
-        serde_json::to_string(&body).unwrap_or_default(),
-    )
-        .into_response()
-}
-
-fn gateway_timeout() -> Response {
-    openai_error(
-        StatusCode::GATEWAY_TIMEOUT,
-        "processing the request timed out",
-    )
-}
-
-fn service_unavailable(message: &str) -> Response {
-    openai_error(StatusCode::SERVICE_UNAVAILABLE, message)
-}
-
-fn error_type(status: StatusCode) -> &'static str {
-    if status == StatusCode::TOO_MANY_REQUESTS {
-        "rate_limit_error"
-    } else if status.is_server_error() {
-        "server_error"
+/// GET /v1/models/{model}
+async fn retrieve_model(State(state): State<ServerState>, Path(model): Path<String>) -> Response {
+    if model == *state.served_model_id {
+        json_response(StatusCode::OK, &model_object(&state.served_model_id))
     } else {
-        "invalid_request_error"
+        MODEL_NOT_FOUND.into_response()
     }
 }
 
-fn error_code(status: StatusCode) -> &'static str {
-    match status {
-        StatusCode::BAD_REQUEST => "invalid_request",
-        StatusCode::PAYLOAD_TOO_LARGE => "payload_too_large",
-        StatusCode::UNSUPPORTED_MEDIA_TYPE => "unsupported_media_type",
-        StatusCode::REQUEST_TIMEOUT => "request_timeout",
-        StatusCode::TOO_MANY_REQUESTS => "rate_limit",
-        StatusCode::SERVICE_UNAVAILABLE => "service_unavailable",
-        StatusCode::GATEWAY_TIMEOUT => "gateway_timeout",
-        _ => "internal_error",
-    }
+/// GET /health: liveness; answers while a transcription runs.
+async fn health() -> Response {
+    json_response(
+        StatusCode::OK,
+        &serde_json::json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") }),
+    )
 }
 
-fn json_response(status: StatusCode, value: serde_json::Value) -> Response {
-    let body = serde_json::to_string(&value).unwrap_or_else(|_| {
-        r#"{"error":{"message":"internal error","type":"server_error","param":null,"code":"internal_error"}}"#
-            .to_string()
-    });
-    (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
+async fn not_found() -> Response {
+    NOT_FOUND.into_response()
+}
+
+async fn method_not_allowed() -> Response {
+    METHOD_NOT_ALLOWED.into_response()
 }
 
 /// Wait for shutdown via Ctrl-C or SIGTERM.
@@ -693,9 +725,12 @@ pub async fn shutdown_signal() {
 
     #[cfg(unix)]
     let terminate = async {
-        let mut sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler");
-        sig.recv().await;
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
     };
 
     #[cfg(not(unix))]
@@ -708,236 +743,4 @@ pub async fn shutdown_signal() {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::FakeEngine;
-    use axum::body::{Body, Bytes};
-    use std::io::Cursor;
-
-    fn make_state(engine: Arc<dyn Engine>, model_id: &str) -> ServerState {
-        ServerState {
-            engine,
-            served_model_id: model_id.to_string(),
-            config: Arc::new(Config::default()),
-            admission: Arc::new(Semaphore::new(1)),
-            shutdown: CancellationToken::new(),
-            request_ids: Arc::new(std::sync::atomic::AtomicU64::new(1)),
-        }
-    }
-
-    fn build_multipart(fields: &[(&str, &str, Option<&[u8]>)]) -> (Vec<u8>, String) {
-        let boundary = "----pumice-test-boundary";
-        let mut body = Vec::new();
-        for (name, value, file) in fields {
-            body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-            if let Some(bytes) = file {
-                body.extend_from_slice(
-                    format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"audio.wav\"\r\n").as_bytes(),
-                );
-                body.extend_from_slice(b"Content-Type: audio/wav\r\n\r\n");
-                body.extend_from_slice(bytes);
-            } else {
-                body.extend_from_slice(
-                    format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}")
-                        .as_bytes(),
-                );
-            }
-            body.extend_from_slice(b"\r\n");
-        }
-        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
-        (body, boundary.to_string())
-    }
-
-    fn silence_wav(seconds: f64) -> Vec<u8> {
-        let samples = vec![0.0f32; (seconds * 16_000.0) as usize];
-        let mut buf = Cursor::new(Vec::new());
-        let spec = hound::WavSpec {
-            channels: 1,
-            sample_rate: 16_000,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        };
-        let mut writer = hound::WavWriter::new(&mut buf, spec).unwrap();
-        for &s in &samples {
-            writer.write_sample(s).unwrap();
-        }
-        writer.finalize().unwrap();
-        buf.into_inner()
-    }
-
-    #[tokio::test]
-    async fn health_returns_ok() {
-        let _state = make_state(Arc::new(FakeEngine::new("x", None::<String>)), "tiny");
-        let response = health().await;
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn models_lists_only_served_id() {
-        let state = make_state(Arc::new(FakeEngine::new("x", None::<String>)), "turbo");
-        let response = list_models(State(state)).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let ids: Vec<&str> = json["data"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|m| m["id"].as_str().unwrap())
-            .collect();
-        assert_eq!(ids, vec!["turbo"]);
-    }
-
-    #[tokio::test]
-    async fn transcribe_json_returns_text() {
-        let state = make_state(Arc::new(FakeEngine::new("Olá mundo", Some("pt"))), "tiny");
-        let wav = silence_wav(1.0);
-        let (body, boundary) = build_multipart(&[
-            ("file", "", Some(&wav)),
-            ("model", "tiny", None),
-            ("language", "pt", None),
-        ]);
-        let request = Request::builder()
-            .method("POST")
-            .uri("/v1/audio/transcriptions")
-            .header(
-                header::CONTENT_TYPE,
-                format!("multipart/form-data; boundary={boundary}"),
-            )
-            .body(Body::from(body))
-            .unwrap();
-        let response = transcriptions(State(state), request).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(json["text"], "Olá mundo");
-    }
-
-    #[tokio::test]
-    async fn transcribe_text_returns_plain_text() {
-        let state = make_state(Arc::new(FakeEngine::new("hello", None::<String>)), "tiny");
-        let wav = silence_wav(1.0);
-        let (body, boundary) = build_multipart(&[
-            ("file", "", Some(&wav)),
-            ("model", "tiny", None),
-            ("response_format", "text", None),
-        ]);
-        let request = Request::builder()
-            .method("POST")
-            .uri("/v1/audio/transcriptions")
-            .header(
-                header::CONTENT_TYPE,
-                format!("multipart/form-data; boundary={boundary}"),
-            )
-            .body(Body::from(body))
-            .unwrap();
-        let response = transcriptions(State(state), request).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert_eq!(bytes, Bytes::from_static(b"hello"));
-    }
-
-    #[tokio::test]
-    async fn missing_model_returns_400() {
-        let state = make_state(Arc::new(FakeEngine::new("x", None::<String>)), "tiny");
-        let wav = silence_wav(1.0);
-        let (body, boundary) = build_multipart(&[("file", "", Some(&wav))]);
-        let request = Request::builder()
-            .method("POST")
-            .uri("/v1/audio/transcriptions")
-            .header(
-                header::CONTENT_TYPE,
-                format!("multipart/form-data; boundary={boundary}"),
-            )
-            .body(Body::from(body))
-            .unwrap();
-        let response = transcriptions(State(state), request).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn wrong_model_returns_400() {
-        let state = make_state(Arc::new(FakeEngine::new("x", None::<String>)), "tiny");
-        let wav = silence_wav(1.0);
-        let (body, boundary) =
-            build_multipart(&[("file", "", Some(&wav)), ("model", "huge", None)]);
-        let request = Request::builder()
-            .method("POST")
-            .uri("/v1/audio/transcriptions")
-            .header(
-                header::CONTENT_TYPE,
-                format!("multipart/form-data; boundary={boundary}"),
-            )
-            .body(Body::from(body))
-            .unwrap();
-        let response = transcriptions(State(state), request).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn busy_server_returns_429() {
-        let state = make_state(Arc::new(FakeEngine::new("x", None::<String>)), "tiny");
-        let _permit = state.admission.acquire().await.unwrap();
-        let wav = silence_wav(1.0);
-        let (body, boundary) =
-            build_multipart(&[("file", "", Some(&wav)), ("model", "tiny", None)]);
-        let request = Request::builder()
-            .method("POST")
-            .uri("/v1/audio/transcriptions")
-            .header(
-                header::CONTENT_TYPE,
-                format!("multipart/form-data; boundary={boundary}"),
-            )
-            .body(Body::from(body))
-            .unwrap();
-        let response = transcriptions(State(state.clone()), request).await;
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    }
-
-    #[tokio::test]
-    async fn oversize_file_returns_413() {
-        let state = make_state(Arc::new(FakeEngine::new("x", None::<String>)), "tiny");
-        let big = vec![0u8; MAX_FILE_BYTES as usize + 1];
-        let (body, boundary) =
-            build_multipart(&[("file", "", Some(&big)), ("model", "tiny", None)]);
-        let request = Request::builder()
-            .method("POST")
-            .uri("/v1/audio/transcriptions")
-            .header(
-                header::CONTENT_TYPE,
-                format!("multipart/form-data; boundary={boundary}"),
-            )
-            .body(Body::from(body))
-            .unwrap();
-        let response = transcriptions(State(state), request).await;
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    }
-
-    #[tokio::test]
-    async fn unsupported_field_returns_400() {
-        let state = make_state(Arc::new(FakeEngine::new("x", None::<String>)), "tiny");
-        let wav = silence_wav(1.0);
-        let (body, boundary) = build_multipart(&[
-            ("file", "", Some(&wav)),
-            ("model", "tiny", None),
-            ("timestamp_granularities", "word", None),
-        ]);
-        let request = Request::builder()
-            .method("POST")
-            .uri("/v1/audio/transcriptions")
-            .header(
-                header::CONTENT_TYPE,
-                format!("multipart/form-data; boundary={boundary}"),
-            )
-            .body(Body::from(body))
-            .unwrap();
-        let response = transcriptions(State(state), request).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-}
+mod tests;
