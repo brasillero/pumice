@@ -77,3 +77,55 @@ fn existing_ogg_opus_fixture_decodes() {
     let decoded = decode_audio(Cursor::new(fixture("sample-pt.opus"))).unwrap();
     assert!((decoded.samples.len() as f64 / 48_000.0 - 14.19).abs() < 1.0);
 }
+
+#[test]
+fn rejects_corrupted_ogg_page() {
+    let mut bytes = fixture("sample-pt-48k.opus");
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0x01;
+    let err = decode_audio(Cursor::new(bytes)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidInput);
+}
+
+#[test]
+fn rejects_chained_ogg_opus() {
+    let mut bytes = fixture("sample-pt-48k.opus");
+    bytes.extend(fixture("sample-pt-48k.opus"));
+    let err = decode_audio(Cursor::new(bytes)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::UnsupportedFormat);
+}
+
+#[test]
+fn rejects_truncated_ogg_opus() {
+    let bytes = fixture("sample-pt-48k.opus");
+    let err = decode_audio(Cursor::new(&bytes[..bytes.len() - 30])).unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidInput);
+}
+
+#[test]
+fn rejects_truncated_webm() {
+    for name in [
+        "sample-pt.webm",
+        "sample-pt-live.webm",
+        "chrome-mediarecorder.webm",
+    ] {
+        let bytes = fixture(name);
+        let err = decode_audio(Cursor::new(&bytes[..bytes.len() - 17])).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput, "{name}");
+    }
+}
+
+#[test]
+fn rejects_mutated_webm_opus_head() {
+    let mut bytes = fixture("sample-pt.webm");
+    let at = bytes.windows(8).position(|w| w == b"OpusHead").unwrap();
+    bytes[at + 9] = 8; // channel count
+    let err = decode_audio(Cursor::new(bytes)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::UnsupportedFormat);
+}
+
+#[test]
+fn vorbis_ogg_still_uses_the_existing_path() {
+    let decoded = decode_audio(Cursor::new(fixture("sample-pt.ogg"))).unwrap();
+    assert!((decoded.samples.len() as f64 / 16_000.0 - 14.19).abs() < 1.0);
+}

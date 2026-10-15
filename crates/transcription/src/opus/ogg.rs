@@ -278,7 +278,7 @@ pub(crate) fn decode_ogg_opus(bytes: Vec<u8>, cancel: &CancelToken) -> Result<De
             return Err(Error::invalid_input("ogg stream contains an empty packet"));
         }
         packets.push(OpusPacket {
-            data: packet.data.into(),
+            data: packet.data,
             trim_start: 0,
             trim_end: packet.trim_end.get() as usize,
         });

@@ -538,7 +538,7 @@ fn demux(bytes: &[u8], info: &WebmInfo, cancel: &CancelToken) -> Result<Vec<Opus
                     (0, samples as usize)
                 };
                 packets.push(OpusPacket {
-                    data: frame.into(),
+                    data: frame,
                     trim_start,
                     trim_end,
                 });
