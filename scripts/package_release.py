@@ -3,7 +3,7 @@
 
 Builds ``pumice-{version}-{target}.zip`` (Windows) or
 ``pumice-{version}-{target}.tar.gz`` (Unix) with a single top-level directory
-containing the release executable, LICENSE, pumice.example.yaml and INSTALL.md.
+containing the release executable, LICENSE, relay.example.yml and INSTALL.md.
 Only the explicitly listed files are packaged — never the repository or the
 target directory, and never the test-only fake CLI.
 
@@ -34,7 +34,7 @@ SUPPORTED_TARGETS = frozenset(
 
 # Files copied verbatim into every archive, relative to the repo root.
 # INSTALL.md lives next to this script and is the archive install note.
-PACKAGE_FILES = ("LICENSE", "pumice.example.yaml", "INSTALL.md")
+PACKAGE_FILES = ("LICENSE", "relay.example.yml", "INSTALL.md")
 
 EXECUTABLE_MODE = 0o755
 DATA_MODE = 0o644

@@ -67,7 +67,7 @@ async fn start_server(yaml: &str, scenario: Value) -> TestServer {
     let fake = FakeCli::new(scenario);
     let yaml = yaml.replace("{binary}", &fake.path().display().to_string());
     let config_dir = TempDir::new().expect("temp dir");
-    let config_path = config_dir.path().join("pumice.yaml");
+    let config_path = config_dir.path().join("relay.yml");
     fs::write(&config_path, yaml).expect("write config");
     let config = config::load_with_env(Some(&config_path), |_| None)
         .expect("config loads")
@@ -461,7 +461,7 @@ async fn debug_log_records_one_redacted_line_when_enabled() {
 /// alive by the caller) and path.
 fn write_config(yaml: &str) -> (TempDir, PathBuf) {
     let dir = TempDir::new().expect("temp dir");
-    let path = dir.path().join("pumice.yaml");
+    let path = dir.path().join("relay.yml");
     fs::write(&path, yaml).expect("write config");
     (dir, path)
 }

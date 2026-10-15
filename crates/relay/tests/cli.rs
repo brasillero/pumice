@@ -42,11 +42,11 @@ fn hermetic_yaml(port: u16) -> (Vec<FakeCli>, String) {
     (fakes, yaml)
 }
 
-/// Writes `yaml` to `pumice.yaml` inside a fresh directory and returns the
+/// Writes `yaml` to `relay.yml` inside a fresh directory and returns the
 /// directory (kept alive by the caller) and the file's path.
 fn write_config(yaml: &str) -> (TempDir, PathBuf) {
     let dir = TempDir::new().expect("temp dir");
-    let path = dir.path().join("pumice.yaml");
+    let path = dir.path().join("relay.yml");
     fs::write(&path, yaml).expect("write config");
     (dir, path)
 }
@@ -287,7 +287,7 @@ fn bare_pumice_starts_the_service_with_the_per_user_config() {
         let xdg = config_dir.path().join("xdg");
         let config_home = xdg.join("pumice");
         fs::create_dir_all(&config_home).expect("create per-user config dir");
-        fs::copy(&config_path, config_home.join("pumice.yaml")).expect("install per-user config");
+        fs::copy(&config_path, config_home.join("relay.yml")).expect("install per-user config");
         let cwd = config_dir.path().join("work");
         fs::create_dir_all(&cwd).expect("create working directory");
 
@@ -424,7 +424,7 @@ fn malformed_args_exit_2_with_usage_without_starting_the_service() {
 #[test]
 fn bad_config_exits_2_naming_the_file_and_line() {
     let dir = TempDir::new().expect("temp dir");
-    let config_path = dir.path().join("pumice.yaml");
+    let config_path = dir.path().join("relay.yml");
     fs::write(&config_path, "port: [unclosed\n").expect("write bad config");
     let output = run(
         &["--config", config_path.to_str().expect("UTF-8 path")],
@@ -437,7 +437,7 @@ fn bad_config_exits_2_naming_the_file_and_line() {
         "a bad config must exit 2: {stderr}"
     );
     assert!(
-        stderr.contains("pumice.yaml:1"),
+        stderr.contains("relay.yml:1"),
         "the error must name the file and line: {stderr}"
     );
 }

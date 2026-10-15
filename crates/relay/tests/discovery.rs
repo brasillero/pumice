@@ -28,7 +28,7 @@ fn descriptor(id: &str) -> ProviderDescriptor {
 /// always pass absolute fake paths and the directory can drop after loading.
 fn load(yaml: &str) -> Config {
     let dir = TempDir::new().expect("temp dir");
-    let path = dir.path().join("pumice.yaml");
+    let path = dir.path().join("relay.yml");
     std::fs::write(&path, yaml).expect("write config");
     config::load_with_env(Some(&path), |_| None)
         .expect("config loads")
@@ -178,7 +178,7 @@ fn registry_probe_metadata_is_consistent() {
 /// Validates `yaml` against `descriptors` alone, so archived (unregistered)
 /// providers keep their detection guarantees tested.
 fn load_with(yaml: &str, descriptors: &[ProviderDescriptor]) -> Config {
-    config::validate_text_with_descriptors(yaml, Path::new("pumice.yaml"), descriptors)
+    config::validate_text_with_descriptors(yaml, Path::new("relay.yml"), descriptors)
         .expect("config validates")
 }
 

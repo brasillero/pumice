@@ -65,7 +65,7 @@ async fn start_monitored_server(
     let fake = FakeCli::new(scenario);
     let yaml = yaml.replace("{binary}", &fake.path().display().to_string());
     let config_dir = TempDir::new().expect("temp dir");
-    let config_path = config_dir.path().join("pumice.yaml");
+    let config_path = config_dir.path().join("relay.yml");
     fs::write(&config_path, yaml).expect("write config");
     let config = config::load_with_env(Some(&config_path), |_| None)
         .expect("config loads")

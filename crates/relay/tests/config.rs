@@ -12,9 +12,9 @@ use pumice_relay::process::ProcessRunner;
 use pumice_relay::providers::{self, ProviderDescriptor, ProviderSettings};
 use tempfile::TempDir;
 
-const CONFIG_NAME: &str = "pumice.yaml";
+const CONFIG_NAME: &str = "relay.yml";
 
-/// Writes `text` to a temporary `pumice.yaml` and loads it.
+/// Writes `text` to a temporary `relay.yml` and loads it.
 fn load_text(text: &str) -> Result<Config, String> {
     let dir = TempDir::new().map_err(|e| e.to_string())?;
     let path = dir.path().join(CONFIG_NAME);
@@ -819,14 +819,14 @@ fn serve_reports_config_errors_like_check_config() {
     );
 }
 
-/// Path to the shipped `pumice.example.yaml` at the repository root.
+/// Path to the shipped `relay.example.yml` at the repository root.
 fn example_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("manifest dir has a parent")
         .parent()
         .expect("manifest dir has a grandparent")
-        .join("pumice.example.yaml")
+        .join("relay.example.yml")
 }
 
 #[test]

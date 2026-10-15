@@ -264,7 +264,7 @@ fn absent_entry_means_not_configured() {
 #[test]
 fn a_config_entry_is_refused_as_archived() {
     let dir = TempDir::new().expect("temp dir");
-    let path = dir.path().join("pumice.yaml");
+    let path = dir.path().join("relay.yml");
     fs::write(
         &path,
         "providers:\n  - id: antigravity\n    enabled: false\n",
@@ -351,7 +351,7 @@ fn enabled_true_is_refused_at_the_enabled_line() {
     // The archived descriptor still refuses enablement at the exact line.
     let error = config::validate_text_with_descriptors(
         "providers:\n  - id: antigravity\n    enabled: true\n",
-        std::path::Path::new("pumice.yaml"),
+        std::path::Path::new("relay.yml"),
         &[pumice_relay::providers::antigravity::DESCRIPTOR],
     )
     .expect_err("enablement is refused")

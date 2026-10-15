@@ -29,7 +29,7 @@ pub const DEFAULT_MAX_PARALLEL: usize = 4;
 /// Hard upper bound for `max_parallel`, kept small to limit resource use.
 pub const MAX_PARALLEL_LIMIT: usize = 32;
 const DEFAULT_DEBUG_LOG_FILE: &str = "pumice-debug.jsonl";
-const PER_USER_FILE: &str = "pumice.yaml";
+const PER_USER_FILE: &str = "relay.yml";
 
 /// Validated settings with every default applied.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -526,7 +526,7 @@ mod tests {
             &|key| (key == "XDG_CONFIG_HOME").then(|| env_value.clone()),
             false,
         );
-        assert_eq!(path, Some(xdg.join("pumice").join("pumice.yaml")));
+        assert_eq!(path, Some(xdg.join("pumice").join("relay.yml")));
     }
 
     #[test]
@@ -541,7 +541,7 @@ mod tests {
                 PathBuf::from("/tmp/home")
                     .join(".config")
                     .join("pumice")
-                    .join("pumice.yaml")
+                    .join("relay.yml")
             )
         );
     }
@@ -562,7 +562,7 @@ mod tests {
                 PathBuf::from("/tmp/home")
                     .join(".config")
                     .join("pumice")
-                    .join("pumice.yaml")
+                    .join("relay.yml")
             )
         );
     }
@@ -578,7 +578,7 @@ mod tests {
             Some(
                 PathBuf::from(r"C:\Users\me\AppData\Roaming")
                     .join("pumice")
-                    .join("pumice.yaml")
+                    .join("relay.yml")
             )
         );
     }
@@ -591,7 +591,7 @@ mod tests {
     #[test]
     fn unknown_location_is_dropped() {
         let error =
-            ConfigError::at(Location::UNKNOWN, "lost position").with_file(Path::new("pumice.yaml"));
-        assert_eq!(error.to_string(), "pumice.yaml: lost position");
+            ConfigError::at(Location::UNKNOWN, "lost position").with_file(Path::new("relay.yml"));
+        assert_eq!(error.to_string(), "relay.yml: lost position");
     }
 }

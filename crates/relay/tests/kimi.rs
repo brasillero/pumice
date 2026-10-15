@@ -377,10 +377,10 @@ fn descriptor_defaults_ship_disabled_with_an_empty_model() {
 
 // Configuration validation, through the real YAML loader.
 
-/// Loads `text` as a pumice.yaml, returning the parsed config.
+/// Loads `text` as a relay.yml, returning the parsed config.
 fn load(text: &str) -> Result<Config, String> {
     let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let path = dir.path().join("pumice.yaml");
+    let path = dir.path().join("relay.yml");
     std::fs::write(&path, text).map_err(|e| e.to_string())?;
     config::load_with_env(Some(&path), |_| None)
         .map(|loaded| loaded.config)

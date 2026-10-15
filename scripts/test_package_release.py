@@ -16,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 LINUX_TARGET = "x86_64-unknown-linux-musl"
 WINDOWS_TARGET = "x86_64-pc-windows-msvc"
-EXPECTED_MEMBERS = ("pumice", "LICENSE", "pumice.example.yaml", "INSTALL.md")
+EXPECTED_MEMBERS = ("pumice", "LICENSE", "relay.example.yml", "INSTALL.md")
 
 
 class PackageReleaseTests(unittest.TestCase):
@@ -44,7 +44,7 @@ class PackageReleaseTests(unittest.TestCase):
             sorted(members), sorted(f"{top}/{name}" for name in EXPECTED_MEMBERS)
         )
         self.assertEqual(members[f"{top}/pumice"].mode, 0o755)
-        for name in ("LICENSE", "pumice.example.yaml", "INSTALL.md"):
+        for name in ("LICENSE", "relay.example.yml", "INSTALL.md"):
             self.assertEqual(members[f"{top}/{name}"].mode, 0o644)
         self.assertEqual(payload, self.binary.read_bytes())
 

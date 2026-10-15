@@ -105,7 +105,7 @@ async fn start_dual_server(
         .replace("{claude}", &claude.path().display().to_string())
         .replace("{codex}", &codex.path().display().to_string());
     let config_dir = TempDir::new().expect("temp dir");
-    let config_path = config_dir.path().join("pumice.yaml");
+    let config_path = config_dir.path().join("relay.yml");
     fs::write(&config_path, yaml).expect("write config");
     let config = config::load_with_env(Some(&config_path), |_| None)
         .expect("config loads")
@@ -145,7 +145,7 @@ async fn start_server(yaml: &str, scenario: Value) -> TestServer {
     let fake = FakeCli::new(scenario);
     let yaml = yaml.replace("{binary}", &fake.path().display().to_string());
     let config_dir = TempDir::new().expect("temp dir");
-    let config_path = config_dir.path().join("pumice.yaml");
+    let config_path = config_dir.path().join("relay.yml");
     fs::write(&config_path, yaml).expect("write config");
     let config = config::load_with_env(Some(&config_path), |_| None)
         .expect("config loads")
@@ -185,7 +185,7 @@ async fn start_server_with_debug_log(yaml: &str, scenario: Value) -> (TestServer
     let fake = FakeCli::new(scenario);
     let yaml = yaml.replace("{binary}", &fake.path().display().to_string());
     let config_dir = TempDir::new().expect("temp dir");
-    let config_path = config_dir.path().join("pumice.yaml");
+    let config_path = config_dir.path().join("relay.yml");
     let debug_path = config_dir.path().join("debug.log");
     let yaml = format!(
         "{}\ndebug_log:\n  enabled: true\n  path: {}\n",
@@ -1250,7 +1250,7 @@ async fn start_missing_selected_server(
     )
     .replace("{codex}", &codex.path().display().to_string());
     let config_dir = TempDir::new().expect("temp dir");
-    let config_path = config_dir.path().join("pumice.yaml");
+    let config_path = config_dir.path().join("relay.yml");
     fs::write(&config_path, yaml).expect("write config");
     let config = config::load_with_env(Some(&config_path), |_| None)
         .expect("config loads")
@@ -1446,7 +1446,7 @@ fn hermetic_serve_yaml(port: u16, claude_scenario: Value) -> (FakeCli, Vec<FakeC
 /// alive by the caller) and path.
 fn write_config(yaml: &str) -> (TempDir, std::path::PathBuf) {
     let dir = TempDir::new().expect("temp dir");
-    let path = dir.path().join("pumice.yaml");
+    let path = dir.path().join("relay.yml");
     fs::write(&path, yaml).expect("write config");
     (dir, path)
 }

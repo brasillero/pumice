@@ -23,7 +23,7 @@ const FIXTURE_RESULT: &str = "Formatted text.";
 /// alive by the caller) and path.
 fn write_config(yaml: &str) -> (TempDir, PathBuf) {
     let dir = TempDir::new().expect("temp dir");
-    let path = dir.path().join("pumice.yaml");
+    let path = dir.path().join("relay.yml");
     fs::write(&path, yaml).expect("write config");
     (dir, path)
 }

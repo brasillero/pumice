@@ -106,23 +106,23 @@ mod tests {
     #[test]
     fn display_formats_file_line_column() {
         let error = ConfigError {
-            file: Some(PathBuf::from("pumice.yaml")),
+            file: Some(PathBuf::from("relay.yml")),
             line: Some(12),
             column: Some(19),
             message: "providers.codex.timeout_secs must be greater than zero".to_owned(),
         };
         assert_eq!(
             error.to_string(),
-            "pumice.yaml:12:19: providers.codex.timeout_secs must be greater than zero"
+            "relay.yml:12:19: providers.codex.timeout_secs must be greater than zero"
         );
     }
 
     #[test]
     fn display_formats_file_only_and_bare() {
-        let file_only = ConfigError::file("pumice.yaml", "cannot read configuration file: nope");
+        let file_only = ConfigError::file("relay.yml", "cannot read configuration file: nope");
         assert_eq!(
             file_only.to_string(),
-            "pumice.yaml: cannot read configuration file: nope"
+            "relay.yml: cannot read configuration file: nope"
         );
         let bare = ConfigError::general("nothing at all");
         assert_eq!(bare.to_string(), "nothing at all");
