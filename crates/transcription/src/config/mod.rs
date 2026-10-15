@@ -386,7 +386,7 @@ models:
         assert_eq!(loaded.config.models[0].id, "tiny");
         assert_eq!(
             loaded.config.models[0].path,
-            tmp.path().canonicalize().unwrap().join("tiny.gguf")
+            std::path::absolute(tmp.path()).unwrap().join("tiny.gguf")
         );
     }
 
