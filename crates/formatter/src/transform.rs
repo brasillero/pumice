@@ -5,11 +5,13 @@
 //! directly before the first message that is not a leading `system` or
 //! `developer` message, and changes nothing else: the model, `stream`,
 //! unknown top-level members and every other message (including unknown
-//! message fields) are preserved exactly. If the request already carries
-//! non-empty `system`/`developer` instructions the default policy refuses
-//! with [`ErrorCode::FormatterInstructionConflict`]; [`ConflictPolicy::Append`]
+//! message fields) are preserved exactly. If the request carries non-empty
+//! `system`/`developer` instructions *anywhere* in the conversation — not
+//! just in the leading run — the default policy refuses with
+//! [`ErrorCode::FormatterInstructionConflict`]; [`ConflictPolicy::Append`]
 //! instead keeps the existing instructions and inserts the formatter's
-//! message right after them. The dictated text itself is never modified.
+//! message right after the leading ones. The dictated text itself is never
+//! modified.
 
 use serde_json::Value;
 
@@ -77,9 +79,13 @@ pub fn apply(
         .iter()
         .take_while(|message| is_instruction_message(message))
         .count();
-    let has_instructions = messages[..leading]
+    // Every instruction message in the conversation conflicts, not just the
+    // leading run: inserting the formatter before a `system` message that
+    // sits after the user text would still reorder the client's own
+    // instructions.
+    let has_instructions = messages
         .iter()
-        .any(content_present);
+        .any(|message| is_instruction_message(message) && content_present(message));
 
     if has_instructions && policy == ConflictPolicy::Reject {
         return Err(Error::formatter_instruction_conflict());
@@ -228,18 +234,43 @@ mod tests {
     }
 
     #[test]
-    fn instructions_after_the_user_message_do_not_conflict() {
-        // Only the *leading* instruction prefix is protected; a system
-        // message later in the conversation is left exactly where it is.
-        let mut request = user_request();
-        request["messages"] = serde_json::json!([
-            {"role": "user", "content": "hi"},
-            {"role": "system", "content": "late rules"},
-        ]);
-        let out = apply(request.clone(), &formatter(), ConflictPolicy::Reject).unwrap();
-        assert_eq!(out["messages"][0]["role"], "system");
-        assert_eq!(out["messages"][0]["content"], "THE RULES");
-        assert_eq!(out["messages"][2], request["messages"][1]);
+    fn instructions_after_the_user_message_still_conflict() {
+        // The conflict scan covers every system/developer message, not just
+        // the leading run: a system message later in the conversation is the
+        // client's own instruction and must not be bypassed.
+        for instruction in [
+            serde_json::json!({"role": "system", "content": "late rules"}),
+            serde_json::json!({"role": "developer", "content": "late rules"}),
+            serde_json::json!({"role": "system", "content": [{"type": "text", "text": ""}]}),
+        ] {
+            let mut request = user_request();
+            request["messages"] = serde_json::json!([
+                {"role": "user", "content": "hi"},
+                instruction,
+            ]);
+            let err = apply(request, &formatter(), ConflictPolicy::Reject).unwrap_err();
+            assert_eq!(err.code, ErrorCode::FormatterInstructionConflict);
+        }
+    }
+
+    #[test]
+    fn append_keeps_late_instructions_where_they_are() {
+        // With append, a late system message stays untouched and the
+        // formatter's message goes before the first user message.
+        for role in ["system", "developer"] {
+            let mut request = user_request();
+            request["messages"] = serde_json::json!([
+                {"role": "user", "content": "hi"},
+                {"role": role, "content": "late rules"},
+            ]);
+            let out = apply(request.clone(), &formatter(), ConflictPolicy::Append).unwrap();
+            let messages = out["messages"].as_array().unwrap();
+            assert_eq!(messages.len(), 3);
+            assert_eq!(messages[0]["role"], "system");
+            assert_eq!(messages[0]["content"], "THE RULES");
+            assert_eq!(messages[1], request["messages"][0]);
+            assert_eq!(messages[2], request["messages"][1]);
+        }
     }
 
     #[test]
