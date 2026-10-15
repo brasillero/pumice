@@ -40,3 +40,16 @@
 **Rejected.** Reading `pumice.yaml` as a fallback with a warning; a `pumice config migrate` command.
 
 **Consequences.** Before deploying this version on server-1, the owner (or the supervisor) renames `~/.config/pumice/pumice.yaml` to `relay.yml` and changes the service to `pumice relay serve --plain`.
+
+### D4 · Active · On Unix `pumice transcribe` replaces itself with `pumice-transcribe`
+- date: 2026-10-15
+- decided by: claude (orchestrator), brasillero (authorized)
+- origin: D2
+- area: cli
+- revisit if: the orchestrator needs to supervise a running transcription process
+
+**Decision.** On Unix, `pumice transcribe …` execs the sibling `pumice-transcribe` (`CommandExt::exec`), so the transcription process takes over `pumice`'s process: signals, exit status and arguments (as `OsString`) are native. On Windows, where exec does not exist, `pumice` spawns the sibling, ignores console Ctrl-C itself while waiting so the child handles it, and exits with the child's full exit code.
+
+**Why.** Review round 1 found that spawning and forwarding signals could orphan the child, truncate exit codes and reject non-UTF-8 arguments; exec removes the forwarding layer entirely.
+
+**Rejected.** Spawn-and-forward with signal handlers on Unix.
