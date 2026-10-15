@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pumice · Transcription test</title>
+<style>
+:root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+body { max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+h1 { margin-bottom: .2rem; } .muted { opacity: .75; }
+fieldset { border: 1px solid #8887; border-radius: 12px; margin: 1rem 0; padding: 1rem; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+label { display: block; } input, select, textarea, button { font: inherit; }
+input:not([type=file]), select, textarea { box-sizing: border-box; width: 100%; padding: .5rem; }
+button { cursor: pointer; padding: .5rem 1rem; } button:disabled { cursor: default; opacity: .5; }
+#record { font-size: 1.3rem; background: #305bd5; color: white; border: 0; border-radius: 8px; }
+#record.recording { background: #b72c39; } meter { width: 12rem; vertical-align: middle; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #8881; padding: 1rem; min-height: 2rem; }
+#error, #notice { white-space: pre-wrap; } #error { color: light-dark(#a11320, #ff9caa); }
+#history { padding-left: 1.5rem; } #history button { text-align: left; margin: .25rem 0; }
+@media(max-width:600px) { .grid { grid-template-columns: 1fr; } }
+</style>
+<h1>Pumice transcription</h1>
+<p class="muted">Record, talk, and send audio through the OpenAI-compatible API. Audio stays in memory until sent to your configured endpoint.</p>
+<fieldset><legend>Connection</legend>
+<label>Endpoint base URL <input id="base" type="text" spellcheck="false"></label>
+<div class="grid">
+<label>Model <select id="model" required><option value="">Refresh models first</option></select></label>
+<label>Optional API key <input id="key" type="password" autocomplete="off" placeholder="Only sent when filled; never saved"></label>
+</div>
+<button id="refresh" type="button">Refresh models</button> <span id="modelsStatus" role="status"></span>
+</fieldset>
+<fieldset><legend>Transcription options</legend>
+<div class="grid">
+<label>Language (optional) <input id="language" value="pt" placeholder="Auto-detect when blank"></label>
+<label>Response format <select id="format"><option value="json">JSON</option><option value="text">Text</option></select></label>
+</div>
+<label>Prompt (optional) <textarea id="prompt" rows="2" placeholder="Context or vocabulary for transcription"></textarea></label>
+</fieldset>
+<fieldset><legend>Audio</legend>
+<p id="notice" role="status"></p>
+<button id="record" type="button">Record</button> <output id="timer">0:00 / 2:00</output>
+<label>Microphone level <meter id="level" min="0" max="1" value="0"></meter></label>
+<p class="muted">Mono 16-bit PCM WAV at the browser sample rate. Recording stops and sends automatically at 120 seconds.</p>
+<label>Or upload a file <input id="file" type="file" accept=".wav,.mp3,.flac,.ogg,audio/wav,audio/mpeg,audio/flac,audio/ogg"></label>
+<button id="upload" type="button">Transcribe selected file</button>
+<p class="muted">Up to 25,000,000 bytes and 120 seconds. WAV, MP3, FLAC, Ogg/Vorbis. WebM/Opus and AAC/MP4 are unsupported.</p>
+</fieldset>
+<p id="progress" role="status" aria-live="polite">Ready.</p>
+<p id="error" role="alert"></p>
+<p>HTTP status: <output id="status">—</output> · Round-trip: <output id="elapsed">—</output> ms</p>
+<div>Transcript <pre id="transcript" tabindex="0" aria-label="Transcript"></pre></div>
+<details><summary>Raw response</summary><pre id="raw"></pre></details>
+<h2>Session history</h2><ol id="history"></ol>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const directBase = 'http://127.0.0.1:17568/v1';
+// The helper serves this at its root. Other static HTTP hosts can use a direct base.
+const defaultBase = location.protocol === 'file:' ? directBase : '/v1';
+try { $('base').value = localStorage.getItem('pumice-transcribe-base') || defaultBase; }
+catch { $('base').value = defaultBase; }
+let pending = false, starting = false, discovering = false, recording = null;
+const history = [];
+function base() { return $('base').value.trim().replace(/\/+$/, ''); }
+function headers() { const key = $('key').value.trim(); return key ? {Authorization: `Bearer ${key}`} : {}; }
+function saveBase() { try { localStorage.setItem('pumice-transcribe-base', base()); } catch {} }
+$('base').addEventListener('change', () => { saveBase(); $('model').replaceChildren(new Option('Refresh models first', '')); });
+function controls() {
+  const locked = pending || starting || discovering || !!recording;
+  for (const id of ['base', 'key', 'model', 'language', 'format', 'prompt', 'file', 'upload', 'refresh']) $(id).disabled = locked;
+  $('record').disabled = pending || starting || discovering || !navigator.mediaDevices?.getUserMedia;
+  $('record').textContent = recording ? 'Stop & transcribe' : starting ? 'Opening microphone…' : 'Record';
+  $('record').classList.toggle('recording', !!recording);
+}
+function errorText(status, parsed) {
+  const e = parsed?.error;
+  return e ? `${status === 429 ? 'Busy — one transcription runs at a time.\n' : ''}${e.message}\nType: ${e.type ?? '—'} · Code: ${e.code ?? '—'} · Param: ${e.param ?? '—'} · HTTP ${status}` : `HTTP ${status}: request failed.`;
+}
+async function refreshModels() {
+  if (pending || starting || recording || discovering) return;
+  discovering = true; controls(); $('modelsStatus').textContent = 'Loading…'; saveBase();
+  try {
+    const res = await fetch(`${base()}/models`, {headers: headers(), signal: AbortSignal.timeout(15000)});
+    const raw = await res.text(); let data; try { data = JSON.parse(raw); } catch { throw new Error(`HTTP ${res.status}: invalid models JSON`); }
+    if (!res.ok) throw new Error(errorText(res.status, data));
+    if (!Array.isArray(data.data)) throw new Error('Invalid OpenAI model list.');
+    const previous = $('model').value;
+    $('model').replaceChildren(...data.data.filter(m => typeof m.id === 'string').map(m => new Option(m.id, m.id)));
+    if ([...$('model').options].some(o => o.value === previous)) $('model').value = previous;
+    $('modelsStatus').textContent = `${$('model').options.length} model(s)`;
+  } catch (e) { $('modelsStatus').textContent = `${e.message}. Check the URL, server, and CORS (use the helper for same-origin requests).`; }
+  finally { discovering = false; controls(); }
+}
+$('refresh').onclick = refreshModels;
+function showResult(result) {
+  for (const id of ['status', 'elapsed', 'transcript', 'raw', 'error']) $(id).textContent = result[id];
+}
+async function transcribe(file) {
+  if (pending || recording || starting) return;
+  if (!$('model').value) { $('error').textContent = 'Refresh models and select the served model first.'; return; }
+  if (!file || file.size === 0 || file.size > 25000000) { $('error').textContent = 'Choose nonempty audio up to 25,000,000 bytes.'; return; }
+  const form = new FormData();
+  form.append('file', file, file.name || 'recording.wav'); form.append('model', $('model').value);
+  if ($('language').value.trim()) form.append('language', $('language').value.trim());
+  if ($('prompt').value) form.append('prompt', $('prompt').value);
+  form.append('response_format', $('format').value);
+  pending = true; controls(); saveBase(); $('progress').textContent = 'Transcribing…';
+  const result = {status: '—', elapsed: '—', transcript: '', raw: '', error: ''};
+  showResult(result); const start = performance.now();
+  try {
+    const res = await fetch(`${base()}/audio/transcriptions`, {method: 'POST', headers: headers(), body: form, signal: AbortSignal.timeout(135000)});
+    result.status = `${res.status} ${res.statusText}`; result.raw = await res.text();
+    let parsed; try { parsed = JSON.parse(result.raw); } catch {}
+    if (!res.ok) result.error = errorText(res.status, parsed);
+    else if ($('format').value === 'text') result.transcript = result.raw;
+    else if (typeof parsed?.text === 'string') result.transcript = parsed.text;
+    else result.error = 'Expected a JSON response with a text string.';
+  } catch (e) { result.error = `${e.message}\nCheck the server and endpoint. Cross-origin requests require CORS; use serve.py for same-origin access. HTTPS pages cannot call an insecure remote HTTP endpoint.`; }
+  finally {
+    result.elapsed = String(Math.round(performance.now() - start)); showResult(result);
+    $('progress').textContent = result.error ? 'Request failed.' : result.transcript === '' ? 'Done — empty transcript (silence).' : 'Done.';
+    history.unshift(result); if (history.length > 10) history.pop();
+    $('history').replaceChildren(...history.map((item, i) => {
+      const li = document.createElement('li'), button = document.createElement('button');
+      button.textContent = `${i + 1}. ${item.status} · ${item.elapsed} ms · ${item.error || item.transcript || '(empty transcript)'}`.slice(0, 160);
+      button.onclick = () => showResult(item); li.append(button); return li;
+    }));
+    pending = false; controls();
+  }
+}
+$('upload').onclick = () => transcribe($('file').files[0]);
+// Standalone pure encoder, also exercised by the development WAV validation.
+function encodeWav(samples, sampleRate) {
+  const buffer = new ArrayBuffer(44 + samples.length * 2), view = new DataView(buffer);
+  const ascii = (offset, value) => { for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i)); };
+  ascii(0, 'RIFF'); view.setUint32(4, buffer.byteLength - 8, true); ascii(8, 'WAVE');
+  ascii(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  ascii(36, 'data'); view.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) { const s = Math.max(-1, Math.min(1, samples[i])); view.setInt16(44 + i * 2, Math.round(s * (s < 0 ? 32768 : 32767)), true); }
+  return buffer;
+}
+async function release(r) {
+  clearInterval(r.timer); r.processor.onaudioprocess = null;
+  r.source.disconnect(); r.processor.disconnect(); r.mute.disconnect();
+  r.stream.getTracks().forEach(t => t.stop());
+  await r.context.close(); $('level').value = 0;
+}
+async function stopRecording(send = true) {
+  const r = recording; if (!r) return;
+  recording = null; starting = true; controls();
+  await release(r);
+  const samples = new Float32Array(r.count); let offset = 0;
+  for (const chunk of r.chunks) { samples.set(chunk, offset); offset += chunk.length; }
+  const file = new File([encodeWav(samples, r.rate)], 'recording.wav', {type: 'audio/wav'});
+  starting = false; controls(); if (send) await transcribe(file);
+}
+async function startRecording() {
+  if (!$('model').value) { $('error').textContent = 'Refresh models and select the served model first.'; return; }
+  starting = true; controls(); $('error').textContent = '';
+  let stream, context;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({audio: {channelCount: 1}, video: false});
+    context = new AudioContext(); await context.resume();
+    const source = context.createMediaStreamSource(stream);
+    // ScriptProcessor keeps this single file usable without a worklet module URL.
+    const processor = context.createScriptProcessor(4096, 1, 1), mute = context.createGain(); mute.gain.value = 0;
+    const r = {stream, context, source, processor, mute, rate: context.sampleRate, chunks: [], count: 0, start: performance.now()};
+    recording = r;
+    processor.onaudioprocess = event => {
+      if (recording !== r) return;
+      const input = event.inputBuffer.getChannelData(0), remaining = Math.max(0, Math.floor(r.rate * 120) - r.count);
+      const chunk = input.slice(0, remaining); r.chunks.push(chunk); r.count += chunk.length;
+      let sum = 0; for (const value of chunk) sum += value * value;
+      $('level').value = chunk.length ? Math.min(1, Math.sqrt(sum / chunk.length) * 4) : 0;
+      if (r.count >= r.rate * 120) void stopRecording();
+    };
+    source.connect(processor); processor.connect(mute); mute.connect(context.destination);
+    const tick = () => {
+      const seconds = Math.min(120, Math.floor((performance.now() - r.start) / 1000));
+      $('timer').textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} / 2:00`;
+      if (seconds >= 120) void stopRecording();
+    };
+    r.timer = setInterval(tick, 100); tick(); $('progress').textContent = 'Recording…';
+  } catch (e) {
+    stream?.getTracks().forEach(t => t.stop()); if (context) await context.close();
+    recording = null; $('error').textContent = `Microphone unavailable: ${e.message}`;
+  } finally { starting = false; controls(); }
+}
+$('record').onclick = () => recording ? stopRecording() : startRecording();
+window.addEventListener('pagehide', () => { if (recording) { recording.stream.getTracks().forEach(t => t.stop()); void recording.context.close(); } });
+$('notice').textContent = navigator.mediaDevices?.getUserMedia
+  ? 'Microphone permission is requested when you click Record.'
+  : 'Microphone access is unavailable. Use http://localhost or http://127.0.0.1 locally, or serve this page over HTTPS from another machine. File uploads remain available.';
+controls(); void refreshModels();
+</script>
+</html>
