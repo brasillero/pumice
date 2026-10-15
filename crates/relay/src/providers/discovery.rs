@@ -123,9 +123,9 @@ pub async fn detect_with_timeout(
 
     let mut set: JoinSet<(usize, Version)> = JoinSet::new();
     for (index, invocation) in probes {
-        // `ProcessRunner` is stateless, so a copy runs the probe with exactly
-        // the same lifecycle (fresh workspace, no shell, process-tree kill).
-        let runner = *runner;
+        // A clone of the runner runs the probe with exactly the same
+        // lifecycle (fresh workspace, no shell, process-tree kill).
+        let runner = runner.clone();
         set.spawn(async move {
             (
                 index,

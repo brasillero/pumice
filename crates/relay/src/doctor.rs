@@ -168,7 +168,7 @@ pub async fn prepare_login_check(
     if !matches!(statuses[0].found, Found::Found(_) | Found::NotApplicable) {
         return Err(LoginCheckError::NotInstalled);
     }
-    (descriptor.build)(settings, Arc::new(*runner)).map_err(LoginCheckError::BuildFailed)
+    (descriptor.build)(settings, Arc::new(runner.clone())).map_err(LoginCheckError::BuildFailed)
 }
 
 /// Runs exactly one formatting call through `provider`: the normal adapter

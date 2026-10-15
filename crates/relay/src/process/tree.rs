@@ -17,10 +17,12 @@
 
 use std::io;
 use std::process::ExitStatus;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
+use tokio::time::Instant;
 
 /// How often the direct child is polled for exit.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -131,15 +133,26 @@ impl ProcessTree {
         Ok(self.status.is_some())
     }
 
+    /// Kills every process in the tree without waiting. Safe to repeat: a
+    /// reaped tree is never signalled again.
+    pub(crate) fn kill_now(&mut self) {
+        if !self.reaped {
+            // Unix: the unreaped leader still pins the group ID here.
+            let _ = self.child.start_kill();
+        }
+    }
+
+    /// True once [`finish`](ProcessTree::finish) reaped the direct child.
+    pub(crate) fn is_reaped(&self) -> bool {
+        self.reaped
+    }
+
     /// Kills every process in the tree, then reaps the direct child, waiting
     /// at most `limit`. Returns the direct child's exit status, or `None`
     /// when it could not be reaped in time (dropping the tree retries the
     /// kill).
     pub async fn finish(&mut self, limit: Duration) -> Option<ExitStatus> {
-        if !self.reaped {
-            // Unix: the unreaped leader still pins the group ID here.
-            let _ = self.child.start_kill();
-        }
+        self.kill_now();
         let status = tokio::time::timeout(limit, self.reap()).await.ok()?.ok()?;
         self.reaped = true;
         Some(status)
@@ -160,14 +173,87 @@ impl ProcessTree {
     }
 }
 
+impl std::fmt::Debug for ProcessTree {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("ProcessTree");
+        #[cfg(unix)]
+        debug.field("pid", &self.pid);
+        debug.field("reaped", &self.reaped).finish()
+    }
+}
+
 impl Drop for ProcessTree {
     /// Cancellation safety: if the run was abandoned before `finish` reaped
     /// the child, kill the whole tree now. On Unix the unreaped leader still
     /// pins the group ID, so the signal cannot reach an unrelated group. On
     /// Windows closing the job handle afterwards also kills the job.
     fn drop(&mut self) {
-        if !self.reaped {
-            let _ = self.child.start_kill();
+        self.kill_now();
+    }
+}
+
+/// Process trees killed but not yet reaped, collected so a caller can await
+/// their teardown after a cancellation (p12-pumice-run: the orchestrator
+/// drains the scope, bounded, before reporting its result).
+///
+/// Registration kills the tree synchronously — the same kill as
+/// [`ProcessTree`]'s drop — and [`drain`](CleanupScope::drain) then reaps
+/// each registered tree within one bounded budget. Trees still registered
+/// when the scope is dropped are killed again by their own drop: kill-on-drop
+/// stays the last defense.
+#[derive(Debug, Default)]
+pub struct CleanupScope {
+    pending: Mutex<Vec<ProcessTree>>,
+}
+
+impl CleanupScope {
+    pub fn new() -> CleanupScope {
+        CleanupScope::default()
+    }
+
+    /// True when no killed tree is waiting to be reaped.
+    pub fn is_empty(&self) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty()
+    }
+
+    /// Kills `tree` now and keeps it for a later [`drain`](Self::drain).
+    pub(crate) fn kill_and_register(&self, mut tree: ProcessTree) {
+        tree.kill_now();
+        self.pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(tree);
+    }
+
+    /// Reaps every registered tree, spending at most `limit` overall, and
+    /// returns how many trees could not be reaped in time. Unreaped trees
+    /// stay registered — and killed — so a later drain can retry them.
+    pub async fn drain(&self, limit: Duration) -> usize {
+        let deadline = Instant::now() + limit;
+        let mut unreaped = 0;
+        loop {
+            let next = self
+                .pending
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .pop();
+            let Some(mut tree) = next else { break };
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if tree.finish(remaining).await.is_none() {
+                unreaped += 1;
+            }
+            if Instant::now() >= deadline {
+                unreaped += self
+                    .pending
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .len();
+                break;
+            }
         }
+        unreaped
     }
 }

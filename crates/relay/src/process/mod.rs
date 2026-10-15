@@ -18,6 +18,7 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -29,9 +30,9 @@ pub use invocation::{
     toml_basic_string,
 };
 pub use resolve::{ResolvedProgram, resolve_program};
+pub use tree::{CleanupScope, ProcessTree};
 
 use crate::providers::{ProviderError, ProviderErrorCode};
-use tree::ProcessTree;
 
 /// Maximum stdout captured from a CLI; more is `OutputTooLarge`.
 pub const MAX_STDOUT_BYTES: usize = 10 * 1024 * 1024;
@@ -51,13 +52,28 @@ const REMOVE_RETRY_DELAY: Duration = Duration::from_millis(50);
 const WORKSPACE_DIR: &str = "workspace";
 const CONTROL_DIR: &str = "control";
 
-/// Runs CLI invocations. Stateless; share one instance.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct ProcessRunner;
+/// Runs CLI invocations. Stateless apart from an optional cleanup scope;
+/// share one instance.
+#[derive(Debug, Default, Clone)]
+pub struct ProcessRunner {
+    cleanup_scope: Option<Arc<CleanupScope>>,
+}
 
 impl ProcessRunner {
     pub fn new() -> ProcessRunner {
-        ProcessRunner
+        ProcessRunner::default()
+    }
+
+    /// Returns a runner that reports abandoned process trees to `scope`
+    /// (p12-pumice-run): when a call's future is dropped mid-run — the
+    /// caller cancelled — the tree is killed synchronously and registered for
+    /// the scope owner to reap with [`CleanupScope::drain`]. Without a scope
+    /// the behavior is unchanged: a dropped tree is killed and nobody awaits
+    /// the reap.
+    pub fn with_cleanup_scope(self, scope: Arc<CleanupScope>) -> ProcessRunner {
+        ProcessRunner {
+            cleanup_scope: Some(scope),
+        }
     }
 
     /// Runs `invocation` to completion before `deadline`.
@@ -77,7 +93,43 @@ impl ProcessRunner {
         // Dropping the guard removes the root, on success, failure and
         // cancellation alike.
         let root = RootGuard(Some(private_temp::tempdir().map_err(io_error)?));
-        run_in(root.path(), &program, invocation, deadline).await
+        run_in(
+            root.path(),
+            &program,
+            invocation,
+            deadline,
+            self.cleanup_scope.clone(),
+        )
+        .await
+    }
+}
+
+/// Guards a spawned tree for the length of a run: every explicit exit path
+/// calls [`ProcessTree::finish`] (kill and reap), and a drop before that —
+/// the run's future was cancelled — kills the tree. With a cleanup scope the
+/// killed tree is registered so its owner can await the reap; without one
+/// the tree's own drop kills it, as before.
+struct TreeGuard {
+    tree: Option<ProcessTree>,
+    scope: Option<Arc<CleanupScope>>,
+}
+
+impl TreeGuard {
+    fn tree_mut(&mut self) -> &mut ProcessTree {
+        self.tree.as_mut().expect("tree present until dropped")
+    }
+}
+
+impl Drop for TreeGuard {
+    fn drop(&mut self) {
+        let Some(tree) = self.tree.take() else { return };
+        if tree.is_reaped() {
+            return;
+        }
+        if let Some(scope) = &self.scope {
+            scope.kill_and_register(tree);
+        }
+        // No scope: dropping `tree` here runs ProcessTree's own kill-on-drop.
     }
 }
 
@@ -86,6 +138,7 @@ async fn run_in(
     program: &ResolvedProgram,
     invocation: CliInvocation,
     deadline: Instant,
+    cleanup_scope: Option<Arc<CleanupScope>>,
 ) -> Result<ProcessOutput, ProviderError> {
     let workspace = root.join(WORKSPACE_DIR);
     let control = root.join(CONTROL_DIR);
@@ -135,15 +188,19 @@ async fn run_in(
     if Instant::now() >= deadline {
         return Err(ProviderError::Timeout);
     }
-    let mut tree = ProcessTree::spawn(command).map_err(|e| match e.kind() {
+    let tree = ProcessTree::spawn(command).map_err(|e| match e.kind() {
         io::ErrorKind::NotFound => ProviderError::NotInstalled,
         _ => ProviderError::other(ProviderErrorCode::Spawn),
     })?;
-    let captured = drive(&mut tree, invocation.stdin, deadline).await;
+    let mut guard = TreeGuard {
+        tree: Some(tree),
+        scope: cleanup_scope,
+    };
+    let captured = drive(guard.tree_mut(), invocation.stdin, deadline).await;
     // Kill whatever is left (descendants included) on every path, then reap.
-    // If this future is dropped before here, `ProcessTree`'s drop kills the
-    // tree instead.
-    let status = tree.finish(REAP_LIMIT).await;
+    // If this future is dropped before here, the guard kills the tree instead
+    // (registering it with the cleanup scope when one is set).
+    let status = guard.tree_mut().finish(REAP_LIMIT).await;
     let (stdout, stderr_tail, stdin_complete) = captured?;
     let status = status.ok_or(ProviderError::other(ProviderErrorCode::Io))?;
     // A CLI that exits cleanly without taking all of its stdin answered a

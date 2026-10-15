@@ -370,6 +370,113 @@ async fn provider_timeout_wins_over_the_total_budget() {
 }
 
 #[tokio::test]
+async fn caller_deadline_shortens_the_module_budget() {
+    // Module budgets are generous (30 s total and per-provider); the caller
+    // deadline of about a second stops the sleeping fake first.
+    let (pipeline, fake) = pipeline(
+        "total_timeout_secs: 30\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n",
+        json!({
+            "stdout": success_envelope("too late"),
+            "exit_code": 0,
+            "sleep_ms": 30_000,
+        }),
+    );
+    let started = Instant::now();
+    let outcome = pipeline
+        .format_until_observed(
+            &handy_request(Some("claude"), "hello"),
+            started,
+            Some(started + Duration::from_millis(1200)),
+            &(),
+        )
+        .await;
+    assert_raw(
+        &outcome,
+        RawReason::ProviderFailed(ProviderErrorKind::Timeout),
+        "hello",
+    );
+    assert!(
+        outcome.elapsed < Duration::from_secs(5),
+        "took {:?}",
+        outcome.elapsed
+    );
+
+    // The deadline kills the fake (which would otherwise sleep 30 s).
+    let pid = fake.report()["pid"].as_u64().expect("pid") as u32;
+    assert!(process_alive(std::process::id()), "liveness check works");
+    wait_until_gone(pid);
+}
+
+#[tokio::test]
+async fn caller_deadline_never_extends_the_module_budget() {
+    // The caller allows 30 s but the module's total budget is 1 s: the
+    // module budget still wins.
+    let (pipeline, _fake) = pipeline(
+        "total_timeout_secs: 1\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n",
+        json!({
+            "stdout": success_envelope("too late"),
+            "exit_code": 0,
+            "sleep_ms": 30_000,
+        }),
+    );
+    let started = Instant::now();
+    let outcome = pipeline
+        .format_until_observed(
+            &handy_request(Some("claude"), "hello"),
+            started,
+            Some(started + Duration::from_secs(30)),
+            &(),
+        )
+        .await;
+    assert_raw(
+        &outcome,
+        RawReason::ProviderFailed(ProviderErrorKind::Timeout),
+        "hello",
+    );
+    assert!(
+        outcome.elapsed < Duration::from_secs(5),
+        "took {:?}",
+        outcome.elapsed
+    );
+}
+
+#[tokio::test]
+async fn spent_caller_deadline_starts_no_cli() {
+    let (pipeline, fake) = pipeline(
+        "total_timeout_secs: 30\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n",
+        success_scenario("unused"),
+    );
+    let started = Instant::now();
+    let outcome = pipeline
+        .format_until_observed(
+            &handy_request(Some("claude"), "ditado"),
+            started,
+            Some(started),
+            &(),
+        )
+        .await;
+    assert_raw(&outcome, RawReason::BudgetExhausted, "ditado");
+    assert!(!fake.report_path().exists(), "the fake must not run");
+}
+
+#[tokio::test]
+async fn caller_deadline_with_room_runs_like_format() {
+    let (pipeline, fake) = pipeline(CLAUDE_AT_FAKE, success_scenario("Limpo."));
+    let started = Instant::now();
+    let outcome = pipeline
+        .format_until_observed(
+            &handy_request(Some("claude"), "sujo"),
+            started,
+            Some(started + Duration::from_secs(30)),
+            &(),
+        )
+        .await;
+    assert_eq!(outcome.kind, OutcomeKind::Formatted);
+    assert_eq!(outcome.text, "Limpo.");
+    assert!(fake.report_path().exists(), "the fake ran");
+}
+
+#[tokio::test]
 async fn exhausted_budget_never_starts_the_cli() {
     let (pipeline, fake) = pipeline(
         "total_timeout_secs: 2\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n",

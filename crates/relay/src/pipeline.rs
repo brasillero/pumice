@@ -223,7 +223,7 @@ impl Pipeline {
     /// [`RawReason::CleanupFailed`]. When the budget dies before the attempt
     /// starts, the reason is [`RawReason::BudgetExhausted`] instead.
     pub async fn format(&self, request: &ExtractedRequest, started: Instant) -> FormatOutcome {
-        self.format_observed(request, started, &()).await
+        self.format_until_observed(request, started, None, &()).await
     }
 
     /// [`format`](Self::format), reporting each step to `progress`.
@@ -231,6 +231,24 @@ impl Pipeline {
         &self,
         request: &ExtractedRequest,
         started: Instant,
+        progress: &dyn Progress,
+    ) -> FormatOutcome {
+        self.format_until_observed(request, started, None, progress)
+            .await
+    }
+
+    /// [`format_observed`](Self::format_observed) with a caller-imposed
+    /// deadline that can only shorten the run, never extend it
+    /// (p12-pumice-run/D2: the orchestrator's flow deadline bounds the relay
+    /// stage): the effective response end is
+    /// `min(started + total_timeout, caller_deadline)` minus the response
+    /// reserve. `None` keeps the module budget alone, exactly as
+    /// [`format`](Self::format).
+    pub async fn format_until_observed(
+        &self,
+        request: &ExtractedRequest,
+        started: Instant,
+        caller_deadline: Option<Instant>,
         progress: &dyn Progress,
     ) -> FormatOutcome {
         // Explicit passthrough preserves even whitespace-only transcripts and
@@ -273,6 +291,12 @@ impl Pipeline {
 
         let Some(total_deadline) = started.checked_add(self.total_timeout) else {
             return self.raw(request, RawReason::BudgetExhausted, started, Vec::new());
+        };
+        // A caller deadline shortens the module budget; it can never extend
+        // it past `started + total_timeout`.
+        let total_deadline = match caller_deadline {
+            Some(caller_deadline) => total_deadline.min(caller_deadline),
+            None => total_deadline,
         };
         let total_deadline = total_deadline
             .checked_sub(RESPONSE_RESERVE)
