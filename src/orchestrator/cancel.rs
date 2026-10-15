@@ -17,6 +17,7 @@ pub enum CancelReason {
     /// Ctrl-C (SIGINT on Unix, console Ctrl-C on Windows): exit 130.
     Interrupt,
     /// SIGTERM (Unix only): exit 143.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Terminate,
 }
 

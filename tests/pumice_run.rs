@@ -1411,6 +1411,7 @@ fn pid_alive(pid: u32) -> bool {
     libc_kill(pid, 0) == 0
 }
 
+#[cfg(unix)]
 fn libc_kill(pid: u32, signal: libc::c_int) -> i32 {
     // Wrapped so the unsafe block is an ordinary call expression.
     unsafe { libc::kill(pid as i32, signal) }
