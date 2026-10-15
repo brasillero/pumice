@@ -312,6 +312,14 @@ async fn models_list_and_retrieve_match_openai_shapes() {
     )
     .await;
     assert_eq!(missing["code"], "model_not_found");
+
+    // A path segment that is not UTF-8 still gets a JSON error.
+    let invalid = error(
+        send(&state, get("/v1/models/%FF")).await,
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    assert_eq!(invalid["code"], "model_not_found");
 }
 
 #[tokio::test]
@@ -414,7 +422,23 @@ async fn invalid_parameters_are_rejected_with_their_param() {
         None,
     )
     .await;
-    expect_invalid(with("model", MODEL), StatusCode::BAD_REQUEST, None).await;
+    expect_invalid(with("model", MODEL), StatusCode::BAD_REQUEST, Some("model")).await;
+    expect_invalid(
+        with("prompt", "before\0after"),
+        StatusCode::BAD_REQUEST,
+        Some("prompt"),
+    )
+    .await;
+    let mut bad_utf8 = multipart(&[Part::File("file", &audio), Part::Text("model", MODEL)]);
+    let tail = format!("--{BOUNDARY}--\r\n");
+    bad_utf8.truncate(bad_utf8.len() - tail.len());
+    bad_utf8.extend_from_slice(
+        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\n")
+            .as_bytes(),
+    );
+    bad_utf8.extend_from_slice(&[0xff, 0xfe]);
+    bad_utf8.extend_from_slice(format!("\r\n{tail}").as_bytes());
+    expect_invalid(bad_utf8, StatusCode::BAD_REQUEST, Some("prompt")).await;
 }
 
 #[tokio::test]
@@ -514,7 +538,7 @@ async fn oversize_file_and_text_fields_are_rejected() {
             Part::Text("prompt", &long_prompt),
         ]),
         StatusCode::PAYLOAD_TOO_LARGE,
-        None,
+        Some("prompt"),
     )
     .await;
 }
@@ -702,4 +726,61 @@ async fn serve_binds_loopback_and_drains_on_shutdown() {
         .await
         .expect("server stopped")
         .unwrap();
+}
+
+#[tokio::test]
+async fn total_deadline_counts_from_arrival_including_the_upload() {
+    let engine = TestEngine::gated("late");
+    let limits = Limits {
+        upload_deadline: Duration::from_secs(5),
+        total_deadline: Duration::from_millis(400),
+    };
+    let state = state_with(Arc::clone(&engine), limits);
+    let body = basic_body(&wav(1.0));
+    let (stream, tx) = hanging_body(&body[..10]);
+    let started = Instant::now();
+    let request = tokio::spawn(send_owned(state.clone(), post(stream)));
+    time::sleep(Duration::from_millis(300)).await;
+    tx.send(Bytes::copy_from_slice(&body[10..])).unwrap();
+    drop(tx);
+
+    let response = request.await.unwrap();
+    error(response, StatusCode::GATEWAY_TIMEOUT).await;
+    // Counted from the end of the upload it would take at least 700 ms.
+    assert!(
+        started.elapsed() < Duration::from_millis(650),
+        "{:?}",
+        started.elapsed()
+    );
+    engine.release();
+    wait_until(|| state.admission.available_permits() == 1).await;
+}
+
+#[test]
+fn a_run_that_finishes_after_cancellation_is_discarded() {
+    /// Cancellation arrives while the run is in progress and the run still
+    /// returns text, as a native run past its last cancellation check would.
+    struct CancelledMidRun;
+    impl Engine for CancelledMidRun {
+        fn transcribe(
+            &self,
+            _pcm: &[f32],
+            _options: &TranscriptionOptions,
+            cancel: &CancelToken,
+        ) -> Result<Transcript, EngineError> {
+            cancel.cancel();
+            Ok(Transcript {
+                text: "must not be published".into(),
+                language: None,
+            })
+        }
+    }
+
+    let result = transcribe_pcm_from_reader(
+        Cursor::new(wav(1.0)),
+        &CancelledMidRun,
+        &TranscriptionOptions::default(),
+        &CancelToken::new(),
+    );
+    assert_eq!(result.err().map(|e| e.code), Some(ErrorCode::Cancelled));
 }

@@ -156,9 +156,10 @@ responsive while a transcription runs.
 
 If the client disconnects, or the request hits its deadline or a shutdown, the
 transcription is cancelled and its result is discarded. The server stays busy
-until the engine actually stops: Whisper checks for cancellation between
-decoding steps, not inside its encoder, so with Turbo on a CPU this can take
-up to about 25 seconds.
+until the engine actually stops. Whisper checks for cancellation between
+decoding steps, not inside its encoder, so there is no fixed bound: with Turbo
+on server-1's CPU (i5-14500T, portable build) a cancelled 14-second clip kept
+the server busy for 26 to 32 seconds, and a shutdown waited as long.
 
 #### Endpoints
 
@@ -206,14 +207,16 @@ up to about 25 seconds.
     Whisper can still produce text for very short silent clips.
   - `text`: `200 text/plain; charset=utf-8` with the exact transcript bytes.
 
-  Limits: 25,000,000 uploaded file bytes, 26,000,000 total body bytes, ≤32
-  multipart parts, ≤16 KiB per text field, 120 seconds of decoded audio, 15
+  Limits: 25,000,000 uploaded file bytes, 26,000,000 total body bytes,
+  ≤16 KiB per text field, each parameter at most once, 120 seconds of decoded audio, 15
   seconds to receive the body and 120 seconds for the whole response, both
   counted from the request's arrival. The body size limit covers the whole
   body, chunked or not, including bytes after the closing boundary.
 
-  Errors use the OpenAI error object, with `param` naming the offending field
-  when there is one and `code` set only where OpenAI defines one:
+  Errors use the OpenAI error object, with `param` naming the offending
+  parameter when it is one this server accepts, and `code` set only where
+  OpenAI defines one. Text parameters must be valid UTF-8 without NUL
+  characters.
   ```json
   { "error": { "message": "...", "type": "invalid_request_error", "param": "file", "code": null } }
   ```

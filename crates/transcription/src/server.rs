@@ -12,7 +12,7 @@ use crate::{ErrorCode, TranscriptionOptions};
 use axum::{
     Router,
     body::Body,
-    extract::{Path, Request, State},
+    extract::{Path, Request, State, rejection::PathRejection},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -35,7 +35,6 @@ use tokio_util::sync::CancellationToken;
 
 /// Whole request body, including multipart framing and any epilogue.
 const MAX_TOTAL_BODY_BYTES: u64 = 26_000_000;
-const MAX_MULTIPART_PARTS: usize = 32;
 const MAX_TEXT_FIELD_BYTES: u64 = 16 * 1024;
 const BUSY_RETRY_AFTER_SECONDS: &str = "1";
 
@@ -235,7 +234,6 @@ const NOT_MULTIPART: ApiError = invalid(
     "The request must be multipart/form-data with a boundary.",
 );
 const MALFORMED_MULTIPART: ApiError = invalid(None, "The multipart request body is malformed.");
-const TOO_MANY_PARTS: ApiError = invalid(None, "The request has too many multipart parts.");
 const UNSUPPORTED_PARAMETER: ApiError = invalid(
     None,
     "Unrecognized or unsupported request parameter. Supported: file, model, language, prompt, response_format, temperature, stream.",
@@ -263,6 +261,7 @@ const INVALID_TEMPERATURE: ApiError = invalid(
 const STREAM_UNSUPPORTED: ApiError = invalid(Some("stream"), "Streaming is not supported.");
 const INVALID_STREAM: ApiError = invalid(Some("stream"), "stream must be true or false.");
 const NOT_UTF8: ApiError = invalid(None, "A text parameter is not valid UTF-8.");
+const NUL_IN_TEXT: ApiError = invalid(None, "A text parameter contains a NUL character.");
 const UNDECODABLE_AUDIO: ApiError = invalid(Some("file"), "The audio file could not be decoded.");
 const UNSUPPORTED_FORMAT: ApiError = invalid(
     Some("file"),
@@ -302,6 +301,30 @@ fn map_error(code: ErrorCode) -> ApiError {
         | ErrorCode::ModelLoadFailed
         | ErrorCode::Internal => TRANSCRIPTION_FAILED,
     }
+}
+
+impl ApiError {
+    /// The same error, naming one of the server's own (static) parameter names.
+    const fn for_param(self, param: &'static str) -> Self {
+        Self {
+            param: Some(param),
+            ..self
+        }
+    }
+}
+
+/// The accepted multipart parameter names. Unknown names are never echoed.
+fn known_param(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "file" => "file",
+        "model" => "model",
+        "language" => "language",
+        "response_format" => "response_format",
+        "prompt" => "prompt",
+        "temperature" => "temperature",
+        "stream" => "stream",
+        _ => return None,
+    })
 }
 
 impl IntoResponse for ApiError {
@@ -518,7 +541,7 @@ enum ResponseFormat {
 }
 
 struct Form {
-    file: Vec<u8>,
+    file: Bytes,
     model: Option<String>,
     language: Option<String>,
     response_format: ResponseFormat,
@@ -564,26 +587,24 @@ async fn parse_form(body: Bytes, boundary: String) -> Result<Form, ApiError> {
     let mut response_format = ResponseFormat::Json;
     let mut prompt = None;
     let mut temperature = None;
-    let mut parts = 0;
 
     while let Some(field) = multipart.next_field().await.map_err(map_multer_error)? {
-        parts += 1;
-        if parts > MAX_MULTIPART_PARTS {
-            return Err(TOO_MANY_PARTS);
-        }
         let is_upload = field.file_name().is_some();
-        let (slot, param) = match field.name() {
-            Some("file") => (&mut seen.file, "file"),
-            Some("model") => (&mut seen.model, "model"),
-            Some("language") => (&mut seen.language, "language"),
-            Some("response_format") => (&mut seen.response_format, "response_format"),
-            Some("prompt") => (&mut seen.prompt, "prompt"),
-            Some("temperature") => (&mut seen.temperature, "temperature"),
-            Some("stream") => (&mut seen.stream, "stream"),
-            _ => return Err(UNSUPPORTED_PARAMETER),
+        let param = field
+            .name()
+            .and_then(known_param)
+            .ok_or(UNSUPPORTED_PARAMETER)?;
+        let slot = match param {
+            "file" => &mut seen.file,
+            "model" => &mut seen.model,
+            "language" => &mut seen.language,
+            "response_format" => &mut seen.response_format,
+            "prompt" => &mut seen.prompt,
+            "temperature" => &mut seen.temperature,
+            _ => &mut seen.stream,
         };
         if std::mem::replace(slot, true) {
-            return Err(DUPLICATE_PARAMETER);
+            return Err(DUPLICATE_PARAMETER.for_param(param));
         }
 
         if param == "file" {
@@ -594,7 +615,7 @@ async fn parse_form(body: Bytes, boundary: String) -> Result<Form, ApiError> {
             if data.is_empty() {
                 return Err(EMPTY_FILE);
             }
-            file = Some(data.to_vec());
+            file = Some(data);
             continue;
         }
 
@@ -602,7 +623,11 @@ async fn parse_form(body: Bytes, boundary: String) -> Result<Form, ApiError> {
             return Err(text_param_error(param));
         }
         let data = field.bytes().await.map_err(map_multer_error)?;
-        let value = String::from_utf8(data.to_vec()).map_err(|_| NOT_UTF8)?;
+        let value = String::from_utf8(data.to_vec()).map_err(|_| NOT_UTF8.for_param(param))?;
+        // The engine passes text to C APIs that stop at NUL.
+        if value.contains('\0') {
+            return Err(NUL_IN_TEXT.for_param(param));
+        }
         match param {
             "model" => model = Some(value),
             "language" => language = Some(value),
@@ -651,10 +676,10 @@ fn text_param_error(param: &'static str) -> ApiError {
 fn map_multer_error(error: multer::Error) -> ApiError {
     match error {
         multer::Error::FieldSizeExceeded { field_name, .. } => {
-            if field_name.as_deref() == Some("file") {
-                FILE_TOO_LARGE
-            } else {
-                FIELD_TOO_LARGE
+            match field_name.as_deref().and_then(known_param) {
+                Some("file") => FILE_TOO_LARGE,
+                Some(param) => FIELD_TOO_LARGE.for_param(param),
+                None => FIELD_TOO_LARGE,
             }
         }
         multer::Error::StreamSizeExceeded { .. } => BODY_TOO_LARGE,
@@ -693,7 +718,14 @@ async fn list_models(State(state): State<ServerState>) -> Response {
 }
 
 /// GET /v1/models/{model}
-async fn retrieve_model(State(state): State<ServerState>, Path(model): Path<String>) -> Response {
+async fn retrieve_model(
+    State(state): State<ServerState>,
+    model: Result<Path<String>, PathRejection>,
+) -> Response {
+    // A path that is not valid UTF-8 cannot name the served model.
+    let Ok(Path(model)) = model else {
+        return MODEL_NOT_FOUND.into_response();
+    };
     if model == *state.served_model_id {
         json_response(StatusCode::OK, &model_object(&state.served_model_id))
     } else {
