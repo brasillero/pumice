@@ -1624,31 +1624,18 @@ fn a_relay_timeout_at_the_overall_budget_is_a_flow_timeout() {
     assert_eq!(envelope["transcript"]["text"], RAW);
 }
 
-/// A pipe as (read end, write end).
-#[cfg(unix)]
-fn pipe() -> (std::os::fd::OwnedFd, std::os::fd::OwnedFd) {
-    use std::os::fd::FromRawFd;
-    let mut fds = [0; 2];
-    // SAFETY: `fds` is a valid two-element array for pipe(2) to fill.
-    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe");
-    // SAFETY: both descriptors were just created and are owned here only.
-    unsafe {
-        (
-            std::os::fd::OwnedFd::from_raw_fd(fds[0]),
-            std::os::fd::OwnedFd::from_raw_fd(fds[1]),
-        )
-    }
-}
-
 /// A pipe whose buffer is already full, so the next blocking write to its
-/// write end blocks until someone reads (nobody will).
+/// write end blocks until someone reads (nobody will). `std::io::pipe`
+/// creates both ends close-on-exec, so a test spawning concurrently never
+/// inherits them.
 #[cfg(unix)]
-fn full_pipe() -> (std::os::fd::OwnedFd, std::os::fd::OwnedFd) {
+fn full_pipe() -> (std::io::PipeReader, std::io::PipeWriter) {
     use std::os::fd::AsRawFd;
-    let (read, write) = pipe();
+    let (read, write) = std::io::pipe().expect("pipe");
     let fd = write.as_raw_fd();
-    // SAFETY: fcntl on a descriptor we own. O_NONBLOCK lives on the open
-    // file description, so it is cleared again before the child inherits it.
+    // SAFETY: fcntl and write on a descriptor we own. O_NONBLOCK lives on the
+    // open file description, so it is cleared again before the child
+    // inherits it.
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
         assert!(flags >= 0);
@@ -1659,6 +1646,27 @@ fn full_pipe() -> (std::os::fd::OwnedFd, std::os::fd::OwnedFd) {
         assert_eq!(libc::fcntl(fd, libc::F_SETFL, flags), 0);
     }
     (read, write)
+}
+
+/// Waits for our own child with a bound; on timeout kills it (still
+/// unreaped, so the PID is ours) and returns `None`.
+#[cfg(unix)]
+fn wait_bounded(
+    child: &mut std::process::Child,
+    limit: std::time::Duration,
+) -> Option<std::process::ExitStatus> {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        if let Some(status) = child.try_wait().expect("poll child") {
+            return Some(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 #[cfg(unix)]
@@ -1673,7 +1681,7 @@ fn a_broken_stdout_with_a_blocked_stderr_still_exits() {
     });
     for json_mode in [true, false] {
         let (stderr_read, stderr_write) = full_pipe();
-        let (stdout_read, stdout_write) = pipe();
+        let (stdout_read, stdout_write) = std::io::pipe().expect("pipe");
         drop(stdout_read);
         let mut command = Command::new(rig.pumice());
         command
@@ -1693,22 +1701,8 @@ fn a_broken_stdout_with_a_blocked_stderr_still_exits() {
         // The Command still holds copies of the write ends until dropped.
         drop(command);
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        let status = loop {
-            if let Some(status) = child.try_wait().expect("poll pumice run") {
-                break Some(status);
-            }
-            if std::time::Instant::now() >= deadline {
-                break None;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        };
-        let Some(status) = status else {
-            // Still our unreaped child: killing it is safe.
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("pumice run hung on a blocked stderr (json: {json_mode})");
-        };
+        let status = wait_bounded(&mut child, std::time::Duration::from_secs(15))
+            .unwrap_or_else(|| panic!("pumice run hung on a blocked stderr (json: {json_mode})"));
         assert_eq!(status.code(), Some(1), "json: {json_mode}");
         drop(stderr_read);
     }
