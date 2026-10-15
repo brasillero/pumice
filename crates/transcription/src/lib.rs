@@ -5,6 +5,7 @@ pub mod config;
 pub mod download;
 pub mod engine;
 pub mod error;
+pub mod managed;
 pub mod models_dir;
 #[cfg(feature = "opus")]
 mod opus;

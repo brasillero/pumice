@@ -2,6 +2,7 @@ use crate::catalog;
 use crate::config::{self, Config, ConfigSource, LoadedConfig};
 use crate::download::{self, DownloadSpec, Downloader, FetchResult};
 use crate::engine::{CancelToken, Engine};
+use crate::managed::{self, Lifecycle, StopReason};
 use crate::models_dir;
 use crate::service::{
     decode_audio_from_reader, normalize_language, normalize_threads, resolve_model_id,
@@ -93,6 +94,15 @@ pub struct ServeArgs {
     /// Port to listen on. Overrides `server.port` in the configuration file.
     #[arg(long, value_name = "PORT")]
     port: Option<u16>,
+
+    /// Run as a child owned by `pumice serve` (internal protocol): lifecycle
+    /// JSON Lines on stdout, shutdown when stdin closes.
+    #[arg(long, requires = "instance_id")]
+    managed: bool,
+
+    /// Launch id from the owner, echoed in lifecycle records and `/ready`.
+    #[arg(long, value_name = "ID", requires = "managed")]
+    instance_id: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -248,21 +258,6 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let raw: Vec<OsString> = args.into_iter().map(Into::into).collect();
-    let wants_json = raw.iter().any(|a| a.as_encoded_bytes() == b"--json");
-
-    let parsed = Args::try_parse_from(&raw);
-    let args = match parsed {
-        Ok(a) => a,
-        Err(e) => {
-            return handle_clap_error(e, wants_json);
-        }
-    };
-
-    let json = json_flag(&args);
-    let mut stdout = io::stdout();
-    let mut stderr = io::stderr();
-
     let make_engine = |path: &Path, threads: i32| -> Result<Box<dyn Engine>, Error> {
         #[cfg(feature = "engine")]
         {
@@ -276,6 +271,50 @@ where
             Err(Error::engine_not_available())
         }
     };
+    run_with_engine_factory(args, make_engine)
+}
+
+/// [`run`] with another engine loader, for tests that drive the whole binary
+/// (arguments, output, exit status) with a fake engine.
+pub fn run_with_engine_factory<I, T, F>(args: I, make_engine: F) -> ExitCode
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+    F: FnOnce(&Path, i32) -> Result<Box<dyn Engine>, Error>,
+{
+    let raw: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let wants_json = raw.iter().any(|a| a.as_encoded_bytes() == b"--json");
+    let wants_managed = raw.iter().any(|a| a.as_encoded_bytes() == b"--managed");
+
+    let parsed = Args::try_parse_from(&raw);
+    let args = match parsed {
+        Ok(a) => a,
+        Err(e)
+            if wants_managed
+                && !matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) =>
+        {
+            // The owner reads stdout; clap's text (which can quote any
+            // argument) only goes to stderr.
+            let _ = e.print();
+            managed::write_startup_error(
+                &mut io::stdout(),
+                ErrorCode::InvalidArguments,
+                managed::INVALID_ARGUMENTS,
+            );
+            return ExitCode::from(2);
+        }
+        Err(e) => {
+            return handle_clap_error(e, wants_json);
+        }
+    };
+
+    if matches!(&args.command, Command::Serve(serve) if serve.managed) {
+        return run_managed(args, make_engine);
+    }
+
+    let json = json_flag(&args);
+    let mut stdout = io::stdout();
+    let mut stderr = io::stderr();
 
     match run_command(args, make_engine) {
         Ok(CommandOutput::Transcription(output)) => match print_success(&output, json, &mut stdout)
@@ -406,7 +445,7 @@ where
             Ok(CommandOutput::Transcription(output))
         }
         Command::Serve(serve_args) => {
-            run_serve(serve_args, &loaded.config, config_arg, make_engine)?;
+            run_serve(serve_args, &loaded.config, config_arg, make_engine, None)?;
             Ok(CommandOutput::None)
         }
         Command::CheckConfig(_) => Ok(CommandOutput::CheckConfig(match loaded.source {
@@ -559,11 +598,63 @@ fn catalog_of<'a>(config: &'a Config, model_id: &str) -> Option<&'a str> {
         .and_then(|m| m.catalog.as_deref())
 }
 
+/// `serve --managed`: every outcome is reported as lifecycle records on
+/// stdout (see [`crate::managed`]); human messages go to stderr.
+fn run_managed<F>(args: Args, make_engine: F) -> ExitCode
+where
+    F: FnOnce(&Path, i32) -> Result<Box<dyn Engine>, Error>,
+{
+    let Command::Serve(serve_args) = &args.command else {
+        unreachable!("only serve has a managed mode");
+    };
+    let instance_id = serve_args.instance_id.as_deref().unwrap_or_default();
+    let lifecycle = match managed::validate_instance_id(instance_id) {
+        Ok(id) => Lifecycle::new(id, Box::new(io::stdout())),
+        Err(message) => {
+            eprintln!("{message}");
+            managed::write_startup_error(&mut io::stdout(), ErrorCode::InvalidArguments, message);
+            return ExitCode::from(2);
+        }
+    };
+    // Before anything that can block, so an early EOF is never missed.
+    if let Err(e) = lifecycle.start_lifeline() {
+        let error = Error::internal(format!("failed to watch stdin: {e}"));
+        eprintln!("{error}");
+        lifecycle.announce_error(&error);
+        return exit_code(&error);
+    }
+
+    let result = load_config(&args).and_then(|loaded| {
+        let Command::Serve(serve_args) = args.command else {
+            unreachable!("only serve has a managed mode");
+        };
+        run_serve(
+            serve_args,
+            &loaded.config,
+            args.config.as_deref(),
+            make_engine,
+            Some(&lifecycle),
+        )
+    });
+    match result {
+        Ok(()) => {
+            lifecycle.announce_stopped();
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            lifecycle.announce_error(&error);
+            exit_code(&error)
+        }
+    }
+}
+
 fn run_serve<F>(
     serve_args: ServeArgs,
     config: &Config,
     config_arg: Option<&Path>,
     make_engine: F,
+    lifecycle: Option<&Arc<Lifecycle>>,
 ) -> Result<(), Error>
 where
     F: FnOnce(&Path, i32) -> Result<Box<dyn Engine>, Error>,
@@ -571,6 +662,9 @@ where
     let threads = normalize_threads(config.threads)?;
     let (served_model_id, model_path) =
         resolve_model_id(config, serve_args.model.as_deref(), None)?;
+    if lifecycle.is_some() {
+        managed::validate_model_id(&served_model_id)?;
+    }
 
     if !model_path.is_file() {
         return Err(missing_model_error(
@@ -597,6 +691,17 @@ where
     }
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| Error::internal(format!("{e}")))?;
+    if let Some(lifecycle) = lifecycle {
+        let model_load_ms = u64::try_from(load_ms).unwrap_or(u64::MAX);
+        return rt.block_on(serve_managed(
+            port,
+            Arc::from(engine),
+            served_model_id,
+            config.language.clone(),
+            model_load_ms,
+            lifecycle,
+        ));
+    }
     rt.block_on(async {
         let handle = crate::server::serve(
             port,
@@ -610,6 +715,50 @@ where
         let _ = handle.await;
         Ok(())
     })
+}
+
+/// Serve in managed mode until the lifeline or a signal stops it. `ready` is
+/// announced only after the model is loaded and the listener is bound, and
+/// never once a stop was requested.
+async fn serve_managed(
+    port: u16,
+    engine: Arc<dyn Engine>,
+    served_model_id: String,
+    default_language: Option<String>,
+    model_load_ms: u64,
+    lifecycle: &Arc<Lifecycle>,
+) -> Result<(), Error> {
+    if lifecycle.is_stopping() {
+        return Ok(());
+    }
+    // Installed before `ready`, so an owner's signal is never missed.
+    let signal = crate::server::registered_shutdown_signal()
+        .map_err(|e| Error::internal(format!("failed to install signal handlers: {e}")))?;
+    let bind_error = |e: io::Error| Error::internal(format!("failed to bind: {e}"));
+    let listener = crate::server::bind(port).await.map_err(bind_error)?;
+    let bound_port = listener.local_addr().map_err(bind_error)?.port();
+
+    let lifeline = Arc::clone(lifecycle);
+    let shutdown = async move {
+        tokio::select! {
+            () = lifeline.cancelled() => {}
+            () = signal => lifeline.request_stop(StopReason::Signal),
+        }
+    };
+    let handle = crate::server::serve_on(
+        listener,
+        engine,
+        served_model_id.clone(),
+        default_language,
+        Some(crate::server::Managed {
+            instance_id: lifecycle.instance_id().to_string(),
+        }),
+        shutdown,
+    )
+    .map_err(bind_error)?;
+    lifecycle.announce_ready(bound_port, &served_model_id, model_load_ms);
+    let _ = handle.await;
+    Ok(())
 }
 
 fn load_config(args: &Args) -> Result<LoadedConfig, Error> {

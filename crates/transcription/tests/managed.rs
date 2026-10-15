@@ -1,0 +1,744 @@
+//! Process-level tests for `pumice-transcribe serve --managed`: the real CLI
+//! entry point with a fake engine, run as a child process, so stdout, stdin
+//! EOF, the exit status and the watchdog are observed as an owner sees them.
+//!
+//! This target has `harness = false`: the same executable is the test runner
+//! and, when `PUMICE_MANAGED_TEST_CHILD` is set, the child. libtest would
+//! print its own lines on stdout, which the child must never do.
+
+use pumice_transcription::cli::run_with_engine_factory;
+use pumice_transcription::{
+    CancelToken, Engine, EngineError, Error, Transcript, TranscriptionOptions,
+};
+use serde_json::Value;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, ExitCode, ExitStatus, Stdio};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+const CHILD_ENV: &str = "PUMICE_MANAGED_TEST_CHILD";
+/// `ok`, `stall` (ignores cancellation forever) or `cooperative` (runs until
+/// cancelled), `fail-load`, or `no-threads` (on Linux, forbids new threads
+/// before loading).
+const ENGINE_ENV: &str = "PUMICE_TEST_ENGINE";
+const LOAD_MS_ENV: &str = "PUMICE_TEST_LOAD_MS";
+/// Created by the fake engine when a transcription starts.
+const STARTED_FILE_ENV: &str = "PUMICE_TEST_STARTED_FILE";
+/// Created by the fake engine factory when the model load starts (in
+/// `no-threads` mode, once new threads are forbidden).
+const LOADING_FILE_ENV: &str = "PUMICE_TEST_LOADING_FILE";
+
+const MODEL: &str = "turbo";
+const INSTANCE: &str = "gen-1";
+const BOUNDARY: &str = "pumice-managed-boundary";
+/// Matches `managed::SHUTDOWN_GRACE`; the forced exit cannot come earlier.
+const GRACE: Duration = Duration::from_millis(2000);
+/// Upper bound for anything that should be prompt, generous for slow CI.
+const PROMPT: Duration = Duration::from_secs(10);
+
+// --- Child -------------------------------------------------------------------
+
+struct ChildEngine {
+    mode: String,
+    started_file: Option<PathBuf>,
+}
+
+impl Engine for ChildEngine {
+    fn transcribe(
+        &self,
+        _pcm: &[f32],
+        _options: &TranscriptionOptions,
+        cancel: &CancelToken,
+    ) -> Result<Transcript, EngineError> {
+        if let Some(path) = &self.started_file {
+            std::fs::write(path, b"started").unwrap();
+        }
+        match self.mode.as_str() {
+            "stall" => loop {
+                thread::sleep(Duration::from_millis(10));
+            },
+            "cooperative" => {
+                while !cancel.is_cancelled() {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(EngineError::Cancelled)
+            }
+            _ => Ok(Transcript {
+                text: "fake words".to_string(),
+                language: Some("en".to_string()),
+            }),
+        }
+    }
+}
+
+fn child_main() -> ExitCode {
+    let mode = std::env::var(ENGINE_ENV).unwrap_or_else(|_| "ok".to_string());
+    let load_ms: u64 = std::env::var(LOAD_MS_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let started_file = std::env::var_os(STARTED_FILE_ENV).map(PathBuf::from);
+    let loading_file = std::env::var_os(LOADING_FILE_ENV).map(PathBuf::from);
+    run_with_engine_factory(std::env::args_os(), move |_path, _threads| {
+        #[cfg(target_os = "linux")]
+        if mode == "no-threads" {
+            let none = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: plain syscall on this process with a valid struct.
+            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &none) }, 0);
+        }
+        if let Some(path) = &loading_file {
+            std::fs::write(path, b"loading").unwrap();
+        }
+        thread::sleep(Duration::from_millis(load_ms));
+        if mode == "fail-load" {
+            return Err(Error::model_load_failed());
+        }
+        Ok(Box::new(ChildEngine { mode, started_file }) as Box<dyn Engine>)
+    })
+}
+
+// --- Runner --------------------------------------------------------------------
+
+fn main() -> ExitCode {
+    if std::env::var_os(CHILD_ENV).is_some() {
+        return child_main();
+    }
+    let tests: &[(&str, fn())] = &[
+        (
+            "ready_follows_load_and_bind_and_stdin_eof_stops_cleanly",
+            ready_follows_load_and_bind_and_stdin_eof_stops_cleanly,
+        ),
+        (
+            "eof_during_model_load_never_announces_ready",
+            eof_during_model_load_never_announces_ready,
+        ),
+        (
+            "eof_during_a_stuck_model_load_hits_the_watchdog",
+            eof_during_a_stuck_model_load_hits_the_watchdog,
+        ),
+        #[cfg(target_os = "linux")]
+        (
+            "a_watchdog_that_cannot_start_exits_at_once",
+            a_watchdog_that_cannot_start_exits_at_once,
+        ),
+        (
+            "eof_during_a_stalled_inference_hits_the_watchdog",
+            eof_during_a_stalled_inference_hits_the_watchdog,
+        ),
+        (
+            "eof_during_a_cooperative_inference_drains_and_exits_cleanly",
+            eof_during_a_cooperative_inference_drains_and_exits_cleanly,
+        ),
+        (
+            "invalid_instance_id_is_refused_without_echo",
+            invalid_instance_id_is_refused_without_echo,
+        ),
+        (
+            "startup_failures_are_one_error_record",
+            startup_failures_are_one_error_record,
+        ),
+        (
+            "a_model_id_too_long_to_announce_is_refused_before_loading",
+            a_model_id_too_long_to_announce_is_refused_before_loading,
+        ),
+        (
+            "normal_mode_ignores_stdin_and_keeps_stdout_empty",
+            normal_mode_ignores_stdin_and_keeps_stdout_empty,
+        ),
+        #[cfg(unix)]
+        (
+            "sigterm_stops_a_managed_child_cleanly",
+            sigterm_stops_a_managed_child_cleanly,
+        ),
+    ];
+    let filter = std::env::args().skip(1).find(|arg| !arg.starts_with('-'));
+    let selected: Vec<_> = tests
+        .iter()
+        .filter(|(name, _)| filter.as_deref().is_none_or(|f| name.contains(f)))
+        .collect();
+    println!("\nrunning {} tests", selected.len());
+    // Every test owns its child and port, so they run in parallel.
+    let handles: Vec<_> = selected
+        .iter()
+        .map(|&&(name, test)| (name, thread::spawn(test)))
+        .collect();
+    let mut failed = Vec::new();
+    for (name, handle) in handles {
+        if handle.join().is_ok() {
+            println!("test {name} ... ok");
+        } else {
+            println!("test {name} ... FAILED");
+            failed.push(name);
+        }
+    }
+    if failed.is_empty() {
+        println!("\ntest result: ok. {} passed", selected.len());
+        ExitCode::SUCCESS
+    } else {
+        println!("\ntest result: FAILED. {} failed: {failed:?}", failed.len());
+        ExitCode::FAILURE
+    }
+}
+
+// --- Helpers -----------------------------------------------------------------
+
+struct Setup {
+    _dir: tempfile::TempDir,
+    config: PathBuf,
+    started_file: PathBuf,
+    loading_file: PathBuf,
+    model: String,
+}
+
+fn setup(model_present: bool) -> Setup {
+    setup_with_model_id(model_present, MODEL)
+}
+
+fn setup_with_model_id(model_present: bool, model: &str) -> Setup {
+    let dir = tempfile::tempdir().unwrap();
+    if model_present {
+        std::fs::write(dir.path().join("model.gguf"), b"not a real model").unwrap();
+    }
+    let config = dir.path().join("transcribe.yml");
+    std::fs::write(
+        &config,
+        format!("schema_version: 1\nmodels:\n  - id: {model}\n    path: model.gguf\n"),
+    )
+    .unwrap();
+    let started_file = dir.path().join("started");
+    let loading_file = dir.path().join("loading");
+    Setup {
+        _dir: dir,
+        config,
+        started_file,
+        loading_file,
+        model: model.to_string(),
+    }
+}
+
+struct Spawned {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    lines: mpsc::Receiver<String>,
+    stdout: Option<thread::JoinHandle<Vec<String>>>,
+    stderr: Arc<Mutex<String>>,
+}
+
+fn spawn(setup: &Setup, engine: &str, load_ms: u64, extra: &[&str]) -> Spawned {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .env(CHILD_ENV, "1")
+        .env(ENGINE_ENV, engine)
+        .env(LOAD_MS_ENV, load_ms.to_string())
+        .env(STARTED_FILE_ENV, &setup.started_file)
+        .env(LOADING_FILE_ENV, &setup.loading_file)
+        .arg("--config")
+        .arg(&setup.config)
+        .args(["serve", "--model", &setup.model, "--port", "0"])
+        .args(extra)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let stdin = child.stdin.take();
+
+    let (tx, lines) = mpsc::channel();
+    let out = child.stdout.take().unwrap();
+    let stdout = thread::spawn(move || {
+        let mut all = Vec::new();
+        for line in BufReader::new(out).lines() {
+            let line = line.unwrap();
+            all.push(line.clone());
+            let _ = tx.send(line);
+        }
+        all
+    });
+    let stderr = Arc::new(Mutex::new(String::new()));
+    let mut err = child.stderr.take().unwrap();
+    let sink = Arc::clone(&stderr);
+    thread::spawn(move || {
+        let mut buf = [0u8; 1024];
+        while let Ok(n) = err.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            sink.lock()
+                .unwrap()
+                .push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+    });
+    Spawned {
+        child,
+        stdin,
+        lines,
+        stdout: Some(stdout),
+        stderr,
+    }
+}
+
+fn managed_args() -> [&'static str; 3] {
+    ["--managed", "--instance-id", INSTANCE]
+}
+
+impl Spawned {
+    fn next_record(&self) -> Value {
+        let line = self
+            .lines
+            .recv_timeout(PROMPT)
+            .unwrap_or_else(|_| panic!("no record; stderr: {}", self.stderr()));
+        parse_record(&line)
+    }
+
+    fn close_stdin(&mut self) {
+        drop(self.stdin.take());
+    }
+
+    fn stderr(&self) -> String {
+        self.stderr.lock().unwrap().clone()
+    }
+
+    fn wait(&mut self, limit: Duration) -> ExitStatus {
+        let started = Instant::now();
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            if started.elapsed() > limit {
+                let _ = self.child.kill();
+                panic!("child still running; stderr: {}", self.stderr());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Every stdout line the child wrote, once it has exited.
+    fn all_records(&mut self) -> Vec<Value> {
+        self.stdout
+            .take()
+            .unwrap()
+            .join()
+            .unwrap()
+            .iter()
+            .map(|line| parse_record(line))
+            .collect()
+    }
+
+    fn wait_for_started(&self, setup: &Setup) {
+        self.wait_for_file(&setup.started_file, "the engine never started");
+    }
+
+    fn wait_for_loading(&self, setup: &Setup) {
+        self.wait_for_file(&setup.loading_file, "the model load never started");
+    }
+
+    fn wait_for_file(&self, path: &Path, failure: &str) {
+        let started = Instant::now();
+        while !path.exists() {
+            assert!(
+                started.elapsed() < PROMPT,
+                "{failure}; stderr: {}",
+                self.stderr()
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+impl Drop for Spawned {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A lifecycle record: one bounded JSON object of the managed protocol.
+fn parse_record(line: &str) -> Value {
+    assert!(line.len() < 4096, "record too long");
+    let value: Value =
+        serde_json::from_str(line).unwrap_or_else(|_| panic!("not a JSON record: {line}"));
+    assert_eq!(value["schema_version"], 1, "{line}");
+    assert_eq!(value["module"], "transcription", "{line}");
+    assert!(
+        ["ready", "stopping", "stopped", "error"].contains(&value["event"].as_str().unwrap()),
+        "{line}"
+    );
+    value
+}
+
+fn events(records: &[Value]) -> Vec<String> {
+    records
+        .iter()
+        .map(|r| r["event"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn wav(seconds: f64) -> Vec<u8> {
+    let mut buf = std::io::Cursor::new(Vec::new());
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: 16_000,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::new(&mut buf, spec).unwrap();
+    for _ in 0..(seconds * 16_000.0) as usize {
+        writer.write_sample(0i16).unwrap();
+    }
+    writer.finalize().unwrap();
+    buf.into_inner()
+}
+
+fn transcription_body() -> Vec<u8> {
+    let mut body = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"clip.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend_from_slice(&wav(1.0));
+    body.extend_from_slice(
+        format!(
+            "\r\n--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{MODEL}\r\n--{BOUNDARY}--\r\n"
+        )
+        .as_bytes(),
+    );
+    body
+}
+
+/// One HTTP/1.1 request over a real socket; returns the status and body.
+fn http(port: u16, method: &str, path: &str, body: &[u8]) -> (u16, String) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.set_read_timeout(Some(PROMPT)).unwrap();
+    let mut head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    if !body.is_empty() {
+        head.push_str(&format!(
+            "Content-Type: multipart/form-data; boundary={BOUNDARY}\r\n"
+        ));
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes()).unwrap();
+    stream.write_all(body).unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    let response = String::from_utf8(response).unwrap();
+    let status = response[9..12].parse().unwrap();
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_string())
+        .unwrap_or_default();
+    (status, body)
+}
+
+fn ready_port(record: &Value) -> u16 {
+    assert_eq!(record["event"], "ready", "{record}");
+    let port = record["port"].as_u64().unwrap();
+    assert_ne!(port, 0);
+    u16::try_from(port).unwrap()
+}
+
+// --- Tests -------------------------------------------------------------------
+
+fn ready_follows_load_and_bind_and_stdin_eof_stops_cleanly() {
+    let setup = setup(true);
+    let started = Instant::now();
+    let mut child = spawn(&setup, "ok", 300, &managed_args());
+
+    let ready = child.next_record();
+    assert!(started.elapsed() >= Duration::from_millis(300));
+    let port = ready_port(&ready);
+    let keys: Vec<_> = ready.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(
+        keys,
+        [
+            "schema_version",
+            "event",
+            "module",
+            "instance_id",
+            "protocol_version",
+            "version",
+            "host",
+            "port",
+            "model",
+            "capabilities",
+            "model_load_ms",
+        ]
+    );
+    assert_eq!(ready["instance_id"], INSTANCE);
+    assert_eq!(ready["protocol_version"], 1);
+    assert_eq!(ready["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(ready["host"], "127.0.0.1");
+    assert_eq!(ready["model"], MODEL);
+    assert_eq!(
+        ready["capabilities"],
+        serde_json::json!([
+            "openai_transcriptions",
+            "detailed_transcriptions",
+            "managed_shutdown"
+        ])
+    );
+    assert!(ready["model_load_ms"].as_u64().unwrap() >= 300);
+
+    // The announced listener answers at once.
+    let (status, body) = http(port, "GET", "/ready", b"");
+    assert_eq!(status, 200, "{body}");
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["instance_id"], INSTANCE);
+    assert_eq!(body["state"], "ready");
+
+    let (status, body) = http(
+        port,
+        "POST",
+        "/pumice/v1/transcriptions",
+        &transcription_body(),
+    );
+    assert_eq!(status, 200, "{body}");
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["schema_version"], 1);
+    assert_eq!(body["text"], "fake words");
+    assert_eq!(body["language"], "en");
+    assert_eq!(body["audio_seconds"], 1.0);
+    assert!(body["inference_ms"].is_u64());
+
+    let (status, body) = http(
+        port,
+        "POST",
+        "/v1/audio/transcriptions",
+        &transcription_body(),
+    );
+    assert_eq!((status, body.as_str()), (200, r#"{"text":"fake words"}"#));
+
+    child.close_stdin();
+    let closed = Instant::now();
+    let status = child.wait(PROMPT);
+    assert_eq!(status.code(), Some(0), "stderr: {}", child.stderr());
+    assert!(closed.elapsed() < GRACE, "{:?}", closed.elapsed());
+
+    let records = child.all_records();
+    assert_eq!(events(&records), ["ready", "stopping", "stopped"]);
+    assert_eq!(records[1]["reason"], "stdin_closed");
+    assert_eq!(records[1]["instance_id"], INSTANCE);
+    assert_eq!(records[2]["instance_id"], INSTANCE);
+}
+
+fn eof_during_model_load_never_announces_ready() {
+    let setup = setup(true);
+    let mut child = spawn(&setup, "ok", 800, &managed_args());
+    child.wait_for_loading(&setup);
+    child.close_stdin();
+
+    let stopping = child.next_record();
+    assert_eq!(stopping["event"], "stopping");
+    let status = child.wait(PROMPT);
+    assert_eq!(status.code(), Some(0), "stderr: {}", child.stderr());
+    assert_eq!(events(&child.all_records()), ["stopping", "stopped"]);
+}
+
+fn eof_during_a_stuck_model_load_hits_the_watchdog() {
+    let setup = setup(true);
+    let mut child = spawn(&setup, "ok", 60_000, &managed_args());
+    child.wait_for_loading(&setup);
+    child.close_stdin();
+    let closed = Instant::now();
+
+    let status = child.wait(PROMPT);
+    let elapsed = closed.elapsed();
+    assert_eq!(status.code(), Some(3), "stderr: {}", child.stderr());
+    assert!(elapsed >= GRACE - Duration::from_millis(100), "{elapsed:?}");
+    assert_eq!(events(&child.all_records()), ["stopping"]);
+}
+
+/// The watchdog thread cannot be created (no threads allowed): with nothing
+/// to bound the shutdown, a stop request exits at once instead.
+#[cfg(target_os = "linux")]
+fn a_watchdog_that_cannot_start_exits_at_once() {
+    // SAFETY: plain syscall without arguments.
+    if unsafe { libc::geteuid() } == 0 {
+        // RLIMIT_NPROC does not apply to root.
+        return;
+    }
+    let setup = setup(true);
+    let mut child = spawn(&setup, "no-threads", 60_000, &managed_args());
+    child.wait_for_loading(&setup);
+    child.close_stdin();
+    let closed = Instant::now();
+
+    let status = child.wait(PROMPT);
+    assert_eq!(status.code(), Some(3), "stderr: {}", child.stderr());
+    assert!(closed.elapsed() < GRACE, "{:?}", closed.elapsed());
+    assert!(child.all_records().is_empty());
+}
+
+fn eof_during_a_stalled_inference_hits_the_watchdog() {
+    let setup = setup(true);
+    let mut child = spawn(&setup, "stall", 0, &managed_args());
+    let port = ready_port(&child.next_record());
+
+    let client = thread::spawn(move || {
+        http(
+            port,
+            "POST",
+            "/pumice/v1/transcriptions",
+            &transcription_body(),
+        )
+    });
+    child.wait_for_started(&setup);
+    child.close_stdin();
+    let closed = Instant::now();
+
+    // The request is answered at once; the stuck engine holds the exit.
+    let (status, body) = client.join().unwrap();
+    assert_eq!(status, 503, "{body}");
+    assert!(body.contains(r#""code":"shutting_down""#), "{body}");
+
+    let status = child.wait(PROMPT);
+    let elapsed = closed.elapsed();
+    assert_eq!(status.code(), Some(3), "stderr: {}", child.stderr());
+    assert!(elapsed >= GRACE - Duration::from_millis(100), "{elapsed:?}");
+    assert_eq!(events(&child.all_records()), ["ready", "stopping"]);
+}
+
+fn eof_during_a_cooperative_inference_drains_and_exits_cleanly() {
+    let setup = setup(true);
+    let mut child = spawn(&setup, "cooperative", 0, &managed_args());
+    let port = ready_port(&child.next_record());
+
+    let client = thread::spawn(move || {
+        http(
+            port,
+            "POST",
+            "/pumice/v1/transcriptions",
+            &transcription_body(),
+        )
+    });
+    child.wait_for_started(&setup);
+    child.close_stdin();
+    let closed = Instant::now();
+
+    let (status, _) = client.join().unwrap();
+    assert_eq!(status, 503);
+    let status = child.wait(PROMPT);
+    assert_eq!(status.code(), Some(0), "stderr: {}", child.stderr());
+    assert!(closed.elapsed() < GRACE, "{:?}", closed.elapsed());
+    assert_eq!(
+        events(&child.all_records()),
+        ["ready", "stopping", "stopped"]
+    );
+}
+
+fn invalid_instance_id_is_refused_without_echo() {
+    let setup = setup(true);
+    for id in ["bad id", "quote\"brace}", &"x".repeat(65), ""] {
+        let mut child = spawn(&setup, "ok", 0, &["--managed", "--instance-id", id]);
+        let status = child.wait(PROMPT);
+        assert_eq!(status.code(), Some(2));
+        let lines = child.stdout.take().unwrap().join().unwrap();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(id.is_empty() || !lines[0].contains(id), "{}", lines[0]);
+        let record = parse_record(&lines[0]);
+        assert_eq!(record["event"], "error");
+        assert_eq!(record["code"], "invalid_arguments");
+        assert!(record.get("instance_id").is_none());
+    }
+}
+
+fn startup_failures_are_one_error_record() {
+    // (setup with a model file, engine, extra arguments, exit code, error code)
+    let cases: [(bool, &str, &[&str], i32, &str); 4] = [
+        (false, "ok", &managed_args(), 2, "model_not_found"),
+        (true, "fail-load", &managed_args(), 1, "model_load_failed"),
+        (true, "ok", &["--managed"], 2, "invalid_arguments"),
+        (
+            true,
+            "ok",
+            &["--managed", "--instance-id", INSTANCE, "--bogus"],
+            2,
+            "invalid_arguments",
+        ),
+    ];
+    for (model_present, engine, extra, exit, code) in cases {
+        let setup = setup(model_present);
+        let mut child = spawn(&setup, engine, 0, extra);
+        let status = child.wait(PROMPT);
+        assert_eq!(status.code(), Some(exit), "stderr: {}", child.stderr());
+        let records = child.all_records();
+        assert_eq!(events(&records), ["error"], "{code}");
+        assert_eq!(records[0]["code"], code);
+        assert!(
+            !child.stderr().is_empty(),
+            "the human message goes to stderr"
+        );
+    }
+}
+
+fn a_model_id_too_long_to_announce_is_refused_before_loading() {
+    let long_id = "m".repeat(600);
+    let setup = setup_with_model_id(true, &long_id);
+    // A load would fail with `model_load_failed`; it never starts.
+    let mut child = spawn(&setup, "fail-load", 0, &managed_args());
+    let status = child.wait(PROMPT);
+    assert_eq!(status.code(), Some(2), "stderr: {}", child.stderr());
+    let records = child.all_records();
+    assert_eq!(events(&records), ["error"]);
+    assert_eq!(records[0]["code"], "invalid_config");
+    assert_eq!(records[0]["instance_id"], INSTANCE);
+}
+
+fn normal_mode_ignores_stdin_and_keeps_stdout_empty() {
+    let setup = setup(true);
+    let mut child = spawn(&setup, "ok", 0, &[]);
+    let started = Instant::now();
+    let port = loop {
+        let stderr = child.stderr();
+        if let Some(rest) = stderr.split("listening on http://127.0.0.1:").nth(1) {
+            break rest.split('/').next().unwrap().parse::<u16>().unwrap();
+        }
+        assert!(started.elapsed() < PROMPT, "no listening line: {stderr}");
+        thread::sleep(Duration::from_millis(10));
+    };
+
+    child.close_stdin();
+    thread::sleep(Duration::from_millis(300));
+    assert!(
+        child.child.try_wait().unwrap().is_none(),
+        "stdin EOF stopped it"
+    );
+    assert_eq!(http(port, "GET", "/ready", b"").0, 404);
+    assert_eq!(
+        http(
+            port,
+            "POST",
+            "/pumice/v1/transcriptions",
+            &transcription_body()
+        )
+        .0,
+        404
+    );
+
+    child.child.kill().unwrap();
+    child.child.wait().unwrap();
+    let lines = child.stdout.take().unwrap().join().unwrap();
+    assert!(lines.is_empty(), "{lines:?}");
+}
+
+#[cfg(unix)]
+fn sigterm_stops_a_managed_child_cleanly() {
+    let setup = setup(true);
+    let mut child = spawn(&setup, "ok", 0, &managed_args());
+    ready_port(&child.next_record());
+    let pid = libc::pid_t::try_from(child.child.id()).unwrap();
+    // SAFETY: plain syscall on the child we spawned and still own.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+    let status = child.wait(PROMPT);
+    assert_eq!(status.code(), Some(0), "stderr: {}", child.stderr());
+    let records = child.all_records();
+    assert_eq!(events(&records), ["ready", "stopping", "stopped"]);
+    assert_eq!(records[1]["reason"], "signal");
+}

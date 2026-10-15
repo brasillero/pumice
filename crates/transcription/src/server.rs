@@ -1,12 +1,16 @@
 //! OpenAI-compatible HTTP server for `pumice-transcribe serve`.
 //!
 //! Serves on IPv4 loopback only, with one model loaded at startup and one
-//! transcription admitted at a time. Every error body and log line is built from
-//! fixed text: nothing the client sent (model names, field names, prompts, file
-//! names) and nothing the engine produced is ever echoed or logged.
+//! transcription admitted at a time. In managed mode (see [`crate::managed`])
+//! it also serves `GET /ready` and `POST /pumice/v1/transcriptions`; the
+//! OpenAI routes answer exactly as they do without it. Every error body and
+//! log line is built from fixed text: nothing the client sent (model names,
+//! field names, prompts, file names) and nothing the engine produced is ever
+//! echoed or logged.
 
 use crate::audio::MAX_FILE_BYTES;
 use crate::engine::{CancelToken, Engine};
+use crate::managed::{CAPABILITIES, PROTOCOL_VERSION};
 use crate::service::transcribe_pcm_from_reader;
 use crate::{ErrorCode, TranscriptionOptions};
 use axum::{
@@ -65,6 +69,13 @@ struct ServerState {
     admission: Arc<Semaphore>,
     shutdown: CancellationToken,
     request_ids: Arc<AtomicU64>,
+    managed: Option<Arc<ManagedState>>,
+}
+
+struct ManagedState {
+    instance_id: String,
+    /// The only accepted `Host`: `127.0.0.1:<bound port>`.
+    host: String,
 }
 
 impl ServerState {
@@ -83,8 +94,23 @@ impl ServerState {
             admission: Arc::new(Semaphore::new(1)),
             shutdown,
             request_ids: Arc::new(AtomicU64::new(1)),
+            managed: None,
         }
     }
+
+    fn managed(mut self, instance_id: String, port: u16) -> Self {
+        self.managed = Some(Arc::new(ManagedState {
+            instance_id,
+            host: format!("{}:{port}", Ipv4Addr::LOCALHOST),
+        }));
+        self
+    }
+}
+
+/// Identity of a managed instance (`serve --managed`).
+pub struct Managed {
+    /// Already validated by [`crate::managed::validate_instance_id`].
+    pub instance_id: String,
 }
 
 /// Start the HTTP server on `127.0.0.1:port` and serve until `shutdown_signal`
@@ -97,18 +123,52 @@ pub async fn serve(
     default_language: Option<String>,
     shutdown_signal: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<tokio::task::JoinHandle<()>> {
-    let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)).await?;
+    let listener = bind(port).await?;
+    serve_on(
+        listener,
+        engine,
+        served_model_id,
+        default_language,
+        None,
+        shutdown_signal,
+    )
+}
+
+/// Bind `127.0.0.1:port`; port 0 picks a free port.
+pub async fn bind(port: u16) -> io::Result<TcpListener> {
+    TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)).await
+}
+
+/// [`serve`] on a listener from [`bind`], optionally in managed mode. Must be
+/// called inside a Tokio runtime.
+pub fn serve_on(
+    listener: TcpListener,
+    engine: Arc<dyn Engine>,
+    served_model_id: String,
+    default_language: Option<String>,
+    managed: Option<Managed>,
+    shutdown_signal: impl Future<Output = ()> + Send + 'static,
+) -> io::Result<tokio::task::JoinHandle<()>> {
     let local_addr = listener.local_addr()?;
+    if local_addr.ip() != Ipv4Addr::LOCALHOST {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the server only listens on 127.0.0.1",
+        ));
+    }
     eprintln!("pumice-transcribe listening on http://{local_addr}/v1 (model: {served_model_id})");
 
     let shutdown = CancellationToken::new();
-    let state = ServerState::new(
+    let mut state = ServerState::new(
         engine,
         &served_model_id,
         default_language,
         Limits::default(),
         shutdown.clone(),
     );
+    if let Some(managed) = managed {
+        state = state.managed(managed.instance_id, local_addr.port());
+    }
     let admission = Arc::clone(&state.admission);
     let app = router(state);
 
@@ -129,11 +189,22 @@ pub async fn serve(
 }
 
 fn router(state: ServerState) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/v1/audio/transcriptions", post(transcriptions))
         .route("/v1/models", get(list_models))
         .route("/v1/models/{model}", get(retrieve_model))
-        .route("/health", get(health))
+        .route("/health", get(health));
+    if state.managed.is_some() {
+        // Their own method fallback, so an unsupported method also meets the
+        // managed guards and gets a stable code.
+        router = router
+            .route("/ready", get(ready).fallback(managed_method_not_allowed))
+            .route(
+                "/pumice/v1/transcriptions",
+                post(detailed_transcriptions).fallback(managed_method_not_allowed),
+            );
+    }
+    router
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
@@ -144,30 +215,40 @@ fn router(state: ServerState) -> Router {
 // ---------------------------------------------------------------------------
 
 /// An OpenAI error object. Every field is static text by construction.
+///
+/// `code` is what the OpenAI routes send (set only where OpenAI defines one);
+/// managed routes always send `stable` as the code instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ApiError {
     status: StatusCode,
     kind: &'static str,
     code: Option<&'static str>,
+    stable: &'static str,
     param: Option<&'static str>,
     message: &'static str,
 }
 
-const fn invalid(param: Option<&'static str>, message: &'static str) -> ApiError {
+const fn invalid(
+    stable: &'static str,
+    param: Option<&'static str>,
+    message: &'static str,
+) -> ApiError {
     ApiError {
         status: StatusCode::BAD_REQUEST,
         kind: "invalid_request_error",
         code: None,
+        stable,
         param,
         message,
     }
 }
 
-const fn server_error(status: StatusCode, message: &'static str) -> ApiError {
+const fn server_error(status: StatusCode, stable: &'static str, message: &'static str) -> ApiError {
     ApiError {
         status,
         kind: "server_error",
         code: None,
+        stable,
         param: None,
         message,
     }
@@ -177,6 +258,7 @@ const BUSY: ApiError = ApiError {
     status: StatusCode::TOO_MANY_REQUESTS,
     kind: "rate_limit_error",
     code: Some("rate_limit_exceeded"),
+    stable: "rate_limit_exceeded",
     param: None,
     message: "The server is busy with another transcription. Retry after a short wait.",
 };
@@ -184,6 +266,7 @@ const BODY_TOO_LARGE: ApiError = ApiError {
     status: StatusCode::PAYLOAD_TOO_LARGE,
     kind: "invalid_request_error",
     code: None,
+    stable: "body_too_large",
     param: None,
     message: "The request body exceeds the maximum size of 26000000 bytes.",
 };
@@ -191,6 +274,7 @@ const FILE_TOO_LARGE: ApiError = ApiError {
     status: StatusCode::PAYLOAD_TOO_LARGE,
     kind: "invalid_request_error",
     code: None,
+    stable: "file_too_large",
     param: Some("file"),
     message: "The uploaded file exceeds the maximum size of 25000000 bytes.",
 };
@@ -198,6 +282,7 @@ const FIELD_TOO_LARGE: ApiError = ApiError {
     status: StatusCode::PAYLOAD_TOO_LARGE,
     kind: "invalid_request_error",
     code: None,
+    stable: "field_too_large",
     param: None,
     message: "A text field exceeds the maximum size of 16384 bytes.",
 };
@@ -205,6 +290,7 @@ const UPLOAD_TIMEOUT: ApiError = ApiError {
     status: StatusCode::REQUEST_TIMEOUT,
     kind: "invalid_request_error",
     code: None,
+    stable: "upload_timeout",
     param: None,
     message: "The request body was not received in time.",
 };
@@ -212,6 +298,7 @@ const MODEL_NOT_FOUND: ApiError = ApiError {
     status: StatusCode::NOT_FOUND,
     kind: "invalid_request_error",
     code: Some("model_not_found"),
+    stable: "model_not_found",
     param: Some("model"),
     message: "The requested model does not exist on this server.",
 };
@@ -219,6 +306,7 @@ const NOT_FOUND: ApiError = ApiError {
     status: StatusCode::NOT_FOUND,
     kind: "invalid_request_error",
     code: None,
+    stable: "not_found",
     param: None,
     message: "Invalid URL.",
 };
@@ -226,69 +314,136 @@ const METHOD_NOT_ALLOWED: ApiError = ApiError {
     status: StatusCode::METHOD_NOT_ALLOWED,
     kind: "invalid_request_error",
     code: None,
+    stable: "method_not_allowed",
     param: None,
     message: "Method not allowed for this URL.",
 };
 const NOT_MULTIPART: ApiError = invalid(
+    "not_multipart",
     None,
     "The request must be multipart/form-data with a boundary.",
 );
-const MALFORMED_MULTIPART: ApiError = invalid(None, "The multipart request body is malformed.");
+const MALFORMED_MULTIPART: ApiError = invalid(
+    "malformed_multipart",
+    None,
+    "The multipart request body is malformed.",
+);
 const UNSUPPORTED_PARAMETER: ApiError = invalid(
+    "unsupported_parameter",
     None,
     "Unrecognized or unsupported request parameter. Supported: file, model, language, prompt, response_format, temperature, stream.",
 );
-const DUPLICATE_PARAMETER: ApiError = invalid(None, "A request parameter was sent more than once.");
-const MISSING_FILE: ApiError = invalid(Some("file"), "You must provide a file parameter.");
-const EMPTY_FILE: ApiError = invalid(Some("file"), "The uploaded file is empty.");
+const DUPLICATE_PARAMETER: ApiError = invalid(
+    "duplicate_parameter",
+    None,
+    "A request parameter was sent more than once.",
+);
+const MISSING_FILE: ApiError = invalid(
+    "missing_file",
+    Some("file"),
+    "You must provide a file parameter.",
+);
+const EMPTY_FILE: ApiError = invalid("empty_file", Some("file"), "The uploaded file is empty.");
 const FILE_NOT_UPLOAD: ApiError = invalid(
+    "file_not_upload",
     Some("file"),
     "The file parameter must be sent as a file upload.",
 );
-const MISSING_MODEL: ApiError = invalid(Some("model"), "You must provide a model parameter.");
+const MISSING_MODEL: ApiError = invalid(
+    "missing_model",
+    Some("model"),
+    "You must provide a model parameter.",
+);
 const INVALID_LANGUAGE: ApiError = invalid(
+    "invalid_language",
     Some("language"),
     "language must be a supported ISO-639-1 code.",
 );
 const INVALID_RESPONSE_FORMAT: ApiError = invalid(
+    "invalid_response_format",
     Some("response_format"),
     "Unsupported response_format. Supported: json, text.",
 );
 const INVALID_TEMPERATURE: ApiError = invalid(
+    "invalid_temperature",
     Some("temperature"),
     "temperature must be a number between 0 and 1.",
 );
-const STREAM_UNSUPPORTED: ApiError = invalid(Some("stream"), "Streaming is not supported.");
-const INVALID_STREAM: ApiError = invalid(Some("stream"), "stream must be true or false.");
-const NOT_UTF8: ApiError = invalid(None, "A text parameter is not valid UTF-8.");
-const NUL_IN_TEXT: ApiError = invalid(None, "A text parameter contains a NUL character.");
-const UNDECODABLE_AUDIO: ApiError = invalid(Some("file"), "The audio file could not be decoded.");
+const STREAM_UNSUPPORTED: ApiError = invalid(
+    "stream_unsupported",
+    Some("stream"),
+    "Streaming is not supported.",
+);
+const INVALID_STREAM: ApiError = invalid(
+    "invalid_stream",
+    Some("stream"),
+    "stream must be true or false.",
+);
+const NOT_UTF8: ApiError = invalid("invalid_utf8", None, "A text parameter is not valid UTF-8.");
+const NUL_IN_TEXT: ApiError = invalid(
+    "nul_in_text",
+    None,
+    "A text parameter contains a NUL character.",
+);
+const UNDECODABLE_AUDIO: ApiError = invalid(
+    "invalid_audio",
+    Some("file"),
+    "The audio file could not be decoded.",
+);
 #[cfg(feature = "opus")]
 const UNSUPPORTED_FORMAT: ApiError = invalid(
+    "unsupported_format",
     Some("file"),
     "Invalid file format. Supported formats: wav, mp3, flac, ogg (Vorbis), ogg (Opus), WebM (Opus).",
 );
 #[cfg(not(feature = "opus"))]
 const UNSUPPORTED_FORMAT: ApiError = invalid(
+    "unsupported_format",
     Some("file"),
     "Invalid file format. Supported formats: wav, mp3, flac, ogg (Vorbis).",
 );
 const AUDIO_TOO_LONG: ApiError = invalid(
+    "audio_too_long",
     Some("file"),
     "Audio longer than 120 seconds is not supported.",
 );
 const SHUTTING_DOWN: ApiError = server_error(
     StatusCode::SERVICE_UNAVAILABLE,
+    "shutting_down",
     "The server is shutting down.",
 );
 const DEADLINE_EXCEEDED: ApiError = server_error(
     StatusCode::GATEWAY_TIMEOUT,
+    "deadline_exceeded",
     "The transcription did not finish in time.",
 );
 const TRANSCRIPTION_FAILED: ApiError = server_error(
     StatusCode::INTERNAL_SERVER_ERROR,
+    "transcription_failed",
     "The transcription failed.",
 );
+
+const DETAILED_RESPONSE_FORMAT: ApiError = invalid(
+    "invalid_response_format",
+    Some("response_format"),
+    "Unsupported response_format. Supported: json.",
+);
+const HOST_NOT_ALLOWED: ApiError = ApiError {
+    status: StatusCode::FORBIDDEN,
+    kind: "invalid_request_error",
+    code: None,
+    stable: "host_not_allowed",
+    param: None,
+    message: "This route only accepts the Host 127.0.0.1 with the server's port.",
+};
+const ORIGIN_NOT_ALLOWED: ApiError = ApiError {
+    status: StatusCode::FORBIDDEN,
+    kind: "invalid_request_error",
+    code: None,
+    stable: "origin_not_allowed",
+    param: None,
+    message: "This route does not accept requests with an Origin header.",
+};
 
 /// Map a library error to a fixed HTTP error. The library error's own message
 /// may contain decoder or native text and is never used.
@@ -337,12 +492,23 @@ fn known_param(name: &str) -> Option<&'static str> {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        self.response(self.code)
+    }
+}
+
+impl ApiError {
+    /// The error as managed routes send it, with its stable `code`.
+    fn managed_response(self) -> Response {
+        self.response(Some(self.stable))
+    }
+
+    fn response(self, code: Option<&'static str>) -> Response {
         let body = serde_json::json!({
             "error": {
                 "message": self.message,
                 "type": self.kind,
                 "param": self.param,
-                "code": self.code,
+                "code": code,
             }
         });
         let mut response = json_response(self.status, &body);
@@ -422,10 +588,10 @@ impl Drop for CancelOnDrop {
 /// POST /v1/audio/transcriptions
 async fn transcriptions(State(state): State<ServerState>, request: Request) -> Response {
     let log = RequestLog::new(&state);
-    match transcribe(&state, request).await {
-        Ok((format, text, audio_seconds)) => {
-            log.answered(StatusCode::OK, Some(audio_seconds));
-            success_response(format, text)
+    match transcribe(&state, request, Endpoint::OpenAi).await {
+        Ok(done) => {
+            log.answered(StatusCode::OK, Some(done.audio_seconds));
+            success_response(done.format, done.text)
         }
         Err(error) => {
             log.answered(error.status, None);
@@ -434,10 +600,82 @@ async fn transcriptions(State(state): State<ServerState>, request: Request) -> R
     }
 }
 
+/// POST /pumice/v1/transcriptions (managed mode only): the same request,
+/// limits and admission as `/v1/audio/transcriptions`, answered with a
+/// versioned detailed result instead of the OpenAI one.
+async fn detailed_transcriptions(State(state): State<ServerState>, request: Request) -> Response {
+    let log = RequestLog::new(&state);
+    let result = match check_managed_request(&state, &request) {
+        Ok(()) => transcribe(&state, request, Endpoint::Detailed).await,
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(done) => {
+            log.answered(StatusCode::OK, Some(done.audio_seconds));
+            let mut body = serde_json::json!({ "schema_version": 1, "text": done.text });
+            if let Some(language) = done.language {
+                body["language"] = language.into();
+            }
+            body["audio_seconds"] = done.audio_seconds.into();
+            body["inference_ms"] = u64::try_from(done.inference.as_millis())
+                .unwrap_or(u64::MAX)
+                .into();
+            json_response(StatusCode::OK, &body)
+        }
+        Err(error) => {
+            log.answered(error.status, None);
+            error.managed_response()
+        }
+    }
+}
+
+/// Managed routes answer only their owner: the literal `Host` `127.0.0.1`
+/// with the bound port (no DNS name, against DNS rebinding) and no `Origin`
+/// header (browsers send one on cross-origin requests). Checked before
+/// admission and before reading the body.
+fn check_managed_request(state: &ServerState, request: &Request) -> Result<(), ApiError> {
+    let Some(managed) = state.managed.as_deref() else {
+        return Err(NOT_FOUND);
+    };
+    if request.headers().contains_key(header::ORIGIN) {
+        return Err(ORIGIN_NOT_ALLOWED);
+    }
+    let mut hosts = request.headers().get_all(header::HOST).iter();
+    let host_ok = matches!(
+        (hosts.next(), hosts.next()),
+        (Some(host), None) if host.as_bytes() == managed.host.as_bytes()
+    );
+    let authority_ok = request
+        .uri()
+        .authority()
+        .is_none_or(|authority| authority.as_str() == managed.host);
+    if host_ok && authority_ok {
+        Ok(())
+    } else {
+        Err(HOST_NOT_ALLOWED)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Endpoint {
+    OpenAi,
+    Detailed,
+}
+
+/// A finished transcription. No `Debug`: `text` is the transcript.
+struct Transcribed {
+    format: ResponseFormat,
+    text: String,
+    language: Option<String>,
+    audio_seconds: f64,
+    inference: Duration,
+}
+
 async fn transcribe(
     state: &ServerState,
     request: Request,
-) -> Result<(ResponseFormat, String, f64), ApiError> {
+    endpoint: Endpoint,
+) -> Result<Transcribed, ApiError> {
     let arrived = time::Instant::now();
     let deadline = arrived + state.limits.total_deadline;
     let upload_deadline = (arrived + state.limits.upload_deadline).min(deadline);
@@ -466,6 +704,9 @@ async fn transcribe(
         }
     };
     let form = parse_form(body, boundary).await?;
+    if endpoint == Endpoint::Detailed && form.response_format != ResponseFormat::Json {
+        return Err(DETAILED_RESPONSE_FORMAT);
+    }
 
     let model = form.model.as_deref().ok_or(MISSING_MODEL)?;
     if model != &*state.served_model_id {
@@ -475,6 +716,7 @@ async fn transcribe(
         Some(lang) => Some(crate::config::validate_language(&lang).map_err(|_| INVALID_LANGUAGE)?),
         None => state.default_language.clone(),
     };
+    let hint = language.clone();
     let options = TranscriptionOptions {
         language,
         prompt: form.prompt,
@@ -503,7 +745,15 @@ async fn transcribe(
         () = state.shutdown.cancelled() => Err(SHUTTING_DOWN),
         () = time::sleep_until(deadline) => Err(DEADLINE_EXCEEDED),
         joined = worker => match joined {
-            Ok(Ok(result)) => Ok((form.response_format, result.transcript.text, result.audio_seconds)),
+            Ok(Ok(result)) => Ok(Transcribed {
+                format: form.response_format,
+                text: result.transcript.text,
+                // The hint the engine was given wins over what it detected,
+                // as in the `file` command.
+                language: hint.or(result.transcript.language),
+                audio_seconds: result.audio_seconds,
+                inference: result.inference,
+            }),
             Ok(Err(error)) => Err(map_error(error.code)),
             // The worker panicked; its permit was released while unwinding.
             Err(_) => Err(TRANSCRIPTION_FAILED),
@@ -676,6 +926,7 @@ async fn parse_form(body: Bytes, boundary: String) -> Result<Form, ApiError> {
 /// A text parameter that arrived as a file upload.
 fn text_param_error(param: &'static str) -> ApiError {
     invalid(
+        "text_param_as_file",
         Some(param),
         "This parameter must be sent as a text field, not a file.",
     )
@@ -741,6 +992,34 @@ async fn retrieve_model(
     }
 }
 
+/// GET /ready (managed mode only): the instance's identity while it accepts
+/// work; 503 once shutting down. A running transcription does not make it
+/// unready.
+async fn ready(State(state): State<ServerState>, request: Request) -> Response {
+    if let Err(error) = check_managed_request(&state, &request) {
+        return error.managed_response();
+    }
+    let Some(managed) = state.managed.as_deref() else {
+        return NOT_FOUND.into_response();
+    };
+    if state.shutdown.is_cancelled() {
+        return SHUTTING_DOWN.managed_response();
+    }
+    json_response(
+        StatusCode::OK,
+        &serde_json::json!({
+            "schema_version": 1,
+            "module": "transcription",
+            "instance_id": managed.instance_id,
+            "protocol_version": PROTOCOL_VERSION,
+            "version": env!("CARGO_PKG_VERSION"),
+            "model": &*state.served_model_id,
+            "capabilities": CAPABILITIES,
+            "state": "ready",
+        }),
+    )
+}
+
 /// GET /health: liveness; answers while a transcription runs.
 async fn health() -> Response {
     json_response(
@@ -755,6 +1034,18 @@ async fn not_found() -> Response {
 
 async fn method_not_allowed() -> Response {
     METHOD_NOT_ALLOWED.into_response()
+}
+
+/// An unsupported method on a managed route: the managed guards first, then a
+/// 405 with its stable code. The router adds the `Allow` header.
+async fn managed_method_not_allowed(
+    State(state): State<ServerState>,
+    request: Request,
+) -> Response {
+    match check_managed_request(&state, &request) {
+        Ok(()) => METHOD_NOT_ALLOWED.managed_response(),
+        Err(error) => error.managed_response(),
+    }
 }
 
 /// Wait for shutdown via Ctrl-C or SIGTERM.
@@ -779,6 +1070,37 @@ pub async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => {}
         () = terminate => {}
+    }
+}
+
+/// [`shutdown_signal`] with its handlers installed before it returns, so a
+/// signal that arrives before the future is first polled is not missed. Must
+/// be called inside a Tokio runtime.
+pub fn registered_shutdown_signal() -> io::Result<impl Future<Output = ()> + Send + 'static> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut interrupt = signal(SignalKind::interrupt())?;
+        let mut terminate = signal(SignalKind::terminate())?;
+        Ok(async move {
+            tokio::select! {
+                _ = interrupt.recv() => {}
+                _ = terminate.recv() => {}
+            }
+        })
+    }
+
+    #[cfg(windows)]
+    {
+        let mut ctrl_c = tokio::signal::windows::ctrl_c()?;
+        Ok(async move {
+            ctrl_c.recv().await;
+        })
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Ok(shutdown_signal())
     }
 }
 

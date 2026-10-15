@@ -13,6 +13,12 @@ path = "src/lib.rs"
 name = "pumice-transcribe"
 path = "src/main.rs"
 
+# Its own runner: the test executable is also the managed child under test,
+# and libtest would write to the child's stdout.
+[[test]]
+name = "managed"
+harness = false
+
 [features]
 default = []
 opus = ["dep:opus", "dep:opusic-sys", "dep:webm-iterable"]

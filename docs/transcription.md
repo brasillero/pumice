@@ -466,6 +466,79 @@ curl --fail http://127.0.0.1:17568/v1/models
 curl --fail http://127.0.0.1:17568/health
 ```
 
+#### Managed mode (used by `pumice serve`)
+
+Internal protocol, version 1. It exists so `pumice serve` can own one warm
+`pumice-transcribe` child; it is not meant for direct use and may change with
+the protocol version.
+
+```bash
+pumice-transcribe --config ./transcribe.yml serve --model turbo --port 0 \
+  --managed --instance-id gen-1
+```
+
+`--managed` and `--instance-id` go together. The id comes from the owner and
+must be 1 to 64 characters from `A-Z a-z 0-9 . _ -`. The served model id
+must be at most 512 bytes, so `ready` can carry it unchanged; a longer one
+fails before loading with `invalid_config`. Everything else, including
+the OpenAI routes above, behaves exactly as without `--managed`.
+
+**stdout** carries only lifecycle records, one JSON object per line, each
+under 4096 bytes; human messages stay on stderr. A run writes `ready` or
+`error`, then possibly `stopping` and `stopped`:
+
+```json
+{"schema_version":1,"event":"ready","module":"transcription","instance_id":"gen-1","protocol_version":1,"version":"0.2.0","host":"127.0.0.1","port":49152,"model":"turbo","capabilities":["openai_transcriptions","detailed_transcriptions","managed_shutdown"],"model_load_ms":362}
+{"schema_version":1,"event":"stopping","module":"transcription","instance_id":"gen-1","reason":"stdin_closed"}
+{"schema_version":1,"event":"stopped","module":"transcription","instance_id":"gen-1"}
+```
+
+- `ready` comes only after the model is loaded and the listener is bound, and
+  never after `stopping`.
+- `error` replaces `ready` when startup fails: `code` is one of the
+  [error codes](#json-output-and-exit-codes) and `message` is cut to 512
+  bytes. An invalid `--instance-id` or invalid arguments give
+  `invalid_arguments` without `instance_id`. The exit status is non-zero.
+- `stopping` has `reason` `stdin_closed` or `signal`.
+
+**stdin** is the owner's lifeline: end of file, or a read error, starts a
+shutdown; anything written to it is ignored. It is watched from the start,
+before the model loads. A shutdown (from stdin or Ctrl-C/SIGTERM) stops new
+work, answers a running request with 503 and cancels its transcription. If
+the server has not drained 2 seconds after the request, for example because
+the engine is between cancellation checks or the model is still loading, the
+process exits at once with status 3; if the thread that enforces this cannot
+be started, it exits with status 3 right away, without `stopping`. Otherwise
+it writes `stopped` and exits with status 0. Ctrl-C/SIGTERM are handled this
+way once the model is loaded; during loading they end the process at once, as
+without `--managed`.
+
+Two more routes exist only in managed mode (404 otherwise). Both accept only
+the `Host` `127.0.0.1:<port>` (no `localhost` or other names) and refuse any
+request with an `Origin` header, with 403 `host_not_allowed` or
+`origin_not_allowed`, whatever the method; past those checks, an unsupported
+method gets 405 `method_not_allowed` with an `Allow` header. Their errors use
+the OpenAI error object with `code` always set (for example
+`rate_limit_exceeded`, `missing_model`, `unsupported_format`,
+`audio_too_long`, `body_too_large`, `shutting_down`, `deadline_exceeded`,
+`transcription_failed`).
+
+- `GET /ready` — `200` while the instance accepts work (a running
+  transcription does not change that); `503` `shutting_down` once stopping:
+  ```json
+  {"schema_version":1,"module":"transcription","instance_id":"gen-1","protocol_version":1,"version":"0.2.0","model":"turbo","capabilities":["openai_transcriptions","detailed_transcriptions","managed_shutdown"],"state":"ready"}
+  ```
+- `POST /pumice/v1/transcriptions` — the same multipart fields, limits,
+  deadlines and single-transcription admission as `/v1/audio/transcriptions`
+  (the two routes share it: either one busy gives 429), except that
+  `response_format` can only be `json`. The answer is a versioned result:
+  ```json
+  {"schema_version":1,"text":"...","language":"pt","audio_seconds":2.1,"inference_ms":5800}
+  ```
+  `language` is the hint the engine was given, or the detected language, and
+  is left out when neither is known. `inference_ms` is the engine call alone,
+  without reading, decoding or resampling the audio.
+
 ## Supported formats and limits
 
 Formats are detected by content (magic bytes), not by file extension.
@@ -528,6 +601,9 @@ Failures use the same envelope with `ok: false` and `error.code`:
 
 Config errors include `error.location.file`, `line`, and `column` when the
 position is known.
+
+`serve --managed` uses exit status 3 when its shutdown grace runs out (see
+[Managed mode](#managed-mode-used-by-pumice-serve)).
 
 ## Common errors
 
