@@ -36,7 +36,7 @@ const ID_BLOCK: u64 = 0xA1;
 const ID_DISCARD_PADDING: u64 = 0x75A2;
 const ID_BLOCK_DURATION: u64 = 0x9B;
 const ID_REFERENCE_BLOCK: u64 = 0xFB;
-const ID_INFO_TIMESTAMP_SCALE: u64 = 0x2AD7_B1;
+const ID_INFO_TIMESTAMP_SCALE: u64 = 0x2AD7B1;
 const ID_AUDIO: u64 = 0xE1;
 const ID_CHANNELS: u64 = 0x9F;
 const ID_SAMPLING_FREQUENCY: u64 = 0xB5;
@@ -378,21 +378,22 @@ fn walk_track_entry(bytes: &[u8], element: &Element, info: &mut WebmInfo) -> Res
                 while let Some(grandchild) = audio_reader.next()? {
                     match grandchild.id {
                         ID_CHANNELS => {
-                            if channels.replace(read_uint(bytes, &grandchild)?).is_some() {
+                            let value = read_uint(bytes, &grandchild)?;
+                            if channels.is_some() {
                                 return Err(Error::invalid_input(
                                     "duplicate webm audio channel count",
                                 ));
                             }
+                            channels = Some(value);
                         }
                         ID_SAMPLING_FREQUENCY => {
-                            if sampling_frequency
-                                .replace(read_float(bytes, &grandchild)?)
-                                .is_some()
-                            {
+                            let value = read_float(bytes, &grandchild)?;
+                            if sampling_frequency.is_some() {
                                 return Err(Error::invalid_input(
                                     "duplicate webm audio sampling frequency",
                                 ));
                             }
+                            sampling_frequency = Some(value);
                         }
                         _ => {}
                     }
@@ -730,21 +731,23 @@ pub(crate) fn decode_webm_opus(
 ) -> Result<DecodedAudio, Error> {
     let info = validate(&bytes)?;
     let head = OpusHead::parse(&info.codec_private)?;
-    if let Some(channels) = info.audio_channels {
-        if channels != u64::from(head.channels) {
-            return Err(Error::unsupported_format(
-                "webm audio channel metadata disagrees with the opus header",
-            ));
-        }
+    if info
+        .audio_channels
+        .is_some_and(|channels| channels != u64::from(head.channels))
+    {
+        return Err(Error::unsupported_format(
+            "webm audio channel metadata disagrees with the opus header",
+        ));
     }
-    if let Some(rate) = info.sampling_frequency {
+    if info
+        .sampling_frequency
+        .is_some_and(|rate| !rate.is_finite() || rate != f64::from(OPUS_SAMPLE_RATE))
+    {
         // Opus always decodes at 48 kHz; the Matroska Opus mapping fixes the
         // declared sampling frequency to that value.
-        if !rate.is_finite() || rate != f64::from(OPUS_SAMPLE_RATE) {
-            return Err(Error::unsupported_format(
-                "webm audio sampling frequency is not 48000",
-            ));
-        }
+        return Err(Error::unsupported_format(
+            "webm audio sampling frequency is not 48000",
+        ));
     }
     if let Some(ns) = info.codec_delay_ns {
         let ns =
