@@ -8,7 +8,8 @@ transcript, portable baseline kept).
 ## What was built
 
 - New opt-in Cargo feature `cpu-variants` on `pumice-transcription`
-  (`= ["engine", "transcribe-cpp/dynamic-backends"]`). The default `engine`
+  (`= ["engine", "transcribe-cpp/dynamic-backends"]`), Linux x86-64 only;
+  other architectures have no module mapping yet. The default `engine`
   build stays a single static binary with the portable x86-64 baseline.
 - With the feature, the engine links as shared libraries plus one ggml CPU
   module per x86 ISA tier (`GGML_CPU_ALL_VARIANTS`, 14 modules in a non-MSVC
@@ -42,9 +43,13 @@ transcript, portable baseline kept).
   the module into a per-process directory and was rejected in review round
   2: it failed on read-only install dirs and was attackable through
   symlinks), so the staged folder works read-only. If the chosen variant's
-  module is not staged, startup falls back to the next lower tier whose
-  module exists — the tiers nest, so any lower tier is safe — down to `x64`;
-  if none exists, startup fails with the "modules missing" error.
+  module is not staged, startup falls back to the next less-preferred
+  variant whose module exists and whose required features pass the same
+  OS-aware detection — the table is not a nesting hierarchy (`alderlake`
+  follows `zen4` without requiring AVX-512, for example), so fallback
+  candidates are filtered by the detector, not by table position — down to
+  `x64`; if no candidate's module exists, startup fails with the "modules
+  missing" error.
 - Init failures distinguish modules missing / no usable CPU module, each
   with a recovery hint, in fixed text with no native error strings.
 - The selected variant is reported from ground truth: the ggml device
@@ -167,8 +172,8 @@ Transcript: exact match in all runs of both builds.
 - **Windows/macOS are out of scope** for this mode (no CI matrix changes);
   the feature is off by default and existing builds are untouched. The
   feature compiles on other OSes but only prints a warning that runtime
-  selection is wired up on Linux; the Windows/macOS staging layout is not
-  built or tested.
+  selection is wired up on Linux x86-64; the Windows/macOS staging layout is
+  not built or tested.
 - **Only the `file` and `serve` flows were exercised**; cancellation and
   client-disconnect paths were not re-tested on the staged build (they do not
   touch backend selection).

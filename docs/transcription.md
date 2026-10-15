@@ -34,8 +34,8 @@ Windows notes.
 
 ## Faster CPU builds (runtime CPU variants)
 
-Linux only, opt-in. The default build above is a single static binary with a
-portable x86-64 baseline; on modern CPUs it leaves a lot of transcription
+Linux x86-64 only, opt-in. The default build above is a single static binary
+with a portable x86-64 baseline; on modern CPUs it leaves a lot of transcription
 speed unused. The `cpu-variants` Cargo feature instead links the engine as
 shared libraries plus one ggml CPU module per x86 ISA tier (14 modules from
 baseline `x64` up to `sapphirerapids`). At startup the binary picks the
@@ -47,10 +47,11 @@ directory — never from the current directory or PATH. Each module is staged
 alone in its variant directory at build time, so ggml's directory probe can
 only ever see the selected one. Nothing is copied or written at runtime: the
 staged folder works from a read-only install directory. If the selected
-variant's module was not staged, the binary falls back to the next safe
-lower tier that exists, down to the plain `x64` portable floor, so a missing
-feature or an incomplete staged package degrades instead of crashing with
-SIGILL.
+variant's module was not staged, the binary falls back to the next staged
+variant this CPU and OS can execute, down to the plain `x64` portable floor,
+so an incomplete staged package degrades instead of failing; variants whose
+features the host lacks are never fallback candidates, so there is no SIGILL
+risk from the fallback walk.
 
 Build and stage a self-contained folder (binary + its shared libraries and
 CPU modules) in one step:
@@ -73,7 +74,7 @@ build changes. (The one visible addition to ordinary `engine` builds from
 this work is the `backend` field in `file --json` and the startup backend
 line; the binary stays a single static portable executable.) Windows and
 macOS builds are unchanged (the feature is off by default and its runtime
-wiring is Linux-only).
+wiring is Linux x86-64-only; other architectures have no module mapping).
 
 Measurements for both builds on server-1 and the details of the mechanism are
 in [`docs/research/P7-cpu-variants.md`](../docs/research/P7-cpu-variants.md).
