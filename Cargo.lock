@@ -1429,7 +1429,9 @@ name = "pumice"
 version = "0.2.0"
 dependencies = [
  "libc",
+ "pumice-formatter",
  "pumice-relay",
+ "serde_json",
  "tempfile",
  "windows-sys 0.61.2",
 ]

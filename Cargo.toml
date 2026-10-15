@@ -60,6 +60,7 @@ test = false
 bench = false
 
 [dependencies]
+pumice-formatter = { path = "crates/formatter" }
 pumice-relay = { path = "crates/relay" }
 
 [target.'cfg(windows)'.dependencies]
@@ -70,6 +71,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 
 [target.'cfg(unix)'.dev-dependencies]
