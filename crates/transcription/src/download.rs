@@ -285,6 +285,11 @@ impl Downloader {
         dest: &Path,
         on_event: &mut dyn FnMut(DownloadEvent),
     ) -> Result<FetchResult, Error> {
+        // The directory sync below is Unix-only; on other platforms the
+        // parameter is intentionally unused.
+        #[cfg(not(unix))]
+        let _ = models_dir;
+
         let part = part_path(dest);
         // A stale .part can only come from a crashed download (failures clean
         // up after themselves); we hold the lock, so removing it is safe.
