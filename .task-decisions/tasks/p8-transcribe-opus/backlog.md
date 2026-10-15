@@ -17,17 +17,18 @@
 **To do.**
 - [ ] Solve `OPUS_STATIC_RUNTIME` when Windows engine builds are taken up.
 
-### #2 · Deferred · Let the test page send the browser's own recording
+## Closed
+
+### #2 · Moved · Let the test page send the browser's own recording
 - type: Improvement
 - area: api
 - origin: conversation
 - ticket: —
 - created: 2026-10-15
-- reason: follows this task; small change to `tools/transcribe-test/`
+- closed: 2026-10-15
+- outcome: → p8b-test-page-native#1
 
 **Context.** The test page builds a WAV in the browser because Opus used to be rejected. With Opus supported, it can send MediaRecorder's WebM/Opus as is, exactly like an app such as T3 would.
 
 **To do.**
 - [ ] Add a "send native recording (WebM/Opus)" option to `tools/transcribe-test/index.html`.
-
-## Closed
