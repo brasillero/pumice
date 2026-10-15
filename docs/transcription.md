@@ -309,20 +309,15 @@ Formats are detected by content (magic bytes), not by file extension.
 | MP3 | MPEG Audio Layer III | Same limits |
 | FLAC | Free Lossless Audio Codec | Same limits |
 | Ogg Vorbis | Ogg + Vorbis (one logical stream) | Same limits |
-| Format | Container/codec | Limits |
-| --- | --- | --- |
-| WAV | RIFF/WAVE PCM / IEEE float / extensible | Max file 25 MB, max audio 120 s, sample rate 8–192 kHz, mono or stereo |
-| MP3 | MPEG Audio Layer III | Same limits |
-| FLAC | Free Lossless Audio Codec | Same limits |
-| Ogg Vorbis | Ogg + Vorbis (one logical stream) | Same limits |
-| Ogg Opus | Ogg + Opus | `engine` builds only; mono/stereo, one logical stream; same limits |
-| WebM/Opus | WebM or Matroska + Opus | `engine` builds only; mono/stereo, one audio track, unlaced blocks; same limits |
+| Ogg Opus | Ogg + Opus | `opus` Cargo feature; mono/stereo, one logical stream; same limits |
+| WebM/Opus | WebM or Matroska + Opus | `opus` Cargo feature; mono/stereo, one audio track, unlaced blocks; same limits |
 | MP4/AAC | — | Not supported |
 
-Opus decoding is only compiled into `engine` builds (the `opus` Cargo
-feature, enabled by `engine`). Other builds reject Opus files with
-`unsupported_format`. Opus always decodes at 48 kHz and is resampled to
-16 kHz like any other input.
+Opus decoding is compiled behind the `opus` Cargo feature: the CLI's
+`engine` feature enables it transitively, and a library build with only
+`opus` already decodes these formats. Builds without the feature reject
+Opus files with `unsupported_format`. Opus always decodes at 48 kHz and is
+resampled to 16 kHz like any other input.
 
 Known limit: a truncated file is rejected only when its container proves
 completeness — a strict container check does this for WebM (every element

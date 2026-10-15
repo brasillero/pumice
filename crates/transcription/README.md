@@ -68,41 +68,7 @@ configured `default_model`.
 
 See [`docs/transcription.md`](../../docs/transcription.md) for the full guide:
 configuration schema, model download recipes, JSON output, exit codes, and
-supported formats.
-
-## Supported formats
-
-Formats are detected by content (magic bytes), not by file extension.
-
-| Format | Container/codec | Limits |
-| --- | --- | --- |
-| WAV | RIFF/WAVE PCM / IEEE float / extensible | Max file 25 MB, max audio 120 s, sample rate 8–192 kHz, mono or stereo |
-| MP3 | MPEG Audio Layer III | Same limits |
-| FLAC | Free Lossless Audio Codec | Same limits |
-| Ogg Vorbis | Ogg + Vorbis (one logical stream) | Same limits |
-| Format | Container/codec | Limits |
-| --- | --- | --- |
-| WAV | RIFF/WAVE PCM / IEEE float / extensible | Max file 25 MB, max audio 120 s, sample rate 8–192 kHz, mono or stereo |
-| MP3 | MPEG Audio Layer III | Same limits |
-| FLAC | Free Lossless Audio Codec | Same limits |
-| Ogg Vorbis | Ogg + Vorbis (one logical stream) | Same limits |
-| Ogg Opus | Ogg + Opus | `engine` builds only; mono/stereo, one logical stream; same limits |
-| WebM/Opus | WebM or Matroska + Opus | `engine` builds only; mono/stereo, one audio track, unlaced blocks; same limits |
-| MP4/AAC | — | Not supported |
-
-Opus decoding is only compiled into `engine` builds (the `opus` Cargo
-feature, enabled by `engine`). Other builds reject Opus files with
-`unsupported_format`. Opus always decodes at 48 kHz and is resampled to
-16 kHz like any other input.
-
-Known limit: a truncated file is rejected only when its container proves
-completeness — a strict container check does this for WebM (every element
-extent is validated against the actual file size) and for Ogg (per-page
-checksums and the end-of-stream marker). A plain MP3 without a declared
-frame count has no reliable end marker, so a cut-off file decodes as a
-shorter recording instead of failing. As with any compressed format, a
-WebM Opus stream recorded live (no duration, no cues) cannot prove that
-whole final blocks were not lost at a clean boundary.
+the [supported formats and limits](../../docs/transcription.md#supported-formats-and-limits).
 
 ## Third-party licenses
 
