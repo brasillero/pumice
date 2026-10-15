@@ -97,6 +97,9 @@ jobs:
       - name: cargo clippy -p pumice-transcription --features cpu-variants
         run: cargo clippy -p pumice-transcription --features cpu-variants --all-targets --locked -- -D warnings
 
+      - name: cargo test -p pumice-transcription --features cpu-variants
+        run: cargo test -p pumice-transcription --features cpu-variants --locked
+
       - name: Build and stage cpu-variants
         run: crates/transcription/scripts/build-cpu-variants.sh
 
