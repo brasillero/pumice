@@ -491,6 +491,47 @@ async fn audio_errors_map_to_fixed_messages() {
     .await;
 }
 
+#[cfg(feature = "opus")]
+#[tokio::test]
+async fn webm_opus_upload_transcribes() {
+    let state = state(TestEngine::returning("transcribed"));
+    let webm = std::fs::read(format!(
+        "{}/tests/fixtures/sample-pt.webm",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    let response = send(&state, post(basic_body(&webm))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json(response).await, serde_json::json!({ "text": "transcribed" }));
+}
+
+#[cfg(feature = "opus")]
+#[tokio::test]
+async fn ogg_opus_upload_transcribes() {
+    let state = state(TestEngine::returning("transcribed"));
+    let ogg = std::fs::read(format!(
+        "{}/tests/fixtures/sample-pt-48k.opus",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    let response = send(&state, post(basic_body(&ogg))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json(response).await, serde_json::json!({ "text": "transcribed" }));
+}
+
+#[cfg(not(feature = "opus"))]
+#[tokio::test]
+async fn webm_upload_is_rejected_without_the_opus_feature() {
+    let state = state(TestEngine::returning("transcribed"));
+    let webm = std::fs::read(format!(
+        "{}/tests/fixtures/sample-pt.webm",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    let response = send(&state, post(basic_body(&webm))).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn non_multipart_requests_are_rejected() {
     let state = state(TestEngine::returning("x"));

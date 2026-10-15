@@ -1060,6 +1060,7 @@ fn empty_audio_file_returns_unsupported_format() {
     assert_eq!(err.code, ErrorCode::UnsupportedFormat);
 }
 
+#[cfg(not(feature = "opus"))]
 #[test]
 fn ogg_opus_returns_unsupported_format() {
     let err = run_with_engine(
@@ -1118,6 +1119,7 @@ fn long_compressed_audio_returns_audio_too_long() {
     assert_eq!(err.code, ErrorCode::AudioTooLong);
 }
 
+#[cfg(not(feature = "opus"))]
 #[test]
 fn json_error_envelope_for_unsupported_format() {
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");

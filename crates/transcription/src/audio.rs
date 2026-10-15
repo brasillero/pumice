@@ -1350,6 +1350,26 @@ mod tests {
         assert_eq!(AudioFormat::detect(b"OggS"), AudioFormat::Ogg);
     }
 
+    #[cfg(feature = "opus")]
+    #[test]
+    fn detect_webm_by_content() {
+        assert_eq!(
+            AudioFormat::detect(&[0x1A, 0x45, 0xDF, 0xA3, 0x00]),
+            AudioFormat::Webm
+        );
+    }
+
+    #[cfg(not(feature = "opus"))]
+    #[test]
+    fn ebml_magic_is_unknown_without_the_opus_feature() {
+        // Without the feature, WebM keeps falling through to Unknown and is
+        // rejected as unsupported, exactly as before Opus support.
+        assert_eq!(
+            AudioFormat::detect(&[0x1A, 0x45, 0xDF, 0xA3, 0x00]),
+            AudioFormat::Unknown
+        );
+    }
+
     #[test]
     fn detect_unknown_content() {
         assert_eq!(AudioFormat::detect(b"not audio"), AudioFormat::Unknown);
