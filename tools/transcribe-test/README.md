@@ -19,16 +19,22 @@ python3 -I tools/transcribe-test/serve.py
 Open <http://127.0.0.1:17569>. The page defaults to `/v1`; the helper proxies that
 path to `http://127.0.0.1:17568/v1`. Refresh models, select the served model, then
 click **Record**, speak, and click **Stop & transcribe**. At 120 seconds it stops
-and sends automatically. You can also select an existing file and click
-**Transcribe selected file**. An empty language enables server configuration or
-automatic detection. Prompt text is sent unchanged. The optional API key is sent
+and sends automatically. Under **Recording format** you choose what the page
+records: **Browser's own recording (WebM/Opus)** is the default and uses
+MediaRecorder exactly as an app like T3 would (`audio/webm;codecs=opus`, one-second
+timeslices); **WAV built in the page** keeps the previous in-page 16-bit mono PCM
+encoder. When WebM/Opus is not supported (some Safari versions), the page falls
+back to WAV automatically and says so. You can also select an existing file and
+click **Transcribe selected file**. An empty language enables server configuration
+or automatic detection. Prompt text is sent unchanged. The optional API key is sent
 only when filled, as `Authorization: Bearer …`; it is never saved.
 
 The transcript, HTTP status, round-trip time (through receipt of the response
-body), raw response, and OpenAI error details appear below. HTTP 429 means the
-server is busy; retry manually after its current transcription finishes. The ten
-latest results stay in page memory until reload. Only the endpoint base URL is
-remembered in localStorage. Transcripts and audio are not persisted by this tool.
+body), the name, format, and byte size of the audio sent, raw response, and OpenAI
+error details appear below. HTTP 429 means the server is busy; retry manually after
+its current transcription finishes. The ten latest results stay in page memory
+until reload. The endpoint base URL and the recording format are remembered in
+localStorage. Transcripts and audio are not persisted by this tool.
 
 Custom ports and upstream:
 
@@ -77,19 +83,27 @@ field only mimics SDK clients; it adds no authentication to this helper.
 
 ## Limits
 
-- Microphone capture uses Web Audio's ScriptProcessor compatibility API, which is
-  deprecated but keeps the page in one file without a separate worklet. It mixes
-  to mono and writes 16-bit PCM WAV at the AudioContext's native sample rate
-  (typically 44.1 or 48 kHz). The transcription server resamples to 16 kHz.
-- Browser microphone permissions, device availability, and Web Audio support are
-  required. Keep the tab active; suspended/background tabs can lose audio or
-  delay automatic stopping. Both the sample budget and timer cap recording at
-  120 seconds; the timer can be delayed by browser suspension.
+- Microphone capture requires browser microphone permissions, device
+  availability, and Web Audio support. Keep the tab active; suspended/background
+  tabs can lose audio or delay automatic stopping. Both modes stop and send at
+  120 seconds (the WAV mode additionally caps by sample count); the timer can be
+  delayed by browser suspension. Microphone tracks are released when recording
+  stops in both modes.
+- The level meter uses Web Audio's ScriptProcessor compatibility API on the
+  microphone stream in both modes; it is deprecated but keeps the page in one
+  file without a separate worklet. The WAV mode also uses it to mix to mono and
+  write 16-bit PCM WAV at the AudioContext's native sample rate (typically 44.1
+  or 48 kHz); the transcription server resamples to 16 kHz. The WebM/Opus mode
+  instead captures with MediaRecorder and sends the browser's own
+  `audio/webm;codecs=opus` output, collected in one-second timeslices.
+- A WebM/Opus recording needs a transcription server built with the `opus`
+  feature (any `engine` build). An older server without it answers
+  400 "Invalid file format" to such uploads.
 - Audio must be at most 25,000,000 bytes and 120 decoded seconds. Unusual high
   native sample rates can reach the byte limit before 120 seconds. Upload
   duration and actual codecs are validated by the server.
-- Supported uploads: WAV PCM/float, MP3, FLAC, Ogg/Vorbis. Opus/WebM and AAC/MP4
-  are unsupported. This page deliberately avoids MediaRecorder's lossy formats.
+- Supported uploads: WAV PCM/float, MP3, FLAC, Ogg/Vorbis, and WebM/Opus on a
+  server built with the `opus` feature. AAC/MP4 is unsupported.
 - The page requests only model discovery and transcription. No health polling,
   retries, cancellation UI, streaming transcription, temperature control, or
   automatic model changes. Fetch times out after 135 seconds; server-side
