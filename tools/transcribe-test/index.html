@@ -213,15 +213,18 @@ async function startRecording() {
     source.connect(processor); processor.connect(mute); mute.connect(context.destination);
     if (useWebm) {
       const recorder = new MediaRecorder(stream, {mimeType: webmMime});
-      recorder.ondataavailable = event => { if (recording === r && event.data?.size) r.chunks.push(event.data); };
+      // No `recording === r` check: the final chunk arrives after stopRecording() has cleared `recording`.
+      recorder.ondataavailable = event => { if (event.data?.size) r.chunks.push(event.data); };
       recorder.onerror = event => { if (recording === r) { $('error').textContent = `Recorder failed: ${event.error?.message || 'unknown error'}`; void stopRecording(false); } };
       r.recorder = recorder;
       recorder.start(1000);
     }
     const tick = () => {
-      const seconds = Math.min(120, Math.floor((performance.now() - r.start) / 1000));
+      // MediaRecorder output can run slightly past the wall clock; stop WebM early so it stays under the server's 120 s limit.
+      const limit = r.mode === 'webm' ? 119 : 120;
+      const seconds = Math.min(limit, Math.floor((performance.now() - r.start) / 1000));
       $('timer').textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} / 2:00`;
-      if (seconds >= 120) void stopRecording();
+      if (seconds >= limit) void stopRecording();
     };
     r.timer = setInterval(tick, 100); tick(); $('progress').textContent = 'Recording…';
   } catch (e) {
