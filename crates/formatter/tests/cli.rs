@@ -55,9 +55,7 @@ impl HermeticHome {
             .unwrap_or_default();
         fs::write(
             dir.join("formatter.yml"),
-            format!(
-                "schema_version: 1\nformatters:\n  - path: {formatter_id}.yml\n{default_line}"
-            ),
+            format!("schema_version: 1\nformatters:\n  - path: {formatter_id}.yml\n{default_line}"),
         )
         .expect("write formatter.yml");
     }
@@ -179,10 +177,12 @@ fn show_json_describes_the_builtin() {
     assert_eq!(envelope["ok"], true);
     assert_eq!(envelope["result"]["id"], "builtin:clean");
     assert_eq!(envelope["result"]["builtin"], true);
-    assert!(envelope["result"]["system"]
-        .as_str()
-        .unwrap()
-        .contains("Clean the text by"));
+    assert!(
+        envelope["result"]["system"]
+            .as_str()
+            .unwrap()
+            .contains("Clean the text by")
+    );
 }
 
 #[test]
@@ -216,8 +216,7 @@ fn apply_uses_the_configured_default() {
     let home = HermeticHome::new();
     home.write_config("mine", Some("mine"));
     let request = serde_json::to_vec(&user_request()).unwrap();
-    let output =
-        run_with_stdin(&mut home.command(&["apply"]), &request);
+    let output = run_with_stdin(&mut home.command(&["apply"]), &request);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     let transformed: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(transformed["messages"][0]["content"], "TEST RULES");
@@ -229,7 +228,11 @@ fn apply_without_a_formatter_and_default_fails_with_2() {
     let request = serde_json::to_vec(&user_request()).unwrap();
     let output = run_with_stdin(&mut home.command(&["apply"]), &request);
     assert_eq!(output.status.code(), Some(2));
-    assert!(stderr(&output).contains("no formatter selected"), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("no formatter selected"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]
@@ -262,7 +265,11 @@ fn apply_rejects_existing_instructions_and_append_places_after_them() {
     );
     assert_eq!(conflict.status.code(), Some(2));
     assert!(conflict.stdout.is_empty(), "no partial stdout");
-    assert!(stderr(&conflict).contains("--on-conflict append"), "{}", stderr(&conflict));
+    assert!(
+        stderr(&conflict).contains("--on-conflict append"),
+        "{}",
+        stderr(&conflict)
+    );
 
     let conflict_json = run_with_stdin(
         &mut home.command(&["apply", "--formatter", "builtin:clean", "--json"]),
@@ -283,7 +290,12 @@ fn apply_rejects_existing_instructions_and_append_places_after_them() {
         ]),
         &bytes,
     );
-    assert_eq!(appended.status.code(), Some(0), "stderr: {}", stderr(&appended));
+    assert_eq!(
+        appended.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr(&appended)
+    );
     let transformed: Value = serde_json::from_slice(&appended.stdout).unwrap();
     let roles: Vec<&str> = transformed["messages"]
         .as_array()
@@ -309,14 +321,22 @@ fn apply_rejects_invalid_json_and_shape_with_2() {
         br#"{"model": "claude"}"#,
     );
     assert_eq!(no_messages.status.code(), Some(2));
-    assert!(stderr(&no_messages).contains("\"messages\""), "{}", stderr(&no_messages));
+    assert!(
+        stderr(&no_messages).contains("\"messages\""),
+        "{}",
+        stderr(&no_messages)
+    );
 
     let bad_message = run_with_stdin(
         &mut home.command(&["apply", "--formatter", "builtin:clean"]),
         br#"{"messages": [{"role": "user"}, {"content": "no role"}]}"#,
     );
     assert_eq!(bad_message.status.code(), Some(2));
-    assert!(stderr(&bad_message).contains("message 1"), "{}", stderr(&bad_message));
+    assert!(
+        stderr(&bad_message).contains("message 1"),
+        "{}",
+        stderr(&bad_message)
+    );
 }
 
 #[test]
@@ -340,15 +360,13 @@ fn apply_reads_the_request_from_a_file() {
     let tmp = TempDir::new().expect("temp dir");
     let path = tmp.path().join("request.json");
     fs::write(&path, serde_json::to_vec(&user_request()).unwrap()).unwrap();
-    let output = run(
-        &mut home.command(&[
-            "apply",
-            "--formatter",
-            "builtin:clean",
-            "--request",
-            path.to_str().unwrap(),
-        ]),
-    );
+    let output = run(&mut home.command(&[
+        "apply",
+        "--formatter",
+        "builtin:clean",
+        "--request",
+        path.to_str().unwrap(),
+    ]));
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     let transformed: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(transformed["messages"][0]["role"], "system");
@@ -362,7 +380,13 @@ fn check_config_validates_the_per_user_file() {
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     let stdout = stdout(&output);
     assert!(
-        stdout.contains(&home.pumice_dir().join("formatter.yml").display().to_string()),
+        stdout.contains(
+            &home
+                .pumice_dir()
+                .join("formatter.yml")
+                .display()
+                .to_string()
+        ),
         "{stdout}"
     );
 
@@ -378,7 +402,11 @@ fn check_config_reports_config_errors_with_location() {
     let home = HermeticHome::new();
     let dir = home.pumice_dir();
     fs::create_dir_all(&dir).expect("create per-user config dir");
-    fs::write(dir.join("formatter.yml"), "schema_version: 1\ndefault: gone\n").unwrap();
+    fs::write(
+        dir.join("formatter.yml"),
+        "schema_version: 1\ndefault: gone\n",
+    )
+    .unwrap();
     let output = run(&mut home.command(&["check-config"]));
     assert_eq!(output.status.code(), Some(2));
     let stderr = stderr(&output);
@@ -391,7 +419,11 @@ fn check_config_without_a_file_is_ok() {
     let home = HermeticHome::new();
     let output = run(&mut home.command(&["check-config"]));
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
-    assert!(stdout(&output).contains("no per-user file found"), "{}", stdout(&output));
+    assert!(
+        stdout(&output).contains("no per-user file found"),
+        "{}",
+        stdout(&output)
+    );
 }
 
 #[test]

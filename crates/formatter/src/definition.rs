@@ -72,7 +72,9 @@ pub(crate) fn load_definition_file_located(
     validate(raw.unwrap_or_default()).map_err(|error| error.with_file(path))
 }
 
-fn validate(raw: RawDefinition) -> Result<(serde_saphyr::Location, FormatterDefinition), ConfigError> {
+fn validate(
+    raw: RawDefinition,
+) -> Result<(serde_saphyr::Location, FormatterDefinition), ConfigError> {
     match &raw.schema_version {
         None => {
             return Err(ConfigError::general(
@@ -252,11 +254,7 @@ system: Correct the text.
     #[test]
     fn missing_id_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
-        let err = load(
-            &tmp,
-            "schema_version: 1\ndescription: x\nsystem: y\n",
-        )
-        .unwrap_err();
+        let err = load(&tmp, "schema_version: 1\ndescription: x\nsystem: y\n").unwrap_err();
         assert!(err.to_string().contains("has no \"id\""));
     }
 
@@ -308,9 +306,7 @@ system: Correct the text.
         let big = "x".repeat(MAX_SYSTEM_BYTES + 1);
         let err = load(
             &tmp,
-            &format!(
-                "schema_version: 1\nid: clean\ndescription: x\nsystem: {big}\n"
-            ),
+            &format!("schema_version: 1\nid: clean\ndescription: x\nsystem: {big}\n"),
         )
         .unwrap_err();
         assert!(err.to_string().contains("the maximum is 16 KiB"));

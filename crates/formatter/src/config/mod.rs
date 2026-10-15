@@ -118,10 +118,15 @@ fn load_file(path: &Path) -> Result<Config, ConfigError> {
     let config_dir = config_dir_of(path);
     let raw = serde_saphyr::from_str_with_options::<Option<RawConfig>>(&text, saphyr_options())
         .map_err(|error| parse_error(path, &error))?;
-    validate(raw.unwrap_or_default(), path, Some(&config_dir)).map_err(|error| error.with_file(path))
+    validate(raw.unwrap_or_default(), path, Some(&config_dir))
+        .map_err(|error| error.with_file(path))
 }
 
-fn validate(raw: RawConfig, config_path: &Path, config_dir: Option<&Path>) -> Result<Config, ConfigError> {
+fn validate(
+    raw: RawConfig,
+    config_path: &Path,
+    config_dir: Option<&Path>,
+) -> Result<Config, ConfigError> {
     match &raw.schema_version {
         None => {
             return Err(ConfigError::general(
@@ -144,7 +149,10 @@ fn validate(raw: RawConfig, config_path: &Path, config_dir: Option<&Path>) -> Re
         let path = match &entry.path {
             Some(path) => path,
             None => {
-                return Err(ConfigError::at(entry_location, "formatter entry has no \"path\""));
+                return Err(ConfigError::at(
+                    entry_location,
+                    "formatter entry has no \"path\"",
+                ));
             }
         };
         if path.value.as_os_str().is_empty() {
@@ -161,7 +169,10 @@ fn validate(raw: RawConfig, config_path: &Path, config_dir: Option<&Path>) -> Re
                 config_path,
                 (path.referenced.line() != 0).then(|| path.referenced.line()),
                 (path.referenced.column() != 0).then(|| path.referenced.column()),
-                format!("formatter definition file does not exist: {}", resolved.display()),
+                format!(
+                    "formatter definition file does not exist: {}",
+                    resolved.display()
+                ),
             ));
         }
         let (id_location, definition) = definition::load_definition_file_located(&resolved)?;
@@ -184,7 +195,9 @@ fn validate(raw: RawConfig, config_path: &Path, config_dir: Option<&Path>) -> Re
     let default = match &raw.default {
         Some(span) => {
             let known = span.value == BUILTIN_CLEAN
-                || formatters.iter().any(|entry| entry.definition.id == span.value);
+                || formatters
+                    .iter()
+                    .any(|entry| entry.definition.id == span.value);
             if !known {
                 return Err(ConfigError::at(
                     span.referenced,
@@ -199,7 +212,10 @@ fn validate(raw: RawConfig, config_path: &Path, config_dir: Option<&Path>) -> Re
         None => None,
     };
 
-    Ok(Config { formatters, default })
+    Ok(Config {
+        formatters,
+        default,
+    })
 }
 
 /// Directory that relative paths in the file resolve against.
@@ -357,10 +373,7 @@ mod tests {
     #[test]
     fn builtin_default_is_valid_without_registered_formatters() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = write_config(
-            tmp.path(),
-            "schema_version: 1\ndefault: builtin:clean\n",
-        );
+        let path = write_config(tmp.path(), "schema_version: 1\ndefault: builtin:clean\n");
         let loaded = load(Some(&path)).unwrap();
         assert!(loaded.config.formatters.is_empty());
         assert_eq!(loaded.config.default.as_deref(), Some("builtin:clean"));
@@ -375,7 +388,10 @@ mod tests {
         );
         let err = load(Some(&path)).unwrap_err();
         let err = err.to_string();
-        assert!(err.contains("formatter definition file does not exist"), "{err}");
+        assert!(
+            err.contains("formatter definition file does not exist"),
+            "{err}"
+        );
         assert!(err.contains("gone.yml"), "{err}");
         assert!(err.contains(":3:"), "the path entry's line: {err}");
     }
@@ -402,16 +418,25 @@ mod tests {
     fn invalid_definition_reports_the_definition_file() {
         let tmp = tempfile::tempdir().unwrap();
         let bad = tmp.path().join("bad.yml");
-        std::fs::write(&bad, "schema_version: 1\nid: \"Bad Id\"\ndescription: x\nsystem: y\n")
-            .unwrap();
+        std::fs::write(
+            &bad,
+            "schema_version: 1\nid: \"Bad Id\"\ndescription: x\nsystem: y\n",
+        )
+        .unwrap();
         let path = write_config(
             tmp.path(),
             "schema_version: 1\nformatters:\n  - path: bad.yml\n",
         );
         let err = load(Some(&path)).unwrap_err();
         let err = err.to_string();
-        assert!(err.contains("bad.yml"), "the definition file is named: {err}");
-        assert!(err.contains(":2:"), "line inside the definition file: {err}");
+        assert!(
+            err.contains("bad.yml"),
+            "the definition file is named: {err}"
+        );
+        assert!(
+            err.contains(":2:"),
+            "line inside the definition file: {err}"
+        );
     }
 
     #[test]
@@ -424,7 +449,10 @@ mod tests {
         );
         let err = load(Some(&path)).unwrap_err();
         let err = err.to_string();
-        assert!(err.contains("default \"missing\" does not name a formatter"), "{err}");
+        assert!(
+            err.contains("default \"missing\" does not name a formatter"),
+            "{err}"
+        );
         assert!(err.contains(":4:"), "the default entry's line: {err}");
     }
 

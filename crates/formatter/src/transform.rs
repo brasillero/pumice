@@ -161,7 +161,10 @@ mod tests {
         for key in ["model", "stream", "reasoning_effort", "top_p"] {
             assert_eq!(out[key], request[key], "member {key} preserved");
         }
-        assert_eq!(out["messages"][1], request["messages"][0], "user message preserved exactly");
+        assert_eq!(
+            out["messages"][1], request["messages"][0],
+            "user message preserved exactly"
+        );
     }
 
     #[test]
@@ -241,7 +244,11 @@ mod tests {
 
     #[test]
     fn non_object_request_is_rejected() {
-        for request in [Value::Null, Value::String("hi".to_owned()), serde_json::json!([])] {
+        for request in [
+            Value::Null,
+            Value::String("hi".to_owned()),
+            serde_json::json!([]),
+        ] {
             let err = apply(request, &formatter(), ConflictPolicy::Reject).unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidInput, "{err}");
             assert!(err.message.contains("JSON object"), "{err}");

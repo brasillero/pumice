@@ -149,9 +149,7 @@ pub fn run_with(name: &str, args: impl IntoIterator<Item = OsString>) -> ExitCod
 
     let mut command = <Args as CommandFactory>::command();
     command.set_bin_name(name);
-    let matches = match command.try_get_matches_from(
-        std::iter::once(name.to_owned()).chain(argv),
-    ) {
+    let matches = match command.try_get_matches_from(std::iter::once(name.to_owned()).chain(argv)) {
         Ok(matches) => matches,
         Err(err) => return handle_clap_error(err, wants_json),
     };
@@ -165,12 +163,10 @@ pub fn run_with(name: &str, args: impl IntoIterator<Item = OsString>) -> ExitCod
     let mut stderr = io::stderr();
 
     match run_command(args) {
-        Ok(CommandOutput::List(entries)) => {
-            match print_list(&entries, json, &mut stdout) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(_) => write_failure(&mut stderr),
-            }
-        }
+        Ok(CommandOutput::List(entries)) => match print_list(&entries, json, &mut stdout) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => write_failure(&mut stderr),
+        },
         Ok(CommandOutput::Show { text, json_result }) => {
             if json {
                 let envelope = Envelope {
@@ -244,7 +240,13 @@ fn handle_clap_error(err: clap::Error, wants_json: bool) -> ExitCode {
                     location: None,
                 }),
             };
-            if writeln!(io::stdout(), "{}", serde_json::to_string(&envelope).unwrap()).is_err() {
+            if writeln!(
+                io::stdout(),
+                "{}",
+                serde_json::to_string(&envelope).unwrap()
+            )
+            .is_err()
+            {
                 return ExitCode::from(1);
             }
             ExitCode::from(2)
@@ -286,13 +288,11 @@ fn run_command(args: Args) -> Result<CommandOutput, Error> {
         }
         Command::Apply(apply_args) => {
             let loaded = load_config(args.config.as_deref())?;
-            let definition =
-                resolve_formatter(apply_args.formatter.as_deref(), &loaded.config)?;
+            let definition = resolve_formatter(apply_args.formatter.as_deref(), &loaded.config)?;
             let request = read_request(&apply_args.request)?;
-            let request: serde_json::Value =
-                serde_json::from_slice(&request).map_err(|err| {
-                    Error::invalid_input(format!("the request is not valid JSON: {err}"))
-                })?;
+            let request: serde_json::Value = serde_json::from_slice(&request).map_err(|err| {
+                Error::invalid_input(format!("the request is not valid JSON: {err}"))
+            })?;
             let transformed = transform::apply(request, &definition, apply_args.on_conflict)?;
             Ok(CommandOutput::Apply(transformed))
         }
@@ -317,7 +317,10 @@ fn load_config(explicit: Option<&Path>) -> Result<LoadedConfig, Error> {
 
 /// Resolves which formatter to apply: `--formatter` when given, else the
 /// configured `default`. Built-ins resolve before registered definitions.
-fn resolve_formatter(requested: Option<&str>, config: &Config) -> Result<FormatterDefinition, Error> {
+fn resolve_formatter(
+    requested: Option<&str>,
+    config: &Config,
+) -> Result<FormatterDefinition, Error> {
     let id = match requested.or(config.default.as_deref()) {
         Some(id) => id,
         None => {
@@ -346,9 +349,13 @@ fn read_request(path: &Path) -> Result<Vec<u8>, Error> {
             .read_to_end(&mut bytes)?;
     } else {
         let file = std::fs::File::open(path).map_err(|err| {
-            Error::invalid_input(format!("cannot open request file {}: {err}", path.display()))
+            Error::invalid_input(format!(
+                "cannot open request file {}: {err}",
+                path.display()
+            ))
         })?;
-        file.take(MAX_REQUEST_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+        file.take(MAX_REQUEST_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
     }
     if bytes.len() > MAX_REQUEST_BYTES {
         return Err(Error::input_too_large(bytes.len()));
@@ -382,7 +389,8 @@ fn show_json_result(
     .unwrap()
 }
 
-fn build_list(config: &Config) -> Vec<ListEntry> {    let mut entries = vec![ListEntry {
+fn build_list(config: &Config) -> Vec<ListEntry> {
+    let mut entries = vec![ListEntry {
         id: BUILTIN_CLEAN.to_owned(),
         description: builtin_clean().description,
         builtin: true,
@@ -439,7 +447,10 @@ fn render_definition_yaml(definition: &FormatterDefinition, id: &str, header: &s
     }
     out.push_str("schema_version: 1\n");
     out.push_str(&format!("id: {id}\n"));
-    out.push_str(&format!("description: {}\n", yaml_scalar(&definition.description)));
+    out.push_str(&format!(
+        "description: {}\n",
+        yaml_scalar(&definition.description)
+    ));
     // Clip/keep the exact trailing-newline shape of the original text.
     let trailing_breaks = definition
         .system
@@ -482,11 +493,7 @@ fn yaml_scalar(text: &str) -> String {
     }
 }
 
-fn print_list(
-    entries: &[ListEntry],
-    json: bool,
-    stdout: &mut dyn Write,
-) -> io::Result<()> {
+fn print_list(entries: &[ListEntry], json: bool, stdout: &mut dyn Write) -> io::Result<()> {
     if json {
         let result = serde_json::json!({ "formatters": entries });
         let envelope = Envelope {
@@ -527,11 +534,7 @@ fn print_list(
     Ok(())
 }
 
-fn print_check_config(
-    file: Option<&Path>,
-    json: bool,
-    stdout: &mut dyn Write,
-) -> io::Result<()> {
+fn print_check_config(file: Option<&Path>, json: bool, stdout: &mut dyn Write) -> io::Result<()> {
     if json {
         let envelope = Envelope {
             schema_version: 1,
@@ -601,7 +604,10 @@ mod tests {
 
     #[test]
     fn yaml_scalar_stays_plain_when_safe() {
-        assert_eq!(yaml_scalar("Light dictation correction"), "Light dictation correction");
+        assert_eq!(
+            yaml_scalar("Light dictation correction"),
+            "Light dictation correction"
+        );
         assert_eq!(yaml_scalar("clean-v2 notes (pt)"), "clean-v2 notes (pt)");
     }
 
@@ -649,4 +655,3 @@ mod tests {
         assert_eq!(loaded, definition);
     }
 }
-

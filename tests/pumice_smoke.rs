@@ -162,8 +162,14 @@ fn format_list_runs_in_process_and_uses_the_per_user_config() {
     let output = run(&mut home.command(&["format", "list"]));
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     let stdout = stdout(&output);
-    assert!(stdout.contains("builtin:clean"), "built-ins listed: {stdout}");
-    assert!(stdout.contains("notes"), "configured formatters listed: {stdout}");
+    assert!(
+        stdout.contains("builtin:clean"),
+        "built-ins listed: {stdout}"
+    );
+    assert!(
+        stdout.contains("notes"),
+        "configured formatters listed: {stdout}"
+    );
     assert!(stdout.contains("yes"), "the default is marked: {stdout}");
 }
 
@@ -180,7 +186,8 @@ fn format_show_builtin_prints_an_editable_definition() {
 #[test]
 fn format_apply_transforms_a_request_and_names_the_program_in_errors() {
     let home = HermeticHome::new();
-    let request = br#"{"model":"claude","messages":[{"role":"user","content":"hi"}],"stream":false}"#;
+    let request =
+        br#"{"model":"claude","messages":[{"role":"user","content":"hi"}],"stream":false}"#;
     let output = run_with_stdin(
         &mut home.command(&["format", "apply", "--formatter", "builtin:clean"]),
         request,

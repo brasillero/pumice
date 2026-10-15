@@ -92,9 +92,7 @@ impl Error {
     pub fn input_too_large(bytes: usize) -> Self {
         Self::new(
             ErrorCode::InputTooLarge,
-            format!(
-                "the request is too large ({bytes} bytes; maximum is 1,048,576 bytes)"
-            ),
+            format!("the request is too large ({bytes} bytes; maximum is 1,048,576 bytes)"),
         )
     }
 
