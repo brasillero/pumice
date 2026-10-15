@@ -449,6 +449,55 @@ fn help_names_the_program_and_lists_the_commands() {
 }
 
 #[test]
+fn apply_preserves_big_integers_and_long_decimals_in_unknown_fields() {
+    let home = HermeticHome::new();
+    // A u64-overflowing integer and a decimal longer than f64 precision:
+    // both must pass through byte-exact (serde_json arbitrary_precision).
+    let request = br#"{"model":"claude","messages":[{"role":"user","content":"hi"}],"big":18446744073709551617,"negative":-18446744073709551617,"price":1.1000000000000000055511151231257827021181583404541015625}"#;
+    let output = run_with_stdin(
+        &mut home.command(&["apply", "--formatter", "builtin:clean"]),
+        request,
+    );
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let stdout = stdout(&output);
+    assert!(stdout.contains("\"big\":18446744073709551617"), "{stdout}");
+    assert!(
+        stdout.contains("\"negative\":-18446744073709551617"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("\"price\":1.1000000000000000055511151231257827021181583404541015625"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn apply_preserves_nested_key_order_in_unknown_fields() {
+    let home = HermeticHome::new();
+    // OpenAI Structured Outputs follow schema key order, so the formatter
+    // must not reorder nested object keys (serde_json preserve_order).
+    let request = br#"{"model":"claude","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_schema","json_schema":{"schema":{"properties":{"z":{"type":"string"},"a":{"type":"integer"}}}}}}"#;
+    let output = run_with_stdin(
+        &mut home.command(&["apply", "--formatter", "builtin:clean"]),
+        request,
+    );
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let transformed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let keys: Vec<&str> = transformed["response_format"]["json_schema"]["schema"]["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, ["z", "a"], "schema property order preserved");
+    let stdout = stdout(&output);
+    assert!(
+        stdout.find("\"z\"").unwrap() < stdout.find("\"a\"").unwrap(),
+        "z serializes before a: {stdout}"
+    );
+}
+
+#[test]
 fn a_transformed_handy_like_request_is_accepted_by_the_relay() {
     // The Handy replacement shape: the user message is the plain dictation
     // (Handy itself would wrap it and append its own prompt; the formatter
