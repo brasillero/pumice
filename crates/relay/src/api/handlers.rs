@@ -298,6 +298,7 @@ async fn complete(state: ApiState, request: Request, number: u64, started: Insta
             attempts: 0,
             trail: Vec::new(),
             elapsed: started.elapsed(),
+            caller_deadline_bound: false,
         };
         if let Some(headers) = &debug_headers {
             state.debug_log.record(&DebugRecord::new(

@@ -367,6 +367,10 @@ async fn provider_timeout_wins_over_the_total_budget() {
         "took {:?}",
         outcome.elapsed
     );
+    assert!(
+        !outcome.caller_deadline_bound,
+        "no caller deadline was given"
+    );
 }
 
 #[tokio::test]
@@ -400,11 +404,47 @@ async fn caller_deadline_shortens_the_module_budget() {
         "took {:?}",
         outcome.elapsed
     );
+    assert!(
+        outcome.caller_deadline_bound,
+        "the caller deadline was the binding limit"
+    );
 
     // The deadline kills the fake (which would otherwise sleep 30 s).
     let pid = fake.report()["pid"].as_u64().expect("pid") as u32;
     assert!(process_alive(std::process::id()), "liveness check works");
     wait_until_gone(pid);
+}
+
+#[tokio::test]
+async fn caller_deadline_bound_stays_false_when_the_provider_timeout_fires_first() {
+    // The caller deadline (5 s) shortens the module budget (30 s), but the
+    // provider's own timeout (1 s) fires first: not the caller's budget.
+    let (pipeline, _fake) = pipeline(
+        "total_timeout_secs: 30\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 1\n",
+        json!({
+            "stdout": success_envelope("too late"),
+            "exit_code": 0,
+            "sleep_ms": 10_000,
+        }),
+    );
+    let started = Instant::now();
+    let outcome = pipeline
+        .format_until_observed(
+            &handy_request(Some("claude"), "hello"),
+            started,
+            Some(started + Duration::from_secs(5)),
+            &(),
+        )
+        .await;
+    assert_raw(
+        &outcome,
+        RawReason::ProviderFailed(ProviderErrorKind::Timeout),
+        "hello",
+    );
+    assert!(
+        !outcome.caller_deadline_bound,
+        "the provider's own timeout bound the run"
+    );
 }
 
 #[tokio::test]
@@ -438,6 +478,10 @@ async fn caller_deadline_never_extends_the_module_budget() {
         "took {:?}",
         outcome.elapsed
     );
+    assert!(
+        !outcome.caller_deadline_bound,
+        "the module budget was the binding limit"
+    );
 }
 
 #[tokio::test]
@@ -456,6 +500,10 @@ async fn spent_caller_deadline_starts_no_cli() {
         )
         .await;
     assert_raw(&outcome, RawReason::BudgetExhausted, "ditado");
+    assert!(
+        outcome.caller_deadline_bound,
+        "the spent caller deadline was the binding limit"
+    );
     assert!(!fake.report_path().exists(), "the fake must not run");
 }
 

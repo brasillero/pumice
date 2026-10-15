@@ -244,7 +244,10 @@ impl Pipeline {
     /// stage): the effective response end is
     /// `min(started + total_timeout, caller_deadline)` minus the response
     /// reserve. `None` keeps the module budget alone, exactly as
-    /// [`format`](Self::format).
+    /// [`format`](Self::format). Timeout and budget outcomes carry
+    /// [`FormatOutcome::caller_deadline_bound`]: whether the caller's
+    /// deadline — not the module budget or the provider's own timeout — was
+    /// the binding limit.
     pub async fn format_until_observed(
         &self,
         request: &ExtractedRequest,
@@ -290,20 +293,24 @@ impl Pipeline {
             );
         }
 
-        let Some(total_deadline) = started.checked_add(self.total_timeout) else {
+        let Some(module_deadline) = started.checked_add(self.total_timeout) else {
             return self.raw(request, RawReason::BudgetExhausted, started, Vec::new());
         };
+        // The caller's deadline bounds the run when it shortens the module
+        // budget; a timeout at that deadline is the caller's budget firing,
+        // not the relay's own limits.
+        let caller_bound = caller_deadline.is_some_and(|deadline| deadline < module_deadline);
         // A caller deadline shortens the module budget; it can never extend
         // it past `started + total_timeout`.
-        let total_deadline = match caller_deadline {
-            Some(caller_deadline) => total_deadline.min(caller_deadline),
-            None => total_deadline,
-        };
+        let total_deadline =
+            caller_deadline.map_or(module_deadline, |deadline| module_deadline.min(deadline));
         let total_deadline = total_deadline
             .checked_sub(RESPONSE_RESERVE)
             .unwrap_or(started);
         if total_deadline.duration_since(Instant::now()) < MIN_STARTUP {
-            return self.raw(request, RawReason::BudgetExhausted, started, Vec::new());
+            let mut outcome = self.raw(request, RawReason::BudgetExhausted, started, Vec::new());
+            outcome.caller_deadline_bound = caller_bound;
+            return outcome;
         }
 
         // Waits in line (first come, first served) for a free slot until the
@@ -346,14 +353,14 @@ impl Pipeline {
                 Ok(text) => Ok(text),
                 Err(error) => Err(ChainFailure::Cleanup(error)),
             },
-            Err(kind) => Err(ChainFailure::Provider(kind)),
+            Err(failure) => Err(ChainFailure::Provider(failure)),
         };
         let trail = vec![Attempt {
             provider: candidate.provider.id(),
             model: candidate.model.clone(),
             result: match &result {
                 Ok(_) => AttemptResult::Formatted,
-                Err(ChainFailure::Provider(kind)) => AttemptResult::Failed(*kind),
+                Err(ChainFailure::Provider(failure)) => AttemptResult::Failed(failure.kind),
                 Err(ChainFailure::Cleanup(error)) => AttemptResult::CleanupRejected(*error),
             },
             elapsed: attempt_started.elapsed(),
@@ -368,8 +375,19 @@ impl Pipeline {
                 trail,
                 started,
             ),
-            Err(ChainFailure::Provider(kind)) => {
-                self.raw(request, RawReason::ProviderFailed(kind), started, trail)
+            Err(ChainFailure::Provider(failure)) => {
+                let mut outcome = self.raw(
+                    request,
+                    RawReason::ProviderFailed(failure.kind),
+                    started,
+                    trail,
+                );
+                // A timeout at the caller's deadline: the caller's budget was
+                // the binding limit, not the module's or the provider's own.
+                outcome.caller_deadline_bound = caller_bound
+                    && failure.total_bound
+                    && matches!(failure.kind, ProviderError::Timeout);
+                outcome
             }
             Err(ChainFailure::Cleanup(error)) => {
                 self.raw(request, RawReason::CleanupFailed(error), started, trail)
@@ -399,8 +417,16 @@ impl Pipeline {
 /// A formatting attempt that did not produce usable text; decides the raw
 /// outcome.
 enum ChainFailure {
-    Provider(ProviderErrorKind),
+    Provider(ProviderFailure),
     Cleanup(CleanupError),
+}
+
+/// A provider failure, and whether the request's total deadline (module or
+/// caller budget, whichever was shorter) — not the provider's own timeout —
+/// was the binding limit when the run died.
+struct ProviderFailure {
+    kind: ProviderErrorKind,
+    total_bound: bool,
 }
 
 /// Runs one provider: its own timeout capped by the total deadline, plus a
@@ -409,14 +435,18 @@ async fn run_within_budget(
     entry: &ProviderEntry,
     input: FormatInput<'_>,
     total_deadline: Instant,
-) -> Result<String, ProviderErrorKind> {
+) -> Result<String, ProviderFailure> {
     let deadline = Instant::now()
         .checked_add(entry.timeout)
         .map_or(total_deadline, |own| own.min(total_deadline));
+    let total_bound = deadline == total_deadline;
     let hard_stop = deadline.checked_add(HARD_STOP_SLACK).unwrap_or(deadline);
     match tokio::time::timeout_at(hard_stop, entry.provider.format(input, deadline)).await {
-        Ok(result) => result,
-        Err(_) => Err(ProviderError::Timeout),
+        Ok(result) => result.map_err(|kind| ProviderFailure { kind, total_bound }),
+        Err(_) => Err(ProviderFailure {
+            kind: ProviderError::Timeout,
+            total_bound,
+        }),
     }
 }
 
@@ -436,6 +466,12 @@ pub struct FormatOutcome {
     pub trail: Vec<Attempt>,
     /// Time since the HTTP request arrived.
     pub elapsed: Duration,
+    /// True when a timeout or budget outcome fired at the caller-imposed
+    /// deadline ([`format_until_observed`](Pipeline::format_until_observed))
+    /// rather than at the module's own budget or the provider's timeout
+    /// (p12-pumice-run: the orchestrator maps such a timeout to the flow's
+    /// overall budget). Always false without a caller deadline.
+    pub caller_deadline_bound: bool,
 }
 
 /// The single provider run inside a request. Safe to log except
@@ -472,6 +508,7 @@ impl fmt::Debug for FormatOutcome {
             .field("attempts", &self.attempts)
             .field("trail", &self.trail)
             .field("elapsed", &self.elapsed)
+            .field("caller_deadline_bound", &self.caller_deadline_bound)
             .finish()
     }
 }
@@ -491,6 +528,7 @@ impl FormatOutcome {
             attempts: u8::try_from(trail.len()).unwrap_or(u8::MAX),
             trail,
             elapsed: started.elapsed(),
+            caller_deadline_bound: false,
         }
     }
 }
