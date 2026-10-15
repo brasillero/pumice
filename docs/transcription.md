@@ -32,6 +32,41 @@ CARGO_TARGET_DIR=target/native TRANSCRIBE_CMAKE_ARGS="-DGGML_NATIVE=ON" \
 See `crates/transcription/README.md` for the full build section, including
 Windows notes.
 
+## Faster CPU builds (runtime CPU variants)
+
+Linux only, opt-in. The default build above is a single static binary with a
+portable x86-64 baseline; on modern CPUs it leaves a lot of transcription
+speed unused. The `cpu-variants` Cargo feature instead links the engine as
+shared libraries plus one ggml CPU module per x86 ISA tier (baseline x64 up to
+AVX-512/AMX). At startup the binary loads the modules from a trusted
+directory next to the executable — never from the current directory or PATH —
+and ggml picks the fastest module the running CPU can actually execute.
+Modules the CPU cannot run are skipped by runtime feature scoring (the plain
+x64 module always remains as the portable floor), so a missing feature
+degrades instead of crashing with SIGILL.
+
+Build and stage a self-contained folder (binary + its shared libraries and
+CPU modules) in one step:
+
+```bash
+crates/transcription/scripts/build-cpu-variants.sh
+# result: target/cpu-variants/stage/
+```
+
+The staged binary resolves its libraries from its own directory and works
+from any location; copy the whole folder. Run it exactly like the regular
+CLI. It reports the selected backend on stderr at model load, and `file
+--json` includes a `backend` field, e.g. `"CPU (...) [haswell]"`.
+
+The portable build is unaffected: the script uses its own `CARGO_TARGET_DIR`
+and overrides the conservative `TRANSCRIBE_CMAKE_ARGS` from
+`.cargo/config.toml`, so nothing in the portable baseline changes. Windows
+and macOS builds are unchanged (the feature is off by default and its runtime
+wiring is Linux-only).
+
+Measurements for both builds on server-1 and the details of the mechanism are
+in [`docs/research/P7-cpu-variants.md`](../docs/research/P7-cpu-variants.md).
+
 ## Getting models
 
 `pumice-transcribe` needs a Whisper GGUF model. The owner uses these two
