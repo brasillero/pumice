@@ -350,6 +350,37 @@ mod tests {
         }
     }
 
+    /// Builds one Ogg page with a valid CRC. `laces` is the segment table
+    /// and `payload` the concatenated packet bytes it describes; granule -1
+    /// means the page completes no packet.
+    fn page(seq: u32, flags: u8, granule: i64, laces: &[u8], payload: &[u8]) -> Vec<u8> {
+        let mut page = Vec::new();
+        page.extend_from_slice(b"OggS");
+        page.push(0); // stream structure version
+        page.push(flags);
+        page.extend_from_slice(&granule.to_le_bytes());
+        page.extend_from_slice(&123_456u32.to_le_bytes());
+        page.extend_from_slice(&seq.to_le_bytes());
+        page.extend_from_slice(&0u32.to_le_bytes()); // CRC placeholder
+        page.push(laces.len() as u8);
+        page.extend_from_slice(laces);
+        page.extend_from_slice(payload);
+        let crc = crc32(&page);
+        page[22..26].copy_from_slice(&crc.to_le_bytes());
+        page
+    }
+
+    /// Lacing values for whole packets: each packet is full 255-byte laces
+    /// plus a final short lace.
+    fn packet_laces(payloads: &[&[u8]]) -> Vec<u8> {
+        let mut laces = Vec::new();
+        for payload in payloads {
+            laces.extend(std::iter::repeat_n(255, payload.len() / 255));
+            laces.push((payload.len() % 255) as u8);
+        }
+        laces
+    }
+
     fn err_code(bytes: &[u8]) -> ErrorCode {
         validate_pages(bytes).unwrap_err().code
     }
@@ -514,5 +545,62 @@ mod tests {
         bytes[5] = 0x08;
         fix_crcs(&mut bytes, 0);
         assert_eq!(err_code(&bytes), ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn real_120_second_ogg_passes() {
+        // Exactly 120.0 s after its pre-skip and end trim: the review round 1
+        // reproduction that the old untrimmed budget rejected.
+        let bytes = fixture("silence120.opus");
+        let decoded = decode_ogg_opus(bytes, &CancelToken::new()).unwrap();
+        assert_eq!(decoded.samples.len(), 5_760_000);
+    }
+
+    /// Builds an Ogg/Opus stream of `audio_count` identical 20 ms packets
+    /// with a zero pre-skip header and exact granules.
+    fn repeated_packet_ogg(audio_count: usize) -> Vec<u8> {
+        let fixture_packets = crate::opus::tests::ogg_packets(&opus_fixture());
+        let mut head = b"OpusHead".to_vec();
+        head.extend([1, 1, 0, 0]); // version 1, mono, pre-skip 0
+        head.extend([0x80, 0xBB, 0x00, 0x00]); // 48 kHz input rate
+        head.extend([0, 0]); // gain 0
+        head.push(0); // channel mapping family 0
+        let tags = &fixture_packets[1];
+        let packet = &fixture_packets[2];
+
+        let mut bytes = page(0, FLAG_BOS, 0, &packet_laces(&[&head]), &head);
+        bytes.extend(page(1, 0, 0, &packet_laces(&[tags]), tags));
+        let per_page = 50usize;
+        let mut seq = 2u32;
+        let mut decoded = 0u64;
+        let mut remaining = audio_count;
+        while remaining > 0 {
+            let count = per_page.min(remaining);
+            remaining -= count;
+            let complete = remaining == 0;
+            let flags = if complete { FLAG_EOS } else { 0 };
+            // Every page ends the packets it carries; the granule is the
+            // cumulative decoded samples including this page.
+            decoded += (count * 960) as u64;
+            let payloads: Vec<&[u8]> = std::iter::repeat_n(packet.as_ref(), count).collect();
+            let laces = packet_laces(&payloads);
+            let body: Vec<u8> = payloads.concat();
+            bytes.extend(page(seq, flags, decoded as i64, &laces, &body));
+            seq += 1;
+        }
+        bytes
+    }
+
+    #[test]
+    fn ogg_boundary_120_seconds_exact_and_plus_one_packet() {
+        // 120 s / 20 ms = 6,000 packets; exactly that must pass...
+        let bytes = repeated_packet_ogg(6_000);
+        let decoded = decode_ogg_opus(bytes, &CancelToken::new()).unwrap();
+        assert_eq!(decoded.samples.len(), 5_760_000);
+
+        // ...and one packet more must fail as too long.
+        let bytes = repeated_packet_ogg(6_001);
+        let err = decode_ogg_opus(bytes, &CancelToken::new()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::AudioTooLong);
     }
 }

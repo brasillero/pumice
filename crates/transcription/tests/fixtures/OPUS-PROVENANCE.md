@@ -32,6 +32,19 @@ research): the ffmpeg mono fixtures decode to exactly 227,040 samples
 (RMS 0.0094542735; stereo duplicate 0.0094756185); `sample-pt.webm` carries
 end DiscardPadding (3.5 ms) and CodecDelay 6.5 ms.
 
+## Duration boundary inputs
+
+Round 1 review reproductions of the 120 s output budget, generated on
+2026-10-15 with the same ffmpeg static build: 48 kHz mono digital silence
+encoded with libopus. `silence120.opus` keeps exactly 120.0 s after its
+pre-skip and end trim (final granule minus pre-skip = 5,760,000 samples);
+`silence121.webm` carries 121 s and must fail as too long.
+
+| File | ffmpeg arguments | SHA-256 |
+| --- | --- | --- |
+| `silence120.opus` | `-f lavfi -i anullsrc=r=48000:cl=mono -t 120 -c:a libopus -b:a 8k` | `3616ccb6d1eacbc1d2e18868112dd7b42546d36d8175c81ce514e119eccfaa24` |
+| `silence121.webm` | 121 s of the same silence, libopus in WebM (exact flags not recorded by the review harness) | `57f901245c63115ab7637372c09c834ec99363fa83b9f91e37da8b4a8bcacb88` |
+
 ## Browser recording
 
 `chrome-mediarecorder.webm`

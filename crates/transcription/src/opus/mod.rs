@@ -167,12 +167,6 @@ pub(crate) fn decode_packets(
             return Err(Error::cancelled());
         }
         let frames = packet_frames(&packet.data)?;
-        let budget = MAX_OUTPUT_FRAMES - output_frames;
-        if frames > budget {
-            return Err(Error::audio_too_long(
-                (output_frames + frames) as f64 / OPUS_SAMPLE_RATE as f64,
-            ));
-        }
         // Decode into a fixed buffer; `decode_float` returns whole frames and
         // never writes past the buffer. FEC is off and empty input never
         // reaches libopus, so no packet-loss concealment can run.
@@ -196,7 +190,15 @@ pub(crate) fn decode_packets(
         if start + end > decoded {
             return Err(Error::invalid_input("opus trim exceeds packet duration"));
         }
+        // The 120 s budget counts the samples this packet actually retains
+        // after the pre-skip and container trims, so an input whose final
+        // trimmed output is exactly 120 s is accepted.
         let keep = decoded - start - end;
+        if keep > MAX_OUTPUT_FRAMES - output_frames {
+            return Err(Error::audio_too_long(
+                (output_frames + keep) as f64 / OPUS_SAMPLE_RATE as f64,
+            ));
+        }
         output_frames = output_frames
             .checked_add(keep)
             .ok_or_else(|| Error::audio_too_long(MAX_AUDIO_SECONDS + 1.0))?;
@@ -459,7 +461,7 @@ pub(crate) mod tests {
         let one = audio_packets(1).pop().unwrap();
         let frames: usize = 960;
         // 120 s / 20 ms = 6,000 packets; the 6,001st must fail, checked
-        // before it is decoded.
+        // against the retained output before its samples are counted.
         let mut packets: Vec<OpusPacket> = std::iter::repeat_n(one.clone(), 6_001).collect();
         for packet in &mut packets {
             packet.trim_start = 0;
@@ -468,8 +470,7 @@ pub(crate) mod tests {
         let err = decode_packets(&family0_head(0, 0), &packets, &CancelToken::new()).unwrap_err();
         assert_eq!(err.code, ErrorCode::AudioTooLong);
 
-        // Exactly 120 s still passes the cap (and then fails the strict
-        // length check in normalize_and_validate, not here).
+        // Exactly 120 s of retained output passes every check.
         let mut packets: Vec<OpusPacket> = std::iter::repeat_n(one, 6_000).collect();
         for packet in &mut packets {
             packet.trim_start = 0;

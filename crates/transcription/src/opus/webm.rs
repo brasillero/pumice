@@ -1036,4 +1036,12 @@ mod tests {
             ErrorCode::InvalidInput
         );
     }
+
+    #[test]
+    fn real_121_second_webm_is_too_long() {
+        // 121 s of audio: the 120 s retained-output budget rejects it.
+        let bytes = fixture("silence121.webm");
+        let err = decode_webm_opus(bytes, &CancelToken::new()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::AudioTooLong);
+    }
 }
