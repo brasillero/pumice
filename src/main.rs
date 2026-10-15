@@ -3,6 +3,7 @@
 //! as the `pumice-transcribe` program installed next to this executable.
 
 mod dispatch;
+mod orchestrator;
 
 use std::process::ExitCode;
 
