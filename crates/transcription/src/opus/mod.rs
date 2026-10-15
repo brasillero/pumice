@@ -61,9 +61,13 @@ impl OpusHead {
         let pre_skip = usize::from(u16::from_le_bytes([bytes[10], bytes[11]]));
         // The original input sample rate (bytes 12..16) is informational.
         let gain_db_q8 = i16::from_le_bytes([bytes[16], bytes[17]]);
+        // RFC 7845 section 5.1: the version-1 layout below is fixed, and
+        // compatible newer minors (the low nibble of the version byte) may
+        // append fields, which decoders must ignore.
+        let minor = bytes[8] & 0x0F;
         match bytes[18] {
             0 => {
-                if bytes.len() != 19 {
+                if minor == 1 && bytes.len() != 19 {
                     return Err(Error::invalid_input("malformed opus header"));
                 }
             }
@@ -73,7 +77,7 @@ impl OpusHead {
                 // identically to family 0. Anything else needs a multistream
                 // decoder and is rejected.
                 let expected_len = 21 + usize::from(channels);
-                if bytes.len() != expected_len {
+                if bytes.len() < expected_len || (minor == 1 && bytes.len() != expected_len) {
                     return Err(Error::invalid_input("malformed opus header"));
                 }
                 let stream_count = usize::from(bytes[19]);
@@ -374,7 +378,8 @@ pub(crate) mod tests {
             ErrorCode::UnsupportedFormat
         );
 
-        // Family 0 with trailing bytes is malformed.
+        // Family 0 with trailing bytes keeps the fixed version-1 layout and
+        // stays malformed.
         let mut trailing = valid.to_vec();
         trailing.push(0);
         assert_eq!(
@@ -384,6 +389,43 @@ pub(crate) mod tests {
 
         assert_eq!(
             OpusHead::parse(&valid[..10]).unwrap_err().code,
+            ErrorCode::InvalidInput
+        );
+    }
+
+    #[test]
+    fn opus_head_accepts_compatible_minor_version_extensions() {
+        // RFC 7845 section 5.1: a compatible newer minor version (the low
+        // nibble of the version byte) may append fields, which decoders
+        // ignore. Review case version2-extra-field.
+        let bytes = fixture("sample-pt.webm");
+        let at = bytes.windows(8).position(|w| w == b"OpusHead").unwrap();
+        let valid = &bytes[at..at + 19];
+
+        // Family 0, version 2, two extension bytes.
+        let mut extended = valid.to_vec();
+        extended[8] = 2;
+        extended.extend([0xAA, 0xBB]);
+        let head = OpusHead::parse(&extended).unwrap();
+        assert_eq!(head.channels, 1);
+        assert_eq!(head.pre_skip, 312);
+
+        // Family 1, version 15, one extension byte after the mapping table.
+        let mut family1 = b"OpusHead".to_vec();
+        family1.extend([15, 1, 0x38, 0x01]); // version 15, 1 ch, pre-skip 312
+        family1.extend([0x80, 0xBB, 0, 0]); // 48 kHz input rate
+        family1.extend([0, 0]); // gain 0
+        family1.push(1); // family 1
+        family1.extend([1, 0, 0, 0xEE]); // mono mapping + extension byte
+        let head = OpusHead::parse(&family1).unwrap();
+        assert_eq!(head.channels, 1);
+
+        // A mapping table cut short is still malformed, with or without a
+        // newer minor version.
+        let mut short = family1.clone();
+        short.truncate(21);
+        assert_eq!(
+            OpusHead::parse(&short).unwrap_err().code,
             ErrorCode::InvalidInput
         );
     }
