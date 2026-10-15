@@ -22,7 +22,7 @@ process: while the transcription program handles the event and shuts down,
 > no transcription binary ships there yet, so `pumice transcribe` is not
 > satisfied by an npm install of the launcher today. Until the Pumice
 > transcription archive ships (planned), install both programs into the
-> same directory, for example `cargo install --path . --locked` and
+> same directory, for example `cargo install --path . --locked --bin pumice` and
 > `cargo install --path crates/transcription --features engine --locked`.
 
 ## Building from source
