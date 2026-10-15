@@ -291,7 +291,7 @@ pub mod cpp {
     }
 
     /// Runtime CPU-variant backend initialization (`cpu-variants` feature,
-    /// Linux only). The variant is chosen here, not by ggml: ggml's pinned
+    /// Linux x86-64 only). The variant is chosen here, not by ggml: ggml's pinned
     /// scoring reads CPUID without checking OS-enabled state (the FIXME in
     /// transcribe-cpp-sys ggml/src/ggml-cpu/arch/x86/cpu-feats.cpp), so a CPU
     /// or guest advertising AVX/AVX-512 with the state disabled could win
@@ -335,9 +335,11 @@ pub mod cpp {
         }
 
         /// ggml's CPU variant table for a non-MSVC x86-64 build, weakest
-        /// first. Equal feature counts resolve to the later (higher-tier)
-        /// entry; the tiers nest, so ties only arise for theoretical feature
-        /// combinations no shipping CPU has.
+        /// first. Equal feature counts resolve to the later table entry.
+        /// The table is not a strict nesting hierarchy — `alderlake`, for
+        /// example, follows `zen4` but swaps AVX-512 for AVX-VNNI — so
+        /// never treat table position alone as proof that another entry is
+        /// safe on a given host.
         const VARIANTS: &[(&str, &[CpuFeature])] = &[
             ("x64", &[]),
             ("sse42", &[CpuFeature::Sse42]),
@@ -478,14 +480,28 @@ pub mod cpp {
             ),
         ];
 
+        /// Variants whose features are all usable on this host, weakest
+        /// first, in the preference order `choose_variant` uses: feature
+        /// count ascending, table order on ties (the later entry wins).
+        /// `x64` has no requirements, so the list is never empty.
+        fn compatible_variants(
+            detect: impl Fn(CpuFeature) -> bool,
+        ) -> Vec<(&'static str, &'static [CpuFeature])> {
+            let mut variants: Vec<_> = VARIANTS
+                .iter()
+                .filter(|(_, required)| required.iter().all(|&f| detect(f)))
+                .copied()
+                .collect();
+            variants.sort_by_key(|(_, required)| required.len());
+            variants
+        }
+
         /// The best variant whose features are all usable on this host, or
         /// the `x64` portable floor. The detector is injected so the choice
         /// is unit-testable independent of the host.
         fn choose_variant(detect: impl Fn(CpuFeature) -> bool) -> &'static str {
-            VARIANTS
-                .iter()
-                .filter(|(_, required)| required.iter().all(|&f| detect(f)))
-                .max_by_key(|(_, required)| required.len())
+            compatible_variants(detect)
+                .last()
                 .map(|(name, _)| *name)
                 .unwrap_or("x64")
         }
@@ -589,16 +605,21 @@ pub mod cpp {
         }
 
         /// The staged module directory to initialize backends from: the
-        /// chosen variant's, or the next lower tier whose module was staged.
-        /// The tiers nest (every tier requires everything a lower one does),
-        /// so any lower tier is safe on this host. `None` when no module at
-        /// or below the chosen tier was staged.
+        /// chosen variant's, or the next less-preferred compatible variant
+        /// whose module was staged. Candidates are exactly the variants
+        /// whose required features pass the same OS-aware detector, in
+        /// preference order — the table is not a nesting hierarchy, so a
+        /// module earlier in the table is not automatically safe here.
+        /// `x64` is always the last candidate. `None` when no candidate's
+        /// module was staged.
         fn select_module_dir(
             exe_dir: &Path,
             chosen: &'static str,
+            detect: impl Fn(CpuFeature) -> bool,
         ) -> Option<(&'static str, PathBuf)> {
-            let chosen_idx = VARIANTS.iter().position(|(name, _)| *name == chosen)?;
-            VARIANTS[..=chosen_idx]
+            let candidates = compatible_variants(detect);
+            let chosen_idx = candidates.iter().position(|(name, _)| *name == chosen)?;
+            candidates[..=chosen_idx]
                 .iter()
                 .rev()
                 .find(|(name, _)| variant_module_file(exe_dir, name).is_file())
@@ -613,9 +634,11 @@ pub mod cpp {
                 .ok_or(InitError::ExeDir)?;
             let chosen = choose_variant(detect);
             let (variant, module_dir) =
-                select_module_dir(&exe_dir, chosen).ok_or_else(|| InitError::ModulesMissing {
-                    exe_dir: exe_dir.clone(),
-                    variant: chosen,
+                select_module_dir(&exe_dir, chosen, detect).ok_or_else(|| {
+                    InitError::ModulesMissing {
+                        exe_dir: exe_dir.clone(),
+                        variant: chosen,
+                    }
                 })?;
             ::transcribe_cpp::init_backends_with(
                 Some(&module_dir),
@@ -644,6 +667,14 @@ pub mod cpp {
             fn detector(have: &[CpuFeature]) -> impl Fn(CpuFeature) -> bool + '_ {
                 move |feature| have.contains(&feature)
             }
+
+            /// Every feature the host detector can ever report (AMX is
+            /// never reported on stable Rust), so all non-AMX variants are
+            /// compatible unless a test injects a narrower set.
+            const HOST_FEATURES: &[CpuFeature] = &[
+                Sse42, Avx, F16c, Fma, Bmi2, Avx2, AvxVnni, Avx512, Avx512Vbmi, Avx512Vnni,
+                Avx512Bf16,
+            ];
 
             #[test]
             fn x64_is_the_portable_floor() {
@@ -784,7 +815,8 @@ pub mod cpp {
                 let temp = tempfile::tempdir().unwrap();
                 stage_module(temp.path(), "x64");
                 stage_module(temp.path(), "haswell");
-                let (variant, dir) = select_module_dir(temp.path(), "haswell").unwrap();
+                let (variant, dir) =
+                    select_module_dir(temp.path(), "haswell", detector(HOST_FEATURES)).unwrap();
                 assert_eq!(variant, "haswell");
                 assert_eq!(dir, temp.path().join("cpu").join("haswell"));
             }
@@ -794,9 +826,56 @@ pub mod cpp {
                 let temp = tempfile::tempdir().unwrap();
                 stage_module(temp.path(), "sse42");
                 stage_module(temp.path(), "x64");
-                let (variant, dir) = select_module_dir(temp.path(), "haswell").unwrap();
+                let (variant, dir) =
+                    select_module_dir(temp.path(), "haswell", detector(HOST_FEATURES)).unwrap();
                 assert_eq!(variant, "sse42");
                 assert_eq!(dir, temp.path().join("cpu").join("sse42"));
+            }
+
+            #[test]
+            fn missing_best_variant_skips_incompatible_higher_tiers() {
+                // Host: up to alderlake, no AVX-512. `zen4` sits right below
+                // alderlake in the table but requires AVX-512, so with
+                // `cpu/alderlake/` missing the fallback must skip it and
+                // land on haswell, not fail on an unusable module.
+                let alderlake_host = [Sse42, Avx, F16c, Fma, Avx2, Bmi2, AvxVnni];
+                let temp = tempfile::tempdir().unwrap();
+                stage_module(temp.path(), "zen4");
+                stage_module(temp.path(), "haswell");
+                stage_module(temp.path(), "x64");
+                let (variant, dir) =
+                    select_module_dir(temp.path(), "alderlake", detector(&alderlake_host)).unwrap();
+                assert_eq!(variant, "haswell");
+                assert_eq!(dir, temp.path().join("cpu").join("haswell"));
+            }
+
+            #[test]
+            fn missing_cascadelake_skips_predecessors_it_cannot_run() {
+                // Same shape one tier up: cascadelake's module is missing,
+                // and cooperlake/zen4 — staged, and earlier in the table —
+                // require AVX512BF16/VBMI this host lacks. The next
+                // compatible staged variant is skylakex.
+                let cascadelake_host = [Sse42, Avx, F16c, Fma, Avx2, Bmi2, Avx512, Avx512Vnni];
+                let temp = tempfile::tempdir().unwrap();
+                stage_module(temp.path(), "zen4");
+                stage_module(temp.path(), "cooperlake");
+                stage_module(temp.path(), "skylakex");
+                stage_module(temp.path(), "x64");
+                let (variant, dir) =
+                    select_module_dir(temp.path(), "cascadelake", detector(&cascadelake_host))
+                        .unwrap();
+                assert_eq!(variant, "skylakex");
+                assert_eq!(dir, temp.path().join("cpu").join("skylakex"));
+            }
+
+            #[test]
+            fn only_x64_staged_still_runs() {
+                let temp = tempfile::tempdir().unwrap();
+                stage_module(temp.path(), "x64");
+                let (variant, dir) =
+                    select_module_dir(temp.path(), "alderlake", detector(HOST_FEATURES)).unwrap();
+                assert_eq!(variant, "x64");
+                assert_eq!(dir, temp.path().join("cpu").join("x64"));
             }
 
             #[test]
@@ -804,14 +883,18 @@ pub mod cpp {
                 let temp = tempfile::tempdir().unwrap();
                 std::fs::create_dir_all(temp.path().join("cpu").join("haswell")).unwrap();
                 stage_module(temp.path(), "x64");
-                let (variant, _) = select_module_dir(temp.path(), "haswell").unwrap();
+                let (variant, _) =
+                    select_module_dir(temp.path(), "haswell", detector(HOST_FEATURES)).unwrap();
                 assert_eq!(variant, "x64");
             }
 
             #[test]
             fn no_staged_variant_is_an_error() {
                 let temp = tempfile::tempdir().unwrap();
-                assert_eq!(select_module_dir(temp.path(), "haswell"), None);
+                assert_eq!(
+                    select_module_dir(temp.path(), "haswell", detector(HOST_FEATURES)),
+                    None
+                );
             }
 
             #[test]
@@ -822,7 +905,10 @@ pub mod cpp {
                 std::fs::write(temp.path().join("libggml-cpu-haswell.so"), b"").unwrap();
                 std::fs::write(temp.path().join("libggml-base.so"), b"").unwrap();
                 std::fs::write(temp.path().join("notes.txt"), b"").unwrap();
-                assert_eq!(select_module_dir(temp.path(), "haswell"), None);
+                assert_eq!(
+                    select_module_dir(temp.path(), "haswell", detector(HOST_FEATURES)),
+                    None
+                );
             }
 
             #[test]
@@ -835,7 +921,8 @@ pub mod cpp {
                 for dir in [&cpu, &x64] {
                     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
                 }
-                let (variant, dir) = select_module_dir(temp.path(), "alderlake").unwrap();
+                let (variant, dir) =
+                    select_module_dir(temp.path(), "alderlake", detector(HOST_FEATURES)).unwrap();
                 assert_eq!(variant, "x64");
                 assert_eq!(dir, x64);
                 assert!(variant_module_file(temp.path(), "x64").is_file());
