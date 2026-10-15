@@ -7,7 +7,7 @@
 //! final text, also when a later stage fails (D3/D7). No transcript or final
 //! text ever reaches stderr, the events stream or an error message.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -160,6 +160,8 @@ struct Prepared {
     stt: Transcribe,
     pipeline: Pipeline,
     formatter_config: Option<pumice_formatter::Config>,
+    /// The orchestrator file the flow came from, for error locations.
+    orchestrator_path: PathBuf,
 }
 
 struct Execution<'a> {
@@ -393,7 +395,7 @@ impl Execution<'_> {
         // passthrough) before anything runs.
         for other in loaded.config.flows.iter().filter(|other| other.enabled) {
             if !relay_stage::route_enabled(&pipeline, &other.relay_route) {
-                return Err(StageError::new(
+                let mut error = StageError::new(
                     stage::PREPARE,
                     "relay_route_invalid",
                     format!(
@@ -401,7 +403,9 @@ impl Execution<'_> {
                         other.id
                     ),
                     2,
-                ));
+                );
+                set_reference_location(&mut error, &loaded.path, other.references.relay_route);
+                return Err(error);
             }
         }
 
@@ -429,7 +433,7 @@ impl Execution<'_> {
             if let Some(id) = &other.formatter
                 && resolve_formatter(id, formatter_config.as_ref()).is_none()
             {
-                return Err(StageError::new(
+                let mut error = StageError::new(
                     stage::PREPARE,
                     "formatter_not_found",
                     format!(
@@ -437,7 +441,9 @@ impl Execution<'_> {
                         other.id
                     ),
                     2,
-                ));
+                );
+                set_reference_location(&mut error, &loaded.path, other.references.formatter);
+                return Err(error);
             }
         }
 
@@ -468,7 +474,7 @@ impl Execution<'_> {
             .find(|entry| entry.id == flow.transcription_model)
         {
             None => {
-                return Err(StageError::new(
+                let mut error = StageError::new(
                     stage::PREPARE,
                     "transcription_model_not_found",
                     format!(
@@ -476,15 +482,27 @@ impl Execution<'_> {
                         flow.id
                     ),
                     2,
-                ));
+                );
+                set_reference_location(
+                    &mut error,
+                    &loaded.path,
+                    flow.references.transcription_model,
+                );
+                return Err(error);
             }
             Some(entry) if !entry.exists => {
-                return Err(StageError::new(
+                let mut error = StageError::new(
                     stage::PREPARE,
                     "transcription_model_not_found",
                     "the transcription model file is missing; install or download it first",
                     2,
-                ));
+                );
+                set_reference_location(
+                    &mut error,
+                    &loaded.path,
+                    flow.references.transcription_model,
+                );
+                return Err(error);
             }
             Some(_) => {}
         }
@@ -496,6 +514,7 @@ impl Execution<'_> {
             stt,
             pipeline,
             formatter_config,
+            orchestrator_path: loaded.path.clone(),
         })
     }
 
@@ -578,12 +597,18 @@ impl Execution<'_> {
         };
         let Some(definition) = resolve_formatter(id.as_str(), prepared.formatter_config.as_ref())
         else {
-            return Err(StageError::new(
+            let mut error = StageError::new(
                 stage::FORMATTER,
                 "formatter_not_found",
                 "the selected formatter is not registered in the formatter configuration",
                 2,
-            ));
+            );
+            set_reference_location(
+                &mut error,
+                &prepared.orchestrator_path,
+                prepared.flow.references.formatter,
+            );
+            return Err(error);
         };
 
         let at = Instant::now();
@@ -734,6 +759,18 @@ impl Execution<'_> {
 fn stage_deadline(at: Instant, cap: Duration, work_deadline: Instant) -> Instant {
     at.checked_add(cap)
         .map_or(work_deadline, |own| own.min(work_deadline))
+}
+
+/// Attaches the orchestrator file's `file:line:column` of the reference the
+/// error names, when the span survived parsing.
+fn set_reference_location(error: &mut StageError, orchestrator: &Path, at: Option<(u64, u64)>) {
+    if let Some((line, column)) = at {
+        error.locate(ErrorLocation {
+            file: orchestrator.to_path_buf(),
+            line: Some(line),
+            column: Some(column),
+        });
+    }
 }
 
 fn flow_timeout(stage_name: &'static str) -> StageError {

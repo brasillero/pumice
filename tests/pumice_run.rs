@@ -682,8 +682,20 @@ fn a_route_that_is_not_enabled_is_a_config_error() {
     let (output, envelope) = rig.run_json("clean");
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(envelope["error"]["code"], "relay_route_invalid");
+    // Points at the flow's `relay_route` value in orchestrator.yml.
+    assert_orchestrator_location(&rig, &envelope, 15);
     assert_eq!(rig.fake_calls(), 0);
     assert!(rig.stub_file_report().is_none());
+
+    // Plain mode names file:line:column on stderr.
+    let output = rig.run("clean", &[], false);
+    assert_eq!(output.status.code(), Some(2));
+    let expected = format!("{}:15:", rig.orchestrator_yml().display());
+    assert!(
+        stderr_text(&output).contains(&expected),
+        "{}",
+        stderr_text(&output)
+    );
 }
 
 #[test]
@@ -701,6 +713,8 @@ fn an_unregistered_formatter_is_a_config_error() {
     let (output, envelope) = rig.run_json("clean");
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(envelope["error"]["code"], "formatter_not_found");
+    // Points at the flow's `formatter` value in orchestrator.yml.
+    assert_orchestrator_location(&rig, &envelope, 14);
     assert_eq!(rig.fake_calls(), 0);
 }
 
@@ -997,6 +1011,21 @@ fn assert_failure(output: &Output, envelope: &Value, exit: i32, code: &str, stag
     assert_events_metadata_only(output, envelope);
 }
 
+/// Asserts the error points at `file:line` of the orchestrator file, with a
+/// column.
+fn assert_orchestrator_location(rig: &Rig, envelope: &Value, line: u64) {
+    assert_eq!(
+        envelope["error"]["location"]["file"],
+        json!(rig.orchestrator_yml().display().to_string()),
+        "{envelope}"
+    );
+    assert_eq!(envelope["error"]["location"]["line"], line, "{envelope}");
+    assert!(
+        envelope["error"]["location"]["column"].is_number(),
+        "{envelope}"
+    );
+}
+
 fn stub_with_file_behavior(file: Value) -> Script {
     let mut script = Script::default();
     script.stub["file"] = file;
@@ -1270,6 +1299,8 @@ fn models_list_failures_happen_in_preflight() {
         "transcription_model_not_found",
         "prepare",
     );
+    // Points at the flow's `transcription_model` value in orchestrator.yml.
+    assert_orchestrator_location(&rig2, &envelope, 13);
 
     // The model exists in the config but its file is missing.
     let mut script = Script::default();
@@ -1286,6 +1317,7 @@ fn models_list_failures_happen_in_preflight() {
         "transcription_model_not_found",
         "prepare",
     );
+    assert_orchestrator_location(&rig, &envelope, 13);
     assert!(rig.stub_file_report().is_none());
 }
 

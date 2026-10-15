@@ -91,6 +91,25 @@ pub struct Flow {
     pub formatter: Option<String>,
     pub relay_route: String,
     pub budgets: Budgets,
+    /// Source positions of the cross-file references, for errors that name
+    /// them (`file:line:column` in the orchestrator file).
+    pub references: ReferenceSpans,
+}
+
+/// The 1-based (line, column) of each cross-file reference's value in the
+/// orchestrator file; `None` when the span was lost in parsing (anchors,
+/// serde buffering).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReferenceSpans {
+    pub transcription_model: Option<(u64, u64)>,
+    pub formatter: Option<(u64, u64)>,
+    pub relay_route: Option<(u64, u64)>,
+}
+
+/// The position of a parsed value, or `None` when the span is unknown
+/// (mirrors [`ConfigError::at`]'s degradation).
+fn position(location: serde_saphyr::Location) -> Option<(u64, u64)> {
+    (location.line() != 0).then(|| (location.line(), location.column()))
 }
 
 /// Per-flow budgets; the stage deadlines can only shorten the overall one
@@ -406,6 +425,7 @@ fn validate_flow(entry: &Spanned<RawFlow>) -> Result<Flow, ConfigError> {
 
     // `formatter` must be written explicitly: an id or YAML null. A missing
     // key is an error — never an implicit choice (D4).
+    let formatter_span = flow.formatter.location();
     let formatter = match &flow.formatter {
         FormatterField::Missing => {
             return Err(ConfigError::at(
@@ -464,6 +484,11 @@ fn validate_flow(entry: &Spanned<RawFlow>) -> Result<Flow, ConfigError> {
         formatter,
         relay_route: relay_route.value.clone(),
         budgets,
+        references: ReferenceSpans {
+            transcription_model: position(transcription_model.referenced),
+            formatter: formatter_span.and_then(position),
+            relay_route: position(relay_route.referenced),
+        },
     })
 }
 
