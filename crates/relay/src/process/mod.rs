@@ -91,8 +91,12 @@ impl ProcessRunner {
         }
         let program = resolve_program(&invocation.program)?;
         // Dropping the guard removes the root, on success, failure and
-        // cancellation alike.
-        let root = RootGuard(Some(private_temp::tempdir().map_err(io_error)?));
+        // cancellation alike. With a cleanup scope a deferred removal is
+        // registered, so the scope owner's bounded drain awaits it.
+        let root = RootGuard {
+            root: Some(private_temp::tempdir().map_err(io_error)?),
+            scope: self.cleanup_scope.clone(),
+        };
         run_in(
             root.path(),
             &program,
@@ -221,26 +225,63 @@ async fn run_in(
 /// hold the workspace for a moment after termination) a plain thread keeps
 /// retrying, so the retries depend neither on the request nor on the async
 /// runtime still running.
-struct RootGuard(Option<tempfile::TempDir>);
+///
+/// With a cleanup scope the thread reports back and the scope's
+/// [`CleanupScope::drain`] awaits the removal within the caller's bounded
+/// teardown, counting it as a failure when the root survives. Without a
+/// scope the behavior is unchanged: the thread is detached and a final
+/// failure is only warned about on stderr.
+struct RootGuard {
+    root: Option<tempfile::TempDir>,
+    scope: Option<Arc<CleanupScope>>,
+}
 
 impl RootGuard {
     fn path(&self) -> &Path {
-        self.0.as_ref().expect("root present until dropped").path()
+        self.root
+            .as_ref()
+            .expect("root present until dropped")
+            .path()
     }
 }
 
 impl Drop for RootGuard {
     fn drop(&mut self) {
-        let Some(root) = self.0.take() else { return };
+        let Some(root) = self.root.take() else { return };
         if try_remove(root.path()) {
             return;
         }
-        let spawned = std::thread::Builder::new()
-            .name("pumice-temp-cleanup".to_owned())
-            .spawn(move || remove_root_with_retries(root));
-        // Could not start a thread: `TempDir`'s drop (inside the failed
-        // closure) tries once more.
-        drop(spawned);
+        match &self.scope {
+            Some(scope) => {
+                let (sender, done) = tokio::sync::oneshot::channel();
+                let spawned = std::thread::Builder::new()
+                    .name("pumice-temp-cleanup".to_owned())
+                    .spawn(move || {
+                        let gone = remove_root_with_retries(&root);
+                        let _ = sender.send(gone);
+                    });
+                // Could not start a thread: `TempDir`'s drop (inside the
+                // failed closure) tries once more and drops the sender, so
+                // the drain counts the removal as unfinished.
+                drop(spawned);
+                scope.register_temp_cleanup(done);
+            }
+            None => {
+                let spawned = std::thread::Builder::new()
+                    .name("pumice-temp-cleanup".to_owned())
+                    .spawn(move || {
+                        if !remove_root_with_retries(&root) {
+                            eprintln!(
+                                "warning: could not remove the temporary directory {}",
+                                root.path().display()
+                            );
+                        }
+                    });
+                // Could not start a thread: `TempDir`'s drop (inside the
+                // failed closure) tries once more.
+                drop(spawned);
+            }
+        }
     }
 }
 
@@ -252,20 +293,17 @@ fn try_remove(root: &Path) -> bool {
     }
 }
 
-/// Retries removal briefly. Failure must not hide the call's outcome: after
-/// the last attempt it is reported on stderr (the path only, never dictated
-/// text) and `TempDir`'s drop tries once more.
-fn remove_root_with_retries(root: tempfile::TempDir) {
+/// Retries removal briefly; true when the root is gone. After the last
+/// attempt the caller reports the failure; `TempDir`'s own drop tries once
+/// more.
+fn remove_root_with_retries(root: &tempfile::TempDir) -> bool {
     for _ in 0..REMOVE_ATTEMPTS {
         std::thread::sleep(REMOVE_RETRY_DELAY);
         if try_remove(root.path()) {
-            return;
+            return true;
         }
     }
-    eprintln!(
-        "warning: could not remove the temporary directory {}",
-        root.path().display()
-    );
+    false
 }
 
 /// Writes files into `dir` and returns their absolute paths.
@@ -440,4 +478,39 @@ async fn read_tail(
 
 fn io_error(_: io::Error) -> ProviderError {
     ProviderError::other(ProviderErrorCode::Io)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// When the inline removal fails, a scoped guard registers the deferred
+    /// cleanup instead of detaching it: the scope's drain awaits the retry
+    /// thread and observes the removal (p12-pumice-run).
+    #[tokio::test]
+    async fn scoped_root_guard_registers_and_awaits_deferred_cleanup() {
+        let scope = Arc::new(CleanupScope::new());
+        let root = private_temp::tempdir().expect("temp root");
+        private_temp::create_dir(&root.path().join(WORKSPACE_DIR)).expect("workspace");
+        let path = root.path().to_path_buf();
+
+        // The first removal fails while the root is not writable.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o555)).unwrap();
+        {
+            let guard = RootGuard {
+                root: Some(root),
+                scope: Some(Arc::clone(&scope)),
+            };
+            drop(guard);
+        }
+        assert!(!scope.is_empty(), "the deferred cleanup is registered");
+
+        // The retry succeeds once the root is writable again, and the drain
+        // awaits it.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(scope.drain(Duration::from_secs(5)).await, 0);
+        assert!(scope.is_empty());
+        assert!(!path.exists(), "the root is gone");
+    }
 }

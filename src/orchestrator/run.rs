@@ -213,7 +213,7 @@ impl Execution<'_> {
                 outcome = Err(StageError::new(
                     stage::CLEANUP,
                     "cleanup_failed",
-                    "a child process did not exit in time during cleanup",
+                    "cleanup of a child process or temporary directory did not finish in time",
                     1,
                 ));
             }
