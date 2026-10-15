@@ -197,3 +197,18 @@
 **Rejected.** Remote modules in the first iteration.
 
 **Consequences.** `AGENTS.md`'s network rule needs a loopback allowance between modules.
+
+### D15 · Active · The `s10.1-transcription` spike closes unmerged and its branch stays as evidence
+- date: 2026-10-15
+- decided by: claude (orchestrator, owner-delegated 2026-10-15)
+- origin: conversation
+- area: transcription
+- revisit if: —
+
+**Decision.** Draft PR #91 (`s10.1-transcription`) is closed without merging. The remote branch is kept, and its task notes and research note are not brought to `main`.
+
+**Why.** The spike answered its question: `transcribe-cpp` 0.3.1 and the four-target static CPU build were adopted, and the transcription module was built in P4–P9 (`crates/transcription`). Its endpoint design inside the relay and its AVX2-only policy were superseded by D1 and D8. `docs/research/architecture-plan.md` cites the branch at `e644902` as evidence, so deleting it would break those references.
+
+**Rejected.** Merging the spike: its standalone crate, CI workflow and notes describe a design that no longer holds. Deleting the branch: it breaks the evidence citations.
+
+**Consequences.** The owner asked the orchestrator to decide (2026-10-15). PR #91 was closed with a comment explaining this.
