@@ -274,12 +274,21 @@ pub mod cpp {
                 .find(|dir| contains_backend_modules(dir))
         }
 
+        /// Whether `name` is a real ggml CPU backend module filename, matching
+        /// the pattern ggml's own loader probes (`libggml-cpu-*.so`, plus the
+        /// unadorned `libggml-cpu.so`). Core libraries such as libggml-base.so
+        /// must not count: in the documented layout they sit beside the
+        /// executable, and counting them would stop the `lib/` fallback from
+        /// ever being considered.
+        fn is_cpu_module_name(name: &str) -> bool {
+            (name.starts_with("libggml-cpu-") && name.ends_with(".so")) || name == "libggml-cpu.so"
+        }
+
         fn contains_backend_modules(dir: &Path) -> bool {
             std::fs::read_dir(dir).is_ok_and(|entries| {
                 entries.flatten().any(|entry| {
-                    let name = entry.file_name();
-                    let name = name.to_string_lossy();
-                    name.starts_with("libggml-") && name.ends_with(".so")
+                    entry.path().is_file()
+                        && is_cpu_module_name(&entry.file_name().to_string_lossy())
                 })
             })
         }
@@ -317,8 +326,36 @@ pub mod cpp {
             fn unrelated_files_do_not_count_as_modules() {
                 let temp = tempfile::tempdir().unwrap();
                 std::fs::write(temp.path().join("libggml-base.so"), b"").unwrap();
+                std::fs::write(temp.path().join("libggml.so"), b"").unwrap();
+                std::fs::write(temp.path().join("libtranscribe.so.0.3"), b"").unwrap();
                 std::fs::write(temp.path().join("notes.txt"), b"").unwrap();
                 assert_eq!(backend_module_dir(temp.path()), None);
+            }
+
+            #[test]
+            fn versioned_module_names_do_not_count() {
+                let temp = tempfile::tempdir().unwrap();
+                std::fs::write(temp.path().join("libggml-cpu-x64.so.0.3.1"), b"").unwrap();
+                assert_eq!(backend_module_dir(temp.path()), None);
+            }
+
+            #[test]
+            fn core_libs_beside_executable_do_not_hide_lib_modules() {
+                let temp = tempfile::tempdir().unwrap();
+                // Documented layout: core libraries beside the executable,
+                // CPU modules in lib/.
+                for core in [
+                    "libtranscribe.so.0.3",
+                    "libggml.so.0",
+                    "libggml-base.so.0",
+                    "libggml-cpu-alderlake.so.0.3.1",
+                ] {
+                    std::fs::write(temp.path().join(core), b"").unwrap();
+                }
+                let lib = temp.path().join("lib");
+                std::fs::create_dir(&lib).unwrap();
+                std::fs::write(lib.join("libggml-cpu-haswell.so"), b"").unwrap();
+                assert_eq!(backend_module_dir(temp.path()), Some(lib));
             }
         }
     }
