@@ -1625,6 +1625,11 @@ fn relative_config_path_resolves_model_against_config_directory() {
         "schema_version: 1\nmodels:\n  - id: tiny\n    path: models/tiny.gguf\n",
     )
     .unwrap();
+    // The model file exists so both sides can be canonicalized: the OS may
+    // report the working directory in a different but equivalent form
+    // (e.g. /private/var on macOS).
+    std::fs::create_dir(config_dir.join("models")).unwrap();
+    std::fs::write(config_dir.join("models/tiny.gguf"), b"").unwrap();
     let out = isolated_command(env!("CARGO_BIN_EXE_pumice-transcribe"))
         .current_dir(tmp.path())
         .args([
@@ -1638,9 +1643,11 @@ fn relative_config_path_resolves_model_against_config_directory() {
         .unwrap();
     assert!(out.status.success());
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let reported = std::path::PathBuf::from(value["result"][0]["path"].as_str().unwrap());
+    assert!(reported.is_absolute());
     assert_eq!(
-        value["result"][0]["path"],
-        config_dir.join("models/tiny.gguf").to_str().unwrap()
+        reported.canonicalize().unwrap(),
+        config_dir.join("models/tiny.gguf").canonicalize().unwrap()
     );
 }
 
@@ -1654,7 +1661,13 @@ fn example_config_file_parses() {
 #[test]
 fn per_user_config_lookup_via_env() {
     let tmp = tempfile::tempdir().unwrap();
-    let config_dir = tmp.path().join(".config").join("pumice");
+    // Windows looks under %APPDATA%\pumice; Linux and macOS under $HOME/.config/pumice.
+    let base = if cfg!(windows) {
+        tmp.path().join("AppData")
+    } else {
+        tmp.path().join(".config")
+    };
+    let config_dir = base.join("pumice");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("transcribe.yml");
     std::fs::write(
@@ -1662,23 +1675,29 @@ fn per_user_config_lookup_via_env() {
         r#"schema_version: 1
 models:
   - id: tiny
-    path: /tmp/tiny.gguf
+    path: tiny.gguf
 "#,
     )
     .unwrap();
 
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let out = isolated_command(bin)
+    let mut command = isolated_command(bin);
+    command
         .args(["check-config"])
         .env("HOME", tmp.path())
         .env_remove("XDG_CONFIG_HOME")
-        .env_remove("APPDATA")
-        .output()
-        .unwrap();
+        .env_remove("APPDATA");
+    if cfg!(windows) {
+        command.env("APPDATA", &base);
+    }
+    let out = command.output().unwrap();
 
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
-    assert!(stdout.contains(config_path.to_str().unwrap()));
+    assert!(
+        stdout.contains(config_path.to_str().unwrap()),
+        "stdout: {stdout}"
+    );
 }
 
 #[cfg(unix)]
