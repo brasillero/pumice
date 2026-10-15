@@ -1,8 +1,9 @@
 use crate::audio::{MAX_FILE_BYTES, decode_audio, normalize_and_validate, resample_to_target};
+use crate::config::{self, Config, ConfigSource, LoadedConfig, validate_language};
 use crate::engine::Engine;
 use crate::{Error, ErrorCode, JsonError, TranscriptionOptions};
 use clap::error::ErrorKind;
-use clap::{Parser, Subcommand};
+use clap::{Args as ClapArgs, Parser, Subcommand};
 use serde::Serialize;
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
@@ -17,6 +18,10 @@ use std::time::Instant;
     version
 )]
 pub struct Args {
+    /// Path to the module configuration file.
+    #[arg(long, global = true, value_name = "FILE")]
+    config: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -24,28 +29,63 @@ pub struct Args {
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Transcribe an audio file.
-    File {
-        /// Path to the audio file (WAV, MP3, FLAC, Ogg Vorbis).
-        audio: PathBuf,
-
-        /// Path to the GGUF model file.
-        #[arg(long, value_name = "PATH.gguf")]
-        model: PathBuf,
-
-        /// Optional language hint (ISO-639-1 two-letter code). When given, this
-        /// value is reported in the result; otherwise the engine-detected language
-        /// is reported.
-        #[arg(long, value_name = "xx")]
-        language: Option<String>,
-
-        /// Number of threads to use for inference (default: available parallelism, capped at 32).
-        #[arg(long, value_name = "N")]
-        threads: Option<usize>,
-
-        /// Output a JSON envelope instead of plain text.
-        #[arg(long)]
-        json: bool,
+    File(FileArgs),
+    /// Validate the configuration file and exit.
+    CheckConfig(CheckConfigArgs),
+    /// Inspect configured models.
+    Models {
+        #[command(subcommand)]
+        command: ModelsCommand,
     },
+}
+
+#[derive(ClapArgs, Debug)]
+#[command(group = clap::ArgGroup::new("model_source").args(["model", "model_file"]).required(false))]
+pub struct FileArgs {
+    /// Path to the audio file (WAV, MP3, FLAC, Ogg Vorbis).
+    audio: PathBuf,
+
+    /// Model id from the configuration file.
+    #[arg(long, value_name = "ID", group = "model_source")]
+    model: Option<String>,
+
+    /// Direct path to a GGUF model file.
+    #[arg(long, value_name = "PATH.gguf", group = "model_source")]
+    model_file: Option<PathBuf>,
+
+    /// Optional language hint (ISO-639-1 two-letter code). When given, this
+    /// value is reported in the result; otherwise the engine-detected language
+    /// is reported.
+    #[arg(long, value_name = "xx")]
+    language: Option<String>,
+
+    /// Number of threads to use for inference (default: available parallelism, capped at 32).
+    #[arg(long, value_name = "N")]
+    threads: Option<usize>,
+
+    /// Output a JSON envelope instead of plain text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(ClapArgs, Debug)]
+pub struct CheckConfigArgs {
+    /// Output a JSON envelope instead of plain text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ModelsCommand {
+    /// List configured models.
+    List(ModelsListArgs),
+}
+
+#[derive(ClapArgs, Debug)]
+pub struct ModelsListArgs {
+    /// Output JSON instead of a table.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -62,42 +102,43 @@ struct Envelope {
     schema_version: i32,
     ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<ResultJson>,
+    result: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<JsonError>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct ResultJson {
-    text: String,
-    language: Option<String>,
-    audio_seconds: f64,
-    model_load_ms: u64,
-    transcription_ms: u64,
+struct CheckConfigResult {
+    file: Option<PathBuf>,
 }
 
-impl From<SuccessOutput> for ResultJson {
+#[derive(Debug, Clone, Serialize)]
+struct ModelListEntry {
+    id: String,
+    path: PathBuf,
+    exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<u64>,
+    default: bool,
+}
+
+enum CommandOutput {
+    Transcription(SuccessOutput),
+    CheckConfig(Option<PathBuf>),
+    ModelsList(Vec<ModelListEntry>),
+}
+
+impl From<SuccessOutput> for serde_json::Value {
     fn from(out: SuccessOutput) -> Self {
-        Self {
-            text: out.text,
-            language: out.language,
-            audio_seconds: out.audio_seconds,
-            model_load_ms: out.model_load_ms,
-            transcription_ms: out.transcription_ms,
-        }
+        serde_json::json!({
+            "text": out.text,
+            "language": out.language,
+            "audio_seconds": out.audio_seconds,
+            "model_load_ms": out.model_load_ms,
+            "transcription_ms": out.transcription_ms,
+        })
     }
 }
-
-/// Whisper's supported ISO-639-1 language codes.
-const SUPPORTED_LANGUAGES: &[&str] = &[
-    "af", "am", "ar", "as", "az", "ba", "be", "bg", "bn", "bo", "br", "bs", "ca", "cs", "cy", "da",
-    "de", "el", "en", "es", "et", "eu", "fa", "fi", "fo", "fr", "gl", "gu", "ha", "haw", "he",
-    "hi", "hr", "ht", "hu", "hy", "id", "is", "it", "ja", "jw", "ka", "km", "kn", "ko", "la", "lb",
-    "ln", "lo", "lt", "lv", "mg", "mi", "mk", "ml", "mn", "mr", "ms", "mt", "my", "ne", "nl", "nn",
-    "no", "oc", "pa", "pl", "ps", "pt", "ro", "ru", "sa", "sd", "si", "sk", "sl", "sn", "so", "sq",
-    "sr", "su", "sv", "sw", "ta", "te", "tg", "th", "tk", "tl", "tr", "tt", "uk", "ur", "uz", "vi",
-    "yi", "yo", "zh",
-];
 
 pub fn run<I, T>(args: I) -> ExitCode
 where
@@ -115,6 +156,10 @@ where
         }
     };
 
+    let json = json_flag(&args);
+    let mut stdout = io::stdout();
+    let mut stderr = io::stderr();
+
     let make_engine = |path: &Path, threads: i32| -> Result<Box<dyn Engine>, Error> {
         #[cfg(feature = "engine")]
         {
@@ -129,18 +174,33 @@ where
         }
     };
 
-    let json = json_flag(&args);
-    let mut stdout = io::stdout();
-    let mut stderr = io::stderr();
-
-    match run_with_factory(args, make_engine) {
-        Ok(output) => match print_success(&output, json, &mut stdout) {
+    match run_command(args, make_engine) {
+        Ok(CommandOutput::Transcription(output)) => match print_success(&output, json, &mut stdout)
+        {
             Ok(()) => ExitCode::SUCCESS,
             Err(_) => {
                 let _ = stderr.write_all(b"failed to write output\n");
                 ExitCode::from(1)
             }
         },
+        Ok(CommandOutput::CheckConfig(file)) => {
+            match print_check_config(file.as_deref(), json, &mut stdout) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(_) => {
+                    let _ = stderr.write_all(b"failed to write output\n");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Ok(CommandOutput::ModelsList(entries)) => {
+            match print_models_list(&entries, json, &mut stdout) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(_) => {
+                    let _ = stderr.write_all(b"failed to write output\n");
+                    ExitCode::from(1)
+                }
+            }
+        }
         Err(e) => match print_error(&e, json, &mut stdout, &mut stderr) {
             Ok(()) => exit_code(&e),
             Err(_) => {
@@ -169,9 +229,9 @@ fn handle_clap_error(err: clap::Error, wants_json: bool) -> ExitCode {
                 error: Some(JsonError {
                     code: ErrorCode::InvalidArguments.as_str().to_string(),
                     message: err.to_string().trim().to_string(),
+                    location: None,
                 }),
             };
-            // Clap errors may include newlines; emit exactly one JSON object followed by a newline.
             if writeln!(stdout, "{}", serde_json::to_string(&envelope).unwrap()).is_err() {
                 let _ = io::stderr().write_all(b"failed to write output\n");
                 return ExitCode::from(1);
@@ -194,70 +254,164 @@ where
     T: Into<OsString> + Clone,
 {
     let args = Args::try_parse_from(args).map_err(|e| Error::invalid_arguments(format!("{e}")))?;
-    run_with_factory(args, |_: &Path, _: i32| Ok(engine))
-}
-
-pub fn run_with_factory<F>(args: Args, make_engine: F) -> Result<SuccessOutput, Error>
-where
-    F: FnOnce(&Path, i32) -> Result<Box<dyn Engine>, Error>,
-{
+    let loaded = load_config(&args)?;
     match args.command {
-        Command::File {
-            audio,
-            model,
-            language,
-            threads,
-            json: _,
-        } => {
-            let language = normalize_language(language)?;
-            let threads = normalize_threads(threads)?;
-
-            let file = open_regular_file(&audio)?;
-            let metadata = file.metadata()?;
-            if metadata.len() > MAX_FILE_BYTES {
-                return Err(Error::input_too_large(metadata.len()));
-            }
-
-            let budgeted = BudgetReader::new(file, MAX_FILE_BYTES);
-            let decoded =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decode_audio(budgeted)))
-                    .map_err(|_| Error::invalid_input("audio decoding panicked"))?
-                    .map_err(map_budget_error)?;
-            let resampled = resample_to_target(&decoded.samples, decoded.sample_rate)?;
-            let pcm = normalize_and_validate(resampled)?;
-            let audio_seconds = pcm.len() as f64 / 16_000.0;
-
-            if !model.is_file() {
-                return Err(Error::model_not_found(&model));
-            }
-
-            let start = Instant::now();
-            let engine = make_engine(&model, threads)?;
-            let model_load_ms = start.elapsed().as_millis() as u64;
-
-            let start = Instant::now();
-            let transcript = engine.transcribe(
-                &pcm,
-                &TranscriptionOptions {
-                    language: language.clone(),
-                },
-            )?;
-            let transcription_ms = start.elapsed().as_millis() as u64;
-
-            Ok(SuccessOutput {
-                text: transcript.text,
-                language: language.or(transcript.language),
-                audio_seconds,
-                model_load_ms,
-                transcription_ms,
-            })
-        }
+        Command::File(file_args) => run_file(file_args, &loaded.config, |_, _| Ok(engine)),
+        _ => Err(Error::invalid_arguments(
+            "run_with_engine only supports the file subcommand",
+        )),
     }
 }
 
+fn run_command<F>(args: Args, make_engine: F) -> Result<CommandOutput, Error>
+where
+    F: FnOnce(&Path, i32) -> Result<Box<dyn Engine>, Error>,
+{
+    let loaded = load_config(&args)?;
+    match args.command {
+        Command::File(file_args) => {
+            let output = run_file(file_args, &loaded.config, make_engine)?;
+            Ok(CommandOutput::Transcription(output))
+        }
+        Command::CheckConfig(_) => Ok(CommandOutput::CheckConfig(match loaded.source {
+            ConfigSource::File(path) => Some(path),
+            ConfigSource::NoFile => None,
+        })),
+        Command::Models {
+            command: ModelsCommand::List(_),
+        } => Ok(CommandOutput::ModelsList(build_model_list(&loaded.config))),
+    }
+}
+
+fn load_config(args: &Args) -> Result<LoadedConfig, Error> {
+    config::load(args.config.as_deref()).map_err(Error::invalid_config)
+}
+
+fn run_file<F>(file_args: FileArgs, config: &Config, make_engine: F) -> Result<SuccessOutput, Error>
+where
+    F: FnOnce(&Path, i32) -> Result<Box<dyn Engine>, Error>,
+{
+    let language = effective_language(file_args.language, config.language.clone())?;
+    let threads = effective_threads(file_args.threads, config.threads)?;
+
+    let model_path = resolve_model_path(config, file_args.model, file_args.model_file)?;
+
+    let file = open_regular_file(&file_args.audio)?;
+    let metadata = file.metadata()?;
+    if metadata.len() > MAX_FILE_BYTES {
+        return Err(Error::input_too_large(metadata.len()));
+    }
+
+    let budgeted = BudgetReader::new(file, MAX_FILE_BYTES);
+    let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decode_audio(budgeted)))
+        .map_err(|_| Error::invalid_input("audio decoding panicked"))?
+        .map_err(map_budget_error)?;
+    let resampled = resample_to_target(&decoded.samples, decoded.sample_rate)?;
+    let pcm = normalize_and_validate(resampled)?;
+    let audio_seconds = pcm.len() as f64 / 16_000.0;
+
+    if !model_path.is_file() {
+        return Err(Error::model_not_found(&model_path));
+    }
+
+    let start = Instant::now();
+    let engine = make_engine(&model_path, threads)?;
+    let model_load_ms = start.elapsed().as_millis() as u64;
+
+    let start = Instant::now();
+    let transcript = engine.transcribe(
+        &pcm,
+        &TranscriptionOptions {
+            language: language.clone(),
+        },
+    )?;
+    let transcription_ms = start.elapsed().as_millis() as u64;
+
+    Ok(SuccessOutput {
+        text: transcript.text,
+        language: language.or(transcript.language),
+        audio_seconds,
+        model_load_ms,
+        transcription_ms,
+    })
+}
+
+fn resolve_model_path(
+    config: &Config,
+    model_id: Option<String>,
+    model_file: Option<PathBuf>,
+) -> Result<PathBuf, Error> {
+    match (model_id, model_file) {
+        (Some(_), Some(_)) => Err(Error::invalid_arguments(
+            "--model and --model-file are mutually exclusive",
+        )),
+        (None, Some(path)) => Ok(path),
+        (Some(id), None) => {
+            let entry = config
+                .models
+                .iter()
+                .find(|m| m.id == id)
+                .ok_or_else(|| Error::invalid_arguments(unknown_model_message(&id, config)))?;
+            Ok(entry.path.clone())
+        }
+        (None, None) => match &config.default_model {
+            Some(id) => {
+                let entry = config
+                    .models
+                    .iter()
+                    .find(|m| m.id == *id)
+                    .expect("default_model was validated against models");
+                Ok(entry.path.clone())
+            }
+            None => Err(Error::invalid_arguments(
+                "no model selected; use --model ID, --model-file PATH, or set default_model in transcribe.yml",
+            )),
+        },
+    }
+}
+
+fn unknown_model_message(id: &str, config: &Config) -> String {
+    let ids: Vec<&str> = config.models.iter().map(|m| m.id.as_str()).collect();
+    let list = if ids.is_empty() {
+        "(none configured)".to_string()
+    } else {
+        ids.join(", ")
+    };
+    format!("unknown model id `{id}`; configured ids: {list}")
+}
+
+fn effective_language(
+    cli: Option<String>,
+    from_config: Option<String>,
+) -> Result<Option<String>, Error> {
+    normalize_language(cli.or(from_config))
+}
+
+fn effective_threads(cli: Option<usize>, from_config: Option<usize>) -> Result<i32, Error> {
+    normalize_threads(cli.or(from_config))
+}
+
+fn build_model_list(config: &Config) -> Vec<ModelListEntry> {
+    config
+        .models
+        .iter()
+        .map(|entry| {
+            let (exists, size) = match std::fs::metadata(&entry.path) {
+                Ok(meta) if meta.is_file() => (true, Some(meta.len())),
+                _ => (false, None),
+            };
+            ModelListEntry {
+                id: entry.id.clone(),
+                path: entry.path.clone(),
+                exists,
+                size,
+                default: config.default_model.as_ref() == Some(&entry.id),
+            }
+        })
+        .collect()
+}
+
 fn open_regular_file(path: &Path) -> Result<std::fs::File, Error> {
-    // Check the path before opening so FIFOs and other special files are rejected without
-    // blocking. Re-check on the descriptor to cover races.
     let pre_metadata = std::fs::metadata(path)?;
     if !pre_metadata.file_type().is_file() {
         return Err(Error::invalid_input(format!(
@@ -294,7 +448,6 @@ fn open_with_nonblock_on_unix(path: &Path) -> Result<std::fs::File, Error> {
     std::fs::File::open(path).map_err(Error::from)
 }
 
-/// Reader that enforces a hard byte budget while reading.
 struct BudgetReader<R> {
     inner: R,
     budget: u64,
@@ -319,8 +472,6 @@ impl<R: Read> Read for BudgetReader<R> {
             return Err(io::Error::other("byte budget exceeded"));
         }
         if self.read >= self.budget {
-            // Budget is exhausted. We must distinguish EOF at the limit from
-            // data beyond the limit without consuming useful bytes.
             let mut probe = [0u8; 1];
             let n = self.inner.read(&mut probe)?;
             if n == 0 {
@@ -381,6 +532,76 @@ pub fn print_error(
     }
 }
 
+fn print_check_config(file: Option<&Path>, json: bool, stdout: &mut dyn Write) -> io::Result<()> {
+    if json {
+        let envelope = Envelope {
+            schema_version: 1,
+            ok: true,
+            result: Some(serde_json::to_value(CheckConfigResult {
+                file: file.map(Path::to_path_buf),
+            })?),
+            error: None,
+        };
+        writeln!(stdout, "{}", serde_json::to_string(&envelope).unwrap())
+    } else {
+        match file {
+            Some(path) => writeln!(stdout, "config ok: {}", path.display()),
+            None => writeln!(stdout, "config ok: no per-user file found"),
+        }
+    }
+}
+
+fn print_models_list(
+    entries: &[ModelListEntry],
+    json: bool,
+    stdout: &mut dyn Write,
+) -> io::Result<()> {
+    if json {
+        let envelope = Envelope {
+            schema_version: 1,
+            ok: true,
+            result: Some(serde_json::to_value(entries)?),
+            error: None,
+        };
+        writeln!(stdout, "{}", serde_json::to_string(&envelope).unwrap())
+    } else {
+        if entries.is_empty() {
+            writeln!(stdout, "No models configured.")?;
+            return Ok(());
+        }
+        let id_width = entries.iter().map(|e| e.id.len()).max().unwrap_or(0).max(2);
+        let path_width = entries
+            .iter()
+            .map(|e| e.path.to_string_lossy().len())
+            .max()
+            .unwrap_or(0)
+            .max(4);
+        writeln!(
+            stdout,
+            "{:<id_width$}  {:<path_width$}  {:<6}  {:>12}  {:<7}",
+            "ID", "PATH", "EXISTS", "SIZE", "DEFAULT",
+        )?;
+        for entry in entries {
+            let size = entry
+                .size
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            writeln!(
+                stdout,
+                "{:<id_width$}  {:<path_width$}  {:<6}  {:>12}  {:<7}",
+                entry.id,
+                entry.path.display(),
+                if entry.exists { "yes" } else { "no" },
+                size,
+                if entry.default { "yes" } else { "no" },
+                id_width = id_width,
+                path_width = path_width,
+            )?;
+        }
+        Ok(())
+    }
+}
+
 pub fn exit_code(error: &Error) -> ExitCode {
     let code = match error.code {
         ErrorCode::InvalidArguments
@@ -388,6 +609,7 @@ pub fn exit_code(error: &Error) -> ExitCode {
         | ErrorCode::InputTooLarge
         | ErrorCode::AudioTooLong
         | ErrorCode::UnsupportedFormat
+        | ErrorCode::InvalidConfig
         | ErrorCode::ModelNotFound => 2,
         ErrorCode::EngineNotAvailable
         | ErrorCode::EngineFailed
@@ -398,25 +620,22 @@ pub fn exit_code(error: &Error) -> ExitCode {
 }
 
 fn json_flag(args: &Args) -> bool {
-    matches!(args.command, Command::File { json: true, .. })
+    match &args.command {
+        Command::File(args) => args.json,
+        Command::CheckConfig(args) => args.json,
+        Command::Models {
+            command: ModelsCommand::List(args),
+        } => args.json,
+    }
 }
 
 fn normalize_language(language: Option<String>) -> Result<Option<String>, Error> {
     let Some(lang) = language else {
         return Ok(None);
     };
-    let lang = lang.trim().to_lowercase();
-    if lang.len() != 2 || !lang.bytes().all(|b| b.is_ascii_lowercase()) {
-        return Err(Error::invalid_arguments(
-            "--language must be a 2-letter ISO-639-1 code",
-        ));
-    }
-    if !SUPPORTED_LANGUAGES.contains(&lang.as_str()) {
-        return Err(Error::invalid_arguments(format!(
-            "unsupported language code: {lang}"
-        )));
-    }
-    Ok(Some(lang))
+    validate_language(&lang)
+        .map(Some)
+        .map_err(Error::invalid_arguments)
 }
 
 fn normalize_threads(threads: Option<usize>) -> Result<i32, Error> {

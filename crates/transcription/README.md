@@ -59,11 +59,16 @@ This is a documented limitation; Windows native builds come in a later phase.
 ## Usage
 
 ```bash
-pumice-transcribe file audio.wav --model model.gguf [--language pt] [--json]
+pumice-transcribe file audio.wav --model-file model.gguf --language pt --json
 ```
 
-`--language` is an optional hint. When given, the JSON result reports that
-language; otherwise it reports the language detected by the engine.
+`--model-file` takes a direct GGUF path. You can also use `--model ID` to
+select a model configured in `transcribe.yml`, or omit both flags to use the
+configured `default_model`.
+
+See [`docs/transcription.md`](../../docs/transcription.md) for the full guide:
+configuration schema, model download recipes, JSON output, exit codes, and
+supported formats.
 
 ## Supported formats
 

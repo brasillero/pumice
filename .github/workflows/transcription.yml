@@ -68,7 +68,7 @@ jobs:
           bin="target/release/pumice-transcribe"
           out_file="${RUNNER_TEMP}/transcribe-out.json"
           "$bin" file crates/transcription/tests/fixtures/sample-pt.wav \
-            --model "$MODEL_DIR/whisper-tiny-Q8_0.gguf" --json > "$out_file"
+            --model-file "$MODEL_DIR/whisper-tiny-Q8_0.gguf" --json > "$out_file"
           python3 -c "
           import json, sys
           with open(sys.argv[1]) as f:

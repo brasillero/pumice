@@ -1182,6 +1182,7 @@ dependencies = [
  "libc",
  "rubato",
  "serde",
+ "serde-saphyr",
  "serde_json",
  "symphonia",
  "tempfile",
