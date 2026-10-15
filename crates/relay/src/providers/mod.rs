@@ -80,7 +80,7 @@ pub struct ProviderDescriptor {
     /// program exactly like a formatting call; `None` refuses shims.
     pub npm_entrypoint: Option<&'static str>,
     /// Short official installation hint for a missing provider, printed by
-    /// startup and `pumice doctor`.
+    /// startup and `pumice relay doctor`.
     pub install_hint: &'static str,
 }
 

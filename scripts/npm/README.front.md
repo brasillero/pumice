@@ -47,13 +47,13 @@ platform from the registry.
 ## Use
 
 ```sh
-pumice               # starts the service on http://127.0.0.1:7567/v1
-pumice doctor        # shows which AI CLIs are installed and reachable
-pumice check-config  # validates the optional YAML config
+pumice relay serve        # starts the service on http://127.0.0.1:7567/v1
+pumice relay doctor       # shows which AI CLIs are installed and reachable
+pumice relay check-config # validates the optional YAML config
 ```
 
-(`pumice serve` is an explicit alias for the start command, and
-`pumice --config <path>` starts it with an explicit config file.)
+(`pumice relay` with no further arguments is the start command, and
+`pumice relay --config <path>` starts it with an explicit config file.)
 
 In Handy: **Settings → Advanced → Experimental Features → Post Processing**,
 set the provider to **Custom**, base URL `http://127.0.0.1:7567/v1`, API key
@@ -65,8 +65,8 @@ as JSON. Stop the service with Ctrl-C.
 Every setting has a built-in default, so a config file is not required. To
 customize, create the per-user config and edit it:
 
-- Windows: `%APPDATA%\pumice\pumice.yaml`
-- Linux and macOS: `~/.config/pumice/pumice.yaml`
+- Windows: `%APPDATA%\pumice\relay.yml`
+- Linux and macOS: `~/.config/pumice/relay.yml`
 
 The service listens on `127.0.0.1` only, sends no telemetry and makes no
 external connections of its own.

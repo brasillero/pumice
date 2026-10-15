@@ -36,7 +36,7 @@ fn pipeline(yaml: &str, scenario: Value) -> (Pipeline, FakeCli) {
     let fake = FakeCli::new(scenario);
     let yaml = yaml.replace("{binary}", &fake.path().display().to_string());
     let dir = TempDir::new().expect("temp dir");
-    let path = dir.path().join("pumice.yaml");
+    let path = dir.path().join("relay.yml");
     fs::write(&path, yaml).expect("write config");
     let config = config::load_with_env(Some(&path), |_| None)
         .expect("config loads")
@@ -246,7 +246,7 @@ async fn removed_default_key_fails_the_config() {
     let yaml = "default: claude\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n"
         .replace("{binary}", &fake.path().display().to_string());
     let dir = TempDir::new().expect("temp dir");
-    let path = dir.path().join("pumice.yaml");
+    let path = dir.path().join("relay.yml");
     fs::write(&path, yaml).expect("write config");
     let error = config::load_with_env(Some(&path), |_| None)
         .expect_err("the removed key fails the config")

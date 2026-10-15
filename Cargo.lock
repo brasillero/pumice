@@ -1213,8 +1213,10 @@ dependencies = [
 name = "pumice"
 version = "0.2.0"
 dependencies = [
+ "libc",
  "pumice-relay",
  "tempfile",
+ "windows-sys",
 ]
 
 [[package]]

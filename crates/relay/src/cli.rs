@@ -5,6 +5,7 @@
 //! summarizes the configuration; `doctor` reports which provider CLIs are
 //! installed and can run one real call to check a provider's login.
 
+use std::ffi::OsString;
 use std::io::{self, IsTerminal};
 use std::path::Path;
 use std::process::ExitCode;
@@ -33,6 +34,7 @@ usage:
   {name} --help                            print this help
   {name} --version                         print the version
 
+  --config <path> may also precede the command: {name} --config <path> check-config
   --plain prints one log line per request instead of the live view
 "
     )
@@ -43,9 +45,17 @@ fn doctor_usage(name: &str) -> String {
 }
 
 pub fn run(name: &str) -> ExitCode {
+    run_with(name, std::env::args_os().skip(1))
+}
+
+/// Runs the CLI as `name` with an explicit argument list (excluding the
+/// program name). The `pumice` dispatcher uses this for its `relay`
+/// subcommand so there is exactly one argument parser, whether the relay
+/// runs standalone or in-process.
+pub fn run_with(name: &str, args: impl IntoIterator<Item = OsString>) -> ExitCode {
     // `std::env::args` panics on an argument that is not valid Unicode.
-    let Some(args) = std::env::args_os()
-        .skip(1)
+    let Some(args) = args
+        .into_iter()
         .map(|arg| arg.into_string().ok())
         .collect::<Option<Vec<String>>>()
     else {
@@ -63,17 +73,52 @@ pub fn run(name: &str) -> ExitCode {
             println!("{name} {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        ["check-config", rest @ ..] => check_config(rest, name),
-        ["doctor", rest @ ..] => doctor(rest, name),
-        ["serve", rest @ ..] => serve(rest, name, &format!("{name} serve")),
-        // Bare invocation starts the service. `--config`, `--plain` or both are
-        // the only accepted bare flags.
-        [] | ["--config", ..] | ["--plain", ..] => serve(&args, name, name),
-        [first, ..] => {
-            eprintln!("error: unexpected argument '{first}'\n");
-            eprint!("{}", usage(name));
-            ExitCode::from(2)
+        _ => {
+            // `--config <path>` may also precede the command
+            // (`pumice relay --config FILE check-config`); it applies to
+            // whichever command follows and may still appear only once.
+            let (leading, rest) = peel_leading_config(&args);
+            match rest {
+                ["check-config", rest @ ..] => check_config(leading, rest, name),
+                ["doctor", rest @ ..] => doctor(leading, rest, name),
+                ["serve", rest @ ..] => serve(leading, rest, name, &format!("{name} serve")),
+                // Bare invocation starts the service. `--config`, `--plain`
+                // or both are the only accepted bare flags.
+                [] | ["--config", ..] | ["--plain", ..] => serve(leading, rest, name, name),
+                [first, ..] => {
+                    eprintln!("error: unexpected argument '{first}'\n");
+                    eprint!("{}", usage(name));
+                    ExitCode::from(2)
+                }
+            }
         }
+    }
+}
+
+/// Splits off a `--config <path>` placed before the subcommand. Anything
+/// that is not exactly that prefix is returned untouched.
+fn peel_leading_config<'a>(args: &'a [&'a str]) -> (Option<&'a Path>, &'a [&'a str]) {
+    match args {
+        ["--config", path, rest @ ..] => (Some(Path::new(path)), rest),
+        _ => (None, args),
+    }
+}
+
+/// Merges a leading `--config` with the command's own flag. Two configs are
+/// a usage error, never "last one wins"; `usage` is the command's complete
+/// usage line, printed as-is.
+fn merge_config<'a>(
+    leading: Option<&'a Path>,
+    own: Option<&'a Path>,
+    usage: &str,
+) -> Result<Option<&'a Path>, ExitCode> {
+    match (leading, own) {
+        (Some(_), Some(_)) => {
+            eprintln!("error: --config given more than once\n{usage}");
+            Err(ExitCode::from(2))
+        }
+        (Some(path), None) | (None, Some(path)) => Ok(Some(path)),
+        (None, None) => Ok(None),
     }
 }
 
@@ -148,8 +193,14 @@ fn build_runtime() -> Result<tokio::runtime::Runtime, ExitCode> {
         })
 }
 
-fn check_config(args: &[&str], name: &str) -> ExitCode {
-    let explicit = match config_flag(args, &format!("{name} check-config")) {
+fn check_config(leading: Option<&Path>, args: &[&str], name: &str) -> ExitCode {
+    let command = format!("{name} check-config");
+    let own = match config_flag(args, &command) {
+        Ok(own) => own,
+        Err(code) => return code,
+    };
+    let explicit = match merge_config(leading, own, &format!("usage: {command} [--config <path>]"))
+    {
         Ok(explicit) => explicit,
         Err(code) => return code,
     };
@@ -162,12 +213,20 @@ fn check_config(args: &[&str], name: &str) -> ExitCode {
     }
 }
 
-fn serve(args: &[&str], name: &str, command: &str) -> ExitCode {
+fn serve(leading: Option<&Path>, args: &[&str], name: &str, command: &str) -> ExitCode {
     let flags = match serve_flags(args, command) {
         Ok(flags) => flags,
         Err(code) => return code,
     };
-    let loaded = match load_config(flags.config) {
+    let config = match merge_config(
+        leading,
+        flags.config,
+        &format!("usage: {command} [--config <path>] [--plain]"),
+    ) {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    let loaded = match load_config(config) {
         Ok(loaded) => loaded,
         Err(code) => return code,
     };
@@ -179,7 +238,7 @@ fn serve(args: &[&str], name: &str, command: &str) -> ExitCode {
 }
 
 /// `doctor [--config <path>] [--login-check --provider <id>]`.
-fn doctor(args: &[&str], name: &str) -> ExitCode {
+fn doctor(leading: Option<&Path>, args: &[&str], name: &str) -> ExitCode {
     let mut explicit: Option<&Path> = None;
     let mut login_check = false;
     let mut provider: Option<&str> = None;
@@ -227,6 +286,10 @@ fn doctor(args: &[&str], name: &str) -> ExitCode {
         eprintln!("error: --login-check requires --provider <id>\n{usage}");
         return ExitCode::from(2);
     }
+    let explicit = match merge_config(leading, explicit, &usage) {
+        Ok(explicit) => explicit,
+        Err(code) => return code,
+    };
     match provider {
         Some(id) => doctor_login_check(explicit, id),
         None => doctor_report(explicit),

@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **`pumice` is now the module dispatcher.** Bare `pumice` prints the command overview and exits; the relay runs as `pumice relay` / `pumice relay serve` (also in-process: one executable still serves); `pumice transcribe …` runs the `pumice-transcribe` installed next to it — replacing itself with it on Unix, and on Windows waiting out console Ctrl-C and exiting with the child's full exit code. The old `pumice` / `pumice --plain` invocations no longer start the service.
+- **The relay's default configuration file is now `relay.yml`** (`pumice.yaml` is no longer read; the example file is `relay.example.yml`). The standalone `pumice-relay` binary is unchanged. See "Upgrading from 0.2" in the installation guide.
+
 ## [0.2.0] — 2026-10-11
 
 ### Added

@@ -3,7 +3,7 @@
 **/*.rs.bk
 
 # Local configuration and debug logs (may contain dictated text)
-/pumice.yaml
+/relay.yml
 *.log
 
 # Editors and OS files

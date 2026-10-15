@@ -1,4 +1,4 @@
-//! `pumice doctor` (S2.8 part 2): what is installed, what is missing and how
+//! `pumice relay doctor` (S2.8 part 2): what is installed, what is missing and how
 //! to install it — plus the only quota-bearing diagnostic, `--login-check`.
 //!
 //! The default report renders from [`ProviderStatus`] plus the loaded config
@@ -298,7 +298,7 @@ mod tests {
     fn render_marks_missing_enabled_providers_and_counts_them_unready() {
         let mut statuses = full_scan();
         statuses[1] = status("codex", true, Found::Missing, Version::Unavailable);
-        let report = render(&ConfigSource::File(PathBuf::from("pumice.yaml")), &statuses);
+        let report = render(&ConfigSource::File(PathBuf::from("relay.yml")), &statuses);
 
         assert!(
             report.contains("codex: enabled, missing (install: npm install -g @openai/codex)\n"),
@@ -308,7 +308,7 @@ mod tests {
             report.contains("1 of 2 enabled providers ready\n"),
             "{report}"
         );
-        assert!(report.contains("config: pumice.yaml\n"), "{report}");
+        assert!(report.contains("config: relay.yml\n"), "{report}");
     }
 
     #[test]

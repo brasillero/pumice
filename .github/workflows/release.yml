@@ -25,7 +25,7 @@ on:
       - crates/**
       - .cargo/config.toml
       - LICENSE
-      - pumice.example.yaml
+      - relay.example.yml
       - Cargo.toml
       - Cargo.lock
   workflow_dispatch:
