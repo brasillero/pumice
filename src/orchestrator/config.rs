@@ -31,6 +31,21 @@
 //! must be present even as an explicit null, and `relay_route` is always
 //! explicit (D4). Validation reports `file:line:column` like the other
 //! modules; relative module paths resolve against this file's directory.
+//!
+//! An optional `serve:` section configures `pumice serve`
+//! (p13.1-flow-seam/D3); files without it stay valid for `pumice run`:
+//!
+//! ```yaml
+//! serve:
+//!   enabled: true                # default false
+//!   port: 17570                  # optional; 7567 is refused, 0 picks a free port
+//!   transcription_model: turbo   # required when enabled
+//!   startup_timeout_ms: 60000    # optional, 1000..=300000
+//! ```
+//!
+//! The section's own shape is checked at load; the rules that tie it to the
+//! flows (every enabled flow uses the served model) are checked only by
+//! `pumice serve`, through [`serve_settings`].
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -55,12 +70,58 @@ const DEFAULT_RELAY_MS: u64 = 60_000;
 
 const PER_USER_FILE: &str = "orchestrator.yml";
 
+/// `pumice serve`'s default frontend port (p13.1-flow-seam/D3).
+pub const DEFAULT_SERVE_PORT: u16 = 17570;
+/// The live relay's port: never accepted for `pumice serve` (D3).
+pub const RESERVED_RELAY_PORT: u16 = 7567;
+const DEFAULT_STARTUP_TIMEOUT_MS: u64 = 60_000;
+const MIN_STARTUP_TIMEOUT_MS: u64 = 1_000;
+const MAX_STARTUP_TIMEOUT_MS: u64 = 300_000;
+/// The managed transcription child announces model ids of at most this many
+/// bytes (crates/transcription/src/managed.rs `MAX_MODEL_ID_BYTES`; kept in
+/// sync by hand, `pumice` does not depend on the transcription crate).
+const MAX_SERVED_MODEL_BYTES: usize = 512;
+/// `pumice serve` publishes at most this many enabled flows, each with an id
+/// of at most this many bytes (design §7: no silent truncation).
+pub const MAX_SERVED_FLOWS: usize = 128;
+pub const MAX_SERVED_FLOW_ID_BYTES: usize = 128;
+
 /// Validated orchestrator configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub modules: Modules,
     /// Every flow in file (list) order, enabled or not.
     pub flows: Vec<Flow>,
+    /// The `serve:` section, when the file has one.
+    pub serve: Option<Serve>,
+}
+
+/// The `serve:` section, with its shape already checked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Serve {
+    pub enabled: bool,
+    pub port: u16,
+    /// Required when `enabled`; checked at load.
+    pub transcription_model: Option<String>,
+    pub startup_timeout: Duration,
+    /// Source positions for errors `pumice serve` reports later.
+    pub spans: ServeSpans,
+}
+
+/// The 1-based (line, column) of the `serve:` section and of its keys.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ServeSpans {
+    pub section: Option<(u64, u64)>,
+    pub enabled: Option<(u64, u64)>,
+}
+
+/// What `pumice serve` runs with, after [`serve_settings`] checked the
+/// section against the flows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServeSettings {
+    pub port: u16,
+    pub transcription_model: String,
+    pub startup_timeout: Duration,
 }
 
 /// The module references. `formatter` is optional only when no enabled flow
@@ -101,6 +162,7 @@ pub struct Flow {
 /// serde buffering).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReferenceSpans {
+    pub id: Option<(u64, u64)>,
     pub transcription_model: Option<(u64, u64)>,
     pub formatter: Option<(u64, u64)>,
     pub relay_route: Option<(u64, u64)>,
@@ -290,7 +352,155 @@ fn validate(raw: RawConfig, config_dir: &Path) -> Result<Config, ConfigError> {
         ));
     }
 
-    Ok(Config { modules, flows })
+    let serve = raw.serve.map(validate_serve).transpose()?;
+
+    Ok(Config {
+        modules,
+        flows,
+        serve,
+    })
+}
+
+fn validate_serve(raw: Spanned<RawServe>) -> Result<Serve, ConfigError> {
+    let section = raw.referenced;
+    let serve = raw.value;
+    let enabled = serve.enabled.as_ref().is_some_and(|span| span.value);
+    let port = match &serve.port {
+        None => DEFAULT_SERVE_PORT,
+        Some(span) => check_serve_port(span.value)
+            .map_err(|message| ConfigError::at(span.referenced, message))?,
+    };
+    let transcription_model = match &serve.transcription_model {
+        None if enabled => {
+            return Err(ConfigError::at(
+                section,
+                "\"serve.transcription_model\" is required when serve is enabled; \
+                 name the model every enabled flow uses",
+            ));
+        }
+        None => None,
+        Some(span) if span.value.trim().is_empty() => {
+            return Err(ConfigError::at(
+                span.referenced,
+                "serve.transcription_model must not be empty",
+            ));
+        }
+        Some(span) if span.value.len() > MAX_SERVED_MODEL_BYTES => {
+            return Err(ConfigError::at(
+                span.referenced,
+                format!("serve.transcription_model must be at most {MAX_SERVED_MODEL_BYTES} bytes"),
+            ));
+        }
+        Some(span) => Some(span.value.clone()),
+    };
+    let startup_timeout = match &serve.startup_timeout_ms {
+        None => Duration::from_millis(DEFAULT_STARTUP_TIMEOUT_MS),
+        Some(span) if !(MIN_STARTUP_TIMEOUT_MS..=MAX_STARTUP_TIMEOUT_MS).contains(&span.value) => {
+            return Err(ConfigError::at(
+                span.referenced,
+                format!(
+                    "serve.startup_timeout_ms must be between {MIN_STARTUP_TIMEOUT_MS} and {MAX_STARTUP_TIMEOUT_MS}"
+                ),
+            ));
+        }
+        Some(span) => Duration::from_millis(span.value),
+    };
+    Ok(Serve {
+        enabled,
+        port,
+        transcription_model,
+        startup_timeout,
+        spans: ServeSpans {
+            section: position(section),
+            enabled: serve
+                .enabled
+                .as_ref()
+                .and_then(|span| position(span.referenced)),
+        },
+    })
+}
+
+/// The frontend port rule shared by `serve.port` and `pumice serve --port`:
+/// any port but the live relay's (D3). Port 0 is accepted when given
+/// explicitly; the chosen port is announced.
+pub fn check_serve_port(port: u16) -> Result<u16, String> {
+    if port == RESERVED_RELAY_PORT {
+        return Err(format!(
+            "port {RESERVED_RELAY_PORT} is reserved for the relay service; pumice serve \
+             uses another port (default {DEFAULT_SERVE_PORT})"
+        ));
+    }
+    Ok(port)
+}
+
+/// The settings `pumice serve` runs with: the section must be present and
+/// enabled, and every enabled flow must use the served transcription model
+/// (p13.1-flow-seam/D4), with at most [`MAX_SERVED_FLOWS`] enabled flows
+/// whose ids fit [`MAX_SERVED_FLOW_ID_BYTES`]. Errors carry the
+/// orchestrator file and, when known, the offending value's position.
+pub fn serve_settings(loaded: &LoadedConfig) -> Result<ServeSettings, ConfigError> {
+    let path = &loaded.path;
+    let located = |at: Option<(u64, u64)>, message: String| {
+        ConfigError::at_file(
+            path,
+            at.map(|(line, _)| line),
+            at.map(|(_, column)| column),
+            message,
+        )
+    };
+    let Some(serve) = &loaded.config.serve else {
+        return Err(ConfigError::file(
+            path,
+            "\"serve\" is not configured; add a \"serve:\" section with \"enabled: true\" \
+             and \"transcription_model\" to run pumice serve",
+        ));
+    };
+    if !serve.enabled {
+        return Err(located(
+            serve.spans.enabled.or(serve.spans.section),
+            "serve is not enabled; set \"serve.enabled: true\" to run pumice serve".to_owned(),
+        ));
+    }
+    let Some(model) = &serve.transcription_model else {
+        // `validate_serve` requires the model once enabled.
+        return Err(located(
+            serve.spans.section,
+            "\"serve.transcription_model\" is required when serve is enabled".to_owned(),
+        ));
+    };
+    let mut enabled_flows = 0usize;
+    for flow in loaded.config.flows.iter().filter(|flow| flow.enabled) {
+        enabled_flows += 1;
+        if enabled_flows > MAX_SERVED_FLOWS {
+            return Err(located(
+                flow.references.id,
+                format!("pumice serve publishes at most {MAX_SERVED_FLOWS} enabled flows"),
+            ));
+        }
+        if flow.id.len() > MAX_SERVED_FLOW_ID_BYTES {
+            return Err(located(
+                flow.references.id,
+                format!(
+                    "pumice serve needs enabled flow ids of at most {MAX_SERVED_FLOW_ID_BYTES} bytes"
+                ),
+            ));
+        }
+        if &flow.transcription_model != model {
+            return Err(located(
+                flow.references.transcription_model,
+                format!(
+                    "flow \"{}\" uses a different transcription model than \
+                     \"serve.transcription_model\"; every enabled flow must use the served model",
+                    flow.id
+                ),
+            ));
+        }
+    }
+    Ok(ServeSettings {
+        port: serve.port,
+        transcription_model: model.clone(),
+        startup_timeout: serve.startup_timeout,
+    })
 }
 
 fn validate_modules(
@@ -486,6 +696,7 @@ fn validate_flow(entry: &Spanned<RawFlow>) -> Result<Flow, ConfigError> {
         relay_route: relay_route.value.clone(),
         budgets,
         references: ReferenceSpans {
+            id: position(id_span),
             transcription_model: position(transcription_model.referenced),
             formatter: formatter_span.and_then(position),
             relay_route: position(relay_route.referenced),
@@ -643,6 +854,16 @@ struct RawConfig {
     modules: Option<Spanned<RawModules>>,
     #[serde(default)]
     flows: Vec<Spanned<RawFlow>>,
+    serve: Option<Spanned<RawServe>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawServe {
+    enabled: Option<Spanned<bool>>,
+    port: Option<Spanned<u16>>,
+    transcription_model: Option<Spanned<String>>,
+    startup_timeout_ms: Option<Spanned<u64>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1318,5 +1539,189 @@ flows:
         .to_string();
         assert!(err.contains("no per-user configuration directory"), "{err}");
         assert!(err.contains("--config"), "{err}");
+    }
+
+    /// [`VALID`] with a `serve:` section appended.
+    fn with_serve(serve: &str) -> String {
+        format!("{VALID}serve:\n{serve}")
+    }
+
+    #[test]
+    fn files_without_serve_stay_valid_and_serve_settings_need_the_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        let loaded = load_text(&tmp, VALID).unwrap();
+        assert_eq!(loaded.config.serve, None);
+        let err = serve_settings(&loaded).unwrap_err().to_string();
+        assert!(err.contains("\"serve\" is not configured"), "{err}");
+        assert!(err.contains("orchestrator.yml"), "names the file: {err}");
+    }
+
+    #[test]
+    fn serve_section_defaults_and_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let loaded = load_text(
+            &tmp,
+            &with_serve("  enabled: true\n  transcription_model: turbo\n"),
+        )
+        .unwrap();
+        let serve = loaded.config.serve.as_ref().unwrap();
+        assert!(serve.enabled);
+        assert_eq!(serve.port, DEFAULT_SERVE_PORT);
+        assert_eq!(serve.startup_timeout, Duration::from_millis(60_000));
+        let settings = serve_settings(&loaded).unwrap();
+        assert_eq!(
+            settings,
+            ServeSettings {
+                port: 17570,
+                transcription_model: "turbo".to_owned(),
+                startup_timeout: Duration::from_millis(60_000),
+            }
+        );
+
+        let loaded = load_text(
+            &tmp,
+            &with_serve(
+                "  enabled: true\n  port: 0\n  transcription_model: turbo\n  startup_timeout_ms: 1000\n",
+            ),
+        )
+        .unwrap();
+        let settings = serve_settings(&loaded).unwrap();
+        assert_eq!(settings.port, 0, "port 0 is allowed explicitly");
+        assert_eq!(settings.startup_timeout, Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn serve_disabled_or_unset_is_a_located_error_for_serve_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A disabled section loads (pumice run keeps working) but cannot serve.
+        let text = with_serve("  enabled: false\n");
+        let loaded = load_text(&tmp, &text).unwrap();
+        let err = serve_settings(&loaded).unwrap_err().to_string();
+        assert!(err.contains("serve is not enabled"), "{err}");
+        let line = text.lines().count();
+        assert!(
+            err.contains(&format!(":{line}:")),
+            "the enabled line: {err}"
+        );
+
+        // `enabled` missing: false, located at the section.
+        let loaded = load_text(&tmp, &with_serve("  port: 18000\n")).unwrap();
+        let err = serve_settings(&loaded).unwrap_err().to_string();
+        assert!(err.contains("serve is not enabled"), "{err}");
+    }
+
+    #[test]
+    fn serve_port_7567_and_bad_values_are_rejected_with_their_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let text = with_serve("  enabled: true\n  port: 7567\n  transcription_model: turbo\n");
+        let err = load_text(&tmp, &text).unwrap_err().to_string();
+        assert!(err.contains("port 7567 is reserved"), "{err}");
+        let line = text.lines().count() - 1;
+        assert!(err.contains(&format!(":{line}:")), "the port line: {err}");
+        // Even a disabled section may not name it.
+        let err = load_text(&tmp, &with_serve("  enabled: false\n  port: 7567\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("port 7567 is reserved"), "{err}");
+
+        let err = load_text(
+            &tmp,
+            &with_serve("  enabled: true\n  port: 70000\n  transcription_model: t\n"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("orchestrator.yml:"), "{err}");
+
+        for bad in ["999", "300001"] {
+            let err = load_text(
+                &tmp,
+                &with_serve(&format!(
+                    "  enabled: true\n  transcription_model: turbo\n  startup_timeout_ms: {bad}\n"
+                )),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.contains("startup_timeout_ms must be between 1000 and 300000"),
+                "{err}"
+            );
+        }
+
+        let err = load_text(&tmp, &with_serve("  enabled: true\n  bogus: 1\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown setting `bogus`"), "{err}");
+        // No `endpoints:` map in P13 (p13.1-flow-seam/D2).
+        let err = load_text(&tmp, &with_serve("  enabled: true\n  endpoints: {}\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown setting `endpoints`"), "{err}");
+    }
+
+    #[test]
+    fn serve_model_is_required_when_enabled_and_must_match_enabled_flows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = load_text(&tmp, &with_serve("  enabled: true\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("\"serve.transcription_model\" is required"),
+            "{err}"
+        );
+        let err = load_text(
+            &tmp,
+            &with_serve("  enabled: true\n  transcription_model: \" \"\n"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("must not be empty"), "{err}");
+
+        // The enabled flow `clean` uses turbo; serving another model fails
+        // at that flow's transcription_model line. (`raw` is disabled.)
+        let text = with_serve("  enabled: true\n  transcription_model: small\n");
+        let loaded = load_text(&tmp, &text).unwrap();
+        let err = serve_settings(&loaded).unwrap_err().to_string();
+        assert!(
+            err.contains("flow \"clean\" uses a different transcription model"),
+            "{err}"
+        );
+        assert!(
+            err.contains("orchestrator.yml:13:"),
+            "the flow field: {err}"
+        );
+
+        // A disabled flow may use another model.
+        let text = VALID.replace(
+            "    enabled: false\n    transcription_model: turbo",
+            "    enabled: false\n    transcription_model: small",
+        );
+        let loaded = load_text(
+            &tmp,
+            &format!("{text}serve:\n  enabled: true\n  transcription_model: turbo\n"),
+        )
+        .unwrap();
+        serve_settings(&loaded).unwrap();
+    }
+
+    #[test]
+    fn served_flow_ids_are_bounded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let long = "x".repeat(MAX_SERVED_FLOW_ID_BYTES + 1);
+        let text = format!(
+            "{}serve:\n  enabled: true\n  transcription_model: turbo\n",
+            VALID.replace("- id: clean", &format!("- id: {long}"))
+        );
+        let loaded = load_text(&tmp, &text).unwrap();
+        let err = serve_settings(&loaded).unwrap_err().to_string();
+        assert!(err.contains("ids of at most 128 bytes"), "{err}");
+        assert!(err.contains("orchestrator.yml:11:"), "the id line: {err}");
+        assert!(!err.contains(&long), "the id is not echoed: {err}");
+    }
+
+    #[test]
+    fn the_cli_port_rule_matches_the_config_rule() {
+        assert!(check_serve_port(7567).is_err());
+        assert_eq!(check_serve_port(0), Ok(0));
+        assert_eq!(check_serve_port(17570), Ok(17570));
     }
 }
