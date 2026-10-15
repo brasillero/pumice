@@ -15,7 +15,8 @@ path = "src/main.rs"
 
 [features]
 default = []
-engine = ["dep:transcribe-cpp"]
+opus = ["dep:opus", "dep:opusic-sys", "dep:webm-iterable"]
+engine = ["dep:transcribe-cpp", "opus"]
 # Opt-in Linux-only mode: the engine links as shared libraries plus one ggml
 # CPU module per x86 ISA tier; the best module for the running CPU is selected
 # at startup from a directory next to the executable. The default `engine`
@@ -30,6 +31,8 @@ http-body-util = { workspace = true }
 libc = { workspace = true }
 futures-core = "0.3"
 multer = "3.1.0"
+opusic-sys = { version = "=0.7.5", default-features = false, features = ["bundled"], optional = true }
+opus = { version = "=0.4.0", optional = true }
 rubato = { workspace = true }
 serde = { workspace = true }
 serde-saphyr = { workspace = true }
@@ -38,6 +41,7 @@ symphonia = { version = "=0.6.1", default-features = false, features = ["wav", "
 tokio = { workspace = true }
 tokio-util = "0.7"
 transcribe-cpp = { version = "=0.3.1", optional = true, default-features = false }
+webm-iterable = { version = "=0.7.1", default-features = false, optional = true }
 
 [dev-dependencies]
 hound = { workspace = true }
