@@ -39,6 +39,10 @@ pub struct ProcessTree {
     status: Option<ExitStatus>,
     /// The tree was killed and the direct child reaped: never signal again.
     reaped: bool,
+    /// Test hook: [`finish`](ProcessTree::finish) reports a failed reap
+    /// while the child stays unreaped and owned (still pinning its group).
+    #[cfg(test)]
+    fail_reap: bool,
 }
 
 impl ProcessTree {
@@ -67,6 +71,8 @@ impl ProcessTree {
             #[cfg(windows)]
             status: None,
             reaped: false,
+            #[cfg(test)]
+            fail_reap: false,
         })
     }
 
@@ -153,6 +159,10 @@ impl ProcessTree {
     /// kill).
     pub async fn finish(&mut self, limit: Duration) -> Option<ExitStatus> {
         self.kill_now();
+        #[cfg(test)]
+        if self.fail_reap {
+            return None;
+        }
         let status = tokio::time::timeout(limit, self.reap()).await.ok()?.ok()?;
         self.reaped = true;
         Some(status)
@@ -316,23 +326,17 @@ mod tests {
 
     /// A tree whose reap fails stays registered — and is counted — instead
     /// of being dropped, so a later drain cannot report success; a drain
-    /// handles each tree once.
+    /// handles each tree once. The failure is injected while the leader
+    /// stays unreaped and owned, so every kill reaches only our own group.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_tree_that_cannot_be_reaped_stays_registered() {
         let mut command = Command::new("sleep");
         command.arg("30");
-        let tree = ProcessTree::spawn(command).expect("spawn sleep");
-        let pid = tree.pid;
+        let mut tree = ProcessTree::spawn(command).expect("spawn sleep");
+        tree.fail_reap = true;
         let scope = CleanupScope::new();
         scope.kill_and_register(tree);
-
-        // Steal the reap: the killed leader is collected behind the tree's
-        // back, so its own reap fails (ECHILD) however long it may wait.
-        let mut status = 0;
-        // SAFETY: plain waitpid on our own child with a valid status pointer.
-        let rc = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, 0) };
-        assert_eq!(rc, pid as libc::pid_t, "{}", io::Error::last_os_error());
 
         assert_eq!(scope.drain(Duration::from_secs(5)).await, 1);
         assert!(!scope.is_empty(), "the failed tree stays registered");
@@ -341,13 +345,19 @@ mod tests {
             1,
             "a later drain still reports it"
         );
+        assert!(!scope.is_empty());
 
-        // The leader is gone: never signal its (possibly reused) ID again.
-        let mut pending = scope.pending.lock().unwrap();
-        for tree in pending.iter_mut() {
-            tree.reaped = true;
+        // Without the injected failure the kept tree is reaped normally.
+        for tree in scope
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter_mut()
+        {
+            tree.fail_reap = false;
         }
-        pending.clear();
+        assert_eq!(scope.drain(Duration::from_secs(5)).await, 0);
+        assert!(scope.is_empty());
     }
 
     /// A registered temporary-root cleanup is awaited within the drain
