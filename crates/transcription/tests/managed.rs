@@ -13,7 +13,7 @@ use pumice_transcription::{
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitCode, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -28,6 +28,9 @@ const ENGINE_ENV: &str = "PUMICE_TEST_ENGINE";
 const LOAD_MS_ENV: &str = "PUMICE_TEST_LOAD_MS";
 /// Created by the fake engine when a transcription starts.
 const STARTED_FILE_ENV: &str = "PUMICE_TEST_STARTED_FILE";
+/// Created by the fake engine factory when the model load starts (in
+/// `no-threads` mode, once new threads are forbidden).
+const LOADING_FILE_ENV: &str = "PUMICE_TEST_LOADING_FILE";
 
 const MODEL: &str = "turbo";
 const INSTANCE: &str = "gen-1";
@@ -79,6 +82,7 @@ fn child_main() -> ExitCode {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     let started_file = std::env::var_os(STARTED_FILE_ENV).map(PathBuf::from);
+    let loading_file = std::env::var_os(LOADING_FILE_ENV).map(PathBuf::from);
     run_with_engine_factory(std::env::args_os(), move |_path, _threads| {
         #[cfg(target_os = "linux")]
         if mode == "no-threads" {
@@ -88,6 +92,9 @@ fn child_main() -> ExitCode {
             };
             // SAFETY: plain syscall on this process with a valid struct.
             assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &none) }, 0);
+        }
+        if let Some(path) = &loading_file {
+            std::fs::write(path, b"loading").unwrap();
         }
         thread::sleep(Duration::from_millis(load_ms));
         if mode == "fail-load" {
@@ -186,6 +193,7 @@ struct Setup {
     _dir: tempfile::TempDir,
     config: PathBuf,
     started_file: PathBuf,
+    loading_file: PathBuf,
     model: String,
 }
 
@@ -205,10 +213,12 @@ fn setup_with_model_id(model_present: bool, model: &str) -> Setup {
     )
     .unwrap();
     let started_file = dir.path().join("started");
+    let loading_file = dir.path().join("loading");
     Setup {
         _dir: dir,
         config,
         started_file,
+        loading_file,
         model: model.to_string(),
     }
 }
@@ -228,6 +238,7 @@ fn spawn(setup: &Setup, engine: &str, load_ms: u64, extra: &[&str]) -> Spawned {
         .env(ENGINE_ENV, engine)
         .env(LOAD_MS_ENV, load_ms.to_string())
         .env(STARTED_FILE_ENV, &setup.started_file)
+        .env(LOADING_FILE_ENV, &setup.loading_file)
         .arg("--config")
         .arg(&setup.config)
         .args(["serve", "--model", &setup.model, "--port", "0"])
@@ -320,9 +331,21 @@ impl Spawned {
     }
 
     fn wait_for_started(&self, setup: &Setup) {
+        self.wait_for_file(&setup.started_file, "the engine never started");
+    }
+
+    fn wait_for_loading(&self, setup: &Setup) {
+        self.wait_for_file(&setup.loading_file, "the model load never started");
+    }
+
+    fn wait_for_file(&self, path: &Path, failure: &str) {
         let started = Instant::now();
-        while !setup.started_file.exists() {
-            assert!(started.elapsed() < PROMPT, "the engine never started");
+        while !path.exists() {
+            assert!(
+                started.elapsed() < PROMPT,
+                "{failure}; stderr: {}",
+                self.stderr()
+            );
             thread::sleep(Duration::from_millis(5));
         }
     }
@@ -508,7 +531,7 @@ fn ready_follows_load_and_bind_and_stdin_eof_stops_cleanly() {
 fn eof_during_model_load_never_announces_ready() {
     let setup = setup(true);
     let mut child = spawn(&setup, "ok", 800, &managed_args());
-    thread::sleep(Duration::from_millis(100));
+    child.wait_for_loading(&setup);
     child.close_stdin();
 
     let stopping = child.next_record();
@@ -521,7 +544,7 @@ fn eof_during_model_load_never_announces_ready() {
 fn eof_during_a_stuck_model_load_hits_the_watchdog() {
     let setup = setup(true);
     let mut child = spawn(&setup, "ok", 60_000, &managed_args());
-    thread::sleep(Duration::from_millis(100));
+    child.wait_for_loading(&setup);
     child.close_stdin();
     let closed = Instant::now();
 
@@ -543,7 +566,7 @@ fn a_watchdog_that_cannot_start_exits_at_once() {
     }
     let setup = setup(true);
     let mut child = spawn(&setup, "no-threads", 60_000, &managed_args());
-    thread::sleep(Duration::from_millis(100));
+    child.wait_for_loading(&setup);
     child.close_stdin();
     let closed = Instant::now();
 
