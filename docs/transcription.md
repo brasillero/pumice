@@ -135,6 +135,99 @@ its size in bytes when it is a regular file, and which model is the default.
 Missing paths and directories have `exists: false` and no `size` field in JSON.
 No hashing or network access is performed.
 
+### `serve`
+
+```bash
+pumice-transcribe serve --config ./transcribe.yml --model turbo --port 17568
+```
+
+Runs an OpenAI-compatible HTTP server on `127.0.0.1:PORT`. The bind address is
+always `127.0.0.1` and is not configurable. The port can also be set as
+`server.port` in `transcribe.yml`; `--port` overrides it. Port `0` is allowed
+and the actual bound address is printed on startup.
+
+`serve` loads one model at startup and keeps it in memory. The model is
+selected with `--model ID`; if omitted, the configured `default_model` is used.
+Startup load failure exits non-zero before the server starts listening.
+
+Only one transcription runs at a time. A second request is rejected
+immediately with HTTP 429 and no queue. `/v1/models` and `/health` stay
+responsive while a transcription runs.
+
+#### Endpoints
+
+- `GET /health` — liveness. Returns `200 application/json`:
+  ```json
+  { "status": "ok", "version": "0.2.0" }
+  ```
+
+- `GET /v1/models` — lists only the served model id in the OpenAI list shape:
+  ```json
+  {
+    "object": "list",
+    "data": [
+      { "id": "turbo", "object": "model", "created": 0, "owned_by": "pumice" }
+    ]
+  }
+  ```
+
+- `POST /v1/audio/transcriptions` — multipart/form-data transcription.
+
+  Required fields:
+  - `file`: exactly one uploaded audio file, non-empty.
+  - `model`: must equal the served model id exactly.
+
+  Optional fields:
+  - `language`: ISO-639-1 two-letter code (e.g. `pt`, `en`). Overrides the
+    configured default language hint.
+  - `response_format`: `json` (default) or `text`.
+  - `prompt`: client-supplied context, passed unchanged to the engine.
+  - `temperature`: finite number in `[0, 1]`.
+  - `stream`: must be absent or `false`; `true` is rejected.
+
+  Any other field, duplicate field, timestamp option, or unsupported
+  `response_format` is rejected with HTTP 400.
+
+  Responses:
+  - `json`: `200 application/json` with `{"text":"..."}`. Silence returns
+    `{"text":""}`.
+  - `text`: `200 text/plain; charset=utf-8` with the exact transcript bytes.
+
+  Limits: 25,000,000 uploaded file bytes, 26,000,000 total body bytes, ≤32
+  multipart parts, ≤16 KiB per text field, 120 seconds of decoded audio, 15
+  seconds upload deadline, 120 seconds total processing deadline. Enforced on
+  chunked bodies without unbounded buffering.
+
+  Error status codes use the OpenAI JSON error envelope:
+  ```json
+  { "error": { "message": "...", "type": "...", "param": null, "code": "..." } }
+  ```
+  - `400`: invalid request, unknown/duplicate fields, malformed multipart,
+    unsupported options, wrong model id, excess audio duration.
+  - `413`: total body or uploaded file too large.
+  - `415`: unsupported audio container/codec.
+  - `408`: upload deadline exceeded.
+  - `429`: server is already processing a transcription.
+  - `503`: server is shutting down or unavailable.
+  - `504`: total processing deadline exceeded.
+  - `500`: unexpected engine/worker failure.
+
+  Error messages are fixed and safe: they never include file paths, filenames,
+  the dictated prompt, the transcript, or raw decoder/native strings.
+
+```bash
+curl --fail-with-body --max-time 130 \
+  http://127.0.0.1:17568/v1/audio/transcriptions \
+  -F 'file=@clip.wav' -F 'model=turbo' -F 'language=pt'
+
+curl --fail-with-body --max-time 130 \
+  http://127.0.0.1:17568/v1/audio/transcriptions \
+  -F 'file=@clip.wav' -F 'model=turbo' -F 'response_format=text'
+
+curl --fail http://127.0.0.1:17568/v1/models
+curl --fail http://127.0.0.1:17568/health
+```
+
 ## Supported formats and limits
 
 Formats are detected by content (magic bytes), not by file extension.
