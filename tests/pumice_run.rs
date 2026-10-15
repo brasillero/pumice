@@ -1710,6 +1710,26 @@ fn a_broken_stdout_with_a_blocked_stderr_still_exits() {
 
 #[cfg(unix)]
 #[test]
+fn an_argument_error_with_a_broken_stdout_exits_1() {
+    // The envelope for an argument error cannot be written either: exit 1
+    // like every other stdout failure, not 2.
+    let (stdout_read, stdout_write) = std::io::pipe().expect("pipe");
+    drop(stdout_read);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pumice"));
+    command
+        .args(["run", "--json", "--no-such-flag"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_write))
+        .stderr(Stdio::null());
+    let mut child = command.spawn().expect("spawn pumice run");
+    drop(command);
+    let status =
+        wait_bounded(&mut child, std::time::Duration::from_secs(15)).expect("pumice run exits");
+    assert_eq!(status.code(), Some(1));
+}
+
+#[cfg(unix)]
+#[test]
 fn a_non_utf8_config_path_still_gets_a_valid_envelope() {
     // A config file name with a non-UTF-8 byte and invalid contents: the
     // error location is reported lossily (U+FFFD) in a valid envelope with

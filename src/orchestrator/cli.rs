@@ -45,10 +45,7 @@ pub fn run(args: &[OsString]) -> ExitCode {
             print!("{USAGE}");
             ExitCode::SUCCESS
         }
-        ParseResult::Error(message) => {
-            argument_failure(json, message);
-            ExitCode::from(2)
-        }
+        ParseResult::Error(message) => argument_failure(json, message),
         ParseResult::Run(params) => run_flow(params, json),
     }
 }
@@ -219,8 +216,9 @@ fn write_envelope(envelope: &RunEnvelope) -> bool {
     }
 }
 
-/// A failure envelope for argument errors (no flow was ever named).
-fn argument_failure(json: bool, message: String) {
+/// A failure envelope for argument errors (no flow was ever named). Exits 2,
+/// or 1 when the envelope cannot be written (see [`report`]).
+fn argument_failure(json: bool, message: String) -> ExitCode {
     if json {
         let envelope = RunEnvelope {
             schema_version: SCHEMA_VERSION,
@@ -241,11 +239,13 @@ fn argument_failure(json: bool, message: String) {
                 location: None,
             }),
         };
-        // Exit 2 either way; a failed write has nowhere safer to go.
-        let _ = write_envelope(&envelope);
+        if !write_envelope(&envelope) {
+            return ExitCode::from(1);
+        }
     } else {
         eprintln!("error: {message}\n{USAGE}");
     }
+    ExitCode::from(2)
 }
 
 fn internal_failure(json: bool, message: String) -> ExitCode {
