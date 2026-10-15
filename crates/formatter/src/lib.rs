@@ -7,6 +7,12 @@
 //! The library powers both the standalone `pumice-format` binary and the
 //! in-process `pumice format …` subcommand (D13).
 
+pub mod builtins;
+pub mod config;
+pub mod definition;
 pub mod error;
 
+pub use builtins::{BUILTIN_CLEAN, builtin_clean};
+pub use config::ConfigError;
+pub use definition::{FormatterDefinition, load_definition_file};
 pub use error::{Error, ErrorCode, JsonError};
