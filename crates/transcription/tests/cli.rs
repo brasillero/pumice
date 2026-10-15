@@ -2,7 +2,8 @@ use pumice_transcription::cli::{
     SuccessOutput, print_error, print_success, run_with_engine as run_with_engine_raw,
 };
 use pumice_transcription::{
-    Engine, EngineError, ErrorCode, FakeEngine, Transcript, TranscriptionOptions, config,
+    CancelToken, Engine, EngineError, ErrorCode, FakeEngine, Transcript, TranscriptionOptions,
+    config,
 };
 use std::io::Cursor;
 use std::process::Command;
@@ -143,6 +144,7 @@ impl Engine for RecordingFakeEngine {
         &self,
         pcm_16khz_mono: &[f32],
         options: &TranscriptionOptions,
+        _cancel: &CancelToken,
     ) -> Result<Transcript, EngineError> {
         *self.pcm_len.lock().unwrap() = pcm_16khz_mono.len();
         *self.language.lock().unwrap() = options.language.clone();
@@ -161,6 +163,7 @@ impl Engine for NoLanguageFakeEngine {
         &self,
         _pcm_16khz_mono: &[f32],
         _options: &TranscriptionOptions,
+        _cancel: &CancelToken,
     ) -> Result<Transcript, EngineError> {
         Ok(Transcript {
             text: "hello".to_string(),
@@ -177,6 +180,7 @@ impl Engine for FailingFakeEngine {
         &self,
         _pcm_16khz_mono: &[f32],
         _options: &TranscriptionOptions,
+        _cancel: &CancelToken,
     ) -> Result<Transcript, EngineError> {
         Err(EngineError::Failed)
     }
