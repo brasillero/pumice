@@ -11,6 +11,7 @@ pub mod builtins;
 pub mod config;
 pub mod definition;
 pub mod error;
+pub mod transform;
 
 pub use builtins::{BUILTIN_CLEAN, builtin_clean};
 pub use config::{
@@ -18,3 +19,4 @@ pub use config::{
 };
 pub use definition::{FormatterDefinition, load_definition_file};
 pub use error::{Error, ErrorCode, JsonError};
+pub use transform::{ConflictPolicy, apply};
