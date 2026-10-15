@@ -1,0 +1,31 @@
+# Pumice transcription module configuration example.
+#
+# pumice-transcribe reads exactly one configuration file:
+#   1. the path passed with --config, else
+#   2. the per-user file: ~/.config/pumice/transcribe.yml on Linux and macOS
+#      ($XDG_CONFIG_HOME/pumice/transcribe.yml when XDG_CONFIG_HOME is set),
+#      and %APPDATA%\pumice\transcribe.yml on Windows,
+#   otherwise no file is used and every option must be given on the command line.
+#
+# Validate a file with: pumice-transcribe check-config --config <path>
+
+schema_version: 1
+
+# Optional default model id. When set it must name an entry in models below.
+default_model: tiny
+
+# Optional default language hint (ISO-639-1 two-letter code, e.g. pt, en).
+language: pt
+
+# Optional default thread count for inference (1-32).
+threads: 8
+
+# Explicit model list. Nothing is enabled implicitly.
+models:
+  # whisper-large-v3-turbo-Q8_0.gguf: larger, slower, more accurate.
+  - id: turbo
+    path: whisper-large-v3-turbo-Q8_0.gguf
+
+  # whisper-tiny-Q8_0.gguf: small, fast, rough. Useful for testing.
+  - id: tiny
+    path: whisper-tiny-Q8_0.gguf
