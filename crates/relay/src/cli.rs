@@ -5,6 +5,7 @@
 //! summarizes the configuration; `doctor` reports which provider CLIs are
 //! installed and can run one real call to check a provider's login.
 
+use std::ffi::OsString;
 use std::io::{self, IsTerminal};
 use std::path::Path;
 use std::process::ExitCode;
@@ -43,9 +44,17 @@ fn doctor_usage(name: &str) -> String {
 }
 
 pub fn run(name: &str) -> ExitCode {
+    run_with(name, std::env::args_os().skip(1))
+}
+
+/// Runs the CLI as `name` with an explicit argument list (excluding the
+/// program name). The `pumice` dispatcher uses this for its `relay`
+/// subcommand so there is exactly one argument parser, whether the relay
+/// runs standalone or in-process.
+pub fn run_with(name: &str, args: impl IntoIterator<Item = OsString>) -> ExitCode {
     // `std::env::args` panics on an argument that is not valid Unicode.
-    let Some(args) = std::env::args_os()
-        .skip(1)
+    let Some(args) = args
+        .into_iter()
         .map(|arg| arg.into_string().ok())
         .collect::<Option<Vec<String>>>()
     else {

@@ -51,8 +51,19 @@ default-run = "pumice"
 name = "pumice"
 path = "src/main.rs"
 
+# Portable stand-in for `pumice-transcribe` used only by the dispatcher test
+# suite. It is never released.
+[[bin]]
+name = "pumice-test-transcribe"
+path = "tests/support/transcribe_stub.rs"
+test = false
+bench = false
+
 [dependencies]
 pumice-relay = { path = "crates/relay" }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
