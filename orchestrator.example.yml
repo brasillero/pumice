@@ -1,0 +1,59 @@
+# Pumice orchestrator configuration example (for `pumice run`).
+#
+# `pumice run` reads exactly one configuration file:
+#   1. the path passed with --config, else
+#   2. the per-user file: ~/.config/pumice/orchestrator.yml on Linux and macOS
+#      ($XDG_CONFIG_HOME/pumice/orchestrator.yml when XDG_CONFIG_HOME is
+#      absolute), and %APPDATA%\pumice\orchestrator.yml on Windows.
+# There is no built-in default file: without one, `pumice run` fails.
+#
+# The orchestrator file refers to the module configurations; it never copies
+# their settings (models, provider binaries and timeouts stay in the module
+# files). Full guide: docs/orchestrator.md
+
+schema_version: 1
+
+modules:
+  # Required. The transcription module's own configuration; relative paths
+  # resolve against this file's directory.
+  transcription:
+    config: ./transcribe.yml
+  # Required once any enabled flow selects a formatter (even a built-in);
+  # an empty registry file is enough for builtin:clean.
+  formatter:
+    config: ./formatter.yml
+  # Required. Only `in_process` is supported: the relay runs inside the
+  # `pumice` process using its own configuration file.
+  relay:
+    location: in_process
+    config: ./relay.yml
+
+# Named flows; `pumice run <AUDIO> --flow <ID>` runs one of them. Nothing is
+# enabled implicitly: a flow needs `enabled: true`, and `formatter` must be
+# written explicitly — an id or null (null adds no instructions; combine it
+# with `relay_route: passthrough` for a raw-only flow).
+flows:
+  # Dictation cleanup: transcribe with the `turbo` model, apply the built-in
+  # cleanup rules, call the relay route `claude`.
+  - id: clean
+    enabled: true
+    transcription_model: turbo
+    formatter: builtin:clean
+    relay_route: claude
+    # Optional; the defaults are shown below. One overall clock from command
+    # start; a stage's deadline is the earlier of its own cap and the
+    # remaining total (which never resets). The last 2500 ms of the total
+    # are always reserved for cleanup and output.
+    budgets_ms:
+      total: 180000
+      transcription: 120000
+      formatter: 1000
+      relay: 60000
+
+  # Raw transcription only: no formatter, and the passthrough route returns
+  # the transcript without calling an AI.
+  - id: raw
+    enabled: true
+    transcription_model: turbo
+    formatter: null
+    relay_route: passthrough

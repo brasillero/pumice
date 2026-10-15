@@ -64,9 +64,22 @@ path = "tests/support/transcribe_stub.rs"
 test = false
 bench = false
 
+# The relay's portable fake AI CLI (crates/relay/tests/support/fake_cli.rs),
+# built for the orchestrator's integration tests too: `pumice run` tests point
+# the relay configuration at it. Same source, never released.
+[[bin]]
+name = "pumice-test-cli"
+path = "crates/relay/tests/support/fake_cli.rs"
+test = false
+bench = false
+
 [dependencies]
 pumice-formatter = { path = "crates/formatter" }
 pumice-relay = { path = "crates/relay" }
+serde = { workspace = true }
+serde-saphyr = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 # Console control handler for the transcription dispatch wait (D4).

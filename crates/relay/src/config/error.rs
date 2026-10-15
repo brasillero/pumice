@@ -79,6 +79,22 @@ impl ConfigError {
         }
         self
     }
+
+    pub fn path(&self) -> Option<&Path> {
+        self.file.as_deref()
+    }
+
+    pub fn line(&self) -> Option<u64> {
+        self.line
+    }
+
+    pub fn column(&self) -> Option<u64> {
+        self.column
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 impl fmt::Display for ConfigError {

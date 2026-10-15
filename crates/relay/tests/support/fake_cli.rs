@@ -98,6 +98,10 @@ struct Scenario {
     /// Spawn a grandchild that inherits stdout/stderr and sleeps this long.
     #[serde(default)]
     spawn_grandchild_sleep_ms: Option<u64>,
+    /// A file to append one line to per invocation, so a test can count how
+    /// many times the fake ran.
+    #[serde(default)]
+    count_path: Option<PathBuf>,
 }
 
 fn default_true() -> bool {
@@ -147,6 +151,21 @@ fn main() {
     let exe = std::env::current_exe()
         .unwrap_or_else(|e| fail(EXIT_INTERNAL, &format!("cannot locate own executable: {e}")));
     let scenario = load_scenario(&exe);
+
+    if let Some(path) = &scenario.count_path {
+        use std::io::Write as _;
+        let appended = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut file| file.write_all(b"x\n"));
+        if let Err(e) = appended {
+            fail(
+                EXIT_INTERNAL,
+                &format!("cannot append to count file {}: {e}", path.display()),
+            );
+        }
+    }
 
     let stdin = if scenario.read_stdin {
         let mut buf = Vec::new();

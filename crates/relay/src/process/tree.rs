@@ -17,10 +17,12 @@
 
 use std::io;
 use std::process::ExitStatus;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
+use tokio::time::Instant;
 
 /// How often the direct child is polled for exit.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -37,6 +39,10 @@ pub struct ProcessTree {
     status: Option<ExitStatus>,
     /// The tree was killed and the direct child reaped: never signal again.
     reaped: bool,
+    /// Test hook: [`finish`](ProcessTree::finish) reports a failed reap
+    /// while the child stays unreaped and owned (still pinning its group).
+    #[cfg(test)]
+    fail_reap: bool,
 }
 
 impl ProcessTree {
@@ -65,6 +71,8 @@ impl ProcessTree {
             #[cfg(windows)]
             status: None,
             reaped: false,
+            #[cfg(test)]
+            fail_reap: false,
         })
     }
 
@@ -131,14 +139,29 @@ impl ProcessTree {
         Ok(self.status.is_some())
     }
 
+    /// Kills every process in the tree without waiting. Safe to repeat: a
+    /// reaped tree is never signalled again.
+    pub(crate) fn kill_now(&mut self) {
+        if !self.reaped {
+            // Unix: the unreaped leader still pins the group ID here.
+            let _ = self.child.start_kill();
+        }
+    }
+
+    /// True once [`finish`](ProcessTree::finish) reaped the direct child.
+    pub(crate) fn is_reaped(&self) -> bool {
+        self.reaped
+    }
+
     /// Kills every process in the tree, then reaps the direct child, waiting
     /// at most `limit`. Returns the direct child's exit status, or `None`
     /// when it could not be reaped in time (dropping the tree retries the
     /// kill).
     pub async fn finish(&mut self, limit: Duration) -> Option<ExitStatus> {
-        if !self.reaped {
-            // Unix: the unreaped leader still pins the group ID here.
-            let _ = self.child.start_kill();
+        self.kill_now();
+        #[cfg(test)]
+        if self.fail_reap {
+            return None;
         }
         let status = tokio::time::timeout(limit, self.reap()).await.ok()?.ok()?;
         self.reaped = true;
@@ -160,14 +183,222 @@ impl ProcessTree {
     }
 }
 
+impl std::fmt::Debug for ProcessTree {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("ProcessTree");
+        #[cfg(unix)]
+        debug.field("pid", &self.pid);
+        debug.field("reaped", &self.reaped).finish()
+    }
+}
+
 impl Drop for ProcessTree {
     /// Cancellation safety: if the run was abandoned before `finish` reaped
     /// the child, kill the whole tree now. On Unix the unreaped leader still
     /// pins the group ID, so the signal cannot reach an unrelated group. On
     /// Windows closing the job handle afterwards also kills the job.
     fn drop(&mut self) {
-        if !self.reaped {
-            let _ = self.child.start_kill();
+        self.kill_now();
+    }
+}
+
+/// Process trees killed but not yet reaped — and temporary-root cleanups
+/// still running off-runtime — collected so a caller can await their
+/// teardown after a cancellation (p12-pumice-run: the orchestrator drains
+/// the scope, bounded, before reporting its result).
+///
+/// Registration kills the tree synchronously — the same kill as
+/// [`ProcessTree`]'s drop — and [`drain`](CleanupScope::drain) then reaps
+/// each registered tree within one bounded budget. A tree that could not be
+/// reaped stays registered — and killed — so a later drain can retry it.
+/// Trees still registered when the scope is dropped are killed again by
+/// their own drop: kill-on-drop stays the last defense.
+#[derive(Debug, Default)]
+pub struct CleanupScope {
+    pending: Mutex<Vec<ProcessTree>>,
+    temp_roots: Mutex<Vec<tokio::sync::oneshot::Receiver<bool>>>,
+}
+
+impl CleanupScope {
+    pub fn new() -> CleanupScope {
+        CleanupScope::default()
+    }
+
+    /// True when no killed tree is waiting to be reaped and no temporary-root
+    /// cleanup is still running.
+    pub fn is_empty(&self) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty()
+            && self
+                .temp_roots
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty()
+    }
+
+    /// Kills `tree` now and keeps it for a later [`drain`](Self::drain).
+    pub(crate) fn kill_and_register(&self, mut tree: ProcessTree) {
+        tree.kill_now();
+        self.pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(tree);
+    }
+
+    /// Keeps a temporary-root cleanup running on its own thread for a later
+    /// [`drain`](Self::drain), which awaits its result: `true` when the root
+    /// is gone.
+    pub(crate) fn register_temp_cleanup(&self, done: tokio::sync::oneshot::Receiver<bool>) {
+        self.temp_roots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(done);
+    }
+
+    /// Reaps every registered tree and awaits every registered temporary-root
+    /// cleanup, spending at most `limit` overall, and returns how many could
+    /// not be finished in time (or reported failure). Unreaped trees stay
+    /// registered — and killed — and cleanups still running stay registered,
+    /// so a later drain can retry them; neither is re-processed within this
+    /// drain.
+    pub async fn drain(&self, limit: Duration) -> usize {
+        let deadline = Instant::now() + limit;
+        let mut failed = Vec::new();
+        loop {
+            let next = self
+                .pending
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .pop();
+            let Some(mut tree) = next else { break };
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if tree.finish(remaining).await.is_none() {
+                failed.push(tree);
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
         }
+        let mut unfinished = {
+            let mut pending = self
+                .pending
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let unreaped = failed.len() + pending.len();
+            pending.append(&mut failed);
+            unreaped
+        };
+
+        // A cleanup still running when the budget ends stays registered, like
+        // an unreaped tree; a decided one (removed, failed, or a cleaner that
+        // died without reporting) leaves the scope.
+        let cleanups = std::mem::take(
+            &mut *self
+                .temp_roots
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
+        let mut running = Vec::new();
+        for mut done in cleanups {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match tokio::time::timeout(remaining, &mut done).await {
+                Ok(Ok(true)) => {}
+                Ok(Ok(false)) | Ok(Err(_)) => unfinished += 1,
+                Err(_) => {
+                    unfinished += 1;
+                    running.push(done);
+                }
+            }
+        }
+        self.temp_roots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .append(&mut running);
+        unfinished
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tree whose reap fails stays registered — and is counted — instead
+    /// of being dropped, so a later drain cannot report success; a drain
+    /// handles each tree once. The failure is injected while the leader
+    /// stays unreaped and owned, so every kill reaches only our own group.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_tree_that_cannot_be_reaped_stays_registered() {
+        let mut command = Command::new("sleep");
+        command.arg("30");
+        let mut tree = ProcessTree::spawn(command).expect("spawn sleep");
+        tree.fail_reap = true;
+        let scope = CleanupScope::new();
+        scope.kill_and_register(tree);
+
+        assert_eq!(scope.drain(Duration::from_secs(5)).await, 1);
+        assert!(!scope.is_empty(), "the failed tree stays registered");
+        assert_eq!(
+            scope.drain(Duration::from_secs(5)).await,
+            1,
+            "a later drain still reports it"
+        );
+        assert!(!scope.is_empty());
+
+        // Without the injected failure the kept tree is reaped normally.
+        for tree in scope
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter_mut()
+        {
+            tree.fail_reap = false;
+        }
+        assert_eq!(scope.drain(Duration::from_secs(5)).await, 0);
+        assert!(scope.is_empty());
+    }
+
+    /// A registered temporary-root cleanup is awaited within the drain
+    /// budget; a failure, a dead cleaner thread and an exhausted budget are
+    /// each counted as unfinished.
+    #[tokio::test]
+    async fn drain_awaits_temp_cleanups_and_reports_failures() {
+        let scope = CleanupScope::new();
+
+        // Succeeds within the budget.
+        let (sender, done) = tokio::sync::oneshot::channel();
+        scope.register_temp_cleanup(done);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            let _ = sender.send(true);
+        });
+        assert!(!scope.is_empty());
+        assert_eq!(scope.drain(Duration::from_secs(5)).await, 0);
+        assert!(scope.is_empty());
+
+        // The cleaner reported failure: the root is still there.
+        let (sender, done) = tokio::sync::oneshot::channel();
+        scope.register_temp_cleanup(done);
+        sender.send(false).expect("receiver lives");
+        assert_eq!(scope.drain(Duration::from_secs(5)).await, 1);
+        assert!(scope.is_empty(), "a decided cleanup leaves the scope");
+
+        // The cleaner died without reporting.
+        let (sender, done) = tokio::sync::oneshot::channel::<bool>();
+        scope.register_temp_cleanup(done);
+        drop(sender);
+        assert_eq!(scope.drain(Duration::from_secs(5)).await, 1);
+
+        // The budget ran out before the cleaner answered: the cleanup stays
+        // registered and a later drain awaits it.
+        let (sender, done) = tokio::sync::oneshot::channel::<bool>();
+        scope.register_temp_cleanup(done);
+        assert_eq!(scope.drain(Duration::ZERO).await, 1);
+        assert!(!scope.is_empty(), "a running cleanup stays registered");
+        sender.send(true).expect("receiver kept");
+        assert_eq!(scope.drain(Duration::from_secs(5)).await, 0);
+        assert!(scope.is_empty());
     }
 }

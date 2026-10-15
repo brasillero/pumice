@@ -28,6 +28,8 @@ usage:
   pumice format apply [--formatter <id>]       insert a formatter's rules into one chat request
   pumice format check-config [--config <path>] validate the formatter configuration
   pumice transcribe [ARGS…]                    run the transcription module installed next to pumice
+  pumice run <AUDIO> --flow <ID> [--config <path>] [--json]
+                                               transcribe, format and relay one audio file
   pumice --help                                print this help
   pumice --version                             print the version
 
@@ -51,6 +53,7 @@ pub fn run() -> ExitCode {
         [command, rest @ ..] if command == "relay" => relay(rest),
         [command, rest @ ..] if command == "format" => format(rest),
         [command, rest @ ..] if command == "transcribe" => transcribe(rest),
+        [command, rest @ ..] if command == "run" => crate::orchestrator::cli::run(rest),
         [] => {
             // Bare `pumice` is the future orchestrator; until the stack
             // exists there is nothing to run, so say so instead of silently
@@ -156,18 +159,42 @@ fn transcribe(args: &[OsString]) -> ExitCode {
 /// cannot run. PATH and the working directory are never searched
 /// (p10-pumice-entry/D2).
 fn transcribe_path() -> Result<PathBuf, ()> {
+    match sibling_transcribe() {
+        Ok(path) => Ok(path),
+        Err(SiblingError::NoSelfPath) => {
+            eprintln!("error: cannot locate the running pumice executable");
+            Err(())
+        }
+        Err(SiblingError::Missing(dir)) => {
+            eprintln!(
+                "error: pumice-transcribe is not installed next to pumice ({}); \
+                 install it with the Pumice transcription archive (see docs/transcription.md) \
+                 or `cargo install --path crates/transcription --features engine --locked`",
+                display_dir(&dir)
+            );
+            Err(())
+        }
+    }
+}
+
+/// Why the sibling `pumice-transcribe` cannot run.
+#[derive(Debug)]
+pub(crate) enum SiblingError {
+    /// The running pumice executable could not be located.
+    NoSelfPath,
+    /// No `pumice-transcribe` exists in this install directory.
+    Missing(PathBuf),
+}
+
+/// The sibling lookup without any output, shared with `pumice run` (which
+/// reports the failure through its own envelope).
+pub(crate) fn sibling_transcribe() -> Result<PathBuf, SiblingError> {
     let Some(path) = sibling_transcribe_path() else {
-        eprintln!("error: cannot locate the running pumice executable");
-        return Err(());
+        return Err(SiblingError::NoSelfPath);
     };
     if !path.is_file() {
-        let dir = path.parent().map(display_dir).unwrap_or_default();
-        eprintln!(
-            "error: pumice-transcribe is not installed next to pumice ({dir}); \
-             install it with the Pumice transcription archive (see docs/transcription.md) \
-             or `cargo install --path crates/transcription --features engine --locked`"
-        );
-        return Err(());
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        return Err(SiblingError::Missing(dir));
     }
     Ok(path)
 }

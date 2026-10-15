@@ -5,11 +5,12 @@ mod support;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use pumice_relay::process::{
-    Argument, CliInvocation, ControlFile, MAX_STDOUT_BYTES, ProcessOutput, ProcessRunner,
-    ProgramSpec,
+    Argument, CleanupScope, CliInvocation, ControlFile, MAX_STDOUT_BYTES, ProcessOutput,
+    ProcessRunner, ProgramSpec,
 };
 use pumice_relay::providers::{ProviderError, ProviderErrorCode};
 use serde_json::{Value, json};
@@ -302,6 +303,86 @@ async fn cancelled_run_kills_the_whole_tree() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+#[tokio::test]
+async fn cancelled_scoped_run_registers_the_killed_tree_for_drain() {
+    const SLEEP_MS: u64 = 30_000;
+    let fake = FakeCli::new(json!({
+        "sleep_ms": SLEEP_MS,
+        "spawn_grandchild_sleep_ms": SLEEP_MS,
+    }));
+    let scope = Arc::new(CleanupScope::new());
+    let runner = ProcessRunner::new().with_cleanup_scope(Arc::clone(&scope));
+    let inv = invocation(fake.path());
+    let task = tokio::spawn(async move {
+        runner
+            .run(inv, Instant::now() + Duration::from_millis(SLEEP_MS))
+            .await
+    });
+
+    // The fake writes its report (with the grandchild PID) before sleeping.
+    let started_by = std::time::Instant::now() + RELAXED;
+    while !fake.report_path().exists() {
+        assert!(std::time::Instant::now() < started_by, "fake never started");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let report = fake.report();
+    let parent = report["pid"].as_u64().expect("pid") as u32;
+    let grandchild = report["grandchild_pid"].as_u64().expect("grandchild pid") as u32;
+
+    // Cancel the run; the abandoned tree is killed and handed to the scope.
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+
+    // Draining the scope reaps the registered tree within its budget.
+    assert_eq!(
+        scope.drain(Duration::from_secs(5)).await,
+        0,
+        "every registered tree is reaped"
+    );
+    assert!(scope.is_empty());
+
+    assert!(process_alive(std::process::id()));
+    wait_until_gone(parent);
+    wait_until_gone(grandchild);
+
+    // The temporary root is still removed, in the background.
+    let root = temp_root(&report);
+    let gone_by = std::time::Instant::now() + RELAXED;
+    while root.exists() {
+        assert!(
+            std::time::Instant::now() < gone_by,
+            "temp root left behind: {}",
+            root.display()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn scoped_runner_registers_nothing_on_success_or_clean_failure() {
+    let scope = Arc::new(CleanupScope::new());
+    let runner = ProcessRunner::new().with_cleanup_scope(Arc::clone(&scope));
+
+    let fake = FakeCli::new(json!({"stdout": "ok"}));
+    runner
+        .run(invocation(fake.path()), Instant::now() + RELAXED)
+        .await
+        .expect("run succeeds");
+    assert!(scope.is_empty(), "a finished run registers nothing");
+
+    // A timeout reaps through the runner's normal finish path, not the scope.
+    let slow = FakeCli::new(json!({"sleep_ms": 30_000, "stdout": "too late"}));
+    let result = runner
+        .run(
+            invocation(slow.path()),
+            Instant::now() + Duration::from_millis(500),
+        )
+        .await;
+    assert_eq!(result.unwrap_err(), ProviderError::Timeout);
+    assert!(scope.is_empty(), "a reaped timeout registers nothing");
+    assert_eq!(scope.drain(Duration::from_millis(100)).await, 0);
 }
 
 #[tokio::test]
