@@ -153,7 +153,9 @@ fn validate_pages(bytes: &[u8]) -> Result<PageValidation, Error> {
             Some(_) => {}
             None => {
                 if sequence != 0 {
-                    return Err(Error::invalid_input("ogg stream does not start at page zero"));
+                    return Err(Error::invalid_input(
+                        "ogg stream does not start at page zero",
+                    ));
                 }
                 serial = Some(page_serial);
             }
@@ -188,7 +190,9 @@ fn validate_pages(bytes: &[u8]) -> Result<PageValidation, Error> {
         }
         if granule == -1 {
             if completes_packet {
-                return Err(Error::invalid_input("ogg page is missing its granule position"));
+                return Err(Error::invalid_input(
+                    "ogg page is missing its granule position",
+                ));
             }
         } else {
             if granule < 0 {
@@ -220,10 +224,7 @@ fn validate_pages(bytes: &[u8]) -> Result<PageValidation, Error> {
 }
 
 /// Decodes an Ogg/Opus file already identified by [`is_ogg_opus`].
-pub(crate) fn decode_ogg_opus(
-    bytes: Vec<u8>,
-    cancel: &CancelToken,
-) -> Result<DecodedAudio, Error> {
+pub(crate) fn decode_ogg_opus(bytes: Vec<u8>, cancel: &CancelToken) -> Result<DecodedAudio, Error> {
     let validation = validate_pages(&bytes)?;
 
     let source = ReadOnlySource::new(Cursor::new(bytes));
@@ -258,7 +259,10 @@ pub(crate) fn decode_ogg_opus(
     let mut packets: Vec<OpusPacket> = Vec::new();
     loop {
         if cancel.is_cancelled() {
-            return Err(Error::new(ErrorCode::Cancelled, "transcription was cancelled"));
+            return Err(Error::new(
+                ErrorCode::Cancelled,
+                "transcription was cancelled",
+            ));
         }
         let packet = match format.next_packet() {
             Ok(Some(packet)) => packet,
@@ -283,11 +287,14 @@ pub(crate) fn decode_ogg_opus(
     // No partial results: the demuxer must yield exactly the audio packets
     // the strict page walk counted. RFC 7845 fixes the two header packets
     // (OpusHead, OpusTags), which Symphonia consumes before audio begins.
-    let audio_packets = validation.packets.checked_sub(2).ok_or_else(|| {
-        Error::invalid_input("ogg opus stream contains no audio packets")
-    })?;
+    let audio_packets = validation
+        .packets
+        .checked_sub(2)
+        .ok_or_else(|| Error::invalid_input("ogg opus stream contains no audio packets"))?;
     if packets.len() != audio_packets {
-        return Err(Error::invalid_input("ogg packet count mismatch (lost packets)"));
+        return Err(Error::invalid_input(
+            "ogg packet count mismatch (lost packets)",
+        ));
     }
     let decoded = decode_packets(&head, &packets, cancel)?;
     if decoded.samples.len() + head.pre_skip != validation.final_granule as usize {

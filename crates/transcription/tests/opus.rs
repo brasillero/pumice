@@ -3,8 +3,8 @@
 
 #![cfg(feature = "opus")]
 
-use pumice_transcription::audio::{decode_audio, resample_to_target};
 use pumice_transcription::ErrorCode;
+use pumice_transcription::audio::{decode_audio, resample_to_target};
 use std::io::Cursor;
 
 fn fixture(name: &str) -> Vec<u8> {

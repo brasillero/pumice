@@ -502,7 +502,10 @@ async fn webm_opus_upload_transcribes() {
     .unwrap();
     let response = send(&state, post(basic_body(&webm))).await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(json(response).await, serde_json::json!({ "text": "transcribed" }));
+    assert_eq!(
+        json(response).await,
+        serde_json::json!({ "text": "transcribed" })
+    );
 }
 
 #[cfg(feature = "opus")]
@@ -516,7 +519,10 @@ async fn ogg_opus_upload_transcribes() {
     .unwrap();
     let response = send(&state, post(basic_body(&ogg))).await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(json(response).await, serde_json::json!({ "text": "transcribed" }));
+    assert_eq!(
+        json(response).await,
+        serde_json::json!({ "text": "transcribed" })
+    );
 }
 
 #[cfg(not(feature = "opus"))]

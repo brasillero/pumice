@@ -3,9 +3,9 @@ pub mod cli;
 pub mod config;
 pub mod engine;
 pub mod error;
-mod riff;
 #[cfg(feature = "opus")]
 mod opus;
+mod riff;
 pub mod server;
 pub mod service;
 

@@ -80,12 +80,29 @@ Formats are detected by content (magic bytes), not by file extension.
 | MP3 | MPEG Audio Layer III | Same limits |
 | FLAC | Free Lossless Audio Codec | Same limits |
 | Ogg Vorbis | Ogg + Vorbis (one logical stream) | Same limits |
-| Ogg Opus | Ogg + Opus | Rejected (`unsupported_format`) — no Opus decoder yet |
+| Format | Container/codec | Limits |
+| --- | --- | --- |
+| WAV | RIFF/WAVE PCM / IEEE float / extensible | Max file 25 MB, max audio 120 s, sample rate 8–192 kHz, mono or stereo |
+| MP3 | MPEG Audio Layer III | Same limits |
+| FLAC | Free Lossless Audio Codec | Same limits |
+| Ogg Vorbis | Ogg + Vorbis (one logical stream) | Same limits |
+| Ogg Opus | Ogg + Opus | `engine` builds only; mono/stereo, one logical stream; same limits |
+| WebM/Opus | WebM or Matroska + Opus | `engine` builds only; mono/stereo, one audio track, unlaced blocks; same limits |
+| MP4/AAC | — | Not supported |
 
-Known limit: a truncated file is rejected only when its header declares a
-frame count (WAV, FLAC, and MP3 with a Xing/Info or VBRI header). A plain MP3
-without such a header has no reliable end marker, so a cut-off file decodes as
-a shorter recording instead of failing.
+Opus decoding is only compiled into `engine` builds (the `opus` Cargo
+feature, enabled by `engine`). Other builds reject Opus files with
+`unsupported_format`. Opus always decodes at 48 kHz and is resampled to
+16 kHz like any other input.
+
+Known limit: a truncated file is rejected only when its container proves
+completeness — a strict container check does this for WebM (every element
+extent is validated against the actual file size) and for Ogg (per-page
+checksums and the end-of-stream marker). A plain MP3 without a declared
+frame count has no reliable end marker, so a cut-off file decodes as a
+shorter recording instead of failing. As with any compressed format, a
+WebM Opus stream recorded live (no duration, no cues) cannot prove that
+whole final blocks were not lost at a clean boundary.
 
 ## Third-party licenses
 
@@ -94,3 +111,10 @@ RIFF/WAVE, MP3, FLAC and Ogg Vorbis files. Symphonia is licensed under the
 MPL-2.0. Distributing binaries that include Symphonia requires shipping its
 notice and pointing to its exact source; this is enforced in the
 release-packaging phase.
+
+`engine` builds additionally decode Ogg/Opus and WebM/Opus with the
+reference [libopus](https://opus-codec.org/) (BSD-3-Clause, statically linked
+via `opus`/`opusic-sys`) and read WebM with
+[webm-iterable](https://github.com/austinleroy/webm-iterable) (MIT, with
+ebml-iterable, MIT). Binaries that include them must ship the libopus
+BSD-3-Clause notice and the MIT licenses of webm-iterable/ebml-iterable.

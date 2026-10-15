@@ -8,8 +8,8 @@ use crate::audio::DecodedAudio;
 use crate::engine::CancelToken;
 use crate::{Error, ErrorCode};
 use std::io::Cursor;
-use webm_iterable::matroska_spec::{Block, Master, MatroskaSpec as Tag, SimpleBlock};
 use webm_iterable::WebmIterator;
+use webm_iterable::matroska_spec::{Block, Master, MatroskaSpec as Tag, SimpleBlock};
 
 const ID_EBML: u64 = 0x1A45_DFA3;
 const ID_DOCTYPE: u64 = 0x4282;
@@ -52,7 +52,14 @@ const MAX_ELEMENTS: usize = 1_000_000;
 fn is_segment_level(id: u64) -> bool {
     matches!(
         id,
-        ID_SEEKHEAD | ID_INFO | ID_TRACKS | ID_CUES | ID_ATTACHMENTS | ID_CHAPTERS | ID_CLUSTER | ID_TAGS
+        ID_SEEKHEAD
+            | ID_INFO
+            | ID_TRACKS
+            | ID_CUES
+            | ID_ATTACHMENTS
+            | ID_CHAPTERS
+            | ID_CLUSTER
+            | ID_TAGS
     )
 }
 
@@ -303,7 +310,11 @@ fn walk_block_group(
                 note_block(bytes, &child, cluster_ts, &mut blocks, last_timestamp)?;
             }
             ID_DISCARD_PADDING | ID_BLOCK_DURATION | ID_REFERENCE_BLOCK | ID_VOID | ID_CRC32 => {}
-            _ => return Err(Error::invalid_input("unexpected element in webm block group")),
+            _ => {
+                return Err(Error::invalid_input(
+                    "unexpected element in webm block group",
+                ));
+            }
         }
         reader.pos = child.data_end;
     }
@@ -469,7 +480,10 @@ fn demux(bytes: &[u8], info: &WebmInfo, cancel: &CancelToken) -> Result<Vec<Opus
     let mut packets = Vec::new();
     for tag in &mut iterator {
         if cancel.is_cancelled() {
-            return Err(Error::new(ErrorCode::Cancelled, "transcription was cancelled"));
+            return Err(Error::new(
+                ErrorCode::Cancelled,
+                "transcription was cancelled",
+            ));
         }
         match tag.map_err(|_| Error::invalid_input("malformed webm data"))? {
             block @ Tag::SimpleBlock(_) => {
@@ -554,7 +568,9 @@ pub(crate) fn decode_webm_opus(
     // No partial results: every block the validator counted must come back
     // from the demuxer.
     if packets.len() != info.block_count {
-        return Err(Error::invalid_input("webm block count mismatch (lost blocks)"));
+        return Err(Error::invalid_input(
+            "webm block count mismatch (lost blocks)",
+        ));
     }
     decode_packets(&head, &packets, cancel)
 }
@@ -562,8 +578,8 @@ pub(crate) fn decode_webm_opus(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::opus::tests::fixture;
     use crate::ErrorCode;
+    use crate::opus::tests::fixture;
 
     /// A valid 19-byte family-0 OpusHead (mono, 312-sample pre-skip).
     fn opus_head_bytes() -> Vec<u8> {
@@ -596,7 +612,10 @@ mod tests {
 
     fn uint(id: &[u8], value: u64) -> Vec<u8> {
         let bytes = value.to_be_bytes();
-        let start = bytes.iter().position(|&b| b != 0).unwrap_or(bytes.len() - 1);
+        let start = bytes
+            .iter()
+            .position(|&b| b != 0)
+            .unwrap_or(bytes.len() - 1);
         el(id, &bytes[start..])
     }
 
@@ -940,7 +959,10 @@ mod tests {
         );
 
         let mut many_channels = bytes.clone();
-        let at = many_channels.windows(8).position(|w| w == b"OpusHead").unwrap();
+        let at = many_channels
+            .windows(8)
+            .position(|w| w == b"OpusHead")
+            .unwrap();
         many_channels[at + 9] = 6;
         assert_eq!(
             decode_webm_opus(many_channels, &CancelToken::new())
@@ -950,7 +972,10 @@ mod tests {
         );
 
         let mut bad_family = bytes.clone();
-        let at = bad_family.windows(8).position(|w| w == b"OpusHead").unwrap();
+        let at = bad_family
+            .windows(8)
+            .position(|w| w == b"OpusHead")
+            .unwrap();
         bad_family[at + 18] = 3;
         assert_eq!(
             decode_webm_opus(bad_family, &CancelToken::new())

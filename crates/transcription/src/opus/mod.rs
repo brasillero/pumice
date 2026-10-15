@@ -78,10 +78,7 @@ impl OpusHead {
                 let canonical = match channels {
                     1 => stream_count == 1 && coupled_count == 0 && bytes[21] == 0,
                     _ => {
-                        stream_count == 1
-                            && coupled_count == 1
-                            && bytes[21] == 0
-                            && bytes[22] == 1
+                        stream_count == 1 && coupled_count == 1 && bytes[21] == 0 && bytes[22] == 1
                     }
                 };
                 if !canonical {
@@ -130,7 +127,11 @@ fn packet_frames(data: &[u8]) -> Result<usize, Error> {
 pub(crate) fn ns_to_samples(ns: i64) -> Result<i64, Error> {
     const NS_PER_SECOND: i128 = 1_000_000_000;
     let value = i128::from(ns) * 48_000;
-    let (magnitude, sign) = if value < 0 { (-value, -1i128) } else { (value, 1) };
+    let (magnitude, sign) = if value < 0 {
+        (-value, -1i128)
+    } else {
+        (value, 1)
+    };
     let rounded = (magnitude + NS_PER_SECOND / 2) / NS_PER_SECOND;
     i64::try_from(sign * rounded).map_err(|_| Error::invalid_input("timestamp value out of range"))
 }
@@ -145,7 +146,9 @@ pub(crate) fn decode_packets(
     cancel: &CancelToken,
 ) -> Result<DecodedAudio, Error> {
     if packets.is_empty() {
-        return Err(Error::invalid_input("opus stream contains no audio packets"));
+        return Err(Error::invalid_input(
+            "opus stream contains no audio packets",
+        ));
     }
     let channels = match head.channels {
         1 => opus::Channels::Mono,
@@ -197,7 +200,8 @@ pub(crate) fn decode_packets(
         output_frames = output_frames
             .checked_add(keep)
             .ok_or_else(|| Error::audio_too_long(MAX_AUDIO_SECONDS + 1.0))?;
-        interleaved.extend_from_slice(&scratch[start * channel_count..(decoded - end) * channel_count]);
+        interleaved
+            .extend_from_slice(&scratch[start * channel_count..(decoded - end) * channel_count]);
     }
 
     if pre_skip_left > 0 {
@@ -220,7 +224,10 @@ pub(crate) fn decode_packets(
         *sample = (*sample as f64 * gain) as f32;
     }
     if mono.iter().any(|s| !s.is_finite()) {
-        return Err(Error::new(ErrorCode::InvalidInput, "audio contains non-finite samples"));
+        return Err(Error::new(
+            ErrorCode::InvalidInput,
+            "audio contains non-finite samples",
+        ));
     }
     for sample in &mut mono {
         *sample = sample.clamp(-1.0, 1.0);
@@ -259,8 +266,7 @@ pub(crate) mod tests {
             let segments = usize::from(bytes[offset + 26]);
             let table = &bytes[offset + 27..offset + 27 + segments];
             let body_len: usize = table.iter().map(|&v| usize::from(v)).sum();
-            let body =
-                &bytes[offset + 27 + segments..offset + 27 + segments + body_len];
+            let body = &bytes[offset + 27 + segments..offset + 27 + segments + body_len];
             let mut pos = 0usize;
             for &lace in table {
                 let take = usize::from(lace).min(body.len() - pos);
@@ -298,9 +304,7 @@ pub(crate) mod tests {
     }
 
     fn rms(samples: &[f32]) -> f64 {
-        (samples.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>()
-            / samples.len() as f64)
-            .sqrt()
+        (samples.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>() / samples.len() as f64).sqrt()
     }
 
     #[test]
@@ -421,31 +425,18 @@ pub(crate) mod tests {
         let total = frames_per_packet * packets.len();
 
         // Pre-skip smaller than one packet.
-        let decoded = decode_packets(
-            &family0_head(100, 0),
-            &packets,
-            &CancelToken::new(),
-        )
-        .unwrap();
+        let decoded = decode_packets(&family0_head(100, 0), &packets, &CancelToken::new()).unwrap();
         assert_eq!(decoded.samples.len(), total - 100);
 
         // Pre-skip spanning three whole packets plus a remainder.
         let skip = frames_per_packet * 3 + 17;
-        let decoded = decode_packets(
-            &family0_head(skip, 0),
-            &packets,
-            &CancelToken::new(),
-        )
-        .unwrap();
+        let decoded =
+            decode_packets(&family0_head(skip, 0), &packets, &CancelToken::new()).unwrap();
         assert_eq!(decoded.samples.len(), total - skip);
 
         // A pre-skip beyond the stream is truncated input.
-        let err = decode_packets(
-            &family0_head(total + 1, 0),
-            &packets,
-            &CancelToken::new(),
-        )
-        .unwrap_err();
+        let err =
+            decode_packets(&family0_head(total + 1, 0), &packets, &CancelToken::new()).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
@@ -511,7 +502,10 @@ pub(crate) mod tests {
         let plain = decode_packets(&flat, &packets, &CancelToken::new()).unwrap();
         let loud = decode_packets(&boosted, &packets, &CancelToken::new()).unwrap();
         let ratio = rms(&loud.samples) / rms(&plain.samples);
-        assert!((ratio - 10f64.powf(1.0 / 20.0)).abs() < 1e-3, "ratio {ratio}");
+        assert!(
+            (ratio - 10f64.powf(1.0 / 20.0)).abs() < 1e-3,
+            "ratio {ratio}"
+        );
     }
 
     #[test]
