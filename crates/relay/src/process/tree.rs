@@ -263,60 +263,92 @@ impl CleanupScope {
     /// registered — and killed — and cleanups still running stay registered,
     /// so a later drain can retry them; neither is re-processed within this
     /// drain.
+    ///
+    /// Cancellation-safe: an entry is only ever held by a [`Draining`] guard
+    /// while it is awaited, and the guard returns whatever it still holds to
+    /// the scope when it is dropped, so dropping this future loses no
+    /// teardown and a later drain resumes it.
     pub async fn drain(&self, limit: Duration) -> usize {
         let deadline = Instant::now() + limit;
-        let mut failed = Vec::new();
+        let mut held = Draining {
+            scope: self,
+            trees: Vec::new(),
+            temp_roots: Vec::new(),
+        };
         loop {
             let next = self
                 .pending
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .pop();
-            let Some(mut tree) = next else { break };
+            let Some(tree) = next else { break };
+            held.trees.push(tree);
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if tree.finish(remaining).await.is_none() {
-                failed.push(tree);
+            let tree = held.trees.last_mut().expect("just pushed");
+            if tree.finish(remaining).await.is_some() {
+                held.trees.pop();
             }
             if Instant::now() >= deadline {
                 break;
             }
         }
-        let mut unfinished = {
-            let mut pending = self
+        let mut unfinished = held.trees.len()
+            + self
                 .pending
                 .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let unreaped = failed.len() + pending.len();
-            pending.append(&mut failed);
-            unreaped
-        };
+                .unwrap_or_else(|error| error.into_inner())
+                .len();
 
         // A cleanup still running when the budget ends stays registered, like
         // an unreaped tree; a decided one (removed, failed, or a cleaner that
         // died without reporting) leaves the scope.
-        let cleanups = std::mem::take(
-            &mut *self
+        loop {
+            let next = self
                 .temp_roots
                 .lock()
-                .unwrap_or_else(|error| error.into_inner()),
-        );
-        let mut running = Vec::new();
-        for mut done in cleanups {
+                .unwrap_or_else(|error| error.into_inner())
+                .pop();
+            let Some(done) = next else { break };
+            held.temp_roots.push(done);
             let remaining = deadline.saturating_duration_since(Instant::now());
-            match tokio::time::timeout(remaining, &mut done).await {
-                Ok(Ok(true)) => {}
-                Ok(Ok(false)) | Ok(Err(_)) => unfinished += 1,
-                Err(_) => {
-                    unfinished += 1;
-                    running.push(done);
+            let done = held.temp_roots.last_mut().expect("just pushed");
+            match tokio::time::timeout(remaining, done).await {
+                Ok(Ok(true)) => {
+                    held.temp_roots.pop();
                 }
+                Ok(Ok(false)) | Ok(Err(_)) => {
+                    unfinished += 1;
+                    held.temp_roots.pop();
+                }
+                Err(_) => unfinished += 1,
             }
         }
-        self.temp_roots
+        unfinished
+    }
+}
+
+/// The entries one [`CleanupScope::drain`] has taken out of its scope: the
+/// one being awaited and those it could not finish. Dropping the guard —
+/// when the drain returns, or when its future is dropped mid-await — puts
+/// them all back, so the scope never loses ownership of unfinished teardown.
+struct Draining<'a> {
+    scope: &'a CleanupScope,
+    trees: Vec<ProcessTree>,
+    temp_roots: Vec<tokio::sync::oneshot::Receiver<bool>>,
+}
+
+impl Drop for Draining<'_> {
+    fn drop(&mut self) {
+        self.scope
+            .pending
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .append(&mut running);
-        unfinished
+            .append(&mut self.trees);
+        self.scope
+            .temp_roots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .append(&mut self.temp_roots);
     }
 }
 
@@ -354,6 +386,48 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner())
             .iter_mut()
         {
+            tree.fail_reap = false;
+        }
+        assert_eq!(scope.drain(Duration::from_secs(5)).await, 0);
+        assert!(scope.is_empty());
+    }
+
+    /// Dropping a drain while it awaits loses nothing: the entry it was
+    /// awaiting and the tree it had already failed go back to the scope, the
+    /// cleaner can still report, and a later drain finishes the teardown.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dropped_drain_keeps_its_entries_for_the_next_one() {
+        let mut command = Command::new("sleep");
+        command.arg("30");
+        let mut tree = ProcessTree::spawn(command).expect("spawn sleep");
+        tree.fail_reap = true;
+        let scope = CleanupScope::new();
+        scope.kill_and_register(tree);
+        let (sender, done) = tokio::sync::oneshot::channel();
+        scope.register_temp_cleanup(done);
+
+        // The drain fails the tree at once, then waits on the cleanup until
+        // its future is dropped.
+        let dropped = tokio::time::timeout(
+            Duration::from_millis(50),
+            scope.drain(Duration::from_secs(60)),
+        )
+        .await;
+        assert!(dropped.is_err(), "the drain was still awaiting the cleanup");
+        assert!(!scope.is_empty());
+        let lengths = |scope: &CleanupScope| {
+            (
+                scope.pending.lock().expect("lock").len(),
+                scope.temp_roots.lock().expect("lock").len(),
+            )
+        };
+        assert_eq!(lengths(&scope), (1, 1), "both entries were put back");
+
+        // The cleaner can still report to the kept receiver, and the next
+        // drain resumes the teardown.
+        sender.send(true).expect("receiver kept");
+        for tree in scope.pending.lock().expect("lock").iter_mut() {
             tree.fail_reap = false;
         }
         assert_eq!(scope.drain(Duration::from_secs(5)).await, 0);

@@ -361,7 +361,9 @@ impl<'a> Operation<'a> {
     /// Ends the operation: bounded teardown of `scope` (the runtime's, when
     /// one was built), the `finished` event and the output. A teardown
     /// failure is never a success; with a primary failure it stays secondary
-    /// (an event).
+    /// (an event). Dropping this future mid-teardown loses no ownership:
+    /// whatever was not finished stays in `scope`, so its owner can resume
+    /// with another [`CleanupScope::drain`].
     pub async fn finish(
         mut self,
         outcome: Result<String, StageError>,
