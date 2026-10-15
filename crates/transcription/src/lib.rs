@@ -4,13 +4,20 @@ pub mod config;
 pub mod engine;
 pub mod error;
 mod riff;
+pub mod server;
+pub mod service;
 
-pub use engine::{Engine, FakeEngine};
+pub use engine::{CancelToken, Engine, FakeEngine};
 pub use error::{Error, ErrorCode, JsonError};
+pub use service::{
+    normalize_language, normalize_threads, resolve_model_id, transcribe_pcm_from_reader,
+};
 
 #[derive(Debug, Clone)]
 pub struct TranscriptionOptions {
     pub language: Option<String>,
+    pub prompt: Option<String>,
+    pub temperature: Option<f32>,
 }
 
 #[derive(Debug, Clone)]

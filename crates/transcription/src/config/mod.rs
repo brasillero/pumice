@@ -26,6 +26,8 @@ pub struct Config {
     pub language: Option<String>,
     /// Optional default thread count (1–32).
     pub threads: Option<usize>,
+    /// Optional default server port.
+    pub server_port: Option<u16>,
     /// Explicit list of configured models. Nothing is enabled implicitly.
     pub models: Vec<ModelEntry>,
 }
@@ -147,6 +149,11 @@ fn validate(raw: Option<RawConfig>, config_dir: Option<&Path>) -> Result<Config,
         ));
     }
 
+    let server_port = raw
+        .server
+        .as_ref()
+        .and_then(|s| s.value.port.as_ref().map(|p| p.value));
+
     let mut models: Vec<ModelEntry> = Vec::new();
     for entry in &raw.models {
         let entry_location = entry.referenced;
@@ -217,6 +224,7 @@ fn validate(raw: Option<RawConfig>, config_dir: Option<&Path>) -> Result<Config,
         default_model,
         language,
         threads: raw.threads.map(|s| s.value),
+        server_port,
         models,
     })
 }
