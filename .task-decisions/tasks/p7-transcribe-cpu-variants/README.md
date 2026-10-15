@@ -3,7 +3,7 @@ title: P7: faster CPU transcription with runtime CPU variants
 state: Done
 ticket: —
 branch: p7-transcribe-cpu-variants
-mr: —
+mr: PR #99
 start: 2026-10-15
 end: 2026-10-15
 ---
