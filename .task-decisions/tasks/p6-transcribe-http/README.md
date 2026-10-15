@@ -3,7 +3,7 @@ title: P6: transcription over HTTP
 state: In progress
 ticket: —
 branch: p6-transcribe-http
-mr: —
+mr: PR #97
 start: 2026-10-15
 end: —
 ---
