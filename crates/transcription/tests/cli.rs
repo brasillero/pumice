@@ -1356,6 +1356,44 @@ models:
 }
 
 #[test]
+fn config_language_applies_without_cli_language() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio_path = tmp.path().join("audio.wav");
+    std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
+    let model_path = tmp.path().join("tiny.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+    let config_path = write_config(
+        &tmp,
+        &format!(
+            r#"schema_version: 1
+language: pt
+models:
+  - id: tiny
+    path: {}
+"#,
+            model_path.display()
+        ),
+    );
+
+    let engine = RecordingFakeEngine::new();
+    run_with_engine(
+        vec![
+            "pumice-transcribe",
+            "--config",
+            config_path.to_str().unwrap(),
+            "file",
+            audio_path.to_str().unwrap(),
+            "--model",
+            "tiny",
+        ],
+        Box::new(engine.clone()),
+    )
+    .unwrap();
+
+    assert_eq!(engine.language(), Some("pt".to_string()));
+}
+
+#[test]
 fn cli_language_overrides_config() {
     let tmp = tempfile::tempdir().unwrap();
     let audio_path = tmp.path().join("audio.wav");

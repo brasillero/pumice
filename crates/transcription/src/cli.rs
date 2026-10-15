@@ -335,7 +335,7 @@ where
             port,
             Arc::from(engine),
             served_model_id,
-            config.clone(),
+            config.language.clone(),
             crate::server::shutdown_signal(),
         )
         .await
@@ -353,7 +353,7 @@ fn run_file<F>(file_args: FileArgs, config: &Config, make_engine: F) -> Result<S
 where
     F: FnOnce(&Path, i32) -> Result<Box<dyn Engine>, Error>,
 {
-    let language = normalize_language(file_args.language)?;
+    let language = normalize_language(file_args.language.or_else(|| config.language.clone()))?;
     let threads = normalize_threads(file_args.threads.or(config.threads))?;
 
     let (_model_id, model_path) = resolve_model_id(
@@ -576,6 +576,7 @@ pub fn exit_code(error: &Error) -> ExitCode {
         ErrorCode::EngineNotAvailable
         | ErrorCode::EngineFailed
         | ErrorCode::ModelLoadFailed
+        | ErrorCode::Cancelled
         | ErrorCode::Internal => 1,
     };
     ExitCode::from(code)
