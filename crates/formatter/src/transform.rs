@@ -79,7 +79,7 @@ pub fn apply(
         .count();
     let has_instructions = messages[..leading]
         .iter()
-        .any(|message| content_present(message));
+        .any(content_present);
 
     if has_instructions && policy == ConflictPolicy::Reject {
         return Err(Error::formatter_instruction_conflict());
