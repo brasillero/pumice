@@ -216,7 +216,7 @@ impl Rig {
         stage("start pumice serve");
         let child = command.spawn().expect("start pumice serve");
         let mut running = Running {
-            process: OwnedChild::new("pumice serve", child),
+            process: OwnedChild::new("pumice serve", child).context(self.child_log()),
             port: 0,
         };
         let listening = running.record();
@@ -224,6 +224,28 @@ impl Rig {
         running.port = listening["port"].as_u64().unwrap() as u16;
         running.wait_ready();
         running
+    }
+
+    /// The managed children's lifecycle log (spawns with PIDs, stdin EOF),
+    /// for failure reports: metadata only.
+    fn child_log(&self) -> impl Fn() -> String + 'static {
+        let log = self.log.clone();
+        move || {
+            let text = fs::read_to_string(&log).unwrap_or_default();
+            let events: Vec<String> = text
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .map(
+                    |entry| match (entry["event"].as_str(), entry["pid"].as_u64()) {
+                        (Some("spawn"), Some(pid)) => {
+                            format!("spawn {pid} ({})", bounded::process_state(pid))
+                        }
+                        (event, pid) => format!("{} {pid:?}", event.unwrap_or("?")),
+                    },
+                )
+                .collect();
+            format!("child log [{}]", events.join(", "))
+        }
     }
 
     fn log_events(&self, event: &str) -> Vec<Value> {

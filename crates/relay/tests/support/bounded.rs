@@ -173,6 +173,8 @@ pub struct OwnedChild {
     stdout: Pipe,
     stderr: Pipe,
     status: Option<ExitStatus>,
+    /// Extra state for failure reports (see [`OwnedChild::context`]).
+    context: Option<Box<dyn Fn() -> String>>,
 }
 
 impl OwnedChild {
@@ -187,7 +189,31 @@ impl OwnedChild {
             stdout,
             stderr,
             status: None,
+            context: None,
         }
+    }
+
+    /// Adds `context()` to every failure report: state the test can read
+    /// at that moment (a fake's log, say), metadata only.
+    pub fn context(mut self, context: impl Fn() -> String + 'static) -> Self {
+        self.context = Some(Box::new(context));
+        self
+    }
+
+    fn report(&mut self) -> String {
+        self.stderr.take_ready();
+        let bytes = &self.stderr.bytes;
+        let tail = &bytes[bytes.len().saturating_sub(4096)..];
+        let mut report = format!(
+            "last stage: {}; stderr so far: {:?}",
+            last_stage(),
+            String::from_utf8_lossy(tail)
+        );
+        if let Some(context) = &self.context {
+            report.push_str("; context: ");
+            report.push_str(&context());
+        }
+        report
     }
 
     pub fn id(&self) -> u32 {
@@ -197,19 +223,8 @@ impl OwnedChild {
     /// Fails the test: kills the child and reports the stage and output.
     fn fail(&mut self, problem: &str) -> ! {
         self.kill();
-        let stderr = self.stderr_tail();
-        panic!(
-            "{}: {problem} (last stage: {}); stderr so far: {stderr}",
-            self.what,
-            last_stage()
-        );
-    }
-
-    fn stderr_tail(&mut self) -> String {
-        self.stderr.take_ready();
-        let bytes = &self.stderr.bytes;
-        let tail = &bytes[bytes.len().saturating_sub(4096)..];
-        format!("{:?}", String::from_utf8_lossy(tail))
+        let report = self.report();
+        panic!("{}: {problem} ({report})", self.what);
     }
 
     /// The next stdout line before `deadline`; `None` once stdout ended.
@@ -247,11 +262,23 @@ impl OwnedChild {
     /// it): the test fails instead of waiting for it.
     pub fn collect_until(&mut self, deadline: Instant) -> Output {
         step("collect the output");
-        if !self.stdout.drain(deadline) {
-            self.fail("stdout stayed open past the deadline");
-        }
-        if !self.stderr.drain(deadline) {
-            self.fail("stderr stayed open past the deadline");
+        let stdout_ended = self.stdout.drain(deadline);
+        // Past the deadline, still take what stderr has, to report both.
+        let stderr_ended = self.stderr.drain(if stdout_ended {
+            deadline
+        } else {
+            Instant::now()
+        });
+        if !(stdout_ended && stderr_ended) {
+            let open = match (stdout_ended, stderr_ended) {
+                (false, false) => "stdout and stderr",
+                (false, true) => "stdout",
+                _ => "stderr",
+            };
+            self.fail(&format!(
+                "{open} stayed open past the deadline after the exit ({:?})",
+                self.status
+            ));
         }
         Output {
             status: self.status.expect("collected after the exit"),
@@ -291,13 +318,34 @@ impl Drop for OwnedChild {
     fn drop(&mut self) {
         self.kill();
         if std::thread::panicking() {
-            let stderr = self.stderr_tail();
-            eprintln!(
-                "{} at the failure: last stage: {}; stderr so far: {stderr}",
-                self.what,
-                last_stage()
-            );
+            let report = self.report();
+            eprintln!("{} at the failure: {report}", self.what);
         }
+    }
+}
+
+/// Whether process `pid` still exists, for failure reports only (`kill -0`
+/// on Unix, `tasklist` on Windows): "alive", "gone" or "unknown".
+pub fn process_state(pid: u64) -> &'static str {
+    #[cfg(unix)]
+    let probe = std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success());
+    #[cfg(windows)]
+    let probe = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\"")));
+    #[cfg(not(any(unix, windows)))]
+    let probe: io::Result<bool> = Err(io::ErrorKind::Unsupported.into());
+    match probe {
+        Ok(true) => "alive",
+        Ok(false) => "gone",
+        Err(_) => "unknown",
     }
 }
 
