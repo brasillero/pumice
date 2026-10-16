@@ -438,7 +438,7 @@ fn serves_health_ready_status_and_flows_then_stops() {
 }
 
 #[test]
-fn the_host_and_origin_guard_runs_first_over_real_sockets() {
+fn the_host_origin_and_fetch_site_guard_runs_first_over_real_sockets() {
     let rig = rig(SERVE, json!([{}]));
     let running = rig.start(&["--json"]);
     let port = running.port();
@@ -469,11 +469,30 @@ fn the_host_and_origin_guard_runs_first_over_real_sockets() {
         assert_eq!(body["error"]["code"], "origin_not_allowed");
         assert!(header(&response_headers, "access-control-allow-origin").is_none());
     }
+    // The right Host and no Origin, but cross-site fetch metadata.
+    for site in ["cross-site", "same-site"] {
+        let (status, response_headers, body) = http(
+            port,
+            "GET",
+            "/pumice/v1/status",
+            &[host(port), ("Sec-Fetch-Site", site.to_owned())],
+        );
+        assert_eq!(status, 403, "{site}");
+        assert_eq!(body["error"]["code"], "cross_site_not_allowed");
+        assert!(header(&response_headers, "access-control-allow-origin").is_none());
+    }
     let (status, _, _) = http(
         port,
         "GET",
         "/health",
         &[host(port), ("Origin", format!("http://127.0.0.1:{port}"))],
+    );
+    assert_eq!(status, 200);
+    let (status, _, _) = http(
+        port,
+        "GET",
+        "/health",
+        &[host(port), ("Sec-Fetch-Site", "same-origin".to_owned())],
     );
     assert_eq!(status, 200);
     drop(running.stop());

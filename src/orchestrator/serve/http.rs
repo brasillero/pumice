@@ -5,8 +5,9 @@
 //! route arrives with P13.4.
 //!
 //! Before anything else, every request passes the origin guard (D8): the
-//! `Host` must be the literal `127.0.0.1:<port>` and a present `Origin` must
-//! equal `http://127.0.0.1:<port>`, otherwise 403. No CORS headers are ever
+//! `Host` must be the literal `127.0.0.1:<port>`, a present `Origin` must
+//! equal `http://127.0.0.1:<port>` and a present `Sec-Fetch-Site` must be
+//! `same-origin` or `none`, otherwise 403. No CORS headers are ever
 //! sent. Every answer is JSON with `Cache-Control: no-store`, errors use the
 //! OpenAI error object (`message`, `type`, `param`, `code`), including 404
 //! and 405 (with `Allow`).
@@ -192,6 +193,10 @@ pub fn respond(
                 "origin_not_allowed",
                 "This service only accepts requests from its own origin.",
             ),
+            Rejected::FetchSite => (
+                "cross_site_not_allowed",
+                "This service does not accept cross-site browser requests.",
+            ),
         };
         return error(
             StatusCode::FORBIDDEN,
@@ -329,11 +334,14 @@ fn flows(frontend: &Frontend) -> Value {
 enum Rejected {
     Host,
     Origin,
+    FetchSite,
 }
 
 /// The D8 guard: exactly one `Host`, the literal `127.0.0.1:<port>` (an
-/// absolute request target must name the same authority), and no `Origin`
-/// but this listener's own.
+/// absolute request target must name the same authority), no `Origin` but
+/// this listener's own, and no cross-site fetch metadata (design §9): a
+/// present `Sec-Fetch-Site` must be `same-origin` or `none` (typed by the
+/// user). Native clients send neither header.
 fn check_origin(port: u16, uri: &Uri, headers: &HeaderMap) -> Result<(), Rejected> {
     let authority = format!("127.0.0.1:{port}");
     let mut hosts = headers.get_all(header::HOST).iter();
@@ -358,6 +366,15 @@ fn check_origin(port: u16, uri: &Uri, headers: &HeaderMap) -> Result<(), Rejecte
     };
     if !origin_ok {
         return Err(Rejected::Origin);
+    }
+    let mut sites = headers.get_all("sec-fetch-site").iter();
+    let site_ok = match (sites.next(), sites.next()) {
+        (None, _) => true,
+        (Some(value), None) => matches!(value.as_bytes(), b"same-origin" | b"none"),
+        (Some(_), Some(_)) => false,
+    };
+    if !site_ok {
+        return Err(Rejected::FetchSite);
     }
     Ok(())
 }
@@ -536,6 +553,47 @@ mod tests {
             &[HOST, ("origin", "http://127.0.0.1:41234")],
         );
         assert_eq!(status, StatusCode::OK, "its own origin is accepted");
+    }
+
+    #[test]
+    fn cross_site_fetch_metadata_is_refused() {
+        let frontend = frontend(ChildState::Ready);
+        for site in ["cross-site", "same-site", "Same-Origin", "", "weird"] {
+            let (status, headers, body) = request(
+                &frontend,
+                Method::GET,
+                "/pumice/v1/status",
+                &[HOST, ("sec-fetch-site", site)],
+            );
+            assert_eq!(status, StatusCode::FORBIDDEN, "{site:?}");
+            assert_eq!(body["error"]["code"], "cross_site_not_allowed");
+            assert!(headers.get("access-control-allow-origin").is_none());
+        }
+        // Before routing and method checks, and twice is refused.
+        let (status, _, body) = request(
+            &frontend,
+            Method::POST,
+            "/nowhere",
+            &[HOST, ("sec-fetch-site", "cross-site")],
+        );
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "cross_site_not_allowed");
+        let (status, _, _) = request(
+            &frontend,
+            Method::GET,
+            "/health",
+            &[HOST, ("sec-fetch-site", "none"), ("sec-fetch-site", "none")],
+        );
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        for site in ["same-origin", "none"] {
+            let (status, _, _) = request(
+                &frontend,
+                Method::GET,
+                "/health",
+                &[HOST, ("sec-fetch-site", site)],
+            );
+            assert_eq!(status, StatusCode::OK, "{site}");
+        }
     }
 
     #[test]

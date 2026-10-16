@@ -231,13 +231,15 @@ is checked manually.
 ### Routes
 
 Every request must carry the `Host` `127.0.0.1:<port>` (no `localhost` or
-other names), and a request with an `Origin` header is accepted only when it
-is `http://127.0.0.1:<port>`; anything else gets 403 `host_not_allowed` or
-`origin_not_allowed`, before any routing. No CORS headers are sent. All
-answers are JSON with `Cache-Control: no-store`; errors use the OpenAI error
-object (`message`, `type`, `param`, `code`), including 404 `not_found` and
-405 `method_not_allowed` (with `Allow: GET`). The routes only read in-memory
-state: they never wait for the transcription child, a provider or a model.
+other names), a request with an `Origin` header is accepted only when it is
+`http://127.0.0.1:<port>`, and one with a `Sec-Fetch-Site` header only when
+it is `same-origin` or `none`; anything else gets 403 `host_not_allowed`,
+`origin_not_allowed` or `cross_site_not_allowed`, before any routing. No
+CORS headers are sent. All answers are JSON with `Cache-Control: no-store`;
+errors use the OpenAI error object (`message`, `type`, `param`, `code`),
+including 404 `not_found` and 405 `method_not_allowed` (with `Allow: GET`).
+The routes only read in-memory state: they never wait for the transcription
+child, a provider or a model.
 
 - `GET /health` — `200` `{"status":"ok","version":"0.2.0"}` while the
   service runs, whatever the child's state.
