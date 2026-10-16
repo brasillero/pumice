@@ -17,8 +17,14 @@ path = "src/main.rs"
 [[bin]]
 name = "pumice-test-cli"
 path = "tests/support/fake_cli.rs"
+required-features = ["test-helpers"]
 test = false
 bench = false
+
+[features]
+# Builds `pumice-test-cli`. Only the self dev-dependency below turns it on, so
+# tests build it and `cargo install` leaves it out.
+test-helpers = []
 
 [dependencies]
 axum = { workspace = true }
@@ -40,4 +46,5 @@ toml = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+pumice-relay = { path = ".", features = ["test-helpers"] }
 tokio = { workspace = true, features = ["test-util"] }
