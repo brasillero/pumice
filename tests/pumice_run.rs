@@ -10,7 +10,7 @@ mod install;
 use install::install_executable;
 
 #[cfg(unix)]
-#[path = "support/bounded.rs"]
+#[path = "../crates/relay/tests/support/bounded.rs"]
 mod bounded;
 
 use std::fs;
@@ -1910,7 +1910,7 @@ fn a_signal_right_after_the_started_event_is_handled() {
     let rig = make_rig(&script);
     let mut child = spawn_run(&rig, "clean");
     let first = child
-        .stderr_line(SIGNAL_WAIT)
+        .stderr_line(std::time::Instant::now() + SIGNAL_WAIT)
         .expect("a first event, not the end of stderr");
     let event: Value = serde_json::from_str(&first).expect("an event");
     assert_eq!(event["event"], "started", "{first}");

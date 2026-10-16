@@ -1,6 +1,7 @@
-//! Bounded waits for the root process tests (test-only, never released):
-//! an owner for a child process and its output pipes, and a loopback HTTP
-//! exchange read by its framing. Every wait takes a deadline; when one
+//! Bounded waits for process tests (test-only, never released): an owner
+//! for a child process and its output pipes, and a loopback HTTP exchange
+//! read by its framing. The workspace root's process tests use it too,
+//! through `#[path]`, like `install.rs`. Every wait takes a deadline; when one
 //! passes, the owned child is killed and the test fails with the stage it
 //! had reached, instead of hanging.
 //!
@@ -204,18 +205,18 @@ impl OwnedChild {
         format!("{:?}", String::from_utf8_lossy(tail))
     }
 
-    /// The next stdout line within `within`; `None` once stdout ended.
-    pub fn stdout_line(&mut self, within: Duration) -> Option<String> {
+    /// The next stdout line before `deadline`; `None` once stdout ended.
+    pub fn stdout_line(&mut self, deadline: Instant) -> Option<String> {
         step("read a stdout line");
-        let line = self.stdout.line(Instant::now() + within);
-        line.unwrap_or_else(|()| self.fail(&format!("no stdout line within {within:?}")))
+        let line = self.stdout.line(deadline);
+        line.unwrap_or_else(|()| self.fail("no stdout line in time"))
     }
 
-    /// The next stderr line within `within`; `None` once stderr ended.
-    pub fn stderr_line(&mut self, within: Duration) -> Option<String> {
+    /// The next stderr line before `deadline`; `None` once stderr ended.
+    pub fn stderr_line(&mut self, deadline: Instant) -> Option<String> {
         step("read a stderr line");
-        let line = self.stderr.line(Instant::now() + within);
-        line.unwrap_or_else(|()| self.fail(&format!("no stderr line within {within:?}")))
+        let line = self.stderr.line(deadline);
+        line.unwrap_or_else(|()| self.fail("no stderr line in time"))
     }
 
     /// Waits for the exit until `deadline`, polling.

@@ -4,12 +4,12 @@
 //! as the sibling `pumice-transcribe`. Ports are always `127.0.0.1:0`; no
 //! real AI CLI, transcription module or model is involved. Every
 //! connection, response, exit and output collection has a deadline
-//! (`support/bounded.rs`).
+//! (`crates/relay/tests/support/bounded.rs`).
 
 #[path = "../crates/relay/tests/support/install.rs"]
 mod install;
 
-#[path = "support/bounded.rs"]
+#[path = "../crates/relay/tests/support/bounded.rs"]
 mod bounded;
 use bounded::{OwnedChild, last_stage, stage};
 
@@ -189,7 +189,7 @@ impl Running {
         stage("wait for a lifecycle record");
         let line = self
             .process
-            .stdout_line(WAIT)
+            .stdout_line(Instant::now() + WAIT)
             .expect("a lifecycle record, not the end of stdout");
         serde_json::from_str(&line).unwrap_or_else(|_| panic!("not a JSON record: {line}"))
     }
@@ -663,7 +663,9 @@ fn a_descendant_holding_the_output_fails_the_collection_in_time() {
         .spawn()
         .expect("start sh");
     let mut process = OwnedChild::new("sh", child);
-    let line = process.stdout_line(WAIT).expect("the sleeper's PID");
+    let line = process
+        .stdout_line(Instant::now() + WAIT)
+        .expect("the sleeper's PID");
     let _stop = Stop(line.parse().expect("a PID"));
     let started = Instant::now();
     let deadline = started + Duration::from_millis(500);

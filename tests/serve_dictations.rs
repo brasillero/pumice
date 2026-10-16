@@ -7,13 +7,13 @@
 //! `127.0.0.1:0`. Waits poll observable state (status, the stub's log,
 //! the fake's report) with a bound instead of sleeping for an order, and
 //! every connection, response, exit and output collection has a deadline
-//! (`support/bounded.rs`).
+//! (`crates/relay/tests/support/bounded.rs`).
 
 #[path = "../crates/relay/tests/support/install.rs"]
 mod install;
 use install::install_executable;
 
-#[path = "support/bounded.rs"]
+#[path = "../crates/relay/tests/support/bounded.rs"]
 mod bounded;
 use bounded::{OwnedChild, ReadError, last_stage, stage};
 
@@ -269,7 +269,7 @@ impl Running {
         stage("wait for a lifecycle record");
         let line = self
             .process
-            .stdout_line(WAIT)
+            .stdout_line(Instant::now() + WAIT)
             .expect("a lifecycle record, not the end of stdout");
         serde_json::from_str(&line).unwrap_or_else(|_| panic!("not a JSON record: {line}"))
     }

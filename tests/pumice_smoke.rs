@@ -13,7 +13,7 @@ mod install;
 use install::install_executable;
 
 #[cfg(unix)]
-#[path = "support/bounded.rs"]
+#[path = "../crates/relay/tests/support/bounded.rs"]
 mod bounded;
 
 use std::fs;
