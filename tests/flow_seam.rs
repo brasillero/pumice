@@ -2,7 +2,7 @@
 //! caller other than the CLI drives it: an in-memory transcription transport,
 //! its own arrival instant, cancellation and event sink, and the relay's
 //! portable fake AI CLI behind the real Claude adapter. An integration test
-//! so Cargo builds `pumice-test-cli` for it (p13.1-flow-seam).
+//! so Cargo builds `pumice-root-test-cli` for it (p13.1-flow-seam).
 
 #[path = "../crates/relay/tests/support/install.rs"]
 mod install;
@@ -158,7 +158,7 @@ impl EventSink for RecordingSink {
 
 /// The portable fake AI CLI, built by Cargo for this integration test.
 fn fake_cli() -> &'static Path {
-    Path::new(env!("CARGO_BIN_EXE_pumice-test-cli"))
+    Path::new(env!("CARGO_BIN_EXE_pumice-root-test-cli"))
 }
 
 /// A disposable configuration: the orchestrator file with [`FLOWS`], the

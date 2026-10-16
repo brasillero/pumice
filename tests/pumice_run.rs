@@ -2,7 +2,7 @@
 //! the transcription sibling, the in-process formatter and the in-process
 //! relay. Everything runs through fakes: the transcription sibling is the
 //! scenario-driven `pumice-test-transcribe` stand-in and the provider is the
-//! relay's portable `pumice-test-cli` behind the real Claude adapter,
+//! relay's portable `pumice-root-test-cli` behind the real Claude adapter,
 //! pipeline and process runner. No real AI CLI or model is ever invoked.
 
 #[path = "../crates/relay/tests/support/install.rs"]
@@ -159,7 +159,7 @@ fn make_rig(script: &Script) -> Rig {
     write_scenario(&stub, &stub_scenario);
 
     let fake = fake_dir.join(exe("fake-claude"));
-    install_executable(Path::new(env!("CARGO_BIN_EXE_pumice-test-cli")), &fake);
+    install_executable(Path::new(env!("CARGO_BIN_EXE_pumice-root-test-cli")), &fake);
     let mut fake_scenario = script.fake.clone();
     if fake_scenario.get("report_path").is_none() {
         fake_scenario["report_path"] = json!(fake_dir.join("report.json").display().to_string());

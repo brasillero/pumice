@@ -71,9 +71,10 @@ bench = false
 
 # The relay's portable fake AI CLI (crates/relay/tests/support/fake_cli.rs),
 # built for the orchestrator's integration tests too: `pumice run` tests point
-# the relay configuration at it. Same source, never released.
+# the relay configuration at it. Same source, never released; its own name
+# keeps its output apart from the relay package's `pumice-test-cli`.
 [[bin]]
-name = "pumice-test-cli"
+name = "pumice-root-test-cli"
 path = "crates/relay/tests/support/fake_cli.rs"
 required-features = ["test-helpers"]
 test = false

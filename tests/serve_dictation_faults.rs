@@ -1,7 +1,7 @@
 //! In-process fault tests of `pumice serve`'s dictation route
 //! (p13.4-dictations): the whole service (`serve::run`) with the
 //! scenario-driven `pumice-test-transcribe` as its child and the relay's
-//! `pumice-test-cli` as the provider, driven through the service's test
+//! `pumice-root-test-cli` as the provider, driven through the service's test
 //! seams to inject a panic into a dictation's task and an unconfirmed
 //! cleanup. No real transcription module, model or AI CLI is involved.
 
@@ -66,7 +66,7 @@ fn setup() -> Setup {
     )
     .unwrap();
     let fake = dir.path().join(exe("fake-claude"));
-    install_executable(Path::new(env!("CARGO_BIN_EXE_pumice-test-cli")), &fake);
+    install_executable(Path::new(env!("CARGO_BIN_EXE_pumice-root-test-cli")), &fake);
     fs::write(
         scenario_path(&fake),
         json!({

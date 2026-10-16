@@ -96,7 +96,7 @@ fn rig(serve: &str, generations: Value) -> Rig {
         cfg.join("relay.yml"),
         format!(
             "providers:\n  - id: claude\n    enabled: true\n    model: haiku-test\n    binary: '{}'\n",
-            env!("CARGO_BIN_EXE_pumice-test-cli")
+            env!("CARGO_BIN_EXE_pumice-root-test-cli")
         ),
     )
     .unwrap();
