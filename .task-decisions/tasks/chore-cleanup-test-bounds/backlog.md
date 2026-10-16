@@ -20,4 +20,17 @@
 - [ ] Draft upstream report for the owner to file at process-wrap: create the child inside its Job Object atomically (`PROC_THREAD_ATTRIBUTE_JOB_LIST`, Windows 10+) instead of suspend–assign–resume.
 
 
+### #2 · Deferred · `sleeping_fake_can_be_killed` can leave its fake running after a failure
+- type: Tech debt
+- area: process
+- origin: reports/2026-10-16-test-audit.md
+- ticket: —
+- created: 2026-10-16
+- reason: Codex round-3 nit on Cleanup A; the test is unchanged by it and cannot hang CI past the new step timeouts
+
+**Context.** `crates/relay/tests/fake_cli.rs::sleeping_fake_can_be_killed` spawns a fake that sleeps 30 s and calls `wait_with_output()` without a deadline; if an assertion fails before the kill, the fake keeps running until its sleep ends.
+
+**To do.**
+- [ ] Put the child under `OwnedChild` right after spawn and bound the wait.
+
 ## Closed
