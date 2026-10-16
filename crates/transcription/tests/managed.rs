@@ -571,6 +571,7 @@ fn a_watchdog_that_cannot_start_exits_at_once() {
     // SAFETY: plain syscall without arguments.
     if unsafe { libc::geteuid() } == 0 {
         // RLIMIT_NPROC does not apply to root.
+        eprintln!("skipped a_watchdog_that_cannot_start_exits_at_once: running as root");
         return;
     }
     let setup = setup(true);

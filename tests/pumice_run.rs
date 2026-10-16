@@ -2,7 +2,7 @@
 //! the transcription sibling, the in-process formatter and the in-process
 //! relay. Everything runs through fakes: the transcription sibling is the
 //! scenario-driven `pumice-test-transcribe` stand-in and the provider is the
-//! relay's portable `pumice-test-cli` behind the real Claude adapter,
+//! relay's portable `pumice-root-test-cli` behind the real Claude adapter,
 //! pipeline and process runner. No real AI CLI or model is ever invoked.
 
 #[path = "../crates/relay/tests/support/install.rs"]
@@ -159,7 +159,7 @@ fn make_rig(script: &Script) -> Rig {
     write_scenario(&stub, &stub_scenario);
 
     let fake = fake_dir.join(exe("fake-claude"));
-    install_executable(Path::new(env!("CARGO_BIN_EXE_pumice-test-cli")), &fake);
+    install_executable(Path::new(env!("CARGO_BIN_EXE_pumice-root-test-cli")), &fake);
     let mut fake_scenario = script.fake.clone();
     if fake_scenario.get("report_path").is_none() {
         fake_scenario["report_path"] = json!(fake_dir.join("report.json").display().to_string());
@@ -1448,16 +1448,18 @@ fn wait_for_pids(path: &Path, grandchild: bool) -> (u32, Option<u32>) {
     }
 }
 
-/// Waits until every listed pid is gone (zombie counts as gone here: its
-/// parent is being tested for reaping separately through the exit code).
+/// Waits until every listed pid is gone (a zombie counts as gone here: it
+/// has exited, and reaping it is its parent's job, tested separately through
+/// the exit code).
 #[cfg(unix)]
 fn wait_until_all_gone(pids: &[u32]) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
         if pids.iter().all(|&pid| {
             !pid_alive(pid) || {
-                // A zombie is reaped by definition once its parent exits; the
-                // ps check treats zombies as gone, like the relay tests do.
+                // A zombie has exited but stays until its parent (or init,
+                // once the parent is gone) reaps it; the ps check treats
+                // zombies as gone, like the relay tests do.
                 let out = Command::new("ps")
                     .args(["-o", "stat=", "-p", &pid.to_string()])
                     .output()

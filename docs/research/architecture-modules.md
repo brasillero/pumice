@@ -1,5 +1,7 @@
 # Pumice modular architecture
 
+> **Status (2026-10-16):** historical proposal. Its command aliases, compatibility and migration proposals (old names and defaults kept working, config migration, fallback lookups) were superseded by owner decisions: `arch-modules/D12` (no backward compatibility), `p10-pumice-entry/D1` (bare `pumice` prints the overview) and `/D3` (the relay reads only `relay.yml`), `p12-pumice-run/D6` (`pumice run` takes `--config`) and `p13.1-flow-seam/D2` (the routes `pumice serve` exposes). The current commands are in the [README](../../README.md); the body below is unchanged.
+
 Analysis date: 2026-10-12. **Recommendations for owner review, not new decisions.** Scope: independently usable relay, transcription, formatter and orchestrator CLIs, with future interfaces above them. No implementation, model execution, AI CLI calls, production connections or service operations were performed.
 
 Evidence: current `arch-modules` HEAD `d23ca9f0074f987f25daab64cfc239e0f857e37c`; `origin/s10.1-transcription` at `e64490246f00dfec9584b1681f6f18c6299c361d`. Below, **S:** means a file at that transcription ref, readable with `git show origin/s10.1-transcription:<path>`; other repository `file:line` references mean the current branch. **R:** means the locally installed Cargo registry source under `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/`. External revisions are pinned in §10. **UNVERIFIED** marks behavior/builds not demonstrated by the inspected evidence.

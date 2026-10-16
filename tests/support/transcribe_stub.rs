@@ -87,7 +87,7 @@ fn main() {
     dispatcher_mode(args);
 }
 
-/// Legacy dispatcher contract: `[EXIT_CODE] [ARGS…]`.
+/// Dispatcher contract: `[EXIT_CODE] [ARGS…]`.
 fn dispatcher_mode(args: Vec<OsString>) -> ! {
     let mut args = args.into_iter();
     let code: i32 = args

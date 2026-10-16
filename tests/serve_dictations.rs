@@ -2,7 +2,7 @@
 //! the real `pumice serve` binary over real loopback sockets, with the
 //! scenario-driven `pumice-test-transcribe` as its managed child (real
 //! loopback HTTP for `/pumice/v1/transcriptions`) and the relay's portable
-//! `pumice-test-cli` behind the real Claude adapter. No real AI CLI,
+//! `pumice-root-test-cli` behind the real Claude adapter. No real AI CLI,
 //! transcription engine or model is involved; every port is
 //! `127.0.0.1:0`. Waits poll observable state (status, the stub's log,
 //! the fake's report) with a bound instead of sleeping for an order, and
@@ -106,7 +106,7 @@ fn rig(flows: &str, generations: Value) -> Rig {
         &stub,
     );
     let fake = fake_dir.join(exe("fake-claude"));
-    install_executable(Path::new(env!("CARGO_BIN_EXE_pumice-test-cli")), &fake);
+    install_executable(Path::new(env!("CARGO_BIN_EXE_pumice-root-test-cli")), &fake);
 
     let log = dir.path().join("spawns.jsonl");
     let models = json!({
@@ -1558,7 +1558,13 @@ impl Rig {
 fn a_failed_directory_cleanup_stops_admission_also_after_another_failure() {
     // SAFETY: geteuid(2) has no preconditions.
     if unsafe { libc::geteuid() } == 0 {
-        eprintln!("skipped: root ignores the permissions this test relies on");
+        // Past libtest's output capture, so the skip shows in CI logs.
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stderr(),
+            "skipped a_failed_directory_cleanup_stops_admission_also_after_another_failure: \
+             root ignores the permissions this test relies on"
+        );
         return;
     }
     let rig = rig(&flows(30_000, 10_000, 10_000), json!([{}, {}]));

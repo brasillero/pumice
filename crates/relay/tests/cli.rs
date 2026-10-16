@@ -1,6 +1,6 @@
 //! CLI entry-point tests (S7.3 follow-up): a bare `pumice-relay` starts the
 //! same service as `pumice-relay serve`, `--config` works in the bare form
-//! and the `serve` alias, help/version and malformed arguments never start a
+//! and with the explicit `serve` command, help/version and malformed arguments never start a
 //! server, and the bad-config (exit 2) and occupied-port (exit 1) contracts
 //! hold. Everything runs against hermetic fake provider binaries and the
 //! built-in `passthrough` model — no AI CLI is ever invoked.
@@ -60,7 +60,7 @@ fn grab_free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-/// A running `pumice` service child process. Killing and reaping are
+/// A running `pumice-relay` service child process. Killing and reaping are
 /// guaranteed: [`Server::stop`] does it for the happy path and the owner's
 /// `Drop` covers panics, with a bounded wait so a stuck child cannot hang
 /// the test suite.
@@ -76,7 +76,7 @@ impl Server {
     }
 }
 
-/// Spawns `pumice` with `args`, child-specific `envs` and working directory
+/// Spawns `pumice-relay` with `args`, child-specific `envs` and working directory
 /// `cwd`, and waits for the startup line naming `port`. `Err` carries the
 /// child's stderr for the one tolerable early exit: a lost ephemeral-port
 /// race, which the caller retries.
@@ -98,7 +98,7 @@ fn try_start(
         command.env(key, value);
     }
     let mut server = Server {
-        process: OwnedChild::new("pumice-relay", command.spawn().expect("spawn pumice")),
+        process: OwnedChild::new("pumice-relay", command.spawn().expect("spawn pumice-relay")),
         port,
     };
 
@@ -126,11 +126,11 @@ fn try_start(
 fn assert_port_race(error: &str, attempt: usize) {
     assert!(
         error.contains("already in use"),
-        "pumice exited unexpectedly (attempt {attempt}): {error}"
+        "pumice-relay exited unexpectedly (attempt {attempt}): {error}"
     );
 }
 
-/// Runs `pumice` with `args` to completion in `cwd` and returns its output,
+/// Runs `pumice-relay` with `args` to completion in `cwd` and returns its output,
 /// within [`WAIT`].
 fn run(args: &[&str], cwd: &Path) -> Output {
     stage(format!("run pumice-relay {args:?}"));
@@ -146,7 +146,7 @@ fn output(command: &mut Command) -> Output {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("run pumice");
+        .expect("run pumice-relay");
     OwnedChild::new("pumice-relay", child).finish(WAIT)
 }
 
@@ -241,7 +241,7 @@ fn assert_service_works(port: u16, fakes: &[FakeCli]) {
 }
 
 #[test]
-fn bare_pumice_starts_the_service_with_the_per_user_config() {
+fn bare_pumice_relay_starts_the_service_with_the_per_user_config() {
     for attempt in 1..=3 {
         let port = grab_free_port();
         let (fakes, yaml) = hermetic_yaml(port);
@@ -271,11 +271,11 @@ fn bare_pumice_starts_the_service_with_the_per_user_config() {
         server.stop();
         return;
     }
-    panic!("could not start pumice on a free port after 3 attempts");
+    panic!("could not start pumice-relay on a free port after 3 attempts");
 }
 
 #[test]
-fn bare_pumice_with_config_flag_starts_the_service() {
+fn bare_pumice_relay_with_config_flag_starts_the_service() {
     for attempt in 1..=3 {
         let port = grab_free_port();
         let (fakes, yaml) = hermetic_yaml(port);
@@ -297,11 +297,11 @@ fn bare_pumice_with_config_flag_starts_the_service() {
         server.stop();
         return;
     }
-    panic!("could not start pumice on a free port after 3 attempts");
+    panic!("could not start pumice-relay on a free port after 3 attempts");
 }
 
 #[test]
-fn serve_alias_still_starts_the_service() {
+fn explicit_serve_starts_the_service() {
     for attempt in 1..=3 {
         let port = grab_free_port();
         let (fakes, yaml) = hermetic_yaml(port);
@@ -327,7 +327,7 @@ fn serve_alias_still_starts_the_service() {
         server.stop();
         return;
     }
-    panic!("could not start pumice on a free port after 3 attempts");
+    panic!("could not start pumice-relay on a free port after 3 attempts");
 }
 
 #[test]
@@ -643,7 +643,7 @@ fn startup_prints_the_route_line_naming_the_enabled_providers() {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn pumice");
+        .expect("spawn pumice-relay");
     let line = startup_stderr_line(OwnedChild::new("pumice-relay", child), "providers:");
     assert_eq!(
         line,
@@ -663,7 +663,7 @@ fn startup_with_no_enabled_providers_prints_one_clear_line() {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn pumice");
+        .expect("spawn pumice-relay");
     let line = startup_stderr_line(
         OwnedChild::new("pumice-relay", child),
         "no providers enabled",

@@ -219,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_and_codex_have_no_new_capabilities() {
+    fn claude_and_codex_accept_any_explicit_model() {
         for id in ["claude", "codex"] {
             let d = descriptor(id).expect("registered");
             let mut settings = (d.defaults)();
@@ -227,7 +227,7 @@ mod tests {
             settings.model = "any".to_owned();
             assert!(
                 (d.validate_settings)(&settings, &ProviderLocations::default()).is_ok(),
-                "{id} full-settings validation is a no-op"
+                "{id} accepts an explicit model"
             );
         }
     }

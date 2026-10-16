@@ -25,7 +25,7 @@ The repository ships a portable x86-64 baseline build by default. This is config
 TRANSCRIBE_CMAKE_ARGS = { value = "-DGGML_NATIVE=OFF -DTRANSCRIBE_X86_CONSERVATIVE=ON -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF -DGGML_SSE42=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_AVX_VNNI=OFF -DGGML_AVX512=OFF -DGGML_AVX512_VBMI=OFF -DGGML_AVX512_VNNI=OFF -DGGML_AVX512_BF16=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF -DGGML_BMI2=OFF -DGGML_AMX_TILE=OFF -DGGML_AMX_INT8=OFF -DGGML_AMX_BF16=OFF", force = false }
 ```
 
-This disables host-specific CPU tuning (`-march=native`) and all x86 SIMD tiers so the binary runs on any x86-64 machine without SIGILL. Runtime CPU-variant selection is planned for a later phase.
+This disables host-specific CPU tuning (`-march=native`) and all x86 SIMD tiers so the binary runs on any x86-64 machine without SIGILL. For speed on modern CPUs without giving that up, the opt-in `cpu-variants` feature selects a CPU module at runtime; see [Faster CPU builds](../../docs/transcription.md#faster-cpu-builds-runtime-cpu-variants).
 
 To opt into a native build tuned to the host CPU, override the variable when invoking cargo. `force = false` in `.cargo/config.toml` means an environment variable takes precedence:
 
@@ -54,7 +54,7 @@ $env:TRANSCRIBE_CMAKE_ARGS="-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DGGML_NA
 cargo build -p pumice-transcription --features engine
 ```
 
-This is a documented limitation; Windows native builds come in a later phase.
+This is a documented limitation. Runtime CPU variants on Windows are built only as part of the experimental Vulkan preview; see [Windows Vulkan preview](../../docs/transcription.md#windows-vulkan-preview-experimental).
 
 ## Usage
 

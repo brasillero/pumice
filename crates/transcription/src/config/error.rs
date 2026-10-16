@@ -37,7 +37,6 @@ impl ConfigError {
     }
 
     /// A problem with no source position.
-    #[allow(dead_code)]
     pub(crate) fn general(message: impl Into<String>) -> ConfigError {
         ConfigError {
             file: None,

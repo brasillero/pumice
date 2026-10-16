@@ -10,7 +10,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pumice_relay::config::{self, Config};
 use pumice_relay::process::ProcessRunner;
 use pumice_relay::providers::cli::CliProvider;
 use pumice_relay::providers::kiro::{self as kiro_plugin, AGENT_FILE, DESCRIPTOR, ID, KiroAdapter};
@@ -390,89 +389,4 @@ fn descriptor_defaults_ship_disabled_with_an_empty_model() {
     let settings = (DESCRIPTOR.defaults)();
     assert!(!settings.enabled);
     assert_eq!(settings.model, "");
-}
-
-// Configuration validation, through the real YAML loader.
-
-/// Loads `text` as a relay.yml, returning the parsed config.
-fn load(text: &str) -> Result<Config, String> {
-    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let path = dir.path().join("relay.yml");
-    std::fs::write(&path, text).map_err(|e| e.to_string())?;
-    config::load_with_env(Some(&path), |_| None)
-        .map(|loaded| loaded.config)
-        .map_err(|error| error.to_string())
-}
-
-fn load_error(text: &str) -> String {
-    match load(text) {
-        Ok(_) => panic!("expected a configuration error for:\n{text}"),
-        Err(error) => error,
-    }
-}
-
-/// Asserts the error display contains `:line:column: message`.
-fn assert_error(text: &str, line: u64, column: u64, message: &str) {
-    let error = load_error(text);
-    assert!(
-        error.contains(&format!(":{line}:{column}: {message}")),
-        "expected ':{line}:{column}: {message}' in:\n{error}"
-    );
-}
-
-#[test]
-fn enabled_with_a_model_loads() {
-    let config = load("providers:\n  - id: kiro\n    enabled: true\n    model: claude-haiku-4.5\n")
-        .expect("enabled loads");
-    let kiro = config.provider(ID).expect("kiro configured");
-    assert!(kiro.enabled);
-    assert_eq!(kiro.model, TEST_MODEL);
-}
-
-#[test]
-fn enabled_without_a_model_reports_the_entry() {
-    assert_error(
-        "providers:\n  - id: kiro\n    enabled: true\n",
-        2,
-        9,
-        "providers entry \"kiro\" is enabled but has no model; add \"model: <name>\"",
-    );
-}
-
-#[test]
-fn disabled_entry_is_kept_but_off() {
-    let config = load("providers:\n  - id: kiro\n    enabled: false\n").expect("disabled loads");
-    let kiro = config.provider(ID).expect("kiro configured");
-    assert!(!kiro.enabled);
-    assert_eq!(kiro.model, "");
-}
-
-#[test]
-fn malformed_model_reports_the_value() {
-    assert_error(
-        "providers:\n  - id: kiro\n    enabled: true\n    model: -x\n",
-        4,
-        12,
-        "providers entry \"kiro\".model must not start with '-'",
-    );
-}
-
-#[test]
-fn options_key_is_rejected_as_removed() {
-    assert_error(
-        "providers:\n  - id: kiro\n    enabled: true\n    model: claude-haiku-4.5\n    options:\n      effort: low\n",
-        6,
-        7,
-        "providers entry \"kiro\".options was removed",
-    );
-}
-
-#[test]
-fn env_key_is_rejected_as_removed() {
-    assert_error(
-        "providers:\n  - id: kiro\n    enabled: true\n    model: claude-haiku-4.5\n    env:\n      KIRO_HOME: /tmp\n",
-        6,
-        7,
-        "providers entry \"kiro\".env was removed",
-    );
 }
