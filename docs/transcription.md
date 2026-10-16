@@ -336,14 +336,22 @@ Check a Mac with `backends`, which loads no model:
 engine reports a Metal GPU as type `gpu` with no PCI bus id, so it is
 `gpu_class: "unverified"` and `auto` reports `fallback_reason:
 "gpu_unverified"` until a real Mac shows Metal is faster than the CPU for
-Turbo (p14.4-macos-metal#1). Set `backend: gpu` to use Metal. `auto` and
-`gpu` still initialize the Metal module at startup, shader compilation
-included; `backend: cpu` never loads it.
+Turbo (p14.4-macos-metal#1). Set `backend: gpu` to use Metal.
 
-GitHub's Apple Silicon runners are virtual machines without GPU acceleration,
-so CI proves the build, the relocation, the CPU path and the manifest checks,
-and reports what the virtual machine's Metal device does; it cannot measure
-real Metal.
+`auto` and `gpu` initialize the Metal module at startup, and that compiles
+the embedded shaders; `auto` pays this even though it then runs on the CPU,
+while `backend: cpu` never loads the module. macOS caches the compiled
+shaders per program location: on CI's virtual machine the first `auto` start
+from a new folder took 43–45 s and later starts from the same folder about
+0.1 s. The cost on real hardware is part of the checklist below.
+
+GitHub's Apple Silicon runners (CI uses `macos-15`) are virtual machines
+without GPU acceleration. Their Metal device, `Apple Paravirtual device`,
+registers as `MTL0` and `backend: gpu` runs the tiny model on it, but slowly
+(137 s for the 14 s sample) and with a degenerate transcript, so CI proves
+the build, the relocation, the CPU path, the manifest checks and that the
+Metal module loads and executes; it says nothing about real Metal output or
+speed.
 
 Build it yourself (an Apple Silicon Mac with the Xcode command line tools,
 CMake and `jq`; build time only):

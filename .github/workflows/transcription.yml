@@ -1208,13 +1208,14 @@ jobs:
             "r['allowed_backends'] == ['cpu']" "all(d['kind'] == 'cpu' for d in r['devices'])" \
             "r['fallback_reason'] is None"
 
-          # backend auto: scanned with the CPU|METAL mask. A Metal GPU has no
+          # backend auto: scanned with the CPU|METAL mask. The VM registers
+          # one Metal device ("Apple Paravirtual device"); a Metal GPU has no
           # PCI bus id, so it is `unverified` and auto plans the CPU
-          # (p14.4-macos-metal/D1); with no Metal device at all the reason
-          # is gpu_unavailable.
+          # (p14.4-macos-metal/D1). The first scan from a new location
+          # compiles the embedded shaders (tens of seconds on this VM).
           backends auto auto
           expect auto "r['gpu_module'] == 'scanned'" "r['allowed_backends'] == ['cpu', 'metal']" \
-            "r['fallback_reason'] == ('gpu_unverified' if r['gpu_devices'] else 'gpu_unavailable')" \
+            "r['gpu_devices'] == 1" "r['fallback_reason'] == 'gpu_unverified'" \
             "all(d['gpu_class'] == 'unverified' and d['type'] == 'gpu' for d in r['devices'] if d['kind'] == 'metal')"
           metal_devices="$(jq -r .result.gpu_devices backends-auto.json)"
           echo "metal_devices=$metal_devices" >> "$GITHUB_ENV"
@@ -1372,7 +1373,7 @@ jobs:
           bin="$moved/pumice-transcribe"
           model="$MODEL_DIR/whisper-tiny-Q8_0.gguf"
           fixtures="$GITHUB_WORKSPACE/crates/transcription/tests/fixtures"
-          auto_reason="$([ "$metal_devices" -gt 0 ] && echo gpu_unverified || echo gpu_unavailable)"
+          auto_reason=gpu_unverified
           echo '### Compute snapshots (hosted runner)' >> "$GITHUB_STEP_SUMMARY"
           for run in sample-pt.wav:cpu: sample-pt.wav:auto:$auto_reason \
             chrome-mediarecorder.webm:auto:$auto_reason; do
@@ -1396,10 +1397,11 @@ jobs:
           PY
           done
           cpu_text="$("$bin" file "$fixtures/sample-pt.wav" --model-file "$model" --backend cpu --json | jq -r .result.text)"
-          # backend gpu never falls back. Without a Metal device it is the
-          # fixed error before any audio is transcribed; with the VM's Metal
-          # device it must either run on Metal or fail with a typed error
-          # (never a crash, never the CPU).
+          # backend gpu never falls back, and the VM's paravirtual Metal
+          # device does run the model: gpu must report metal. Its text is
+          # only recorded: on this device it is slow and degenerate, so it
+          # proves the module loads and executes, not that Metal is right
+          # (p14.4-macos-metal#1).
           code=0
           with_alarm 900 "$bin" file "$fixtures/sample-pt.wav" --model-file "$model" --backend gpu --json \
             > gpu.json 2> gpu.err || code=$?
@@ -1413,19 +1415,15 @@ jobs:
           raw = open(path).read()
           assert raw.strip(), f"backend gpu printed no JSON (exit {code}): a crash, not a typed error"
           data = json.loads(raw)
-          if data["ok"]:
-              assert code == 0 and devices > 0, (code, data)
-              compute = data["result"]["compute"]
-              assert compute["requested"] == "gpu" and compute["backend"] == "metal", data
-              assert compute["fallback_reason"] is None and compute["cpu_variant"] == "arm64", data
-              same = "same text as the CPU" if data["result"]["text"] == cpu_text else "text differs from the CPU"
-              print(f"- `gpu`: ran on Metal: `{json.dumps(compute)}`, {data['result']['transcription_ms']} ms, {same}")
-          else:
-              assert code == 1, (code, data)
-              expected = {"gpu_unavailable"} if devices == 0 else {"gpu_unavailable", "model_load_failed", "engine_failed"}
-              assert data["error"]["code"] in expected, data
-              assert "backend: cpu" in data["error"]["message"] or data["error"]["code"] == "engine_failed", data
-              print(f"- `gpu`: typed error `{data['error']['code']}`: {data['error']['message']}")
+          assert data["ok"] is True and code == 0 and devices == 1, (code, data)
+          compute = data["result"]["compute"]
+          assert compute["requested"] == "gpu" and compute["backend"] == "metal", data
+          assert compute["device"]["name"] == "MTL0", data
+          assert compute["fallback_reason"] is None and compute["cpu_variant"] == "arm64", data
+          text = data["result"]["text"]
+          same = "same text as the CPU" if text == cpu_text else f"text differs from the CPU ({text[:40]!r}...)"
+          print(f"- `gpu`: ran on Metal: `{json.dumps(compute)}`, model load {data['result']['model_load_ms']} ms,"
+                f" {data['result']['transcription_ms']} ms, {same}")
           PY
           rm -rf "$moved"
 
@@ -1440,14 +1438,22 @@ jobs:
           q="$RUNNER_TEMP/pumice quarantined"
           rm -rf "$q"
           cp -R "$STAGE" "$q"
+          # Gatekeeper's state on this image, and its verdict on the
+          # executable (not notarized), for reading the result below.
+          gatekeeper="$(spctl --status 2>&1 || true)"
+          verdict="$(spctl --assess --type execute -vv "$q/pumice-transcribe" 2>&1 || true)"
+          echo "spctl --status: $gatekeeper"
+          echo "spctl --assess: $verdict"
           flag="0083;$(printf '%x' "$(date +%s)");Safari;$(uuidgen)"
           find "$q" -type f -exec xattr -w com.apple.quarantine "$flag" {} +
           xattr -l "$q/pumice-transcribe"
           code=0
           with_alarm 120 "$q/pumice-transcribe" backends --backend auto --json > q.json 2> q.err || code=$?
           sed 's/^/  [quarantined] /' q.err | tail -n 20
-          echo "- quarantined copy, \`backends --backend auto\`: exit $code$(jq -e .ok q.json > /dev/null 2>&1 && echo ', ran' || echo ', did not run')" \
-            | tee -a "$GITHUB_STEP_SUMMARY"
+          {
+            echo "- Gatekeeper on the runner: \`$gatekeeper\`; \`spctl --assess\`: \`$(echo "$verdict" | tr '\n' ' ')\`"
+            echo "- quarantined copy, \`backends --backend auto\`: exit $code$(jq -e .ok q.json > /dev/null 2>&1 && echo ', ran' || echo ', did not run')"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
           xattr -dr com.apple.quarantine "$q"
           if xattr -lr "$q" | grep -q com.apple.quarantine; then exit 1; fi
           backends dequarantined auto "$q/pumice-transcribe"
