@@ -3,7 +3,7 @@ title: P14.5: Linux Vulkan transcription bundle, checked on a real GPU
 state: Done
 ticket: —
 branch: p14.5-linux-vulkan
-mr: —
+mr: PR #118
 start: 2026-10-16
 end: 2026-10-16
 ---
