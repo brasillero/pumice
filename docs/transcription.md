@@ -141,7 +141,8 @@ In particular the GPU driver itself is not looked up by Pumice: the Vulkan
 loader finds it through the driver's registration, usually in the Windows
 driver store (`System32\DriverStore\FileRepository`). The folder's own DLLs
 are trusted, so keep it where only you can write. CI checks this with decoy
-DLLs in the current directory and, separately, on `PATH`; it changes no
+DLLs in the current directory and, separately, on `PATH`, for the core DLLs
+and for the dependency of a module ggml loads after startup; it changes no
 system file, so a machine without a Vulkan loader in `System32` is checked
 by hand on a clean machine or VM (step 7 below).
 
@@ -288,17 +289,24 @@ the same model, audio and language for every run (for example
 `whisper-tiny-q8_0`, then Turbo, and the repository's `sample-pt.wav` with
 `--language pt`). Nothing is installed; only the extracted folder is used.
 
-1. Extract the artifact to a new folder (try a path with a space) and open a
-   terminal there. Use a clean extraction on a machine without the Vulkan
-   SDK, and a terminal without `PATH` changes (nothing added for Pumice,
-   the SDK or the build tools). Record the Windows version (`winver`), the
-   GPU driver version (`Get-CimInstance Win32_VideoController | Select-Object
-   Name, DriverVersion`) and the Vulkan loader version
+1. Extract the artifact to a new folder (try a path with a space). Open a
+   PowerShell terminal in a separate, new and empty working directory
+   outside that folder, and run the program by its absolute path, set once
+   as `$exe = 'C:\...\extracted folder\pumice-transcribe.exe'` and called
+   as `& $exe ...` in every step below; pass the model and audio files by
+   absolute path too. The extracted folder is the program's own folder,
+   where DLL lookups are allowed; only a separate working directory shows
+   whether the current directory is searched. Use a clean extraction on a
+   machine without the Vulkan SDK, and a terminal without `PATH` changes
+   (nothing added for Pumice, the SDK or the build tools). Record the
+   Windows version (`winver`), the GPU driver version
+   (`Get-CimInstance Win32_VideoController | Select-Object Name,
+   DriverVersion`) and the Vulkan loader version
    (`(Get-Item $env:SystemRoot\System32\vulkan-1.dll).VersionInfo.FileVersion`).
-2. `pumice-transcribe.exe backends --backend auto --json`: `gpu_module`
+2. `& $exe backends --backend auto --json`: `gpu_module`
    `scanned`, `gpu_devices` ≥ 1 and the GPU listed with kind `vulkan`. Run
    with `--backend cpu` too: `gpu_module` `not_requested`, only the CPU.
-3. CPU baseline: `pumice-transcribe.exe file sample-pt.wav --model-file
+3. CPU baseline: `& $exe file sample-pt.wav --model-file
    MODEL --language pt --backend cpu --json`, three times; note the text,
    `model_load_ms`, `transcription_ms` and `compute`.
 4. Required GPU: the same with `--backend gpu`. It must succeed with
@@ -316,16 +324,28 @@ the same model, audio and language for every run (for example
    `gpu_unavailable`, `--backend cpu` is unaffected. On a clean machine or
    VM with no `vulkan-1.dll` in `System32` (p14.1-windows-vulkan#2, never
    simulated by removing system files), also put a copy of any
-   `vulkan-1.dll` in the current directory: `auto` must still run on the
-   CPU, and Process Monitor must show it was not loaded.
+   `vulkan-1.dll` in the working directory from step 1 (never in the
+   extracted folder, where it would be loaded by design), then, removed
+   from there, in a new directory prepended to `PATH` for that terminal
+   only (`$env:PATH = "C:\...\decoy;$env:PATH"`). In both runs `auto`
+   must still run on the CPU, and Process Monitor (step 8) must show the
+   copy was not loaded.
 8. DLL loads: with [Process Monitor](https://learn.microsoft.com/sysinternals/downloads/procmon),
    filter on Process Name `pumice-transcribe.exe` and capture two runs:
    `backends --backend auto --json` and one `file ... --backend gpu`
-   (step 4). Save the events with Operation `Load Image` (every DLL
-   loaded) and the failed DLL lookups (Operation `CreateFile`, Path ending
-   in `.dll`, Result `NAME NOT FOUND` or `PATH NOT FOUND`). Every image
-   must come from the extracted folder, `System32` or the driver store, and
-   no lookup may touch the current directory or a `PATH` directory.
+   (step 4), from the working directory of step 1. Save the events with
+   Operation `Load Image` (every DLL loaded) and the DLL lookups (Operation
+   `CreateFile`, Path ending in `.dll`, any Result, `NAME NOT FOUND` and
+   `PATH NOT FOUND` included). Allowed: images loaded from, and lookups in,
+   the extracted folder (its subfolders `cpu\` and `gpu\vulkan\`
+   included) and `System32`, plus the GPU driver's own files, which the
+   Vulkan loader opens by path from the driver store. Forbidden: any image
+   or lookup in the working directory or in a `PATH` directory outside
+   `System32` (for example `C:\Windows` itself or a tools folder on `PATH`).
+   A lookup that fails in the extracted folder and then succeeds in
+   `System32` (for example `vulkan-1.dll`) is the expected order. Report
+   any forbidden event with its stack (Event Properties, Stack), which shows
+   whether Pumice's files or the driver's made it.
 9. Report the Windows, GPU driver and Vulkan loader versions, the GPU
    model, the snapshots, the timings, the Process Monitor captures and
    anything unexpected (crashes, hangs, wrong text, high memory or VRAM).
