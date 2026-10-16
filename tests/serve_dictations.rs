@@ -1558,7 +1558,13 @@ impl Rig {
 fn a_failed_directory_cleanup_stops_admission_also_after_another_failure() {
     // SAFETY: geteuid(2) has no preconditions.
     if unsafe { libc::geteuid() } == 0 {
-        eprintln!("skipped: root ignores the permissions this test relies on");
+        // Past libtest's output capture, so the skip shows in CI logs.
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stderr(),
+            "skipped a_failed_directory_cleanup_stops_admission_also_after_another_failure: \
+             root ignores the permissions this test relies on"
+        );
         return;
     }
     let rig = rig(&flows(30_000, 10_000, 10_000), json!([{}, {}]));

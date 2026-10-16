@@ -1400,7 +1400,14 @@ async fn serve_waits_for_an_active_worker_before_returning() {
 #[tokio::test]
 async fn serve_on_refuses_a_non_loopback_listener() {
     let Ok(listener) = TcpListener::bind("0.0.0.0:0").await else {
-        return; // no IPv4 wildcard in this environment
+        // Past libtest's output capture, so the skip shows in CI logs.
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stderr(),
+            "skipped serve_on_refuses_a_non_loopback_listener: \
+             no IPv4 wildcard listener in this environment"
+        );
+        return;
     };
     let result = serve_on(
         listener,
