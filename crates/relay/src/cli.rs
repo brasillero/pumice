@@ -94,10 +94,23 @@ ready. With --login-check it instead runs one real call through provider
     )
 }
 
+/// The options whose next argument is their value, never a flag.
+const VALUE_OPTIONS: [&str; 2] = ["--config", "--provider"];
+
 /// `-h` or `--help` anywhere among a command's arguments asks for that
-/// command's help, the same rule as `pumice run` and `pumice serve`.
+/// command's help, the same rule as `pumice run` and `pumice serve`. An
+/// option's value is not a flag: `--config --help` names a file `--help`.
 fn wants_help(args: &[&str]) -> bool {
-    args.iter().any(|arg| matches!(*arg, "-h" | "--help"))
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if matches!(*arg, "-h" | "--help") {
+            return true;
+        }
+        if VALUE_OPTIONS.contains(arg) {
+            rest.next();
+        }
+    }
+    false
 }
 
 fn print_help(text: &str) -> ExitCode {
