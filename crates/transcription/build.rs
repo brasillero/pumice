@@ -40,6 +40,22 @@ fn main() {
         // reaches the ELF rpath unchanged.
         println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
     }
+    if cpu_variants && windows_x64 && target_env == "msvc" {
+        // Loaded after the bundle check by full path from the executable's
+        // folder (engine.rs, preload_core), then bound by the delay-load
+        // helper (delayimp.lib) on the first engine call; a static import
+        // would be resolved by the standard search order, which ends with
+        // the current directory and PATH, before `main`.
+        // The executable imports nothing else from the engine (the bundle
+        // audit checks it).
+        println!("cargo:rustc-link-arg-bins=/DELAYLOAD:transcribe.dll");
+        println!("cargo:rustc-link-arg-bins=delayimp.lib");
+    } else if cpu_variants && windows_x64 {
+        println!(
+            "cargo:warning=cpu-variants on Windows delay-loads the engine only with MSVC: \
+             this build resolves transcribe.dll before main, with the standard DLL search order"
+        );
+    }
     if cpu_variants && (target_os == "linux" || windows_x64) {
         println!("cargo:rustc-cfg=pumice_dynamic_backends");
     } else if cpu_variants {

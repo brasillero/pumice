@@ -1517,6 +1517,7 @@ dependencies = [
  "ureq",
  "url",
  "webm-iterable",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
