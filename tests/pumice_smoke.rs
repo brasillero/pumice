@@ -12,6 +12,10 @@
 mod install;
 use install::install_executable;
 
+#[cfg(unix)]
+#[path = "support/bounded.rs"]
+mod bounded;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -539,7 +543,9 @@ fn sigterm_right_after_start_reaches_the_execd_stub_and_orphans_nothing() {
         .args(["transcribe", "0"])
         .env("PUMICE_STUB_PID_FILE", &pid_file)
         .stdin(std::process::Stdio::null());
-    let mut child = command.spawn().expect("spawn pumice");
+    // Killed and reaped if the test fails before the stub exits.
+    let mut child =
+        bounded::OwnedChild::new("pumice transcribe", command.spawn().expect("spawn pumice"));
     let pumice_pid = child.id();
 
     // The stub only writes this file after the exec, when `pumice`'s PID has
@@ -554,7 +560,7 @@ fn sigterm_right_after_start_reaches_the_execd_stub_and_orphans_nothing() {
     // The same cancellation a supervisor sends to the `pumice` PID it just
     // started now lands on the stub itself.
     assert_eq!(unsafe { libc::kill(stub_pid as i32, libc::SIGTERM) }, 0);
-    let status = child.wait().expect("reap the stub");
+    let status = child.wait_until(Instant::now() + Duration::from_secs(10));
     assert_eq!(
         status.signal(),
         Some(libc::SIGTERM),
