@@ -1,11 +1,11 @@
 ---
 title: P14.2: backend policy (`cpu|auto|gpu`) and reported compute
-state: In progress
+state: Done
 ticket: —
 branch: p14.2-backend-policy
-mr: —
+mr: PR #116
 start: 2026-10-16
-end: —
+end: 2026-10-16
 ---
 
-Second GPU transcription PR (design: `p14.1-windows-vulkan/reports/2026-10-16-gpu-design.md` §6, §10 item 2; decisions `p14.1-windows-vulkan/D3`–`D5`; replaces the temporary switches of `p14.1-windows-vulkan#3`). Adds `backend: cpu|auto|gpu` to `transcribe.yml` and `--backend` to `file` and `serve`, one immutable `compute` snapshot reported in `file --json`, `serve` startup output, managed `ready` and `/ready` (internal protocol 2) and `pumice serve`'s status, and the D4 failure rules. Implementation by a Claude Opus 5.5 subagent, review by Codex, final review by the orchestrator.
+Second GPU transcription PR (design: `p14.1-windows-vulkan/reports/2026-10-16-gpu-design.md` §6; decisions `p14.1-windows-vulkan/D3`–`D5`, narrowed by D1 here). `transcribe.yml` gets `backend: cpu|auto|gpu` (default `cpu`) and `file`/`serve`/`backends` get `--backend`; `auto` falls back to CPU with a named reason, `gpu` fails instead. One `compute` snapshot from the model's actual device is reported in `file --json`, the `serve` startup line, managed `ready`/`/ready` (protocol 2 on both sides) and `pumice serve`'s status. A GPU load failure fails startup; a native failure that may leave the engine unusable retires a GPU process, withdrawing admission before the permit is released, while content and input errors keep serving (D1). The P14.1 temporary switches are replaced by the model-free `backends` command (`p14.1-windows-vulkan#3`). Implemented by Claude Opus 5.5 subagents; two Codex review rounds (round 1: content errors retired a healthy GPU, admission gap; round 2: name every error kind, fixed by the orchestrator); final review by the orchestrator. The real-GPU check is the owner's (#1).
