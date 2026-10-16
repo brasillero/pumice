@@ -176,7 +176,9 @@ impl Rig {
     }
 
     /// The running provider's PID, once the fake has written its report:
-    /// the relay stage starts before the provider process does.
+    /// the relay stage starts before the provider process does. Only the
+    /// Unix tests check a PID.
+    #[cfg(unix)]
     fn wait_provider_pid(&self) -> u32 {
         let deadline = Instant::now() + WAIT;
         loop {
