@@ -16,9 +16,13 @@
 #   gpu/vulkan/ggml-vulkan.dll                    the only Vulkan importer
 #   bundle.json                                   manifest: sizes and SHA-256
 #
-# Windows resolves the core DLLs from the executable's directory; startup
-# points ggml at exactly one cpu/<variant>/ directory and then gpu/vulkan/.
-# No .lib/.pdb/CMake/SDK files are staged. Nothing is written at runtime.
+# The executable delay-loads transcribe.dll (build.rs) and its main first
+# limits the DLL search to its own directory and System32 (src/main.rs), so
+# the core DLLs, the modules ggml loads by full path and their dependencies
+# (vulkan-1.dll included) never come from the current directory or PATH.
+# Startup points ggml at exactly one cpu/<variant>/ directory and then
+# gpu/vulkan/. No .lib/.pdb/CMake/SDK files are staged. Nothing is written
+# at runtime.
 #
 # bundle.json (src/bundle.rs) lists every staged file with its role, size and
 # SHA-256, plus the product version, target and engine. On Windows startup
@@ -30,8 +34,9 @@
 # .cargo/config.toml and the native build gets CMAKE_MSVC_RUNTIME_LIBRARY=
 # MultiThreaded (/MT). The audit at the end accepts only reviewed imports
 # (Get-ImportFailures): a short list of OS DLLs, the bundled core DLLs, and
-# vulkan-1.dll for the GPU module alone; anything else fails the build. Its
-# self-test runs first (-SelfTestOnly runs just that, without a build).
+# vulkan-1.dll for the GPU module alone; anything else fails the build, as
+# does an engine DLL imported directly (not delay-loaded) by the executable.
+# Its self-test runs first (-SelfTestOnly runs just that, without a build).
 # Needs the Vulkan SDK (VULKAN_SDK, glslc on PATH) and Visual Studio 2022 C++
 # tools at build time only.
 [CmdletBinding()]
@@ -62,16 +67,27 @@ $systemImports = @(
 # failure so the cause is obvious.
 $redistributable = '^(vcruntime|msvcp|msvcr|api-ms-win-crt-|ucrtbase|concrt|vcomp|vccorlib)'
 
-# The failures for one staged file's imports (file relative to the bundle
-# root, Windows separators); nothing when all are allowed.
-function Get-ImportFailures([string]$Relative, [string[]]$Imports) {
+# The failures for one staged file's imports and delay-load imports (file
+# relative to the bundle root, Windows separators); nothing when all are
+# allowed.
+function Get-ImportFailures([string]$Relative, [string[]]$Imports, [string[]]$DelayImports = @()) {
     if ($Imports.Count -eq 0) {
         # Every PE imports kernel32: an empty list means dumpbin's output
         # was not parsed.
         "$Relative has no parsed imports"
         return
     }
-    foreach ($import in $Imports) {
+    if ($Relative -eq 'pumice-transcribe.exe') {
+        # A static import is resolved before main, with the standard search
+        # order (current directory, PATH); a delay-loaded one only after main
+        # has restricted the search.
+        foreach ($import in $Imports) {
+            if ($coreDlls -contains $import.ToLowerInvariant()) {
+                "$Relative imports $import directly (engine DLLs must be delay-loaded)"
+            }
+        }
+    }
+    foreach ($import in @(@($Imports) + @($DelayImports) | Where-Object { $_ })) {
         $lower = $import.ToLowerInvariant()
         if ($systemImports -contains $lower -or $coreDlls -contains $lower) {
             continue
@@ -94,10 +110,13 @@ function Get-ImportFailures([string]$Relative, [string[]]$Imports) {
 function Test-ImportAudit {
     $exeImports = @(
         'ws2_32.dll', 'api-ms-win-core-synch-l1-2-0.dll', 'kernel32.dll', 'ntdll.dll',
-        'bcryptprimitives.dll', 'bcrypt.dll', 'advapi32.dll', 'transcribe.dll'
+        'bcryptprimitives.dll', 'bcrypt.dll', 'advapi32.dll'
     )
     $cases = @(
-        @{ file = 'pumice-transcribe.exe'; imports = $exeImports; expect = @() },
+        @{ file = 'pumice-transcribe.exe'; imports = $exeImports; delay = @('transcribe.dll'); expect = @() },
+        @{ file = 'pumice-transcribe.exe'; imports = $exeImports + 'transcribe.dll'; expect = @('transcribe.dll directly') },
+        @{ file = 'pumice-transcribe.exe'; imports = $exeImports; delay = @('transcribe.dll', 'MSVCP140.dll')
+           expect = @('redistributable runtime MSVCP140.dll') },
         @{ file = $gpuModule; imports = @('ggml-base.dll', 'vulkan-1.dll', 'KERNEL32.dll'); expect = @() },
         @{ file = 'cpu\x64\ggml-cpu-x64.dll'; imports = @('ggml-base.dll', 'KERNEL32.dll', 'ADVAPI32.dll'); expect = @() },
         @{ file = 'transcribe.dll'; imports = @('ggml.dll', 'MSVCR120.dll'); expect = @('redistributable runtime MSVCR120.dll') },
@@ -112,7 +131,8 @@ function Test-ImportAudit {
     )
     $errors = @()
     foreach ($case in $cases) {
-        $got = @(Get-ImportFailures $case.file $case.imports)
+        $delay = @(if ($case.ContainsKey('delay')) { $case.delay })
+        $got = @(Get-ImportFailures $case.file $case.imports $delay)
         $ok = $got.Count -eq $case.expect.Count
         for ($i = 0; $ok -and $i -lt $got.Count; $i++) {
             $ok = $got[$i].Contains($case.expect[$i])
@@ -319,12 +339,25 @@ foreach ($file in $files) {
     if ($LASTEXITCODE -ne 0) {
         throw "dumpbin failed on $relative"
     }
-    $imports = @($output | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\S+\.dll$' })
-    Write-Host "  ${relative}: $($imports -join ', ')"
-    $failures += @(Get-ImportFailures $relative $imports)
+    # dumpbin lists static imports, then delay-load imports under their own
+    # heading.
+    $imports = @()
+    $delayImports = @()
+    $inDelay = $false
+    foreach ($line in $output) {
+        $trimmed = "$line".Trim()
+        if ($trimmed -match 'delay load dependencies') {
+            $inDelay = $true
+        } elseif ($trimmed -match '^\S+\.dll$') {
+            if ($inDelay) { $delayImports += $trimmed } else { $imports += $trimmed }
+        }
+    }
+    $delayNote = if ($delayImports.Count -gt 0) { " (delay-loaded: $($delayImports -join ', '))" } else { '' }
+    Write-Host "  ${relative}: $($imports -join ', ')$delayNote"
+    $failures += @(Get-ImportFailures $relative $imports $delayImports)
 }
 if ($failures.Count -gt 0) {
     $failures | ForEach-Object { Write-Host "error: $_" }
     throw 'dependency audit failed'
 }
-Write-Host 'dependency audit ok: static CRT, only reviewed OS imports, only the GPU module imports vulkan-1.dll'
+Write-Host 'dependency audit ok: static CRT, only reviewed OS imports, engine DLLs delay-loaded by the executable, only the GPU module imports vulkan-1.dll'

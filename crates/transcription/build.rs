@@ -29,12 +29,28 @@ fn main() {
     let vulkan = std::env::var_os("CARGO_FEATURE_VULKAN").is_some();
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
     let windows_x64 = target_os == "windows" && target_arch == "x86_64";
 
     if cpu_variants && target_os == "linux" {
         // rustc invokes the linker without a shell, so the literal `$ORIGIN`
         // reaches the ELF rpath unchanged.
         println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+    }
+    if cpu_variants && windows_x64 && target_env == "msvc" {
+        // Resolved by the delay-load helper (delayimp.lib) on the first
+        // engine call, after `main` has called SetDefaultDllDirectories;
+        // a static import would be resolved by the standard search order,
+        // which ends with the current directory and PATH, before `main`.
+        // The executable imports nothing else from the engine (the bundle
+        // audit checks it).
+        println!("cargo:rustc-link-arg-bins=/DELAYLOAD:transcribe.dll");
+        println!("cargo:rustc-link-arg-bins=delayimp.lib");
+    } else if cpu_variants && windows_x64 {
+        println!(
+            "cargo:warning=cpu-variants on Windows delay-loads the engine only with MSVC: \
+             this build resolves transcribe.dll before main, with the standard DLL search order"
+        );
     }
     if cpu_variants && (target_os == "linux" || windows_x64) {
         println!("cargo:rustc-cfg=pumice_dynamic_backends");

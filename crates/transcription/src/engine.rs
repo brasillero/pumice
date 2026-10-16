@@ -116,8 +116,6 @@ pub mod cpp {
         /// load is never retried on another backend (p14.1-windows-vulkan/D4).
         pub fn new(request: EngineRequest<'_>) -> Result<Self, Error> {
             let mode = request.backend;
-            // Native logs can contain dictated text; disable them before loading.
-            transcribe_cpp::disable_logging();
             let gpu = init_backends(mode)?;
             let load = compute::load_request(mode, gpu)?;
             let backend = match load {
@@ -163,7 +161,10 @@ pub mod cpp {
 
     /// Registers the compute backends `mode` allows and reports what the GPU
     /// side found. Builds without runtime modules have the CPU compiled in
-    /// and no GPU.
+    /// and no GPU. Must run before any other engine call: it disables native
+    /// logging first (logs can contain dictated text), and on Windows the
+    /// bundle check must come before the first call loads the delay-loaded
+    /// engine DLLs (build.rs).
     fn init_backends(mode: BackendMode) -> Result<GpuAvailability, Error> {
         #[cfg(pumice_dynamic_backends)]
         {
@@ -177,6 +178,7 @@ pub mod cpp {
         #[cfg(not(pumice_dynamic_backends))]
         {
             let _ = mode;
+            transcribe_cpp::disable_logging();
             Ok(GpuAvailability::NotBuilt)
         }
     }
@@ -360,7 +362,6 @@ pub mod cpp {
     /// bundle ships and what registered. Fixed field names plus bounded
     /// hardware names only.
     pub fn backends_report(mode: BackendMode) -> Result<serde_json::Value, Error> {
-        transcribe_cpp::disable_logging();
         let gpu = init_backends(mode)?;
         #[cfg(pumice_dynamic_backends)]
         let bundle = dynamic_backends::selection().map(|selection| selection.bundle.as_str());
@@ -1152,6 +1153,9 @@ pub mod cpp {
                 None => BundleCheck::Absent,
             };
             let mask = backend_mask(gpu_plan.is_ok());
+            // The first engine call: on Windows it loads the core DLLs, now
+            // that bundle.json has vouched for them.
+            ::transcribe_cpp::disable_logging();
             ::transcribe_cpp::init_backends_with(Some(&module_dir), mask).map_err(|_| {
                 InitError::NoUsableCpuModule {
                     variant,

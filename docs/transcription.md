@@ -125,6 +125,16 @@ checks that every file uses the static C runtime and that only
 `gpu/vulkan/ggml-vulkan.dll` imports Vulkan, so the CPU path also starts on a
 machine without a Vulkan driver.
 
+Supported on Windows 10 or later, x64. DLLs load only from the folder itself
+and from `System32`, never from the current directory or `PATH`: the
+executable delay-loads `transcribe.dll` and first limits the DLL search with
+`SetDefaultDllDirectories`, which also covers the CPU and Vulkan modules'
+own dependencies. `vulkan-1.dll` therefore comes from the driver in
+`System32` or not at all, and a missing core DLL stops startup instead of
+being looked up elsewhere. The folder's own DLLs are trusted, so keep it
+where only you can write. CI checks this with decoy DLLs in the current
+directory and on `PATH`.
+
 Before loading any engine module, startup checks the core DLLs, the selected
 CPU module and, unless the backend is `cpu`, the Vulkan module against
 `bundle.json` (sizes and SHA-256, about 25–100 ms for the 43 MB Vulkan module
