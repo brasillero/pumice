@@ -32,6 +32,7 @@ usage:
   {name} doctor --login-check --provider <id>
                                            run one real formatting call to check login
   {name} --help                            print this help
+  {name} <command> --help                  print one command's help
   {name} --version                         print the version
 
   --config <path> may also precede the command: {name} --config <path> check-config
@@ -42,6 +43,66 @@ usage:
 
 fn doctor_usage(name: &str) -> String {
     format!("usage: {name} doctor [--config <path>] [--login-check --provider <id>]")
+}
+
+const CONFIG_OPTION: &str = "  --config <path>  the relay configuration file
+                   (default: the per-user relay.yml)";
+
+fn serve_help(name: &str) -> String {
+    format!(
+        "\
+usage: {name} serve [--config <path>] [--plain]
+
+Runs the local OpenAI-compatible service on 127.0.0.1.
+`{name}` without a command does the same.
+
+{CONFIG_OPTION}
+  --plain          print one log line per request instead of the live view
+  -h, --help       print this help
+"
+    )
+}
+
+fn check_config_help(name: &str) -> String {
+    format!(
+        "\
+usage: {name} check-config [--config <path>]
+
+Validates the configuration and prints a summary of its settings.
+
+{CONFIG_OPTION}
+  -h, --help       print this help
+"
+    )
+}
+
+fn doctor_help(name: &str) -> String {
+    format!(
+        "\
+{usage}
+
+Shows which provider CLIs are installed and whether the enabled ones are
+ready. With --login-check it instead runs one real call through provider
+<id> to check its login; that call uses the subscription's quota.
+
+{CONFIG_OPTION}
+  --login-check    run one real call to check a provider's login
+  --provider <id>  the provider to check (required with --login-check)
+  -h, --help       print this help
+",
+        usage = doctor_usage(name)
+    )
+}
+
+/// `-h` or `--help` anywhere among a command's arguments asks for that
+/// command's help, the same rule as `pumice run` and `pumice serve`.
+fn wants_help(args: &[&str]) -> bool {
+    args.iter().any(|arg| matches!(*arg, "-h" | "--help"))
+}
+
+fn print_help(text: &str) -> ExitCode {
+    print!("{text}");
+    ExitCode::SUCCESS
 }
 
 pub fn run(name: &str) -> ExitCode {
@@ -79,6 +140,15 @@ pub fn run_with(name: &str, args: impl IntoIterator<Item = OsString>) -> ExitCod
             // whichever command follows and may still appear only once.
             let (leading, rest) = peel_leading_config(&args);
             match rest {
+                ["check-config", rest @ ..] if wants_help(rest) => {
+                    print_help(&check_config_help(name))
+                }
+                ["doctor", rest @ ..] if wants_help(rest) => print_help(&doctor_help(name)),
+                ["serve", rest @ ..] if wants_help(rest) => print_help(&serve_help(name)),
+                // Help among the bare form's flags prints the full usage.
+                ["-h" | "--help" | "--config" | "--plain", ..] if wants_help(rest) => {
+                    print_help(&usage(name))
+                }
                 ["check-config", rest @ ..] => check_config(leading, rest, name),
                 ["doctor", rest @ ..] => doctor(leading, rest, name),
                 ["serve", rest @ ..] => serve(leading, rest, name, &format!("{name} serve")),

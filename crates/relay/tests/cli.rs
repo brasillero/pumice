@@ -393,6 +393,63 @@ fn help_and_version_print_without_starting_the_service() {
 }
 
 #[test]
+fn help_after_a_subcommand_prints_its_help_without_running_it() {
+    let cwd = TempDir::new().expect("temp dir");
+    // `--help` anywhere among a command's flags wins, even next to flags
+    // that would otherwise be a usage error or start the service.
+    for (args, usage) in [
+        (
+            &["serve"][..],
+            "usage: pumice-relay serve [--config <path>] [--plain]",
+        ),
+        (
+            &["serve", "--plain", "--config", "missing.yml"][..],
+            "usage: pumice-relay serve [--config <path>] [--plain]",
+        ),
+        (
+            &["check-config"][..],
+            "usage: pumice-relay check-config [--config <path>]",
+        ),
+        (
+            &["--config", "missing.yml", "check-config"][..],
+            "usage: pumice-relay check-config [--config <path>]",
+        ),
+        (
+            &["doctor"][..],
+            "usage: pumice-relay doctor [--config <path>] [--login-check --provider <id>]",
+        ),
+        (
+            &["doctor", "--provider", "claude"][..],
+            "usage: pumice-relay doctor [--config <path>] [--login-check --provider <id>]",
+        ),
+        // The bare form prints the full usage.
+        (&["--plain"][..], "pumice-relay [--config <path>] [--plain]"),
+        (
+            &["--config", "missing.yml"][..],
+            "pumice-relay [--config <path>] [--plain]",
+        ),
+    ] {
+        for flag in ["--help", "-h"] {
+            let args = [args, &[flag]].concat();
+            let output = run(&args, cwd.path());
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "args {args:?}: {:?}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(stdout.contains(usage), "args {args:?} help: {stdout}");
+            assert!(
+                output.stderr.is_empty(),
+                "args {args:?} must not write stderr: {:?}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+}
+
+#[test]
 fn malformed_args_exit_2_with_usage_without_starting_the_service() {
     let cwd = TempDir::new().expect("temp dir");
     for args in [

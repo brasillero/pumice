@@ -254,6 +254,40 @@ fn the_overview_lists_the_format_command() {
 }
 
 #[test]
+fn help_after_a_relay_subcommand_prints_its_help() {
+    let home = HermeticHome::new();
+    for (command, usage) in [
+        (
+            "serve",
+            "usage: pumice relay serve [--config <path>] [--plain]",
+        ),
+        (
+            "check-config",
+            "usage: pumice relay check-config [--config <path>]",
+        ),
+        (
+            "doctor",
+            "usage: pumice relay doctor [--config <path>] [--login-check --provider <id>]",
+        ),
+    ] {
+        for flag in ["--help", "-h"] {
+            let output = run(&mut home.command(&["relay", command, flag]));
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "{command} {flag}: {}",
+                stderr(&output)
+            );
+            assert!(
+                stdout(&output).contains(usage),
+                "{command} {flag}: {}",
+                stdout(&output)
+            );
+        }
+    }
+}
+
+#[test]
 fn relay_check_config_reads_the_per_user_relay_yml() {
     let home = HermeticHome::new();
     let dir = home.pumice_dir();
