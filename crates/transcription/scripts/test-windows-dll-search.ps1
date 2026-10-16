@@ -19,7 +19,15 @@
 #   - ggml-base.dll missing and unlisted in bundle.json, so the manifest
 #     check passes and only the loader stands between the program and the
 #     decoy: the core DLL preload must fail with the typed installation
-#     error (Windows error 126), without loading it.
+#     error (Windows error 126), without loading it;
+#   - a module ggml loads after startup: in a copy of the bundle,
+#     gpu\vulkan\ggml-vulkan.dll is replaced by a probe module
+#     (windows-dll-probe-module.c) that imports pumice-probe-dep.dll, which
+#     only the decoys provide, and bundle.json lists the probe. ggml loads it
+#     in auto mode by full path with a plain LoadLibraryW, so only the
+#     process-wide search set by SetDefaultDllDirectories keeps its
+#     dependency out of the current directory and PATH: the module must fail
+#     to load, register no device, and auto must run on the CPU.
 # Every case runs and failures are reported together, followed by a table of
 # every run. Needs the Visual Studio C++ tools (decoys are built with cl).
 #
@@ -39,7 +47,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $sentinel = 86
-$decoyNames = @('transcribe.dll', 'ggml.dll', 'ggml-base.dll', 'ggml-vulkan.dll', 'vulkan-1.dll')
+$decoyNames = @('transcribe.dll', 'ggml.dll', 'ggml-base.dll', 'ggml-vulkan.dll', 'vulkan-1.dll',
+    'pumice-probe-dep.dll')
 $systemVulkan = Join-Path $env:SystemRoot 'System32\vulkan-1.dll'
 
 $Stage = (Resolve-Path -LiteralPath $Stage).Path
@@ -54,11 +63,12 @@ if (Test-Path $WorkDir) {
 New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
 $WorkDir = (Resolve-Path -LiteralPath $WorkDir).Path
 $buildDir = Join-Path $WorkDir 'build'
+$probeDir = Join-Path $buildDir 'probe'
 $cwdDir = Join-Path $WorkDir 'cwd'
 $pathDir = Join-Path $WorkDir 'path'
 $emptyDir = Join-Path $WorkDir 'empty'
 $marker = Join-Path $WorkDir 'decoy-loaded.txt'
-foreach ($dir in $buildDir, $cwdDir, $pathDir, $emptyDir) {
+foreach ($dir in $buildDir, $probeDir, $cwdDir, $pathDir, $emptyDir) {
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
 }
 
@@ -96,7 +106,8 @@ function Get-ExportNames([string]$Path) {
 }
 
 # Each decoy exports the names of the DLL it impersonates; vulkan-1.dll's
-# come from the system loader (only read).
+# come from the system loader (only read), pumice-probe-dep.dll's from the
+# probe module's one import.
 $sources = @{
     'transcribe.dll'  = Join-Path $Stage 'transcribe.dll'
     'ggml.dll'        = Join-Path $Stage 'ggml.dll'
@@ -104,11 +115,16 @@ $sources = @{
     'ggml-vulkan.dll' = Join-Path $Stage 'gpu\vulkan\ggml-vulkan.dll'
     'vulkan-1.dll'    = $systemVulkan
 }
+$fixedExports = @{ 'pumice-probe-dep.dll' = @('pumice_probe') }
 $decoySource = Join-Path $PSScriptRoot 'windows-dll-decoy.c'
 $buildLines = @('@echo off', "call `"$vcvars`" >nul || exit /b 1")
 foreach ($name in $decoyNames) {
     $base = [System.IO.Path]::GetFileNameWithoutExtension($name)
-    $exports = @(if (Test-Path $sources[$name]) { Get-ExportNames $sources[$name] })
+    $exports = @(if ($fixedExports.ContainsKey($name)) {
+            $fixedExports[$name]
+        } elseif (Test-Path $sources[$name]) {
+            Get-ExportNames $sources[$name]
+        })
     if ($name -eq 'vulkan-1.dll' -and $exports.Count -eq 0) {
         # No system loader to copy from: the entry points ggml-vulkan.dll
         # imports, which is what a static import must find.
@@ -125,11 +141,22 @@ foreach ($name in $decoyNames) {
         "/link /NODEFAULTLIB /ENTRY:DllMain kernel32.lib /DEF:`"$def`" /OUT:`"$out`" " +
         "/IMPLIB:`"$buildDir\$base.lib`" >`"$buildDir\$base.log`" || (type `"$buildDir\$base.log`" & exit /b 1)"
 }
+# The probe module links against the import library of the
+# pumice-probe-dep.dll decoy built above.
+$probeModule = Join-Path $probeDir 'ggml-vulkan.dll'
+$buildLines += "cl /nologo /O1 /GS- /LD `"$(Join-Path $PSScriptRoot 'windows-dll-probe-module.c')`" " +
+    "/Fo`"$probeDir\probe.obj`" /link /NODEFAULTLIB /ENTRY:DllMain kernel32.lib " +
+    "`"$buildDir\pumice-probe-dep.lib`" /OUT:`"$probeModule`" /IMPLIB:`"$probeDir\probe.lib`" " +
+    ">`"$probeDir\probe.log`" || (type `"$probeDir\probe.log`" & exit /b 1)"
 $buildScript = Join-Path $buildDir 'build-decoys.cmd'
 Set-Content -Path $buildScript -Value $buildLines -Encoding ascii
 & cmd.exe /d /c $buildScript
 if ($LASTEXITCODE -ne 0) {
     throw "building the decoy DLLs failed with exit code $LASTEXITCODE"
+}
+$probeImports = (& $dumpbin /nologo /imports $probeModule) -join "`n"
+if (-not $probeImports.Contains('pumice-probe-dep.dll')) {
+    throw 'the probe module does not import pumice-probe-dep.dll'
 }
 foreach ($name in $decoyNames) {
     Copy-Item -Path (Join-Path $buildDir $name) -Destination $cwdDir
@@ -274,6 +301,43 @@ foreach ($placement in $placements) {
     Assert-Refused $run @('transcribe.dll (Windows error 126; core library unloadable)')
 }
 Remove-Item -Recurse -Force -Path $copy
+
+# 4. A module ggml loads after startup whose dependency only the decoys
+# provide. The real GPU module would find its imports in the bundle folder
+# and System32 before any decoy, so the probe stands in for it.
+if (-not (Test-Path (Join-Path $Stage 'gpu\vulkan\ggml-vulkan.dll'))) {
+    $failures.Add('late module: no gpu\vulkan\ggml-vulkan.dll staged, so auto scans no module after startup')
+} else {
+    $copy = Join-Path $WorkDir 'bundle probe module'
+    Copy-Item -Recurse -Path $Stage -Destination $copy
+    Copy-Item -Force -Path $probeModule -Destination (Join-Path $copy 'gpu\vulkan\ggml-vulkan.dll')
+    $manifestPath = Join-Path $copy 'bundle.json'
+    $manifest = Get-Content -Raw -Path $manifestPath | ConvertFrom-Json
+    $entry = @($manifest.files | Where-Object { $_.path -eq 'gpu/vulkan/ggml-vulkan.dll' })
+    if ($entry.Count -ne 1) {
+        throw 'bundle.json does not list gpu/vulkan/ggml-vulkan.dll exactly once'
+    }
+    $entry[0].size = (Get-Item -LiteralPath $probeModule).Length
+    $entry[0].sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $probeModule).Hash.ToLowerInvariant()
+    [System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 4) + "`n",
+        [System.Text.UTF8Encoding]::new($false))
+    $copyExe = Join-Path $copy 'pumice-transcribe.exe'
+    foreach ($placement in $placements) {
+        $report = Invoke-Planted 'late-module backends auto' $placement $copyExe @('backends', '--backend', 'auto', '--json')
+        if (Assert-Ok $report) {
+            $gpu = $report.Envelope.result
+            if ($gpu.gpu_module -ne 'scanned' -or $gpu.gpu_devices -ne 0) {
+                $failures.Add("$($report.Label): expected the probe scanned with no device, got " +
+                    "gpu_module=$($gpu.gpu_module) gpu_devices=$($gpu.gpu_devices)")
+            }
+        }
+        $run = Invoke-Planted 'late-module file auto' $placement $copyExe ($fileArgs + @('--backend', 'auto'))
+        if ((Assert-Ok $run) -and $run.Envelope.result.compute.backend -ne 'cpu') {
+            $failures.Add("$($run.Label): expected the CPU, got backend=$($run.Envelope.result.compute.backend)")
+        }
+    }
+    Remove-Item -Recurse -Force -Path $copy
+}
 
 $runs | Format-Table -AutoSize -Wrap | Out-String -Width 200 | Write-Host
 if ($failures.Count -gt 0) {
