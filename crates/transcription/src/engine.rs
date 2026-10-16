@@ -198,7 +198,7 @@ pub mod cpp {
                     n_threads: self.threads,
                     ..Default::default()
                 })
-                .map_err(|_| EngineError::Failed)?;
+                .map_err(|error| run_error(&error))?;
 
             if cancel.is_cancelled() {
                 return Err(EngineError::Cancelled);
@@ -246,15 +246,85 @@ pub mod cpp {
             finished.store(true, Ordering::SeqCst);
             let _ = watcher.join();
 
-            if cancel.is_cancelled() {
+            // A failure that may leave the engine unusable is reported even
+            // when the run was also cancelled, so it still retires a GPU.
+            let run = run.map_err(|error| run_error(&error));
+            if cancel.is_cancelled() && run.as_ref().err() != Some(&EngineError::Failed) {
                 return Err(EngineError::Cancelled);
             }
-            let result = run.map_err(|_| EngineError::Failed)?;
+            let result = run?;
 
             Ok(Transcript {
                 text: result.text,
                 language: result.language,
             })
+        }
+    }
+
+    /// Sorts a native error per p14.2-backend-policy/D1: a request the engine
+    /// refused for its content or input leaves the engine usable; every other
+    /// failure, including kinds a later transcribe-cpp adds, may not.
+    fn run_error(error: &transcribe_cpp::Error) -> EngineError {
+        use transcribe_cpp::Error as Native;
+        match error {
+            Native::InvalidArgument(_)
+            | Native::NotImplemented(_)
+            | Native::Unsupported(_)
+            | Native::InputTooLong(_)
+            | Native::Aborted { .. }
+            | Native::OutputTruncated { .. }
+            | Native::OutputRepetition { .. }
+            | Native::Nul(_)
+            | Native::Busy(_) => EngineError::Rejected,
+            _ => EngineError::Failed,
+        }
+    }
+
+    #[cfg(test)]
+    mod run_error_tests {
+        use super::*;
+        use transcribe_cpp::Error as Native;
+
+        #[test]
+        fn content_and_input_errors_leave_the_engine_usable() {
+            let nul = std::ffi::CString::new("a\0b").unwrap_err();
+            for error in [
+                Native::InvalidArgument("x".into()),
+                Native::NotImplemented("x".into()),
+                Native::Unsupported("x".into()),
+                Native::InputTooLong("x".into()),
+                Native::Aborted {
+                    message: "x".into(),
+                    partial: None,
+                },
+                Native::OutputTruncated {
+                    message: "x".into(),
+                    partial: None,
+                },
+                Native::OutputRepetition {
+                    message: "x".into(),
+                    partial: None,
+                },
+                Native::Nul(nul),
+                Native::Busy("x".into()),
+            ] {
+                assert_eq!(run_error(&error), EngineError::Rejected, "{error:?}");
+            }
+        }
+
+        #[test]
+        fn other_native_failures_make_the_engine_unusable() {
+            for error in [
+                Native::ModelFileNotFound("x".into()),
+                Native::ModelLoad("x".into()),
+                Native::OutOfMemory("x".into()),
+                Native::Backend("x".into()),
+                Native::BadStructSize("x".into()),
+                Native::VersionMismatch("x".into()),
+                Native::Other("x".into()),
+            ] {
+                assert_eq!(run_error(&error), EngineError::Failed, "{error:?}");
+            }
         }
     }
 

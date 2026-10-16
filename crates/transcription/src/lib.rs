@@ -39,7 +39,12 @@ pub struct Transcript {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineError {
     Cancelled,
+    /// A native failure that may leave the engine or its device unsafe to
+    /// reuse; on a GPU it retires the process (p14.2-backend-policy/D1).
     Failed,
+    /// The engine could not transcribe this request because of its content
+    /// or input (for example truncated or repeating output) and stays usable.
+    Rejected,
     ModelLoadFailed,
 }
 
@@ -47,7 +52,8 @@ impl EngineError {
     pub fn to_error(self) -> Error {
         match self {
             Self::Cancelled => Error::cancelled(),
-            Self::Failed => Error::engine_failed(),
+            Self::Failed => Error::engine_failed().with_engine_unusable(),
+            Self::Rejected => Error::engine_failed(),
             Self::ModelLoadFailed => Error::model_load_failed(),
         }
     }

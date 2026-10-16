@@ -9,10 +9,12 @@
 //! echoed or logged.
 //!
 //! When the caller passes a `retire` token (the engine runs on a GPU), a
-//! native engine failure answers its request with the usual
-//! `transcription_failed`, then withdraws readiness at once and cancels the
-//! token so the caller stops the process (p14.1-windows-vulkan/D4).
-//! Cancellation and input errors never do.
+//! native failure that may leave the engine unsafe to reuse retires it: the
+//! worker cancels the token and withdraws admission and readiness before it
+//! releases its admission permit, so no other request starts on the failed
+//! device, and the request is answered with the usual `transcription_failed`
+//! (p14.2-backend-policy/D1). Content and input errors and cancellation
+//! never retire.
 
 use crate::audio::MAX_FILE_BYTES;
 use crate::compute::Compute;
@@ -77,7 +79,8 @@ struct ServerState {
     shutdown: CancellationToken,
     request_ids: Arc<AtomicU64>,
     managed: Option<Arc<ManagedState>>,
-    /// Cancelled after a native engine failure; see the module docs.
+    /// Cancelled when a native failure retires the engine; see the module
+    /// docs.
     retire: Option<CancellationToken>,
 }
 
@@ -123,17 +126,27 @@ impl ServerState {
         self
     }
 
-    /// A native engine failure: with a `retire` token, stop accepting work
-    /// (`/ready` answers 503 from now on) and ask the owner to stop.
-    fn engine_failed(&self) {
+    /// A native failure that may leave the engine unsafe to reuse: with a
+    /// `retire` token, ask the owner to stop and stop accepting work
+    /// (admission and `/ready` answer 503 from now on). Called by the worker
+    /// while it still holds the admission permit.
+    fn engine_unusable(&self) {
         if let Some(retire) = &self.retire {
             eprintln!(
                 "the GPU engine failed; withdrawing readiness and stopping so the process can \
                  be restarted"
             );
-            self.shutdown.cancel();
+            // Retire first: a handler that sees the shutdown then knows why.
             retire.cancel();
+            self.shutdown.cancel();
         }
+    }
+
+    /// Whether a native failure retired the engine.
+    fn retired(&self) -> bool {
+        self.retire
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
     }
 }
 
@@ -173,8 +186,9 @@ pub async fn bind(port: u16) -> io::Result<TcpListener> {
 }
 
 /// [`serve`] on a listener from [`bind`], optionally in managed mode. With
-/// `retire`, a native engine failure cancels it after readiness is withdrawn;
-/// the caller's `shutdown_signal` should then fire. Must be called inside a
+/// `retire`, a native failure that leaves the engine unsafe to reuse cancels
+/// it and withdraws readiness; the caller's `shutdown_signal` should then
+/// fire. Must be called inside a
 /// Tokio runtime.
 pub fn serve_on(
     listener: TcpListener,
@@ -765,42 +779,50 @@ async fn transcribe(
     // server busy until the engine really stops.
     let cancel = CancelToken::new();
     let _cancel_on_drop = CancelOnDrop(cancel.clone());
-    let engine = Arc::clone(&state.engine);
+    let worker_state = state.clone();
     let worker_cancel = cancel.clone();
     let file = form.file;
-    let worker = tokio::task::spawn_blocking(move || {
+    let mut worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        transcribe_pcm_from_reader(
+        let result = transcribe_pcm_from_reader(
             io::Cursor::new(file),
-            engine.as_ref(),
+            worker_state.engine.as_ref(),
             &options,
             &worker_cancel,
-        )
+        );
+        // Before the permit is released, even if this request was abandoned.
+        if result.as_ref().is_err_and(crate::Error::engine_unusable) {
+            worker_state.engine_unusable();
+        }
+        result
     });
 
-    tokio::select! {
+    let joined = tokio::select! {
         biased;
-        () = state.shutdown.cancelled() => Err(SHUTTING_DOWN),
-        () = time::sleep_until(deadline) => Err(DEADLINE_EXCEEDED),
-        joined = worker => match joined {
-            Ok(Ok(result)) => Ok(Transcribed {
-                format: form.response_format,
-                text: result.transcript.text,
-                // The hint the engine was given wins over what it detected,
-                // as in the `file` command.
-                language: hint.or(result.transcript.language),
-                audio_seconds: result.audio_seconds,
-                inference: result.inference,
-            }),
-            Ok(Err(error)) => {
-                if error.code == ErrorCode::EngineFailed {
-                    state.engine_failed();
-                }
-                Err(map_error(error.code))
+        () = state.shutdown.cancelled() => {
+            if !state.retired() {
+                return Err(SHUTTING_DOWN);
             }
-            // The worker panicked; its permit was released while unwinding.
-            Err(_) => Err(TRANSCRIPTION_FAILED),
-        },
+            // This request's worker retired the engine and is returning:
+            // answer with its failure, not with the shutdown it caused.
+            worker.await
+        }
+        () = time::sleep_until(deadline) => return Err(DEADLINE_EXCEEDED),
+        joined = &mut worker => joined,
+    };
+    match joined {
+        Ok(Ok(result)) => Ok(Transcribed {
+            format: form.response_format,
+            text: result.transcript.text,
+            // The hint the engine was given wins over what it detected, as in
+            // the `file` command.
+            language: hint.or(result.transcript.language),
+            audio_seconds: result.audio_seconds,
+            inference: result.inference,
+        }),
+        Ok(Err(error)) => Err(map_error(error.code)),
+        // The worker panicked; its permit was released while unwinding.
+        Err(_) => Err(TRANSCRIPTION_FAILED),
     }
 }
 
@@ -1036,7 +1058,7 @@ async fn retrieve_model(
 }
 
 /// GET /ready (managed mode only): the instance's identity while it accepts
-/// work; 503 once shutting down. A running transcription does not make it
+/// work; 503 once shutting down or retired. A running transcription does not make it
 /// unready.
 async fn ready(State(state): State<ServerState>, request: Request) -> Response {
     if let Err(error) = check_managed_request(&state, &request) {

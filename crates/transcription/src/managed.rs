@@ -5,9 +5,9 @@
 //!   and at most [`MAX_RECORD_BYTES`] each: `ready` (or `error` if startup
 //!   fails), then `stopping` and `stopped`. Human logs stay on stderr.
 //! - `ready` carries the [`Compute`] snapshot of the loaded model (v2).
-//! - A native engine failure on a GPU retires the instance: `stopping` with
-//!   reason `engine_failed`, then `stopped`, and exit status 1, so its owner
-//!   restarts it (p14.1-windows-vulkan/D4).
+//! - A native failure that may leave the GPU engine unusable retires the
+//!   instance: `stopping` with reason `engine_failed`, then `stopped`, and
+//!   exit status 1, so its owner restarts it (p14.2-backend-policy/D1).
 //! - stdin is the owner's lifeline: end of file (or a read error) requests a
 //!   graceful shutdown. Bytes sent on stdin are discarded.
 //! - Once a shutdown is requested, a watchdog ends the process after
@@ -79,7 +79,8 @@ pub fn validate_model_id(id: &str) -> Result<(), Error> {
 pub enum StopReason {
     StdinClosed,
     Signal,
-    /// A native engine failure on a GPU: the instance retires itself.
+    /// A native failure that may leave the GPU engine unusable: the
+    /// instance retires itself.
     EngineFailed,
 }
 

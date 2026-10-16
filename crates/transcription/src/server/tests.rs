@@ -5,7 +5,7 @@ use super::*;
 use crate::{EngineError, Transcript};
 use std::io::Cursor;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use tokio::sync::{Notify, mpsc};
 use tower::ServiceExt;
 
@@ -13,7 +13,8 @@ const MODEL: &str = "turbo";
 const BOUNDARY: &str = "pumice-test-boundary";
 
 /// A fake engine that records its options, can block until released (while
-/// ignoring cancellation, like a slow native run), and can panic.
+/// ignoring cancellation, like a slow native run), can fail after that and can
+/// panic.
 #[derive(Default)]
 struct TestEngine {
     text: String,
@@ -21,8 +22,10 @@ struct TestEngine {
     delay: Duration,
     gated: bool,
     panic: bool,
-    /// Returned instead of a transcript.
+    /// Returned instead of a transcript, after the gate; a `Failed` one even
+    /// when cancelled, as the real engine does.
     error: Option<EngineError>,
+    calls: AtomicUsize,
     started: Notify,
     release: AtomicBool,
     saw_cancel: AtomicBool,
@@ -81,12 +84,10 @@ impl Engine for TestEngine {
         cancel: &CancelToken,
     ) -> Result<Transcript, EngineError> {
         *self.options.lock().unwrap() = Some(options.clone());
+        self.calls.fetch_add(1, Ordering::SeqCst);
         self.started.notify_one();
         if self.panic {
             panic!("test engine panic");
-        }
-        if let Some(error) = self.error {
-            return Err(error);
         }
         std::thread::sleep(self.delay);
         if self.gated {
@@ -98,6 +99,9 @@ impl Engine for TestEngine {
             }
         }
         self.finished.store(true, Ordering::SeqCst);
+        if let Some(error) = self.error {
+            return Err(error);
+        }
         if cancel.is_cancelled() {
             self.saw_cancel.store(true, Ordering::SeqCst);
             return Err(EngineError::Cancelled);
@@ -1064,6 +1068,73 @@ async fn a_gpu_engine_failure_answers_then_withdraws_readiness_and_retires() {
         let response = send(&state, post(basic_body(&wav(1.0)))).await;
         error(response, StatusCode::SERVICE_UNAVAILABLE).await;
     }
+}
+
+#[tokio::test]
+async fn a_retiring_failure_withdraws_admission_before_releasing_the_permit() {
+    for abandoned in [false, true] {
+        let engine = Arc::new(TestEngine {
+            gated: true,
+            error: Some(EngineError::Failed),
+            ..Default::default()
+        });
+        let retire = CancellationToken::new();
+        let state =
+            managed(state(Arc::clone(&engine))).retire_on_engine_failure(Some(retire.clone()));
+        let mut first = tokio::spawn(send_owned(state.clone(), post(basic_body(&wav(1.0)))));
+        engine.started.notified().await;
+        if abandoned {
+            // The client went away: no handler is left to retire the engine.
+            first.abort();
+            assert!((&mut first).await.unwrap_err().is_cancelled());
+        }
+
+        // Hold this test's only thread from the failure until the permit is
+        // free, so the first handler cannot run in between.
+        engine.release();
+        while state.admission.available_permits() == 0 {
+            std::thread::yield_now();
+        }
+        assert!(retire.is_cancelled(), "abandoned: {abandoned}");
+        let response = send(&state, post(basic_body(&wav(1.0)))).await;
+        let refused = error(response, StatusCode::SERVICE_UNAVAILABLE).await;
+        assert_eq!(refused["message"], "The server is shutting down.");
+        assert_eq!(
+            engine.calls.load(Ordering::SeqCst),
+            1,
+            "no second inference"
+        );
+        let response = send(&state, with_host(get("/ready"))).await;
+        managed_error(response, StatusCode::SERVICE_UNAVAILABLE, "shutting_down").await;
+
+        if !abandoned {
+            // The failing request still gets its own answer, not the shutdown.
+            let failure = error(first.await.unwrap(), StatusCode::INTERNAL_SERVER_ERROR).await;
+            assert_eq!(failure["message"], "The transcription failed.");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_content_error_on_a_gpu_answers_and_keeps_the_engine_ready() {
+    let engine = TestEngine::failing(EngineError::Rejected);
+    let retire = CancellationToken::new();
+    let state = managed(state(Arc::clone(&engine))).retire_on_engine_failure(Some(retire.clone()));
+    for detailed in [false, true] {
+        let request = if detailed {
+            post_detailed(basic_body(&wav(1.0)))
+        } else {
+            post(basic_body(&wav(1.0)))
+        };
+        let response = send(&state, request).await;
+        let failure = error(response, StatusCode::INTERNAL_SERVER_ERROR).await;
+        assert_eq!(failure["message"], "The transcription failed.");
+    }
+    assert_eq!(engine.calls.load(Ordering::SeqCst), 2);
+    assert!(!retire.is_cancelled());
+    assert!(!state.shutdown.is_cancelled());
+    let response = send(&state, with_host(get("/ready"))).await;
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]

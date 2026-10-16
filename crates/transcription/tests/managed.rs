@@ -77,6 +77,7 @@ impl Engine for ChildEngine {
                 Err(EngineError::Cancelled)
             }
             "fail" => Err(EngineError::Failed),
+            "reject" => Err(EngineError::Rejected),
             _ => Ok(Transcript {
                 text: "fake words".to_string(),
                 language: Some("en".to_string()),
@@ -181,6 +182,10 @@ fn main() -> ExitCode {
         (
             "a_cpu_engine_failure_keeps_serving",
             a_cpu_engine_failure_keeps_serving,
+        ),
+        (
+            "a_content_error_on_a_gpu_keeps_serving",
+            a_content_error_on_a_gpu_keeps_serving,
         ),
         (
             "cancellation_on_a_gpu_does_not_retire",
@@ -794,6 +799,37 @@ fn a_cpu_engine_failure_keeps_serving() {
     let records = child.all_records();
     assert_eq!(events(&records), ["ready", "stopping", "stopped"]);
     assert_eq!(records[1]["reason"], "stdin_closed");
+}
+
+/// A request the engine refuses for its content leaves a GPU process ready
+/// (p14.2-backend-policy/D1).
+fn a_content_error_on_a_gpu_keeps_serving() {
+    let setup = setup(true);
+    let mut child = spawn_with_compute(&setup, "reject", "vulkan", 0, &managed_args());
+    let port = ready_port(&child.next_record());
+    for _ in 0..2 {
+        let (status, body) = http(
+            port,
+            "POST",
+            "/pumice/v1/transcriptions",
+            &transcription_body(),
+        );
+        assert_eq!(status, 500, "{body}");
+        assert!(body.contains(r#""code":"transcription_failed""#), "{body}");
+    }
+    let (status, _) = http(port, "GET", "/ready", b"");
+    assert_eq!(status, 200);
+    child.close_stdin();
+    assert_eq!(
+        child.wait(PROMPT).code(),
+        Some(0),
+        "stderr: {}",
+        child.stderr()
+    );
+    let records = child.all_records();
+    assert_eq!(events(&records), ["ready", "stopping", "stopped"]);
+    assert_eq!(records[1]["reason"], "stdin_closed");
+    assert!(!child.stderr().contains("the GPU engine failed"));
 }
 
 /// A run cancelled by the owner's shutdown on a GPU is not an engine

@@ -73,6 +73,8 @@ pub struct Error {
     pub code: ErrorCode,
     pub message: String,
     pub location: Option<ErrorLocation>,
+    /// See [`Error::engine_unusable`].
+    engine_unusable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -88,7 +90,21 @@ impl Error {
             code,
             message: message.into(),
             location: None,
+            engine_unusable: false,
         }
+    }
+
+    /// Marks a native failure that may have left the engine unsafe to reuse.
+    pub(crate) fn with_engine_unusable(mut self) -> Self {
+        self.engine_unusable = true;
+        self
+    }
+
+    /// Whether the engine that produced this error may be unsafe to reuse
+    /// ([`crate::EngineError::Failed`]). A server on a GPU retires then
+    /// (p14.2-backend-policy/D1); content and input errors never set it.
+    pub fn engine_unusable(&self) -> bool {
+        self.engine_unusable
     }
 
     pub fn invalid_arguments(message: impl Into<String>) -> Self {
@@ -132,6 +148,7 @@ impl Error {
                 line: config_error.line(),
                 column: config_error.column(),
             }),
+            engine_unusable: false,
         }
     }
 

@@ -522,8 +522,9 @@ enum Served {
 const RETIRED: &str = "the GPU engine failed during a transcription; the server stopped so it \
      can be restarted. Use backend: cpu (or --backend cpu) if this repeats.";
 
-/// The retirement token for an engine on a GPU: a native failure there
-/// retires the process instead of trusting the device again.
+/// The retirement token for an engine on a GPU: a native failure there that
+/// may leave the engine unusable retires the process instead of trusting the
+/// device again (p14.2-backend-policy/D1).
 fn retire_token(compute: Option<&Compute>) -> Option<CancellationToken> {
     compute
         .is_some_and(|compute| compute.backend.is_gpu())

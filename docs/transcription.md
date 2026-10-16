@@ -208,23 +208,28 @@ in managed `ready` and `GET /ready`, and in `pumice serve`'s
 `GET /pumice/v1/status` (`transcription.compute`). The OpenAI
 `/v1/audio/transcriptions` response does not change.
 
-**Failures** (p14.1-windows-vulkan/D4):
+**Failures** (p14.1-windows-vulkan/D4, narrowed by p14.2-backend-policy/D1):
 
 - A model that fails to load with `auto` or `gpu` on a GPU fails startup with
   `model_load_failed` and a message pointing to `backend: cpu`. It is not
   retried on the CPU: a GPU allocation failure after the device initialized
   is not a fallback case.
-- A native engine failure during a transcription on a GPU answers that
-  request with the usual error (`engine_failed`; HTTP 500
-  `transcription_failed`), is never retried or replayed, and retires the
-  process: it stops accepting work at once (`/ready` answers 503), drains,
-  and exits with status 1. Standalone `serve` prints why on stderr; managed
-  mode writes `stopping` with reason `engine_failed`, then `stopped`, so
-  `pumice serve` restarts it within its bounded restart policy. The engine
-  adapter cannot tell a lost device from other native failures, so any
-  native failure on a GPU retires it. Cancellation (a disconnect, a deadline,
-  a shutdown) and audio input errors never do, and on the CPU nothing
-  retires.
+- A request the engine refuses because of its content or input (output
+  truncated or repeating before the end, an invalid or unsupported request,
+  input too long for the model) answers with the usual error
+  (`engine_failed`; HTTP 500 `transcription_failed`) and leaves the process
+  serving, on a GPU too.
+- Any other native engine failure during a transcription on a GPU (out of
+  memory, a backend error, an unclassified failure) may leave the device or
+  engine unusable. It answers that request with the same error, is never
+  retried or replayed, and retires the process: before the next request can
+  be admitted it stops accepting work (new requests and `/ready` answer
+  503), then it drains and exits with status 1. This holds even if the
+  client already disconnected. Standalone `serve` prints why on stderr;
+  managed mode writes `stopping` with reason `engine_failed`, then
+  `stopped`, so `pumice serve` restarts it within its bounded restart
+  policy. Cancellation (a disconnect, a deadline, a shutdown) and audio
+  input errors never retire, and on the CPU nothing retires.
 - A crash or hang inside the native engine is handled by the process
   supervision that already exists (managed mode's shutdown watchdog,
   `pumice serve`'s liveness probes and restarts); there is no in-process
@@ -558,8 +563,9 @@ selected with `--model ID`; if omitted, the configured `default_model` is used.
 `--backend` overrides `backend:` in `transcribe.yml`; the startup line on
 stderr shows the [compute snapshot](#compute-backend-cpu-auto-gpu). Startup
 load failure exits non-zero before the server starts listening. On a GPU, a
-native engine failure during a transcription stops the server after
-answering that request (exit status 1).
+native engine failure that may leave the device unusable stops the server
+after answering that request (exit status 1); see
+[Failures](#compute-backend-cpu-auto-gpu).
 
 Only one transcription runs at a time. A second request is rejected
 immediately with HTTP 429 and no queue. `/v1/models` and `/health` stay
@@ -701,7 +707,7 @@ under 4096 bytes; human messages stay on stderr. A run writes `ready` or
   bytes. An invalid `--instance-id` or invalid arguments give
   `invalid_arguments` without `instance_id`. The exit status is non-zero.
 - `stopping` has `reason` `stdin_closed`, `signal` or `engine_failed` (a
-  native engine failure on a GPU retired the instance; it then writes
+  native failure that may leave the GPU unusable retired the instance; it then writes
   `stopped` and exits with status 1).
 
 **stdin** is the owner's lifeline: end of file, or a read error, starts a
@@ -809,7 +815,7 @@ position is known.
 
 `serve --managed` uses exit status 3 when its shutdown grace runs out (see
 [Managed mode](#managed-mode-used-by-pumice-serve)). `serve` exits with
-status 1 after a native engine failure on a GPU.
+status 1 after a native engine failure that retires a GPU process.
 
 ## Common errors
 
