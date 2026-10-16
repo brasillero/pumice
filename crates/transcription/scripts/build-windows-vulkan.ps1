@@ -28,17 +28,110 @@
 #
 # Static CRT (p14.1-windows-vulkan/D6): Rust uses +crt-static from
 # .cargo/config.toml and the native build gets CMAKE_MSVC_RUNTIME_LIBRARY=
-# MultiThreaded (/MT). The audit at the end fails on any import of a VC++ or
-# UCRT redistributable DLL, and on vulkan-1.dll anywhere but the GPU module.
+# MultiThreaded (/MT). The audit at the end accepts only reviewed imports
+# (Get-ImportFailures): a short list of OS DLLs, the bundled core DLLs, and
+# vulkan-1.dll for the GPU module alone; anything else fails the build. Its
+# self-test runs first (-SelfTestOnly runs just that, without a build).
 # Needs the Vulkan SDK (VULKAN_SDK, glslc on PATH) and Visual Studio 2022 C++
 # tools at build time only.
 [CmdletBinding()]
 param(
-    [string]$TargetDir
+    [string]$TargetDir,
+    [switch]$SelfTestOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+$coreDlls = @('transcribe.dll', 'ggml.dll', 'ggml-base.dll')
+$gpuDll = 'ggml-vulkan.dll'
+$gpuModule = "gpu\vulkan\$gpuDll"
+
+# The OS imports of this bundle, reviewed from dumpbin /dependents on
+# windows-2022 (P14.1): Rust's std (kernel32, ntdll, ws2_32, bcrypt,
+# bcryptprimitives, advapi32 and the WaitOnAddress API set) and the /MT
+# native libraries (kernel32, advapi32). Every Windows 10+ x64 installation
+# provides them. A new import fails the audit until it is reviewed and
+# added here; being present in System32 on the build machine proves nothing
+# (older CRTs such as MSVCR120.dll often are).
+$systemImports = @(
+    'kernel32.dll', 'ntdll.dll', 'advapi32.dll', 'ws2_32.dll', 'bcrypt.dll',
+    'bcryptprimitives.dll', 'api-ms-win-core-synch-l1-2-0.dll'
+)
+# Redistributable runtimes an end user would have to install; named in the
+# failure so the cause is obvious.
+$redistributable = '^(vcruntime|msvcp|msvcr|api-ms-win-crt-|ucrtbase|concrt|vcomp|vccorlib)'
+
+# The failures for one staged file's imports (file relative to the bundle
+# root, Windows separators); nothing when all are allowed.
+function Get-ImportFailures([string]$Relative, [string[]]$Imports) {
+    if ($Imports.Count -eq 0) {
+        # Every PE imports kernel32: an empty list means dumpbin's output
+        # was not parsed.
+        "$Relative has no parsed imports"
+        return
+    }
+    foreach ($import in $Imports) {
+        $lower = $import.ToLowerInvariant()
+        if ($systemImports -contains $lower -or $coreDlls -contains $lower) {
+            continue
+        }
+        if ($lower -eq 'vulkan-1.dll' -and $Relative -eq $gpuModule) {
+            continue
+        }
+        if ($lower -match $redistributable) {
+            "$Relative imports redistributable runtime $import"
+        } elseif ($lower -eq 'vulkan-1.dll') {
+            "$Relative imports vulkan-1.dll (only $gpuModule may)"
+        } else {
+            "$Relative imports $import, which is not on the reviewed allowlist"
+        }
+    }
+}
+
+# Synthetic import lists with known verdicts, checked before anything is
+# built or audited.
+function Test-ImportAudit {
+    $exeImports = @(
+        'ws2_32.dll', 'api-ms-win-core-synch-l1-2-0.dll', 'kernel32.dll', 'ntdll.dll',
+        'bcryptprimitives.dll', 'bcrypt.dll', 'advapi32.dll', 'transcribe.dll'
+    )
+    $cases = @(
+        @{ file = 'pumice-transcribe.exe'; imports = $exeImports; expect = @() },
+        @{ file = $gpuModule; imports = @('ggml-base.dll', 'vulkan-1.dll', 'KERNEL32.dll'); expect = @() },
+        @{ file = 'cpu\x64\ggml-cpu-x64.dll'; imports = @('ggml-base.dll', 'KERNEL32.dll', 'ADVAPI32.dll'); expect = @() },
+        @{ file = 'transcribe.dll'; imports = @('ggml.dll', 'MSVCR120.dll'); expect = @('redistributable runtime MSVCR120.dll') },
+        @{ file = 'ggml.dll'; imports = @('VCRUNTIME140.dll', 'MSVCP140.dll', 'ucrtbase.dll', 'api-ms-win-crt-runtime-l1-1-0.dll')
+           expect = @('redistributable runtime VCRUNTIME140.dll', 'redistributable runtime MSVCP140.dll',
+                      'redistributable runtime ucrtbase.dll', 'redistributable runtime api-ms-win-crt-runtime-l1-1-0.dll') },
+        @{ file = 'ggml-base.dll'; imports = @('KERNEL32.dll', 'unknown.dll', 'api-ms-win-core-file-l1-1-0.dll', 'user32.dll')
+           expect = @('unknown.dll, which is not on', 'api-ms-win-core-file-l1-1-0.dll, which is not on', 'user32.dll, which is not on') },
+        @{ file = 'cpu\x64\ggml-cpu-x64.dll'; imports = @('KERNEL32.dll', 'vulkan-1.dll'); expect = @('vulkan-1.dll (only') },
+        @{ file = 'ggml-vulkan.dll'; imports = @('vulkan-1.dll', 'KERNEL32.dll'); expect = @('vulkan-1.dll (only') },
+        @{ file = 'pumice-transcribe.exe'; imports = @(); expect = @('no parsed imports') }
+    )
+    $errors = @()
+    foreach ($case in $cases) {
+        $got = @(Get-ImportFailures $case.file $case.imports)
+        $ok = $got.Count -eq $case.expect.Count
+        for ($i = 0; $ok -and $i -lt $got.Count; $i++) {
+            $ok = $got[$i].Contains($case.expect[$i])
+        }
+        if (-not $ok) {
+            $errors += "$($case.file) [$($case.imports -join ', ')]: got [$($got -join '; ')]"
+        }
+    }
+    if ($errors.Count -gt 0) {
+        $errors | ForEach-Object { Write-Host "error: audit self-test: $_" }
+        throw 'dependency audit self-test failed'
+    }
+    Write-Host "dependency audit self-test ok ($($cases.Count) cases)"
+}
+
+Test-ImportAudit
+if ($SelfTestOnly) {
+    return
+}
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 if (-not $TargetDir) {
@@ -55,9 +148,6 @@ $expectedVariants = @(
     'alderlake', 'cannonlake', 'cascadelake', 'haswell', 'icelake',
     'sandybridge', 'skylakex', 'sse42', 'x64'
 )
-$coreDlls = @('transcribe.dll', 'ggml.dll', 'ggml-base.dll')
-$gpuDll = 'ggml-vulkan.dll'
-
 $env:CARGO_TARGET_DIR = $TargetDir
 $env:TRANSCRIBE_CMAKE_ARGS = '-DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF ' +
     '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded'
@@ -201,17 +291,14 @@ $manifestPath = Join-Path $stageDir 'bundle.json'
     [System.Text.UTF8Encoding]::new($false))
 Write-Host "wrote bundle.json: pumice-transcribe $productVersion ($triple), transcribe-cpp-sys $engineVersion, $($files.Count) files"
 
-# Dependency audit with dumpbin from the Visual Studio C++ tools.
+# Dependency audit with dumpbin from the Visual Studio C++ tools, against the
+# reviewed allowlist above.
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
     -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
 if (-not $dumpbin) {
     throw 'dumpbin.exe not found (Visual Studio C++ x64 tools)'
 }
-# Redistributable runtimes an end user would have to install.
-$forbidden = '^(vcruntime|msvcp|api-ms-win-crt-|ucrtbase|concrt|vcomp|vccorlib)'
-$bundled = @($coreDlls)
-$system32 = Join-Path $env:SystemRoot 'System32'
 $failures = @()
 Write-Host 'dependency audit (dumpbin /dependents):'
 foreach ($file in $files) {
@@ -222,27 +309,10 @@ foreach ($file in $files) {
     }
     $imports = @($output | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\S+\.dll$' })
     Write-Host "  ${relative}: $($imports -join ', ')"
-    foreach ($import in $imports) {
-        $lower = $import.ToLowerInvariant()
-        if ($lower -match $forbidden) {
-            $failures += "$relative imports redistributable runtime $import"
-        } elseif ($lower -eq 'vulkan-1.dll') {
-            if ($relative -ne "gpu\vulkan\$gpuDll") {
-                $failures += "$relative imports vulkan-1.dll (only gpu\vulkan\$gpuDll may)"
-            }
-        } elseif ($bundled -contains $lower) {
-            # Resolved from the executable's directory.
-        } elseif ($lower -match '^api-ms-win-core-') {
-            # An OS API set, resolved by the loader's ApiSet schema (Rust's
-            # std imports one for WaitOnAddress); not a file to ship. The
-            # UCRT's api-ms-win-crt-* sets are rejected above.
-        } elseif (-not (Test-Path (Join-Path $system32 $import) -PathType Leaf)) {
-            $failures += "$relative imports $import, which is neither bundled nor an OS DLL"
-        }
-    }
+    $failures += @(Get-ImportFailures $relative $imports)
 }
 if ($failures.Count -gt 0) {
     $failures | ForEach-Object { Write-Host "error: $_" }
     throw 'dependency audit failed'
 }
-Write-Host 'dependency audit ok: static CRT, only the GPU module imports vulkan-1.dll'
+Write-Host 'dependency audit ok: static CRT, only reviewed OS imports, only the GPU module imports vulkan-1.dll'

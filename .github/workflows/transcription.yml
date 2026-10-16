@@ -253,6 +253,11 @@ jobs:
             -property catalog_productDisplayVersion
           rustc --version --verbose
 
+      # The audit's allowlist checked on synthetic import lists before the
+      # real audit (the build step runs it again).
+      - name: Dependency audit self-test
+        run: crates/transcription/scripts/build-windows-vulkan.ps1 -SelfTestOnly
+
       - name: Build, stage and audit the Vulkan bundle
         timeout-minutes: 90
         run: crates/transcription/scripts/build-windows-vulkan.ps1 -TargetDir $env:CARGO_TARGET_DIR
