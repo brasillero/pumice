@@ -113,6 +113,7 @@ pub struct Serve {
 pub struct ServeSpans {
     pub section: Option<(u64, u64)>,
     pub enabled: Option<(u64, u64)>,
+    pub transcription_model: Option<(u64, u64)>,
 }
 
 /// What `pumice serve` runs with, after [`serve_settings`] checked the
@@ -122,6 +123,8 @@ pub struct ServeSettings {
     pub port: u16,
     pub transcription_model: String,
     pub startup_timeout: Duration,
+    /// Where `serve.transcription_model` is written, for errors about it.
+    pub transcription_model_at: Option<(u64, u64)>,
 }
 
 /// The module references. `formatter` is optional only when no enabled flow
@@ -416,6 +419,10 @@ fn validate_serve(raw: Spanned<RawServe>) -> Result<Serve, ConfigError> {
                 .enabled
                 .as_ref()
                 .and_then(|span| position(span.referenced)),
+            transcription_model: serve
+                .transcription_model
+                .as_ref()
+                .and_then(|span| position(span.referenced)),
         },
     })
 }
@@ -500,6 +507,7 @@ pub fn serve_settings(loaded: &LoadedConfig) -> Result<ServeSettings, ConfigErro
         port: serve.port,
         transcription_model: model.clone(),
         startup_timeout: serve.startup_timeout,
+        transcription_model_at: serve.spans.transcription_model,
     })
 }
 
@@ -1575,6 +1583,7 @@ flows:
                 port: 17570,
                 transcription_model: "turbo".to_owned(),
                 startup_timeout: Duration::from_millis(60_000),
+                transcription_model_at: Some((23, 24)),
             }
         );
 
