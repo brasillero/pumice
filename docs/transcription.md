@@ -311,8 +311,11 @@ xattr -dr com.apple.quarantine pumice-transcribe-macos-arm64-metal-preview
 ```
 
 (`curl` and `gh run download` do not set the attribute; `xattr -lr` shows
-whether it is there.) CI records what a quarantined copy does on the runner
-and checks that the copy runs after this command.
+whether it is there.) On CI's runner, with Gatekeeper assessments enabled,
+`spctl --assess` rejects the executable, yet a copy given a quarantine
+attribute by a script still ran from the shell; a browser download on a
+desktop Mac is still expected to be blocked (checklist step 1 records it).
+CI checks that the copy runs after this command.
 
 `bundle.json`, the startup checks, the `cpu`/`auto`/`gpu` behavior and the
 messages are the same as on Windows and Linux: the manifest is required,
