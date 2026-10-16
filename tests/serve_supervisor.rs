@@ -822,12 +822,13 @@ fn the_panic_hook_reports_the_location_never_the_payload() {
             "{mode}: {stderr}"
         );
         if mode == "plain" {
-            assert!(
-                stderr.contains(
-                    "pumice serve: internal error: a task panicked at tests/serve_supervisor.rs:"
-                ),
-                "{stderr}"
+            // The location is the source path as the compiler wrote it, so
+            // Windows has `tests\serve_supervisor.rs`.
+            let location = format!(
+                "pumice serve: internal error: a task panicked at tests{}serve_supervisor.rs:",
+                std::path::MAIN_SEPARATOR
             );
+            assert!(stderr.contains(&location), "{stderr}");
         } else {
             let event = stderr
                 .lines()
