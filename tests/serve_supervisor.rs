@@ -6,6 +6,9 @@
 //! tests (`pumice_serve.rs`) run the defaults. The last tests run the whole
 //! service (`serve::run`) to inject panics through its test seams.
 
+#[path = "../crates/relay/tests/support/install.rs"]
+mod install;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -48,9 +51,7 @@ fn stub(generations: Value) -> Stub {
     let dir = TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp dir");
     let binary = dir.path().join(exe("pumice-transcribe"));
     let source = Path::new(env!("CARGO_BIN_EXE_pumice-test-transcribe"));
-    if fs::hard_link(source, &binary).is_err() {
-        fs::copy(source, &binary).expect("copy the stub");
-    }
+    install::install_executable(source, &binary);
     let log = dir.path().join("spawns.jsonl");
     let mut scenario = binary.clone().into_os_string();
     scenario.push(".scenario.json");

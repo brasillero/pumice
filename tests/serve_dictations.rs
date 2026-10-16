@@ -7,6 +7,10 @@
 //! `127.0.0.1:0`. Waits poll observable state (status, the stub's log,
 //! the fake's report) with a bound instead of sleeping for an order.
 
+#[path = "../crates/relay/tests/support/install.rs"]
+mod install;
+use install::install_executable;
+
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -74,12 +78,6 @@ struct Rig {
     fake: PathBuf,
 }
 
-fn link(source: &str, dest: &Path) {
-    if fs::hard_link(source, dest).is_err() {
-        fs::copy(source, dest).expect("copy executable");
-    }
-}
-
 fn scenario_path(exe_path: &Path) -> PathBuf {
     let mut path = exe_path.as_os_str().to_owned();
     path.push(".scenario.json");
@@ -94,11 +92,17 @@ fn rig(flows: &str, generations: Value) -> Rig {
     for path in [&install, &cfg, &fake_dir] {
         fs::create_dir_all(path).unwrap();
     }
-    link(env!("CARGO_BIN_EXE_pumice"), &install.join(exe("pumice")));
+    install_executable(
+        Path::new(env!("CARGO_BIN_EXE_pumice")),
+        &install.join(exe("pumice")),
+    );
     let stub = install.join(exe("pumice-transcribe"));
-    link(env!("CARGO_BIN_EXE_pumice-test-transcribe"), &stub);
+    install_executable(
+        Path::new(env!("CARGO_BIN_EXE_pumice-test-transcribe")),
+        &stub,
+    );
     let fake = fake_dir.join(exe("fake-claude"));
-    link(env!("CARGO_BIN_EXE_pumice-test-cli"), &fake);
+    install_executable(Path::new(env!("CARGO_BIN_EXE_pumice-test-cli")), &fake);
 
     let log = dir.path().join("spawns.jsonl");
     let models = json!({
@@ -1458,10 +1462,10 @@ impl Rig {
         let record = fake_dir.join("locked-cwds.txt");
         let reply = fake_dir.join("reply.txt");
         fs::write(&reply, stdout).unwrap();
-        // Written as a plain file and copied into place by `cp`, so the
-        // script's write descriptor only ever exists in that child: written
-        // here, a test thread forking meanwhile could make running it fail
-        // with "text file busy" (ETXTBSY).
+        // Written as a plain file and copied into place by a `cp` child, so
+        // this process never holds the script open for writing: a test
+        // thread forking meanwhile could make running it fail with "text
+        // file busy" (ETXTBSY).
         let source = fake_dir.join("locking-claude.sh");
         fs::write(
             &source,
@@ -1474,12 +1478,7 @@ impl Rig {
         )
         .unwrap();
         let script = fake_dir.join("locking-claude");
-        let copied = std::process::Command::new("cp")
-            .arg(&source)
-            .arg(&script)
-            .status()
-            .expect("run cp");
-        assert!(copied.success(), "cp the locking script: {copied}");
+        install::copy_executable(&source, &script);
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(
             self.cfg.join("relay.yml"),

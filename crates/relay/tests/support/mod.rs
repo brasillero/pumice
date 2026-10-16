@@ -12,6 +12,7 @@ use tempfile::TempDir;
 
 pub mod adapter_contract;
 pub mod fake_http;
+pub mod install;
 pub mod test_provider;
 
 /// Path of the fake CLI built by Cargo for this test run.
@@ -49,7 +50,7 @@ impl FakeCli {
         let exe = dir
             .path()
             .join(format!("pumice-test-cli{}", std::env::consts::EXE_SUFFIX));
-        install_executable(Path::new(FAKE_CLI_BIN), &exe);
+        install::install_executable(Path::new(FAKE_CLI_BIN), &exe);
 
         let object = scenario
             .as_object_mut()
@@ -108,18 +109,6 @@ impl FakeCli {
             )
         });
         serde_json::from_slice(&bytes).expect("fake CLI report is valid JSON")
-    }
-}
-
-/// Places the fake executable at `dest`.
-///
-/// A hard link is preferred: copying writes a new executable, and on Linux
-/// another test thread forking at that moment can make the first spawn fail
-/// with "text file busy" (ETXTBSY). The temp directory is under Cargo's target
-/// directory, so the link stays on one file system. Copy is the fallback.
-fn install_executable(src: &Path, dest: &Path) {
-    if fs::hard_link(src, dest).is_err() {
-        fs::copy(src, dest).expect("copy fake CLI executable");
     }
 }
 

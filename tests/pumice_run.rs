@@ -5,6 +5,10 @@
 //! relay's portable `pumice-test-cli` behind the real Claude adapter,
 //! pipeline and process runner. No real AI CLI or model is ever invoked.
 
+#[path = "../crates/relay/tests/support/install.rs"]
+mod install;
+use install::install_executable;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -114,16 +118,6 @@ fn stub_scenario(models: Value, file: Value) -> Value {
 
 fn exe(name: &str) -> String {
     format!("{name}{}", std::env::consts::EXE_SUFFIX)
-}
-
-/// Places an executable (hard link preferred: copying at the moment another
-/// test thread forks can fail with ETXTBSY on Linux). The link needs `dest`
-/// on the built binaries' file system, so rigs live under Cargo's target
-/// directory (`CARGO_TARGET_TMPDIR`), not the system temp directory.
-fn install_executable(src: &Path, dest: &Path) {
-    if fs::hard_link(src, dest).is_err() {
-        fs::copy(src, dest).expect("copy executable");
-    }
 }
 
 fn make_rig(script: &Script) -> Rig {

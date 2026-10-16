@@ -4,6 +4,9 @@
 //! portable fake AI CLI behind the real Claude adapter. An integration test
 //! so Cargo builds `pumice-test-cli` for it (p13.1-flow-seam).
 
+#[path = "../crates/relay/tests/support/install.rs"]
+mod install;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -164,16 +167,12 @@ struct Rig {
 }
 
 fn rig(fake: Value) -> Rig {
-    // Under Cargo's target directory, so the hard link below stays on the
-    // built binary's file system.
+    // Under Cargo's target directory, so the fake CLI's hard link stays on
+    // the built binary's file system.
     let dir = TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp dir");
     let root = dir.path();
     let cli = root.join(format!("fake-claude{}", std::env::consts::EXE_SUFFIX));
-    // Hard link preferred: copying while another test thread forks can
-    // fail with ETXTBSY on Linux.
-    if fs::hard_link(fake_cli(), &cli).is_err() {
-        fs::copy(fake_cli(), &cli).expect("copy the fake CLI");
-    }
+    install::install_executable(fake_cli(), &cli);
     let mut scenario = fake;
     scenario["report_path"] = json!(root.join("report.json").display().to_string());
     scenario["count_path"] = json!(root.join("count.txt").display().to_string());

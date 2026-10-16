@@ -8,6 +8,10 @@
 //! exit codes are native). No provider CLI is ever invoked — `check-config`
 //! only validates YAML.
 
+#[path = "../crates/relay/tests/support/install.rs"]
+mod install;
+use install::install_executable;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -353,24 +357,54 @@ fn legacy_pumice_yaml_in_the_config_dir_is_ignored() {
     );
 }
 
+/// The copy fallback for file systems without hard links: copied while other
+/// threads keep spawning children, the copy runs at once instead of failing
+/// with "text file busy" (ETXTBSY), because a `cp` child writes it.
+#[cfg(unix)]
+#[test]
+fn the_copy_fallback_runs_at_once_while_other_threads_spawn() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Stops the spawning threads even when the copy panics, so the scope
+    /// cannot wait for them forever.
+    struct StopOnDrop<'a>(&'a AtomicBool);
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let dir = TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp dir");
+    let stop = AtomicBool::new(false);
+    let failures = std::thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = Command::new("true").status();
+                }
+            });
+        }
+        let _stop = StopOnDrop(&stop);
+        let mut failures = Vec::new();
+        for round in 0..20 {
+            let dest = dir.path().join(format!("pumice-{round}"));
+            install::copy_executable(Path::new(env!("CARGO_BIN_EXE_pumice")), &dest);
+            match Command::new(&dest).arg("--version").output() {
+                Ok(output) if output.status.success() => {}
+                other => failures.push(format!("round {round}: {other:?}")),
+            }
+            fs::remove_file(&dest).expect("remove the copy");
+        }
+        failures
+    });
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
 /// A temp directory holding a copy of `pumice` and, optionally, the
 /// `pumice-transcribe` stand-in next to it.
 struct Install {
     _keep: TempDir,
     dir: PathBuf,
-}
-
-/// Places an executable at `dest` as a hard link, never by copying: a copy
-/// is written by this process, and another test thread forking (spawning)
-/// while the file is still open for writing makes running it fail with
-/// "text file busy" (ETXTBSY) on Linux. Every `dest` is under Cargo's target
-/// directory (`CARGO_TARGET_TMPDIR`), on the same file system as the built
-/// binaries, so the link works there; copy is only the fallback for a file
-/// system without hard links.
-fn install_executable(src: &str, dest: &Path) {
-    if fs::hard_link(src, dest).is_err() {
-        fs::copy(src, dest).expect("copy executable");
-    }
 }
 
 impl Install {
@@ -379,7 +413,7 @@ impl Install {
         let keep = TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp install dir");
         let dir = keep.path().join("bin");
         fs::create_dir_all(&dir).expect("create install dir");
-        install_executable(env!("CARGO_BIN_EXE_pumice"), &dir.join("pumice"));
+        install_executable(Path::new(env!("CARGO_BIN_EXE_pumice")), &dir.join("pumice"));
         Install { _keep: keep, dir }
     }
 
@@ -388,7 +422,7 @@ impl Install {
     fn with_transcribe() -> Self {
         let install = Self::without_transcribe();
         install_executable(
-            env!("CARGO_BIN_EXE_pumice-test-transcribe"),
+            Path::new(env!("CARGO_BIN_EXE_pumice-test-transcribe")),
             &install.dir.join(transcribe_name()),
         );
         install
@@ -583,11 +617,11 @@ fn transcribe_neither_searches_path_nor_the_working_directory() {
     fs::create_dir_all(&path_dir).expect("create PATH decoy dir");
     fs::create_dir_all(&cwd).expect("create cwd decoy dir");
     install_executable(
-        env!("CARGO_BIN_EXE_pumice-test-transcribe"),
+        Path::new(env!("CARGO_BIN_EXE_pumice-test-transcribe")),
         &path_dir.join(transcribe_name()),
     );
     install_executable(
-        env!("CARGO_BIN_EXE_pumice-test-transcribe"),
+        Path::new(env!("CARGO_BIN_EXE_pumice-test-transcribe")),
         &cwd.join(transcribe_name()),
     );
 
