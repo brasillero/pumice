@@ -14,10 +14,17 @@
 #   transcribe.dll, ggml.dll, ggml-base.dll       core DLLs beside the exe
 #   cpu/<variant>/ggml-cpu-<variant>.dll          one CPU module per directory
 #   gpu/vulkan/ggml-vulkan.dll                    the only Vulkan importer
+#   bundle.json                                   manifest: sizes and SHA-256
 #
 # Windows resolves the core DLLs from the executable's directory; startup
 # points ggml at exactly one cpu/<variant>/ directory and then gpu/vulkan/.
 # No .lib/.pdb/CMake/SDK files are staged. Nothing is written at runtime.
+#
+# bundle.json (src/bundle.rs) lists every staged file with its role, size and
+# SHA-256, plus the product version, target and engine. On Windows startup
+# requires it and checks the core DLLs, the selected CPU module and the GPU
+# module against it before registering any of them, so a damaged or
+# mixed-version bundle fails instead of running without its GPU module.
 #
 # Static CRT (p14.1-windows-vulkan/D6): Rust uses +crt-static from
 # .cargo/config.toml and the native build gets CMAKE_MSVC_RUNTIME_LIBRARY=
@@ -150,6 +157,49 @@ foreach ($file in $files) {
     Write-Host ('  {0,12:N0}  {1}' -f $file.Length, $relative)
 }
 Write-Host ('  {0,12:N0}  total ({1} files)' -f $total, $files.Count)
+
+# bundle.json: identity from cargo metadata (the versions this lockfile
+# builds), then every staged file. Written without a BOM, which serde_json
+# would reject.
+$metadata = & cargo metadata --format-version 1 --locked --filter-platform $triple | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) {
+    throw "cargo metadata failed with exit code $LASTEXITCODE"
+}
+$productVersion = @($metadata.packages | Where-Object { $_.name -eq 'pumice-transcription' })[0].version
+$engineVersion = @($metadata.packages | Where-Object { $_.name -eq 'transcribe-cpp-sys' })[0].version
+$entries = foreach ($file in $files) {
+    $relative = $file.FullName.Substring($stageDir.Length + 1).Replace('\', '/')
+    $role = if ($relative -eq 'pumice-transcribe.exe') {
+        'executable'
+    } elseif ($coreDlls -contains $relative) {
+        'core'
+    } elseif ($relative -like 'cpu/*') {
+        'cpu'
+    } elseif ($relative -like 'gpu/*') {
+        'gpu'
+    } else {
+        throw "unclassified staged file $relative"
+    }
+    [ordered]@{
+        path = $relative
+        role = $role
+        size = $file.Length
+        sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+    }
+}
+$manifest = [ordered]@{
+    schema_version = 1
+    product = 'pumice-transcribe'
+    version = $productVersion
+    target = $triple
+    features = @('vulkan')
+    engine = "transcribe-cpp-sys $engineVersion"
+    files = @($entries)
+}
+$manifestPath = Join-Path $stageDir 'bundle.json'
+[System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 4) + "`n",
+    [System.Text.UTF8Encoding]::new($false))
+Write-Host "wrote bundle.json: pumice-transcribe $productVersion ($triple), transcribe-cpp-sys $engineVersion, $($files.Count) files"
 
 # Dependency audit with dumpbin from the Visual Studio C++ tools.
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'

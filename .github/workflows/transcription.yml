@@ -293,6 +293,7 @@ jobs:
             $cpu = @($report.devices | Where-Object { $_.kind -eq 'cpu' })
             if ($cpu.Count -ne 1) { throw "$label registered $($cpu.Count) CPU devices" }
             if (-not $report.cpu_variant) { throw "$label reported no CPU variant" }
+            if ($report.bundle -ne 'verified') { throw "${label}: bundle=$($report.bundle)" }
             return $report
           }
 
@@ -300,6 +301,7 @@ jobs:
           $excluded = Invoke-Backends 'excluded'
           Remove-Item Env:PUMICE_TRANSCRIBE_SKIP_GPU_DIR
           if ($excluded.gpu_dir -ne 'skipped') { throw "excluded: gpu_dir=$($excluded.gpu_dir)" }
+          if ($null -ne $excluded.vulkan_devices) { throw "excluded: vulkan_devices=$($excluded.vulkan_devices)" }
           if (($excluded.allowed_backends -join ',') -ne 'cpu') { throw "excluded: mask $($excluded.allowed_backends -join ',')" }
           if (@($excluded.devices | Where-Object { $_.kind -ne 'cpu' }).Count -ne 0) { throw 'excluded: non-CPU device registered' }
 
@@ -308,6 +310,7 @@ jobs:
           if (($included.allowed_backends -join ',') -ne 'cpu,vulkan') { throw "included: mask $($included.allowed_backends -join ',')" }
           if ($included.cpu_variant -ne $excluded.cpu_variant) { throw 'CPU variant differs between runs' }
           $vulkan = @($included.devices | Where-Object { $_.kind -eq 'vulkan' }).Count
+          if ($included.vulkan_devices -ne $vulkan) { throw "included: vulkan_devices=$($included.vulkan_devices), devices list $vulkan" }
           Write-Host "included: $vulkan Vulkan device(s) on this runner"
 
           # GGML_BACKEND_PATH plugins stay out: the mask has no OTHER bit. A
@@ -337,6 +340,82 @@ jobs:
           $relocated = Invoke-Backends 'relocated'
           if ($relocated.gpu_dir -ne 'scanned') { throw "relocated: gpu_dir=$($relocated.gpu_dir)" }
           Remove-Item -Recurse -Force -Path $moved
+
+      - name: Bundle manifest checks (damaged, unlisted, missing)
+        run: |
+          # Each case damages a fresh copy of the bundle. A present module
+          # that does not match bundle.json is an installation error, never
+          # a CPU fallback; only an absent GPU module falls back.
+          Set-Location $env:RUNNER_TEMP
+          $copy = Join-Path $env:RUNNER_TEMP 'pumice bundle check'
+          function Invoke-Case([string]$label, [scriptblock]$damage, [string]$expect) {
+            if (Test-Path $copy) { Remove-Item -Recurse -Force -Path $copy }
+            Copy-Item -Recurse -Path $env:STAGE -Destination $copy
+            & $damage
+            $ErrorActionPreference = 'Continue'
+            $out = & (Join-Path $copy 'pumice-transcribe.exe') debug-backends 2>&1
+            $code = $LASTEXITCODE
+            $ErrorActionPreference = 'Stop'
+            $out | ForEach-Object { Write-Host "  [$label] $_" }
+            $json = ($out | Where-Object { "$_".StartsWith('{') } | Select-Object -Last 1)
+            $envelope = "$json" | ConvertFrom-Json
+            if ($expect) {
+              if ($code -eq 0 -or $envelope.ok) { throw "${label}: expected an installation error, got exit $code" }
+              if ($envelope.error.code -ne 'engine_failed') { throw "${label}: error code $($envelope.error.code)" }
+              $stderr = ($out | Where-Object { -not "$_".StartsWith('{') }) -join "`n"
+              if (-not $stderr.Contains('(bundle manifest mismatch)')) { throw "${label}: no bundle manifest mismatch reported" }
+              if (-not $stderr.Contains($expect)) { throw "${label}: reason '$expect' not reported" }
+              if ($stderr.Contains('selected ggml CPU module')) { throw "${label}: a module was registered before the check failed" }
+            } elseif ($code -ne 0 -or -not $envelope.ok) {
+              throw "${label}: exited with $code"
+            }
+            return $envelope.result
+          }
+          $vulkanDll = { Join-Path $copy 'gpu\vulkan\ggml-vulkan.dll' }
+
+          # One byte flipped in the middle of the 43 MB module: same size,
+          # so only the SHA-256 catches it.
+          $null = Invoke-Case 'corrupt-gpu-module' {
+            $path = & $vulkanDll
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            $bytes[[int]($bytes.Length / 2)] = $bytes[[int]($bytes.Length / 2)] -bxor 0xff
+            [System.IO.File]::WriteAllBytes($path, $bytes)
+          } 'gpu/vulkan/ggml-vulkan.dll does not match its SHA-256'
+          $null = Invoke-Case 'truncated-gpu-module' {
+            $stream = [System.IO.File]::Open((& $vulkanDll), 'Open', 'ReadWrite')
+            $stream.SetLength($stream.Length - 4096)
+            $stream.Dispose()
+          } 'bytes; bundle.json lists'
+          $null = Invoke-Case 'corrupt-core-dll' {
+            $path = Join-Path $copy 'ggml-base.dll'
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            $bytes[$bytes.Length - 1] = $bytes[$bytes.Length - 1] -bxor 0xff
+            [System.IO.File]::WriteAllBytes($path, $bytes)
+          } 'ggml-base.dll does not match its SHA-256'
+          # An unlisted module-looking file where ggml scans would load
+          # unchecked.
+          $null = Invoke-Case 'unlisted-gpu-file' {
+            Copy-Item -Path (& $vulkanDll) -Destination (Join-Path $copy 'gpu\vulkan\ggml-vulkan-extra.dll')
+          } 'gpu/vulkan/ggml-vulkan-extra.dll is not listed'
+          $null = Invoke-Case 'missing-manifest' {
+            Remove-Item -Path (Join-Path $copy 'bundle.json')
+          } 'bundle.json is missing'
+          # The skip switch never loads the GPU module, so it is not checked.
+          $env:PUMICE_TRANSCRIBE_SKIP_GPU_DIR = '1'
+          $skipped = Invoke-Case 'corrupt-gpu-module-skipped' {
+            $path = & $vulkanDll
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            $bytes[0] = $bytes[0] -bxor 0xff
+            [System.IO.File]::WriteAllBytes($path, $bytes)
+          } $null
+          Remove-Item Env:PUMICE_TRANSCRIBE_SKIP_GPU_DIR
+          if ($skipped.gpu_dir -ne 'skipped') { throw "corrupt-gpu-module-skipped: gpu_dir=$($skipped.gpu_dir)" }
+          # Without the optional GPU module: CPU, still verified.
+          $absent = Invoke-Case 'absent-gpu-module' {
+            Remove-Item -Recurse -Force -Path (Join-Path $copy 'gpu')
+          } $null
+          if ($absent.gpu_dir -ne 'absent' -or $absent.bundle -ne 'verified') { throw "absent-gpu-module: gpu_dir=$($absent.gpu_dir) bundle=$($absent.bundle)" }
+          Remove-Item -Recurse -Force -Path $copy
 
       - name: Cache Whisper tiny Q8_0 model
         id: cache-model
