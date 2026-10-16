@@ -236,19 +236,17 @@ impl SupervisorHandle {
         self.commands.try_send(Command::Recycle(generation)).is_ok()
     }
 
-    /// Waits until `generation` is gone: confirmed killed and reaped, or
-    /// owned by a supervisor that gave up on it (`failed`, `stopping`: its
-    /// own stop reaps it, and the service reports a cleanup failure).
-    /// False when `deadline` passed first.
+    /// Waits until `generation` is confirmed killed and reaped. A terminal
+    /// state confirms nothing: `failed` can be published before the reap
+    /// or because it failed, and `stopping` precedes the shutdown grace.
+    /// False when `deadline` passed first: the caller treats the
+    /// generation as unconfirmed (a cleanup failure).
     pub async fn wait_retired(&self, generation: u64, deadline: Instant) -> bool {
         loop {
             let changed = self.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            let snapshot = self.snapshot();
-            if snapshot.retired >= generation
-                || matches!(snapshot.state, ChildState::Failed | ChildState::Stopping)
-            {
+            if self.snapshot().retired >= generation {
                 return true;
             }
             tokio::select! {
@@ -877,4 +875,34 @@ mod tests {
         assert!(handle.recycle(2));
         assert!(matches!(receiver.try_recv(), Ok(Command::Recycle(2))));
     }
+
+    #[tokio::test]
+    async fn only_a_confirmed_reap_counts_as_retired() {
+        let handle = testing::handle(ChildState::Ready, 2);
+        let set = |state: ChildState, retired: u64| {
+            handle.shared.lock().unwrap().state = state;
+            handle.shared.lock().unwrap().retired = retired;
+            handle.changed.notify_waiters();
+        };
+        let soon = || Instant::now() + Duration::from_millis(50);
+
+        // `failed` before (or instead of) the reap, and `stopping` before
+        // the grace ended, confirm nothing.
+        for state in [ChildState::Failed, ChildState::Stopping] {
+            set(state, 1);
+            assert!(!handle.wait_retired(2, soon()).await, "{state:?}");
+        }
+
+        // A reap published while waiting confirms it, whatever the state.
+        set(ChildState::Restarting, 1);
+        let waiter = handle.clone();
+        let waiting =
+            tokio::spawn(async move { waiter.wait_retired(2, Instant::now() + WAIT_LIMIT).await });
+        tokio::task::yield_now().await;
+        set(ChildState::Failed, 2);
+        assert!(waiting.await.unwrap());
+        assert!(handle.wait_retired(1, soon()).await, "an older generation");
+    }
+
+    const WAIT_LIMIT: Duration = Duration::from_secs(10);
 }

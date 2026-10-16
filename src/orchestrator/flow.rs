@@ -420,6 +420,7 @@ impl<'a> Operation<'a> {
             stages: self.stages,
             total,
             error,
+            cleanup_failed: unreaped > 0,
         }
     }
 

@@ -1364,3 +1364,114 @@ fn a_shutdown_answers_a_running_dictation_with_its_transcript() {
     assert_events_metadata_only(&stderr);
     rig.assert_children_gone();
 }
+
+// --- Cleanup failures -------------------------------------------------------
+
+/// Leftovers of [`Rig::use_locking_provider`]: the temporary roots it left
+/// behind are made writable again and removed when the test ends, also
+/// when it fails.
+#[cfg(unix)]
+struct Locked {
+    record: PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for Locked {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let text = fs::read_to_string(&self.record).unwrap_or_default();
+        for cwd in text.lines().map(PathBuf::from) {
+            let _ = fs::set_permissions(cwd.join("locked"), fs::Permissions::from_mode(0o700));
+            // The provider ran in `<root>/workspace`; the root is Pumice's.
+            if let Some(root) = cwd.parent() {
+                let _ = fs::remove_dir_all(root);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Rig {
+    /// Replaces the provider with a script that answers `stdout` with
+    /// `exit_code` and leaves, in its working directory, a directory
+    /// Pumice cannot delete (no write permission on it, so its entry
+    /// cannot be unlinked). Unix only: file permissions and `sh`.
+    fn use_locking_provider(&self, stdout: &str, exit_code: i32) -> Locked {
+        use std::os::unix::fs::PermissionsExt;
+        let fake_dir = self.fake_dir();
+        let record = fake_dir.join("locked-cwds.txt");
+        let reply = fake_dir.join("reply.txt");
+        fs::write(&reply, stdout).unwrap();
+        let script = fake_dir.join("locking-claude");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\necho x >> '{count}'\npwd >> '{record}'\nmkdir -p locked/inner\nchmod 500 locked\ncat '{reply}'\nexit {exit_code}\n",
+                count = fake_dir.join("count.txt").display(),
+                record = record.display(),
+                reply = reply.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(
+            self.cfg.join("relay.yml"),
+            format!(
+                "providers:\n  - id: claude\n    enabled: true\n    model: haiku-test\n    binary: '{}'\n",
+                script.display()
+            ),
+        )
+        .unwrap();
+        Locked { record }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_directory_cleanup_stops_admission_also_after_another_failure() {
+    // SAFETY: geteuid(2) has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root ignores the permissions this test relies on");
+        return;
+    }
+    let rig = rig(&flows(30_000, 10_000, 10_000), json!([{}, {}]));
+    for (round, (stdout, exit_code, status, code, stage)) in [
+        // A dictation that would have succeeded.
+        (
+            claude_envelope(false, CLEANED),
+            0,
+            500,
+            "cleanup_failed",
+            "cleanup",
+        ),
+        // A relay failure stays the reported error; the cleanup failure
+        // after it still stops admission.
+        ("garbage".to_owned(), 3, 502, "relay_failed", "relay"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let _locked = rig.use_locking_provider(&stdout, exit_code);
+        let running = rig.start();
+        let response = dictate_flow(running.port, "clean");
+        assert_error(&response, status, code, stage);
+        assert_eq!(response.2["transcript"]["text"], "stub transcript");
+        assert_eq!(rig.fake_calls(), round + 1);
+
+        // No second provider call: admission stopped for good.
+        let status = running.status();
+        assert_eq!(status["dictations"]["admission"], "stopped", "{status}");
+        let response = dictate_flow(running.port, "clean");
+        assert_error(&response, 503, "admission_stopped", "prepare");
+        assert_eq!(rig.fake_calls(), round + 1, "round {round}");
+
+        let (_, _, stderr) = running.stop();
+        assert_events_metadata_only(&stderr);
+        assert!(
+            stderr.contains("\"event\":\"admission_stopped\"")
+                && stderr.contains("\"code\":\"cleanup_failed\""),
+            "{stderr}"
+        );
+    }
+    rig.assert_children_gone();
+}

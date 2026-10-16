@@ -33,6 +33,10 @@ pub struct RunOutput {
     pub stages: StageReports,
     pub total: Duration,
     pub error: Option<StageError>,
+    /// The final teardown left a cleanup unconfirmed (a provider tree not
+    /// reaped, a temporary directory not removed), also when `error` is
+    /// another, primary failure. Never presented; a service acts on it.
+    pub cleanup_failed: bool,
 }
 
 impl RunOutput {

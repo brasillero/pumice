@@ -404,9 +404,11 @@ async fn run(
     };
     let mut output = until_shutdown(operation, frontend.shutdown_guard(), &handle).await;
 
-    // D5: an abandoned transcription recycles its generation, confirmed
-    // reaped before the permit is released.
-    let mut confirmed = dictations.runtime.scope().is_empty();
+    // The drain's own count decides, also under a primary failure: a
+    // failed directory removal leaves the scope, so its emptiness proves
+    // nothing. D5: an abandoned transcription recycles its generation,
+    // confirmed reaped before the permit is released.
+    let mut confirmed = !output.cleanup_failed && dictations.runtime.scope().is_empty();
     if let Some(generation) = transcriber.abandoned() {
         let supervisor = frontend.supervisor();
         supervisor.recycle(generation);
