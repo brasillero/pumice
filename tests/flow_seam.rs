@@ -105,7 +105,9 @@ impl Transcriber for FakeTranscriber {
         deadline: Instant,
         cancel: &CancelGuard,
     ) -> Result<TranscriptOutput, SttFailure> {
-        let AudioSource::File(path) = audio;
+        let AudioSource::File(path) = audio else {
+            panic!("the fake transcribes files only");
+        };
         assert!(path.ends_with("audio.wav"));
         assert_eq!(model, "turbo");
         self.deadlines.lock().expect("lock").push(deadline);

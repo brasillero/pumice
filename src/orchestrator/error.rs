@@ -121,6 +121,9 @@ pub struct StageError {
     pub cause_code: Option<Box<str>>,
     pub location: Option<Box<crate::orchestrator::result::ErrorLocation>>,
     pub exit: u8,
+    /// The request parameter at fault, for an HTTP presentation (one of
+    /// the route's own field names, never a client-supplied one).
+    pub param: Option<&'static str>,
 }
 
 impl StageError {
@@ -137,7 +140,13 @@ impl StageError {
             cause_code: None,
             location: None,
             exit,
+            param: None,
         }
+    }
+
+    pub fn with_param(mut self, param: &'static str) -> StageError {
+        self.param = Some(param);
+        self
     }
 
     pub fn with_cause(mut self, cause_code: impl Into<String>) -> StageError {

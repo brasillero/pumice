@@ -44,16 +44,20 @@ use crate::orchestrator::transcription::{SttFailure, TranscriptOutput};
 const CLEANUP_LIMIT: Duration = Duration::from_secs(2);
 
 /// The audio one operation transcribes. `pumice run` hands the transcription
-/// child a file it has already checked; the service adds an in-memory upload
-/// when it needs one (P13.4).
+/// child a file it has already checked; `pumice serve` holds a dictation's
+/// upload in memory (never written to disk). No `Debug`: the bytes are the
+/// user's audio.
 pub enum AudioSource {
     File(PathBuf),
+    Bytes(bytes::Bytes),
 }
 
-/// How an operation reaches the transcription module. Today the sibling
-/// `pumice-transcribe file --json` subprocess
-/// ([`Transcribe`](crate::orchestrator::transcription::Transcribe)); the
-/// service adds its warm child. An implementation must stop at `deadline`
+/// How an operation reaches the transcription module: the sibling
+/// `pumice-transcribe file --json` subprocess for `pumice run`
+/// ([`Transcribe`](crate::orchestrator::transcription::Transcribe)), the
+/// warm managed child for `pumice serve`
+/// ([`WarmTranscriber`](crate::orchestrator::serve::warm::WarmTranscriber)).
+/// An implementation must stop at `deadline`
 /// (failing with [`SttFailure::Timeout`]) and when `cancel` fires (failing
 /// with [`SttFailure::Cancelled`]), with whatever it started torn down.
 pub trait Transcriber: Sync {
@@ -278,6 +282,12 @@ impl<'a> Operation<'a> {
 
     pub fn cancel(&self) -> &CancelGuard {
         &self.cancel
+    }
+
+    /// Names the flow once it is known: a service learns it while it reads
+    /// the request, after the operation started.
+    pub fn set_flow(&mut self, flow: String) {
+        self.flow = Some(flow);
     }
 
     fn emit(
@@ -630,6 +640,15 @@ pub fn map_stt_failure(
         SttFailure::Protocol(message) => {
             StageError::new(stage_name, "transcription_protocol_error", message, 1)
         }
+        SttFailure::Unavailable(message) => {
+            StageError::new(stage_name, "transcription_unavailable", message, 1)
+        }
+        SttFailure::Busy => StageError::new(
+            stage_name,
+            "transcription_busy",
+            "the transcription module is still busy with an earlier transcription",
+            1,
+        ),
         SttFailure::Module { code, location } => {
             // The child's own message is never forwarded (it could carry
             // dictated text): a fixed message per recognized code.
