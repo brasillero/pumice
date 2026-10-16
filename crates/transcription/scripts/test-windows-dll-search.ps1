@@ -7,20 +7,26 @@
 #
 # Decoy DLLs (windows-dll-decoy.c) named like the bundle's DLLs and like
 # vulkan-1.dll, each exporting the real DLL's names so a static import binds
-# to it, are planted in the current directory and in a directory at the
-# front of PATH. A loaded decoy records itself in a marker file and ends the
-# process with exit code 86. Cases:
-#   - complete bundle: backends and file, backend cpu and auto;
-#   - System32\vulkan-1.dll hidden (a machine without a Vulkan driver), so
-#     the planted vulkan-1.dll would be next in the standard search order:
-#     backend auto must run on the CPU;
-#   - ggml-base.dll missing from a copy of the bundle: an installation error;
+# to it. A loaded decoy records itself in a marker file and ends the process
+# with exit code 86. Every case runs twice: decoys only in the current
+# directory (PATH unchanged), then decoys only in a directory prepended to
+# PATH (the current directory empty). Cases:
+#   - complete bundle: backends and file, backend cpu and auto; on a machine
+#     without a usable Vulkan device (the CI runners), auto must run on the
+#     CPU;
+#   - ggml-base.dll missing from a copy of the bundle: the manifest check
+#     names it;
 #   - ggml-base.dll missing and unlisted in bundle.json, so the manifest
 #     check passes and only the loader stands between the program and the
-#     decoy: it must fail without loading it.
-# Every case runs and failures are reported together. Needs the Visual
-# Studio C++ tools (decoys are built with cl) and administrator rights for
-# the hidden-loader case (it renames System32\vulkan-1.dll and restores it).
+#     decoy: the core DLL preload must fail with the typed installation
+#     error (Windows error 126), without loading it.
+# Every case runs and failures are reported together, followed by a table of
+# every run. Needs the Visual Studio C++ tools (decoys are built with cl).
+#
+# The test never changes system files. A machine without a Vulkan loader in
+# System32, where a planted vulkan-1.dll would be next in the standard search
+# order, is checked by the owner on a clean machine or VM
+# (p14.1-windows-vulkan#2), not here.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$Stage,
@@ -50,8 +56,9 @@ $WorkDir = (Resolve-Path -LiteralPath $WorkDir).Path
 $buildDir = Join-Path $WorkDir 'build'
 $cwdDir = Join-Path $WorkDir 'cwd'
 $pathDir = Join-Path $WorkDir 'path'
+$emptyDir = Join-Path $WorkDir 'empty'
 $marker = Join-Path $WorkDir 'decoy-loaded.txt'
-foreach ($dir in $buildDir, $cwdDir, $pathDir) {
+foreach ($dir in $buildDir, $cwdDir, $pathDir, $emptyDir) {
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
 }
 
@@ -89,7 +96,7 @@ function Get-ExportNames([string]$Path) {
 }
 
 # Each decoy exports the names of the DLL it impersonates; vulkan-1.dll's
-# come from the system loader, read before any case hides it.
+# come from the system loader (only read).
 $sources = @{
     'transcribe.dll'  = Join-Path $Stage 'transcribe.dll'
     'ggml.dll'        = Join-Path $Stage 'ggml.dll'
@@ -130,6 +137,8 @@ foreach ($name in $decoyNames) {
 }
 
 $failures = [System.Collections.Generic.List[string]]::new()
+$runs = [System.Collections.Generic.List[object]]::new()
+$placements = @('cwd', 'path')
 
 # Positive control: each decoy, loaded on purpose in a child process, is
 # detected (marker written, sentinel exit code).
@@ -147,14 +156,22 @@ foreach ($name in $decoyNames) {
 Remove-Item -Path $marker -ErrorAction SilentlyContinue
 Write-Host "positive control: $($decoyNames.Count) decoys checked"
 
-# Runs the executable from the decoy directory with the other decoy
-# directory first on PATH; records a failure if a decoy loaded.
-function Invoke-Planted([string]$Label, [string]$Exe, [string[]]$Arguments) {
+# Runs the executable with the decoys in one placement: 'cwd' runs it from
+# the decoy directory with PATH unchanged, 'path' from an empty directory
+# with the decoy directory first on PATH. Records a failure if a decoy
+# loaded.
+function Invoke-Planted([string]$Case, [string]$Placement, [string]$Exe, [string[]]$Arguments) {
+    $Label = "$Case [$Placement]"
     Remove-Item -Path $marker -ErrorAction SilentlyContinue
     $savedPath = $env:PATH
-    $env:PATH = "$pathDir;$savedPath"
+    if ($Placement -eq 'path') {
+        $env:PATH = "$pathDir;$savedPath"
+        $cwd = $emptyDir
+    } else {
+        $cwd = $cwdDir
+    }
     $env:PUMICE_DECOY_MARKER = $marker
-    Push-Location -LiteralPath $cwdDir
+    Push-Location -LiteralPath $cwd
     try {
         # Native stderr (the loader's status lines) is expected output.
         $ErrorActionPreference = 'Continue'
@@ -174,10 +191,15 @@ function Invoke-Planted([string]$Label, [string]$Exe, [string[]]$Arguments) {
     }
     $json = $out | Where-Object { $_.StartsWith('{') } | Select-Object -Last 1
     $envelope = if ($json) { $json | ConvertFrom-Json } else { $null }
-    [pscustomobject]@{ Code = $code; Out = $out; Envelope = $envelope; Loaded = [bool]$loaded }
+    $decoy = if ($loaded) { ($loaded -split "`r?`n") -join ', ' } else { '-' }
+    $script:runs.Add([pscustomobject]@{
+            Case = $Case; Placement = $Placement; Exit = ('0x{0:X8}' -f $code); Decoy = $decoy
+        })
+    [pscustomobject]@{ Label = $Label; Code = $code; Out = $out; Envelope = $envelope; Loaded = [bool]$loaded }
 }
 
-function Assert-Ok([string]$Label, $Run) {
+function Assert-Ok($Run) {
+    $Label = $Run.Label
     if ($Run.Loaded) {
         return $false
     }
@@ -188,14 +210,20 @@ function Assert-Ok([string]$Label, $Run) {
     return $true
 }
 
-function Assert-Refused([string]$Label, $Run, [string]$Expect) {
+function Assert-Refused($Run, [string[]]$Expect) {
+    $Label = $Run.Label
     if ($Run.Loaded) {
         return
     }
     if ($Run.Code -eq 0) {
         $script:failures.Add("${Label}: expected a failure, got exit 0")
-    } elseif ($Expect -and -not (($Run.Out -join "`n").Contains($Expect))) {
-        $script:failures.Add("${Label}: '$Expect' not reported")
+        return
+    }
+    $text = $Run.Out -join "`n"
+    foreach ($phrase in $Expect) {
+        if (-not $text.Contains($phrase)) {
+            $script:failures.Add("${Label}: '$phrase' not reported")
+        }
     }
 }
 
@@ -203,58 +231,51 @@ $exe = Join-Path $Stage 'pumice-transcribe.exe'
 $fileArgs = @('file', $Audio, '--model-file', $Model, '--json')
 
 # 1. Complete bundle.
-foreach ($mode in 'cpu', 'auto') {
-    $run = Invoke-Planted "complete backends $mode" $exe @('backends', '--backend', $mode, '--json')
-    $null = Assert-Ok "complete backends $mode" $run
-    $run = Invoke-Planted "complete file $mode" $exe ($fileArgs + @('--backend', $mode))
-    if ((Assert-Ok "complete file $mode" $run) -and -not $run.Envelope.result.text) {
-        $failures.Add("complete file ${mode}: empty transcript")
-    }
-}
-
-# 2. No Vulkan loader in System32.
-$hidden = "$systemVulkan.pumice-hidden"
-$wasPresent = Test-Path $systemVulkan
-try {
-    if ($wasPresent) {
-        Rename-Item -LiteralPath $systemVulkan -NewName (Split-Path -Leaf $hidden)
-    }
-    Write-Host "System32\vulkan-1.dll hidden (was present: $wasPresent)"
-    $run = Invoke-Planted 'no-loader backends auto' $exe @('backends', '--backend', 'auto', '--json')
-    if (Assert-Ok 'no-loader backends auto' $run) {
-        $result = $run.Envelope.result
-        if ($result.gpu_module -ne 'scanned' -or $result.gpu_devices -ne 0) {
-            $failures.Add("no-loader backends auto: gpu_module=$($result.gpu_module) gpu_devices=$($result.gpu_devices)")
+foreach ($placement in $placements) {
+    foreach ($mode in 'cpu', 'auto') {
+        $report = Invoke-Planted "complete backends $mode" $placement $exe @('backends', '--backend', $mode, '--json')
+        $null = Assert-Ok $report
+        $run = Invoke-Planted "complete file $mode" $placement $exe ($fileArgs + @('--backend', $mode))
+        if (-not (Assert-Ok $run)) {
+            continue
+        }
+        if (-not $run.Envelope.result.text) {
+            $failures.Add("$($run.Label): empty transcript")
+        }
+        # No usable Vulkan device (the CI runners have none): the GPU module
+        # is scanned, registers nothing and auto runs on the CPU.
+        $gpu = if ($report.Envelope) { $report.Envelope.result } else { $null }
+        if ($mode -eq 'auto' -and $gpu -and $gpu.gpu_module -eq 'scanned' -and $gpu.gpu_devices -eq 0 `
+                -and $run.Envelope.result.compute.backend -ne 'cpu') {
+            $failures.Add("$($run.Label): no Vulkan device, but backend=$($run.Envelope.result.compute.backend)")
         }
     }
-    $run = Invoke-Planted 'no-loader file auto' $exe ($fileArgs + @('--backend', 'auto'))
-    if ((Assert-Ok 'no-loader file auto' $run) -and $run.Envelope.result.compute.backend -ne 'cpu') {
-        $failures.Add("no-loader file auto: backend=$($run.Envelope.result.compute.backend)")
-    }
-} finally {
-    if ($wasPresent -and (Test-Path $hidden)) {
-        Rename-Item -LiteralPath $hidden -NewName (Split-Path -Leaf $systemVulkan)
-    }
 }
 
-# 3. A core DLL missing from a copy of the bundle: the manifest check names it.
+# 2. A core DLL missing from a copy of the bundle: the manifest check names it.
 $copy = Join-Path $WorkDir 'bundle missing core'
 Copy-Item -Recurse -Path $Stage -Destination $copy
 Remove-Item -Path (Join-Path $copy 'ggml-base.dll')
 $copyExe = Join-Path $copy 'pumice-transcribe.exe'
-$run = Invoke-Planted 'missing-core backends cpu' $copyExe @('backends', '--backend', 'cpu', '--json')
-Assert-Refused 'missing-core backends cpu' $run 'ggml-base.dll is listed in bundle.json but missing'
+foreach ($placement in $placements) {
+    $run = Invoke-Planted 'missing-core backends cpu' $placement $copyExe @('backends', '--backend', 'cpu', '--json')
+    Assert-Refused $run @('ggml-base.dll is listed in bundle.json but missing')
+}
 
-# 4. The same, unlisted in bundle.json: only the loader refuses it now.
+# 3. The same, unlisted in bundle.json: only the loader refuses it now, and
+# the core DLL preload reports it as an installation error.
 $manifestPath = Join-Path $copy 'bundle.json'
 $manifest = Get-Content -Raw -Path $manifestPath | ConvertFrom-Json
 $manifest.files = @($manifest.files | Where-Object { $_.path -ne 'ggml-base.dll' })
 [System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 4) + "`n",
     [System.Text.UTF8Encoding]::new($false))
-$run = Invoke-Planted 'missing-core-unlisted backends cpu' $copyExe @('backends', '--backend', 'cpu', '--json')
-Assert-Refused 'missing-core-unlisted backends cpu' $run $null
+foreach ($placement in $placements) {
+    $run = Invoke-Planted 'missing-core-unlisted backends cpu' $placement $copyExe @('backends', '--backend', 'cpu', '--json')
+    Assert-Refused $run @('transcribe.dll (Windows error 126; core library unloadable)')
+}
 Remove-Item -Recurse -Force -Path $copy
 
+$runs | Format-Table -AutoSize -Wrap | Out-String -Width 200 | Write-Host
 if ($failures.Count -gt 0) {
     $failures | ForEach-Object { Write-Host "error: $_" }
     throw "DLL search order test failed ($($failures.Count) failures)"

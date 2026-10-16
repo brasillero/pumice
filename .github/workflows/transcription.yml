@@ -572,8 +572,9 @@ jobs:
           $global:LASTEXITCODE = 0
 
       # Release gate (p14.1-windows-vulkan#1): decoy DLLs in the current
-      # directory and on PATH are never loaded, also without a system Vulkan
-      # loader and with a core DLL missing.
+      # directory, and separately on PATH, are never loaded, also with a
+      # core DLL missing. No system file is changed: a machine without a
+      # Vulkan loader is the owner's clean-machine check (p14.1#2).
       - name: DLL search order (decoy DLLs in the current directory and on PATH)
         run: |
           crates/transcription/scripts/test-windows-dll-search.ps1 -Stage $env:STAGE `
