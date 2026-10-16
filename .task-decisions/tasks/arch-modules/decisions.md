@@ -212,3 +212,18 @@
 **Rejected.** Merging the spike: its standalone crate, CI workflow and notes describe a design that no longer holds. Deleting the branch: it breaks the evidence citations.
 
 **Consequences.** The owner asked the orchestrator to decide (2026-10-15). PR #91 was closed with a comment explaining this.
+
+### D16 · Active · Pumice ships as one CLI installed as a folder, not as one file
+- date: 2026-10-16
+- decided by: brasillero
+- origin: conversation
+- area: distribution
+- revisit if: —
+
+**Decision.** The goal is a single Pumice CLI (`pumice`), not a single executable file. An install may be a folder holding `pumice`, `pumice-transcribe` and its native libraries (CPU variants, GPU modules), delivered together by npm or a release archive. `pumice` and `pumice-relay` stay statically linked where they already are; that is no longer a product requirement but is kept because it costs nothing. Transcription stays a separate process inside that folder (orchestrator recommendation, 2026-10-16), so a native or GPU crash only ends `pumice-transcribe` and `pumice serve` restarts it (`p13.1-flow-seam/D5`, `p14.2-backend-policy/D1`).
+
+**Why.** The owner's words (2026-10-16): the single-file rule "was more like a single cli solution"; the modules are now split and assembled into one. GPU transcription needs DLLs next to the executable.
+
+**Rejected.** Linking the transcription engine into `pumice` (it would lose the process isolation GPU failure handling relies on).
+
+**Consequences.** Supersedes the single-file framing of D13 and of AGENTS.md "Stack and constraints"; AGENTS.md is the owner's to change (proposed wording in the P14.5 PR description). P14.3 ships the transcription folder inside the npm packages (owner, 2026-10-16).
