@@ -94,9 +94,10 @@ script uses its own `CARGO_TARGET_DIR` and overrides the conservative
 `TRANSCRIBE_CMAKE_ARGS` from `.cargo/config.toml`, so nothing in the portable
 build changes. (Ordinary `engine` builds report the same compute snapshot,
 with `cpu_variant: null`; the binary stays a single static portable
-executable.) macOS builds
-are unchanged (the feature is off by default; other architectures have no
-module mapping). On x86-64 Windows the same mechanism loads
+executable.) macOS on Intel
+is unchanged (the feature is off by default; other architectures have no
+module mapping); Apple Silicon gets runtime modules only in the Metal preview
+below, with one portable CPU module instead of variants. On x86-64 Windows the same mechanism loads
 `cpu/<variant>/ggml-cpu-<variant>.dll` from the nine variants an MSVC build
 produces; it is only built as part of the Vulkan preview below.
 
@@ -259,6 +260,139 @@ The script also audits every staged file (allowed libraries, `$ORIGIN` as
 the only RUNPATH, no glibc symbol newer than 2.35), so on a build machine
 newer than Ubuntu 22.04 the audit fails by design.
 
+## macOS Metal preview (experimental)
+
+**Not a release.** The same kind of preview for Apple Silicon Macs
+(`aarch64-apple-darwin`); Intel Macs stay CPU-only. CI builds it in the
+`Transcription engine` workflow on a GitHub-hosted Apple Silicon runner
+(`macos-15`) and uploads it as the short-lived artifact
+`pumice-transcribe-macos-arm64-metal-preview`: one tarball (it keeps the
+executable bit) and its `SHA256SUMS`; no release ships it. Extract it
+anywhere and keep the folder together:
+
+```text
+pumice-transcribe
+libtranscribe.0.3.dylib, libggml.0.dylib,        engine core, beside the
+  libggml-base.0.dylib                             executable (@rpath, @executable_path)
+cpu/arm64/libggml-cpu.so                          the portable arm64 CPU module
+gpu/metal/libggml-metal.so                        optional Metal module
+bundle.json                                       manifest: every file's size and SHA-256
+```
+
+Prerequisites: macOS 11 (Big Sur) or newer on an Apple Silicon Mac (M1 or
+later). Nothing else: no Xcode, command line tools, Homebrew, Rust or
+`DYLD_*` variables. The Metal shaders are inside `libggml-metal.so` as
+source, and the macOS Metal framework compiles them the first time the GPU
+module initializes (see the checklist below for that latency); there is no
+`.metal` or `.metallib` file. There are no CPU variants: ggml builds one
+portable arm64 module, reported as `cpu_variant: "arm64"`.
+
+CI checks every file after relocating the folder: arm64 only, a minimum macOS
+of exactly 11.0 (`LC_BUILD_VERSION minos`), dependencies only on `/usr/lib`,
+system frameworks (Accelerate for the CPU path; Metal, MetalKit and
+Foundation, with Metal and MetalKit for `gpu/metal/libggml-metal.so` alone)
+and the bundled core libraries; the executable looks for those only next to
+itself (`@executable_path`), and the modules only in the folder above them
+(`@loader_path/../..`), never in their own directory. A run of the relocated
+folder from a path with spaces and non-ASCII characters, without any `DYLD_*`
+variable, may load images only from that folder and the OS.
+
+**Signing and quarantine.** The files carry ad-hoc signatures only (the
+linker's; `install_name_tool` re-signs the two modules whose rpath the stager
+edits), with no Developer ID and no notarization. macOS marks files from a browser download
+with the `com.apple.quarantine` attribute, and Gatekeeper refuses to run
+quarantined code that is not notarized. Remove the attribute from the whole
+extracted folder once, after checking `SHA256SUMS`:
+
+```bash
+shasum -a 256 -c SHA256SUMS
+tar -xzf pumice-transcribe-macos-arm64-metal-preview.tar.gz
+xattr -dr com.apple.quarantine pumice-transcribe-macos-arm64-metal-preview
+```
+
+(`curl` and `gh run download` do not set the attribute; `xattr -lr` shows
+whether it is there.) On CI's runner, with Gatekeeper assessments enabled,
+`spctl --assess` rejects the executable, yet a copy given a quarantine
+attribute by a script still ran from the shell; a browser download on a
+desktop Mac is still expected to be blocked (checklist step 1 records it).
+CI checks that the copy runs after this command.
+
+`bundle.json`, the startup checks, the `cpu`/`auto`/`gpu` behavior and the
+messages are the same as on Windows and Linux: the manifest is required,
+`gpu/` may be deleted for a CPU-only install, and nothing else may be added
+to `cpu/arm64/` or `gpu/metal/`, except the `.DS_Store` files Finder writes
+into folders it shows (neither ggml nor the system loader ever opens them).
+The core libraries are the executable's own imports, so dyld maps them before
+any check runs: a core library changed in a way dyld accepts fails the
+manifest check, but one dyld or the kernel's code-signing check rejects stops
+the program before it starts.
+
+Check a Mac with `backends`, which loads no model:
+
+```bash
+./pumice-transcribe backends --backend auto --json
+```
+
+`gpu_module: "scanned"` with `gpu_devices: 1` and the GPU listed with kind
+`metal` (`MTL0`, its description the chip, for example `Apple M2`) means
+`gpu` can use it. **`auto` stays on the CPU** (p14.4-macos-metal/D1): the
+engine reports a Metal GPU as type `gpu` with no PCI bus id, so it is
+`gpu_class: "unverified"`, and `auto` would not pick it until a real Mac
+shows Metal is faster than the CPU for Turbo (p14.4-macos-metal#1). Set
+`backend: gpu` to use Metal.
+
+So that `auto` costs nothing for a GPU it never uses, inference with `auto`
+does not touch the Metal module at all (p14.4-macos-metal/D2): `file`,
+`serve` and a managed `serve` register with the CPU-only mask, neither check
+nor load `gpu/metal/`, and report `fallback_reason: "gpu_auto_disabled"`.
+`backends --backend auto` is a diagnostic: it still scans Metal so the
+device is listed, and says what inference does instead with
+`auto_uses_gpu_module: false` and `fallback_reason: "gpu_auto_disabled"`.
+
+`gpu` (and the `auto` diagnostic) initialize the Metal module at startup,
+and that compiles the embedded shaders; `backend: cpu` and `auto` inference
+never load the module. macOS caches the compiled shaders per program
+location: on CI's virtual machine the first Metal start from a new folder
+took 43–45 s and later starts from the same folder about 0.1 s, while an
+`auto` start from a new folder is as fast as a `cpu` one (CI checks it with
+a corrupted Metal module, which `auto` must not notice). The cost on real
+hardware is part of the checklist below.
+
+GitHub's Apple Silicon runners (CI uses `macos-15`) are virtual machines
+without GPU acceleration. Their Metal device, `Apple Paravirtual device`,
+registers as `MTL0` and `backend: gpu` runs the tiny model on it, but slowly
+(137–141 s for the 14 s sample) and with a degenerate transcript (`ass!!!…`),
+so CI proves the build, the relocation, the CPU path, the manifest checks and
+that the Metal module loads and executes; it says nothing about real Metal
+output or speed. The suspected cause is the paravirtual device, not Pumice
+or the engine: llama.cpp saw the same repetitive garbage on this device
+(missing simdgroup capabilities) while physical Macs were fine
+([ggml-org/llama.cpp#8617](https://github.com/ggml-org/llama.cpp/issues/8617)),
+and both llama.cpp's and whisper.cpp's hosted macOS CI build Metal without
+running model tests on it. This is not established: CI records, as
+diagnostics that never fail the job, the same run without flash attention
+(`TRANSCRIBE_NO_FLASH=1`) and ggml's `test-backend-ops` for the ops Whisper
+uses on `MTL0` against the CPU, with the capabilities ggml-metal reports.
+On the first such run (`macos-15`, transcribe.cpp 3f32fbc) ggml-metal
+reported `simdgroup reduction` and `simdgroup matrix mul.` as false, so
+`test-backend-ops` found `MUL_MAT`, `FLASH_ATTN_EXT`, `SOFT_MAX` and `NORM`
+unsupported on `MTL0` (no failures among the ops it did run), and the text
+stayed degenerate without flash attention. Only a real Mac settles it
+(p14.4-macos-metal#1).
+
+Build it yourself (an Apple Silicon Mac with the Xcode command line tools,
+CMake and `jq`; build time only):
+
+```bash
+crates/transcription/scripts/build-macos-metal.sh
+# result: target/macos-metal/stage/
+```
+
+The script builds with `MACOSX_DEPLOYMENT_TARGET=11.0`, rewrites the
+modules' rpath (re-signing them ad hoc if the edit left no valid signature)
+and audits every staged file with `otool`, `lipo` and `codesign`; `--self-test` checks the audit rules alone,
+on any OS.
+
 ## Compute backend (`cpu`, `auto`, `gpu`)
 
 `backend:` in `transcribe.yml` chooses what the model may run on; `--backend`
@@ -269,17 +403,22 @@ device index, no per-request choice and no backend setting in
 | Mode | GPU module | Model loads on | Without a usable GPU |
 | --- | --- | --- | --- |
 | `cpu` (default) | never checked or loaded | the CPU | — |
-| `auto` | checked and scanned | the first discrete GPU, else the CPU | the CPU, with a `fallback_reason` |
+| `auto` | checked and scanned (Vulkan); never checked or loaded with Metal (D2) | the first discrete GPU, else the CPU (always the CPU with Metal) | the CPU, with a `fallback_reason` |
 | `gpu` | checked and scanned | a GPU of any class (the engine's choice: discrete before integrated) | error `gpu_unavailable`, never the CPU |
 
-Only the Vulkan previews (Windows, Linux) have a GPU module. In every other
-build (the default `engine` build, Linux `cpu-variants`, macOS) `auto` runs on
-the CPU with `fallback_reason: "gpu_not_built"` and `gpu` fails.
+With Metal (Apple Silicon), inference with `auto` registers the CPU only and
+reports `fallback_reason: "gpu_auto_disabled"` (p14.4-macos-metal/D2); only
+the `backends --backend auto` diagnostic scans the Metal module.
+
+Only the Vulkan previews (Windows, Linux) and the macOS Metal preview have a
+GPU module. In every other build (the default `engine` build, Linux
+`cpu-variants`, macOS on Intel) `auto` runs on the CPU with
+`fallback_reason: "gpu_not_built"` and `gpu` fails.
 
 **Which GPUs `auto` uses** (p14.5-linux-vulkan/D1, D2). `auto` only uses a
-GPU it can identify as discrete hardware. Each registered Vulkan device gets
-a class from the engine's device type, its PCI bus id and its description
-(the Vulkan device name):
+GPU it can identify as discrete hardware. Each registered GPU device gets a
+class from the engine's device type, its PCI bus id and its description (the
+Vulkan device name, or the Metal device name):
 
 | `gpu_class` | When | `auto` | `gpu` |
 | --- | --- | --- | --- |
@@ -299,23 +438,29 @@ software device. A real card whose driver lacks the optional
 registry order, even when another device registered first. Integrated GPUs
 are skipped because they are usually slower than a modern CPU for this work
 (about 1.7× slower for Turbo on an Intel UHD 770); set `backend: gpu` to use
-one.
+one. Metal devices never report a PCI bus id, so on Apple Silicon the GPU is
+`unverified` and `auto` could never pick it (p14.4-macos-metal/D1);
+inference with `auto` therefore does not load the Metal module and reports
+`gpu_auto_disabled` (D2).
 
 `fallback_reason` (only when `auto` runs on the CPU):
 
 - `gpu_not_built` — this build has no GPU module;
-- `gpu_module_absent` — the build supports one, but `gpu/vulkan/` is not
-  installed next to the executable;
+- `gpu_module_absent` — the build supports one, but `gpu/vulkan/` (Metal:
+  `gpu/metal/`) is not installed next to the executable;
 - `gpu_unavailable` — the module registered no GPU device. The engine cannot
-  tell a missing Vulkan loader, a missing driver or an excluded device
-  apart, so neither does this reason;
+  tell a missing Vulkan loader, a missing driver, an excluded device or a Mac
+  without a Metal device apart, so neither does this reason;
 - `gpu_integrated_only` — no discrete GPU, but an integrated one (others
   may be there too); `backend: gpu` uses it;
 - `gpu_unverified` — no discrete or integrated GPU, but a GPU that could not
   be verified as discrete hardware (`gpu_class: "unverified"`, software ones
   may be there too); `backend: gpu` uses it;
 - `gpu_software_only` — the only GPU devices are software rasterizers
-  (`gpu_class: "software"`); `backend: gpu` uses them.
+  (`gpu_class: "software"`); `backend: gpu` uses them;
+- `gpu_auto_disabled` — this build's `auto` does not use its GPU module, so
+  it was not loaded (Apple Silicon, p14.4-macos-metal/D2); `backend: gpu`
+  uses Metal.
 
 `gpu` fails before loading the model with `gpu_unavailable` (exit status 1)
 and one of three fixed messages: the build has no GPU support, no GPU module
@@ -331,9 +476,9 @@ report shows that same object:
 ```
 
 - `requested`: `cpu`, `auto` or `gpu`;
-- `backend`: `cpu` or `vulkan`, the device's own kind;
-- `device`: the engine's name (`CPU`, `Vulkan0`, …) and description (the
-  CPU or GPU model);
+- `backend`: `cpu`, `vulkan` or `metal`, the device's own kind;
+- `device`: the engine's name (`CPU`, `Vulkan0`, `MTL0`, …) and description
+  (the CPU or GPU model);
 - `cpu_variant`: the loaded ggml CPU module in `cpu-variants` builds, else
   `null`; on a GPU it is the CPU helper, not the primary device;
 - `fallback_reason`: as above, else `null`.
@@ -390,13 +535,18 @@ pumice-transcribe backends --backend auto [--json]
 
 Registers the compute backends exactly as a model load in that mode does,
 without loading a model, and reports what the bundle ships and what
-registered:
+registered. The one exception is `auto` with Metal (p14.4-macos-metal/D2):
+the diagnostic still scans the Metal module so the device is listed, while
+inference with `auto` registers the CPU only; it reports
+`auto_uses_gpu_module: false` and `fallback_reason: "gpu_auto_disabled"`.
 
 ```json
-{"schema_version":1,"ok":true,"result":{"requested":"auto","gpu_build":"vulkan","bundle":"verified","cpu_variant":"alderlake","gpu_module":"scanned","gpu_devices":1,"allowed_backends":["cpu","vulkan"],"devices":[{"name":"CPU","description":"Intel(R) Core(TM) i5-14500T","kind":"cpu","type":"cpu","gpu_class":null},{"name":"Vulkan0","description":"Intel(R) UHD Graphics 770 (ADL-S GT1)","kind":"vulkan","type":"igpu","gpu_class":"integrated"}],"fallback_reason":"gpu_integrated_only"}}
+{"schema_version":1,"ok":true,"result":{"requested":"auto","gpu_build":"vulkan","auto_uses_gpu_module":true,"bundle":"verified","cpu_variant":"alderlake","gpu_module":"scanned","gpu_devices":1,"allowed_backends":["cpu","vulkan"],"devices":[{"name":"CPU","description":"Intel(R) Core(TM) i5-14500T","kind":"cpu","type":"cpu","gpu_class":null},{"name":"Vulkan0","description":"Intel(R) UHD Graphics 770 (ADL-S GT1)","kind":"vulkan","type":"igpu","gpu_class":"integrated"}],"fallback_reason":"gpu_integrated_only"}}
 ```
 
-`gpu_build` is `vulkan` or `null`; `bundle` is `verified`, `absent` (no
+`gpu_build` is `vulkan`, `metal` or `null`; `auto_uses_gpu_module` is whether
+inference with `auto` may use that GPU module (`false` on Apple Silicon, D2;
+`null` without one); `bundle` is `verified`, `absent` (no
 manifest, plain Linux `cpu-variants` only) or `null` (no runtime modules); `gpu_module` is
 `not_built`, `not_requested` (`cpu` mode), `absent` or `scanned`;
 `gpu_devices` counts registered GPU devices of every class; each device's
@@ -487,6 +637,62 @@ the same model, audio and language for every run (for example
 9. Report the Windows, GPU driver and Vulkan loader versions, the GPU
    model, the snapshots, the timings, the Process Monitor captures and
    anything unexpected (crashes, hangs, wrong text, high memory or VRAM).
+
+### Checking real Metal on Apple Silicon
+
+The owner's check of the macOS preview artifact on an Apple Silicon Mac
+(p14.4-macos-metal#1). Use the same model, audio and language for every run
+(`whisper-tiny-q8_0`, then Turbo, with `sample-pt.wav` and `--language pt`).
+Nothing is installed; only the extracted folder is used.
+
+1. Download the artifact, check `SHA256SUMS` and extract it to a new folder
+   (try a path with a space), then remove the quarantine attribute as
+   described [above](#macos-metal-preview-experimental). Before removing it
+   on one copy, note what running `pumice-transcribe` does while it is still
+   quarantined. Work from a new, empty directory outside the folder, call
+   the program by its absolute path (`exe="/…/extracted folder/pumice-transcribe"`,
+   then `"$exe" …`) and pass the model and audio files by absolute path. Use
+   a terminal without `DYLD_*` variables (`env | grep DYLD` prints nothing).
+   Record the macOS version (`sw_vers`), the chip (`sysctl -n
+   machdep.cpu.brand_string`) and its GPU cores (`system_profiler
+   SPDisplaysDataType`), and whether Xcode or its command line tools are
+   installed (`xcode-select -p`; a Mac without them also proves that none is
+   needed).
+2. `"$exe" backends --backend auto --json`: `gpu_module` `scanned`,
+   `gpu_devices: 1`, the GPU listed with kind `metal`, type `gpu` and
+   `gpu_class: "unverified"`, `auto_uses_gpu_module: false` and
+   `fallback_reason: "gpu_auto_disabled"` (D1, D2). With `--backend cpu`:
+   `gpu_module` `not_requested`, only the CPU. Time both (`time "$exe"
+   backends …`), twice each: the first `auto` diagnostic includes the Metal
+   shader compilation, the second may reuse the system's shader cache.
+3. CPU baseline: `"$exe" file sample-pt.wav --model-file MODEL --language pt
+   --backend cpu --json`, three times; note the text, `model_load_ms`,
+   `transcription_ms` and `compute` (`cpu_variant: "arm64"`).
+4. Metal: the same with `--backend gpu`, three times. It must succeed with
+   `compute.backend` `metal` and `compute.device` `MTL0` with your chip as
+   description; compare the text with the CPU run (identical text is not
+   guaranteed) and the timings: the first run (cold, shaders compiled), then
+   warm runs; a longer clip, a short one and silence. Also note the first-run
+   compile latency again after a reboot.
+5. `--backend auto`: runs on the CPU with `fallback_reason:
+   "gpu_auto_disabled"` by design, and as fast as `--backend cpu` even from
+   a new folder (it never loads Metal, D2). If Turbo is clearly faster on
+   Metal than on the CPU (warm and cold), say so: that is the evidence D1
+   waits for before `auto` may pick Metal.
+6. `"$exe" serve --backend gpu --port 17568`: the startup line shows the
+   Metal snapshot; send a few requests, stop it with Ctrl-C. While it runs,
+   Activity Monitor (Window → GPU History) should show GPU activity during a
+   request.
+7. Relocation and loads: copy the folder elsewhere and run step 2 from the
+   copy with `DYLD_PRINT_LIBRARIES=1` (it only reports): every image must
+   come from the copy, `/usr/lib` or `/System`. Then delete `gpu/` from the
+   copy: `backends --backend auto` reports `gpu_module` `absent` (still
+   `gpu_auto_disabled`), `gpu` fails with `gpu_unavailable`, `cpu` and
+   `auto` transcription are unaffected.
+8. Report the macOS version, the chip and GPU core count, the snapshots, the
+   timings (CPU vs Metal, cold and warm, the first-run compile latency),
+   what the quarantined copy did and anything unexpected (crashes, hangs,
+   wrong text, high memory).
 
 ## Getting models
 

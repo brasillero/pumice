@@ -1,15 +1,22 @@
-# Shared by build-cpu-variants.sh and build-linux-vulkan.sh; sourced, not
-# run. Both build pumice-transcribe with the engine as shared libraries and
-# stage one ggml CPU module per cpu/<variant>/ directory; they differ in the
-# feature, the target directory and what else they stage.
+# Shared by build-cpu-variants.sh, build-linux-vulkan.sh and
+# build-macos-metal.sh; sourced, not run. All three build pumice-transcribe
+# with the engine as shared libraries and stage one ggml CPU module per
+# cpu/<variant>/ directory; they differ in the feature, the target directory
+# and what else they stage. stage_cpu_modules is for the x86 variant set
+# (Linux) only.
 
 # cargo_build_logged LOG TIMEOUT CARGO_BUILD_ARGS...
 # Runs `cargo build` with JSON messages written to LOG, so the staging step
-# can name the exact native build it just ran.
+# can name the exact native build it just ran. TIMEOUT applies where
+# `timeout` exists (not on stock macOS; CI bounds the step there).
 cargo_build_logged() {
     local log="$1" limit="$2"
     shift 2
-    timeout "$limit" cargo build "$@" --message-format=json > "$log"
+    if command -v timeout > /dev/null; then
+        timeout "$limit" cargo build "$@" --message-format=json > "$log"
+    else
+        cargo build "$@" --message-format=json > "$log"
+    fi
 }
 
 # transcribe_sys_out LOG

@@ -1178,6 +1178,7 @@ fn print_backends(
     for key in [
         "requested",
         "gpu_build",
+        "auto_uses_gpu_module",
         "bundle",
         "cpu_variant",
         "gpu_module",

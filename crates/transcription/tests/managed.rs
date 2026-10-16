@@ -147,6 +147,10 @@ fn main() -> ExitCode {
     }
     let tests: &[(&str, fn())] = &[
         (
+            "only_a_whole_response_counts_as_complete",
+            only_a_whole_response_counts_as_complete,
+        ),
+        (
             "ready_follows_load_and_bind_and_stdin_eof_stops_cleanly",
             ready_follows_load_and_bind_and_stdin_eof_stops_cleanly,
         ),
@@ -502,7 +506,18 @@ fn http(port: u16, method: &str, path: &str, body: &[u8]) -> (u16, String) {
     stream.write_all(head.as_bytes()).unwrap();
     stream.write_all(body).unwrap();
     let mut response = Vec::new();
-    stream.read_to_end(&mut response).unwrap();
+    // A server that answers without reading the request body (a 404 for a
+    // POST) closes with that body unread, which resets the connection; on
+    // macOS the reset can reach this read after the response did. The bytes
+    // read before the error stay in `response`, and count only when they are
+    // the whole response.
+    match stream.read_to_end(&mut response) {
+        Ok(_) => {}
+        Err(error)
+            if error.kind() == std::io::ErrorKind::ConnectionReset
+                && complete_response(&response) => {}
+        Err(error) => panic!("reading the response: {error}"),
+    }
     let response = String::from_utf8(response).unwrap();
     let status = response[9..12].parse().unwrap();
     let body = response
@@ -510,6 +525,40 @@ fn http(port: u16, method: &str, path: &str, body: &[u8]) -> (u16, String) {
         .map(|(_, body)| body.to_string())
         .unwrap_or_default();
     (status, body)
+}
+
+/// Whether `bytes` hold one whole HTTP/1.1 response: a status line, the
+/// headers and as many body bytes as their `Content-Length` announces.
+fn complete_response(bytes: &[u8]) -> bool {
+    let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let Ok(head) = std::str::from_utf8(&bytes[..end]) else {
+        return false;
+    };
+    let mut lines = head.split("\r\n");
+    let status_line = lines.next().unwrap_or_default();
+    if !status_line.starts_with("HTTP/1.1 ") || status_line.len() < 12 {
+        return false;
+    }
+    let length = lines.find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse::<usize>().ok())
+            .flatten()
+    });
+    length.is_some_and(|length| bytes.len() - (end + 4) == length)
+}
+
+fn only_a_whole_response_counts_as_complete() {
+    let whole =
+        b"HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}";
+    assert!(complete_response(whole));
+    for cut in 1..whole.len() {
+        assert!(!complete_response(&whole[..cut]), "{cut}");
+    }
+    assert!(!complete_response(b"HTTP/1.1 200 OK\r\n\r\n{}"));
+    assert!(!complete_response(b""));
 }
 
 fn ready_port(record: &Value) -> u16 {

@@ -34,6 +34,13 @@ cpu-variants = ["engine", "transcribe-cpp/dynamic-backends"]
 # dependency below); elsewhere, musl included, the feature builds plain
 # `cpu-variants`.
 vulkan = ["cpu-variants", "dep:transcribe-cpp-sys"]
+# Experimental (P14.4): `cpu-variants` plus one loadable ggml Metal module,
+# scanned from `gpu/metal/` next to the executable. Only Apple Silicon macOS
+# gets the native Metal build (the target-scoped dependency below); elsewhere,
+# macOS on Intel included, the feature builds plain `cpu-variants`. Not
+# combinable with `vulkan`: Cargo refuses one package under two names in one
+# build, and no target needs both.
+metal = ["cpu-variants", "dep:transcribe-cpp-sys-metal"]
 
 [dependencies]
 axum = { workspace = true }
@@ -65,6 +72,13 @@ webm-iterable = { version = "=0.7.1", default-features = false, optional = true 
 # copy. Keep this condition in step with `vulkan_target` in build.rs.
 [target.'cfg(all(target_arch = "x86_64", any(windows, all(target_os = "linux", target_env = "gnu"))))'.dependencies]
 transcribe-cpp-sys = { version = "=0.3.1", optional = true, default-features = false, features = ["vulkan"] }
+
+# The same native crate under another name, so the `metal` feature turns on
+# its Metal build (TRANSCRIBE_METAL, with the shader source embedded) for
+# Apple Silicon alone. Keep this condition in step with `metal_target` in
+# build.rs.
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+transcribe-cpp-sys-metal = { package = "transcribe-cpp-sys", version = "=0.3.1", optional = true, default-features = false, features = ["metal"] }
 
 [target.'cfg(windows)'.dependencies]
 # SetDefaultDllDirectories at startup (src/main.rs) and the core DLL

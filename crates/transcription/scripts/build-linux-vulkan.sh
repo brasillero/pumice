@@ -8,7 +8,7 @@
 #   crates/transcription/scripts/build-linux-vulkan.sh --self-test
 #
 # Linux counterpart of build-windows-vulkan.ps1 and sibling of
-# build-cpu-variants.sh (shared steps in linux-stage-common.sh): its own
+# build-cpu-variants.sh (shared steps in stage-common.sh): its own
 # CARGO_TARGET_DIR (CMake never reuses another build's cache), an explicit
 # TRANSCRIBE_CMAKE_ARGS (wins over the portable baseline in
 # .cargo/config.toml, force=false), and staging ONLY from the
@@ -51,8 +51,8 @@ shopt -s nullglob
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../../.." && pwd)"
-# shellcheck source=linux-stage-common.sh
-. "$script_dir/linux-stage-common.sh"
+# shellcheck source=stage-common.sh
+. "$script_dir/stage-common.sh"
 
 triple=x86_64-unknown-linux-gnu
 gpu_module=gpu/vulkan/libggml-vulkan.so

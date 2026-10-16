@@ -23,8 +23,8 @@ shopt -s nullglob
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../../.." && pwd)"
-# shellcheck source=linux-stage-common.sh
-. "$script_dir/linux-stage-common.sh"
+# shellcheck source=stage-common.sh
+. "$script_dir/stage-common.sh"
 profile=release
 if [ "${1:-}" = "--debug" ]; then
     profile=debug
