@@ -655,6 +655,34 @@ fn plain_mode_announces_the_url_on_stderr() {
     rig.assert_children_gone();
 }
 
+// Unix only: on Windows the Job Object kills the child together with
+// `pumice`, so the lifeline is not what ends it there.
+#[cfg(unix)]
+#[test]
+fn an_abrupt_parent_death_closes_the_child_lifeline() {
+    // `pumice serve` killed outright runs no cleanup; the child's stdin
+    // closes (no other process holds its write end), so the child ends
+    // itself (design §4).
+    let rig = rig(SERVE, json!([{}]));
+    let mut running = rig.start(&["--json"]);
+    let port = running.port();
+    running.ready(port);
+    running.child.kill().expect("kill pumice serve");
+    let _ = running.child.wait();
+    let deadline = Instant::now() + WAIT;
+    while rig.log_events("eof").is_empty() {
+        assert!(Instant::now() < deadline, "the child never saw stdin close");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let pid = rig.spawns()[0]["pid"].as_u64().unwrap() as libc::pid_t;
+    // The orphan is reaped by init; wait until it is gone.
+    // SAFETY: signal 0 only checks for existence.
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(Instant::now() < deadline, "the orphaned child kept running");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[cfg(unix)]
 mod signals {
     //! Signal teardown is Unix-only here: Windows and macOS console teardown

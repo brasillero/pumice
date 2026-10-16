@@ -359,14 +359,17 @@ fn stdout_line(line: &str) {
     let _ = out.flush();
 }
 
+/// Best-effort: the log's directory may already be gone (a test that
+/// failed and removed it), and the lifeline must still end the process.
 fn append_log(path: &Option<PathBuf>, value: serde_json::Value) {
     let Some(path) = path else { return };
-    let mut file = std::fs::OpenOptions::new()
+    if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
-        .expect("open the spawn log");
-    let _ = file.write_all(format!("{value}\n").as_bytes());
+    {
+        let _ = file.write_all(format!("{value}\n").as_bytes());
+    }
 }
 
 fn flag_value(args: &[OsString], flag: &str) -> String {
