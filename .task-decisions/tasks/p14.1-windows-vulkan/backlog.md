@@ -32,4 +32,19 @@
 - [ ] Owner check on a Windows machine or VM without a Vulkan driver, or an automated equivalent.
 
 
+### #3 · Deferred · Replace P14.1's temporary GPU switches with the backend policy
+- type: Tech debt
+- area: transcription
+- origin: D3
+- ticket: —
+- created: 2026-10-16
+- reason: P14.2 brings the `cpu|auto|gpu` setting (D3) and the reported `compute` snapshot (D5)
+
+**Context.** P14.1 lets CI choose whether `gpu/vulkan/` is scanned with the environment variable `PUMICE_TRANSCRIBE_SKIP_GPU_DIR=1` (`crates/transcription/src/engine.rs`) and reports registration through a hidden `debug-backends` command (`crates/transcription/src/cli.rs`). Both are marked temporary. CPU description strings also carry trailing spaces from the native API.
+
+**To do.**
+- [ ] Remove the environment variable; drive the GPU scan from `backend:` / `--backend`.
+- [ ] Replace or remove `debug-backends` (design §6 suggests a model-free `backends list --json`).
+- [ ] Trim device strings in the reported snapshot.
+
 ## Closed
