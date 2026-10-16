@@ -249,14 +249,23 @@ foreach ($file in $files) {
 Write-Host ('  {0,12:N0}  total ({1} files)' -f $total, $files.Count)
 
 # bundle.json: identity from cargo metadata (the versions this lockfile
-# builds), then every staged file. Written without a BOM, which serde_json
-# would reject.
-$metadata = & cargo metadata --format-version 1 --locked --filter-platform $triple | ConvertFrom-Json
+# builds with the same features and target; without the feature the engine
+# is not in the resolve), then every staged file. Written without a BOM,
+# which serde_json would reject.
+$metadata = & cargo metadata --format-version 1 --locked --filter-platform $triple `
+    --features pumice-transcription/vulkan | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) {
     throw "cargo metadata failed with exit code $LASTEXITCODE"
 }
-$productVersion = @($metadata.packages | Where-Object { $_.name -eq 'pumice-transcription' })[0].version
-$engineVersion = @($metadata.packages | Where-Object { $_.name -eq 'transcribe-cpp-sys' })[0].version
+function Get-PackageVersion([string]$Name) {
+    $found = @($metadata.packages | Where-Object { $_.name -eq $Name })
+    if ($found.Count -ne 1) {
+        throw "cargo metadata lists $($found.Count) $Name packages, expected 1"
+    }
+    return $found[0].version
+}
+$productVersion = Get-PackageVersion 'pumice-transcription'
+$engineVersion = Get-PackageVersion 'transcribe-cpp-sys'
 $entries = foreach ($file in $files) {
     $relative = $file.FullName.Substring($stageDir.Length + 1).Replace('\', '/')
     $role = if ($relative -eq 'pumice-transcribe.exe') {
