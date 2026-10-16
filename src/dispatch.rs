@@ -30,11 +30,14 @@ usage:
   pumice transcribe [ARGS…]                    run the transcription module installed next to pumice
   pumice run <AUDIO> --flow <ID> [--config <path>] [--json]
                                                transcribe, format and relay one audio file
+  pumice serve [--config <path>] [--port <port>] [--json]
+                                               run the local stack on 127.0.0.1 (default port 17570)
   pumice --help                                print this help
   pumice --version                             print the version
 
 The modules' own options are documented under `pumice relay --help`,
-`pumice format --help` and `pumice transcribe --help`.
+`pumice format --help` and `pumice transcribe --help`; the stack's under
+`pumice run --help` and `pumice serve --help`.
 ";
 
 pub fn run() -> ExitCode {
@@ -54,6 +57,7 @@ pub fn run() -> ExitCode {
         [command, rest @ ..] if command == "format" => format(rest),
         [command, rest @ ..] if command == "transcribe" => transcribe(rest),
         [command, rest @ ..] if command == "run" => crate::orchestrator::cli::run(rest),
+        [command, rest @ ..] if command == "serve" => crate::orchestrator::serve::cli::run(rest),
         [] => {
             // Bare `pumice` is the future orchestrator; until the stack
             // exists there is nothing to run, so say so instead of silently

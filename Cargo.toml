@@ -80,6 +80,12 @@ bench = false
 [dependencies]
 pumice-formatter = { path = "crates/formatter" }
 pumice-relay = { path = "crates/relay" }
+# `pumice serve`'s loopback frontend and its client for the managed child's
+# `/ready`: the same hyper stack the relay already builds into this binary.
+bytes = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["server"] }
+hyper-util = { workspace = true }
 serde = { workspace = true }
 serde-saphyr = { workspace = true }
 serde_json = { workspace = true }
