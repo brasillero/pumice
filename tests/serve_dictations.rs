@@ -175,6 +175,19 @@ impl Rig {
         serde_json::from_str(&text).ok()
     }
 
+    /// The running provider's PID, once the fake has written its report:
+    /// the relay stage starts before the provider process does.
+    fn wait_provider_pid(&self) -> u32 {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            if let Some(report) = self.fake_report() {
+                return report["pid"].as_u64().unwrap() as u32;
+            }
+            assert!(Instant::now() < deadline, "the provider never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn body_path(&self) -> PathBuf {
         self.dir.path().join("child-request.bin")
     }
@@ -1367,14 +1380,7 @@ fn a_client_gone_during_the_provider_call_reaps_it_without_recycling() {
     {
         let _ = fs::remove_file(rig.fake_dir().join("report.json"));
         let stream = dictate_and_hold(running.port, "clean");
-        let deadline = Instant::now() + WAIT;
-        let pid = loop {
-            if let Some(report) = rig.fake_report() {
-                break report["pid"].as_u64().unwrap() as u32;
-            }
-            assert!(Instant::now() < deadline, "the provider never started");
-            std::thread::sleep(Duration::from_millis(10));
-        };
+        let pid = rig.wait_provider_pid();
         running.wait_status("the relay stage", |status| {
             status["dictations"]["stage"] == "relay"
         });
@@ -1410,7 +1416,7 @@ fn a_shutdown_answers_a_running_dictation_with_its_transcript() {
     running.wait_status("the relay stage", |status| {
         status["dictations"]["stage"] == "relay"
     });
-    let pid = rig.fake_report().unwrap()["pid"].as_u64().unwrap() as u32;
+    let pid = rig.wait_provider_pid();
     running.signal(libc::SIGTERM);
     let response = read_response(&mut stream).expect("an answer before the stop");
     assert_error(&response, 503, "cancelled", "relay");
