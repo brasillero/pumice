@@ -55,7 +55,8 @@ Windows notes.
 
 ## Faster CPU builds (runtime CPU variants)
 
-Linux x86-64, opt-in (x86-64 Windows: see the Vulkan preview below). The
+Linux x86-64, opt-in (x86-64 Windows: see the Vulkan preview below; the
+Linux Vulkan preview includes the same variants). The
 default build above is a single static binary with a portable x86-64 baseline;
 on modern CPUs it leaves a lot of transcription speed unused. The `cpu-variants` Cargo feature instead links the engine as
 shared libraries plus one ggml CPU module per x86 ISA tier (14 modules from
@@ -152,6 +153,77 @@ pwsh crates/transcription/scripts/build-windows-vulkan.ps1
 # result: target\windows-vulkan\stage\
 ```
 
+## Linux Vulkan preview (experimental)
+
+**Not a release.** The same preview for x86-64 Linux with glibc (never
+musl). CI builds it in the `Transcription engine` workflow on Ubuntu 22.04
+and uploads it as the short-lived artifact
+`pumice-transcribe-linux-x64-vulkan-preview`, which holds one tarball (a
+tarball keeps the executable bit, which artifact downloads drop) and its
+`SHA256SUMS`; no release ships it. Extract it anywhere and keep the folder
+together:
+
+```text
+pumice-transcribe
+libtranscribe.so.0.3, libggml.so.0,              engine core, beside the
+  libggml-base.so.0                                executable ($ORIGIN rpath)
+cpu/<variant>/libggml-cpu-<variant>.so           runtime CPU variants (14)
+gpu/vulkan/libggml-vulkan.so                     optional Vulkan module
+bundle.json                                      manifest: every file's size and SHA-256
+```
+
+Prerequisites:
+
+- glibc 2.35 or newer and the C++ runtime (`libstdc++6` from GCC 12 or
+  newer) — Ubuntu 22.04, Debian 12, Fedora 36 or later. CI checks that no
+  file needs a newer symbol version and runs the bundle in a plain
+  `ubuntu:22.04` container.
+- For the GPU only: a Vulkan loader (`libvulkan.so.1`, Debian/Ubuntu package
+  `libvulkan1`) and a Vulkan driver: `mesa-vulkan-drivers` for Intel and AMD
+  GPUs, the vendor driver for NVIDIA.
+
+Nothing else: no Vulkan SDK, compiler, Rust or `LD_LIBRARY_PATH`. CI checks
+every file's dependencies after relocating the folder: only glibc, the C++
+runtime and the bundled core libraries, and only `gpu/vulkan/libggml-vulkan.so`
+needs `libvulkan.so.1`, so the CPU path starts on a machine without a Vulkan
+loader (CI checks that too). The modules find the core library they need
+(`libggml-base.so.0`) as the copy the executable already loaded.
+
+`bundle.json`, the startup checks, the `cpu`/`auto`/`gpu` behavior and the
+messages are the same as on Windows (see above): the manifest is required,
+`gpu/` may be deleted for a CPU-only install, and nothing else may be added
+to `cpu/<variant>/` or `gpu/vulkan/`. The plain `cpu-variants` folder from
+`build-cpu-variants.sh` has no manifest and still works without one.
+
+Check a machine with `backends`, which loads no model:
+
+```bash
+./pumice-transcribe backends --backend auto --json
+```
+
+`gpu_module: "scanned"` with `gpu_devices` ≥ 1 and your GPU listed with kind
+`vulkan` means `auto` and `gpu` can use it. `gpu_devices: 0` with
+`fallback_reason: "gpu_unavailable"` means no usable device: install the
+loader and driver above (`vulkaninfo --summary` from `vulkan-tools` lists
+what the loader sees). ggml leaves out software Vulkan devices such as Mesa's
+lavapipe (`llvmpipe`) unless `GGML_VK_VISIBLE_DEVICES` selects them; CI uses
+that to run the tiny model on lavapipe, which proves the module works but
+says nothing about speed or real hardware. For a real-GPU check, follow the
+[Windows checklist](#checking-a-real-gpu-on-windows) with `./pumice-transcribe`.
+
+Build it yourself (x86-64 Linux with glibc; CMake, a C++ compiler, `jq`, and
+the Vulkan headers, loader library, `glslc` and SPIRV-Headers at build time
+only — CI uses LunarG's Vulkan SDK 1.4.350.0):
+
+```bash
+crates/transcription/scripts/build-linux-vulkan.sh
+# result: target/linux-vulkan/stage/
+```
+
+The script also audits every staged file (allowed libraries, `$ORIGIN` as
+the only RUNPATH, no glibc symbol newer than 2.35), so on a build machine
+newer than Ubuntu 22.04 the audit fails by design.
+
 ## Compute backend (`cpu`, `auto`, `gpu`)
 
 `backend:` in `transcribe.yml` chooses what the model may run on; `--backend`
@@ -165,9 +237,9 @@ device index, no per-request choice and no backend setting in
 | `auto` | checked and scanned | a GPU when one initializes (discrete before integrated), else the CPU | the CPU, with a `fallback_reason` |
 | `gpu` | checked and scanned | a GPU | error `gpu_unavailable`, never the CPU |
 
-Only the Windows Vulkan preview has a GPU module. In every other build (the
-default `engine` build, Linux `cpu-variants`, macOS) `auto` runs on the CPU
-with `fallback_reason: "gpu_not_built"` and `gpu` fails.
+Only the Vulkan previews (Windows, Linux) have a GPU module. In every other
+build (the default `engine` build, Linux `cpu-variants`, macOS) `auto` runs on
+the CPU with `fallback_reason: "gpu_not_built"` and `gpu` fails.
 
 `fallback_reason` (only when `auto` runs on the CPU):
 
@@ -250,7 +322,7 @@ registered:
 ```
 
 `gpu_build` is `vulkan` or `null`; `bundle` is `verified`, `absent` (no
-manifest, Linux only) or `null` (no runtime modules); `gpu_module` is
+manifest, plain Linux `cpu-variants` only) or `null` (no runtime modules); `gpu_module` is
 `not_built`, `not_requested` (`cpu` mode), `absent` or `scanned`;
 `gpu_devices` counts registered GPU devices; `allowed_backends` is the
 engine's backend mask (static builds report the engine's default mask, with
