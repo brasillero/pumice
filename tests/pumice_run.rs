@@ -9,6 +9,10 @@
 mod install;
 use install::install_executable;
 
+#[cfg(unix)]
+#[path = "../crates/relay/tests/support/bounded.rs"]
+mod bounded;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -1807,10 +1811,16 @@ fn a_non_utf8_config_path_still_gets_a_valid_envelope() {
 
 // --- Cancellation: Ctrl-C and SIGTERM reap every child -----------------------
 
-/// Spawns `pumice run --json` for the rig's flow and returns the child.
+/// Bound for the signal tests' process exits and output collection.
 #[cfg(unix)]
-fn spawn_run(rig: &Rig, flow: &str) -> std::process::Child {
-    Command::new(rig.pumice())
+const SIGNAL_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Spawns `pumice run --json` for the rig's flow; the returned owner kills
+/// and reaps it if the test fails first.
+#[cfg(unix)]
+fn spawn_run(rig: &Rig, flow: &str) -> bounded::OwnedChild {
+    bounded::stage(format!("pumice run --flow {flow}"));
+    let child = Command::new(rig.pumice())
         .arg("run")
         .arg(&rig.audio)
         .args(["--flow", flow, "--config"])
@@ -1823,7 +1833,8 @@ fn spawn_run(rig: &Rig, flow: &str) -> std::process::Child {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn pumice run")
+        .expect("spawn pumice run");
+    bounded::OwnedChild::new("pumice run", child)
 }
 
 #[cfg(unix)]
@@ -1844,10 +1855,10 @@ fn ctrl_c_during_transcription_kills_and_reaps_the_tree() {
     script.stub["pid_path"] = json!(pid_file.display().to_string());
     let rig = make_rig(&script);
 
-    let child = spawn_run(&rig, "clean");
+    let mut child = spawn_run(&rig, "clean");
     let (stub_pid, grandchild) = wait_for_pids(&pid_file, true);
     send_signal(child.id(), libc::SIGINT);
-    let output = child.wait_with_output().expect("reap pumice run");
+    let output = child.finish(SIGNAL_WAIT);
 
     assert_eq!(output.status.code(), Some(130), "Ctrl-C exits 130");
     let envelope = one_json_document(&output);
@@ -1877,10 +1888,10 @@ fn sigterm_during_transcription_exits_143() {
     script.stub["pid_path"] = json!(pid_file.display().to_string());
     let rig = make_rig(&script);
 
-    let child = spawn_run(&rig, "clean");
+    let mut child = spawn_run(&rig, "clean");
     let (stub_pid, _) = wait_for_pids(&pid_file, false);
     send_signal(child.id(), libc::SIGTERM);
-    let output = child.wait_with_output().expect("reap pumice run");
+    let output = child.finish(SIGNAL_WAIT);
 
     assert_eq!(output.status.code(), Some(143), "SIGTERM exits 143");
     let envelope = one_json_document(&output);
@@ -1894,26 +1905,23 @@ fn a_signal_right_after_the_started_event_is_handled() {
     // The handlers are registered before the `started` event: a SIGTERM the
     // moment it appears gets the envelope and exit 143, never the default
     // signal death.
-    use std::io::BufRead;
-
     let mut script = Script::default();
     script.stub["file"] = json!({"sleep_ms": 30_000, "exit_code": 0});
     let rig = make_rig(&script);
     let mut child = spawn_run(&rig, "clean");
-    let mut stderr = std::io::BufReader::new(child.stderr.take().expect("stderr"));
-    let mut first = String::new();
-    stderr.read_line(&mut first).expect("read the first event");
+    let first = child
+        .stderr_line(std::time::Instant::now() + SIGNAL_WAIT)
+        .expect("a first event, not the end of stderr");
     let event: Value = serde_json::from_str(&first).expect("an event");
     assert_eq!(event["event"], "started", "{first}");
     send_signal(child.id(), libc::SIGTERM);
 
-    let mut rest = String::new();
-    std::io::Read::read_to_string(&mut stderr, &mut rest).expect("drain stderr");
-    let output = child.wait_with_output().expect("reap pumice run");
-    assert_eq!(output.status.code(), Some(143), "{first}{rest}");
+    let output = child.finish(SIGNAL_WAIT);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(143), "{stderr}");
     let envelope = one_json_document(&output);
     assert_eq!(envelope["error"]["code"], "cancelled");
-    assert!(!rest.contains("S3NT1NEL"));
+    assert!(!stderr.contains("S3NT1NEL"));
 }
 
 #[cfg(unix)]
@@ -1929,7 +1937,7 @@ fn ctrl_c_during_the_provider_call_kills_and_reaps_the_tree() {
         ..Script::default()
     });
 
-    let child = spawn_run(&rig, "clean");
+    let mut child = spawn_run(&rig, "clean");
     // The fake writes its report (with both pids) before sleeping.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while rig.fake_report().is_none() {
@@ -1944,7 +1952,7 @@ fn ctrl_c_during_the_provider_call_kills_and_reaps_the_tree() {
     let grandchild_pid = report["grandchild_pid"].as_u64().unwrap() as u32;
 
     send_signal(child.id(), libc::SIGINT);
-    let output = child.wait_with_output().expect("reap pumice run");
+    let output = child.finish(SIGNAL_WAIT);
 
     assert_eq!(output.status.code(), Some(130));
     let envelope = one_json_document(&output);

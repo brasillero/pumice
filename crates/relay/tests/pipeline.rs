@@ -541,7 +541,52 @@ async fn exhausted_budget_never_starts_the_cli() {
 
 /// Yields until `provider` has been called `n` times (paused-clock tests).
 async fn until_called(provider: &TestProvider, n: usize) {
+    // Real time bounds the spin: a paused clock never moves while it yields.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while provider.calls() < n {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the provider was not called {n} time(s)"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Spawns `format_observed` for `text` and returns its task and progress.
+/// `queued` is reported in the same poll that puts the request in line
+/// (`busy.acquire()`), so once [`until_queued`] saw it the request holds
+/// its place.
+fn spawn_observed(
+    pipeline: &Arc<Pipeline>,
+    text: &'static str,
+) -> (
+    tokio::task::JoinHandle<FormatOutcome>,
+    Arc<RecordingProgress>,
+) {
+    let progress = Arc::new(RecordingProgress::new());
+    let task = {
+        let (pipeline, progress) = (Arc::clone(pipeline), Arc::clone(&progress));
+        tokio::spawn(async move {
+            pipeline
+                .format_observed(
+                    &handy_request(Some("alpha"), text),
+                    Instant::now(),
+                    &*progress,
+                )
+                .await
+        })
+    };
+    (task, progress)
+}
+
+/// Waits until `progress` reported waiting in line.
+async fn until_queued(progress: &RecordingProgress) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !progress.steps().iter().any(|step| step == "queued") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the request never queued"
+        );
         tokio::task::yield_now().await;
     }
 }
@@ -724,20 +769,13 @@ async fn queued_requests_run_in_arrival_order() {
         vec![("alpha", test_settings(true))],
     );
     let pipeline = Arc::new(Pipeline::new(&config, vec![alpha.clone()]));
-    let spawn = |text: &'static str| {
-        let pipeline = Arc::clone(&pipeline);
-        tokio::spawn(async move {
-            pipeline
-                .format(&handy_request(Some("alpha"), text), Instant::now())
-                .await
-        })
-    };
 
-    let first = spawn("first");
+    let (first, _) = spawn_observed(&pipeline, "first");
     until_called(&alpha, 1).await;
-    let second = spawn("second");
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    let third = spawn("third");
+    let (second, second_progress) = spawn_observed(&pipeline, "second");
+    until_queued(&second_progress).await;
+    let (third, third_progress) = spawn_observed(&pipeline, "third");
+    until_queued(&third_progress).await;
 
     assert_eq!(first.await.expect("first").kind, OutcomeKind::Formatted);
     assert_eq!(second.await.expect("second").text, "second");
@@ -760,21 +798,18 @@ async fn a_cancelled_queued_request_frees_its_place() {
         vec![("alpha", test_settings(true))],
     );
     let pipeline = Arc::new(Pipeline::new(&config, vec![alpha.clone()]));
-    let spawn = |text: &'static str| {
-        let pipeline = Arc::clone(&pipeline);
-        tokio::spawn(async move {
-            pipeline
-                .format(&handy_request(Some("alpha"), text), Instant::now())
-                .await
-        })
-    };
 
-    let first = spawn("first");
+    let (first, _) = spawn_observed(&pipeline, "first");
     until_called(&alpha, 1).await;
-    let cancelled = spawn("cancelled");
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    // Cancelled only once it really holds a place in line.
+    let (cancelled, cancelled_progress) = spawn_observed(&pipeline, "cancelled");
+    until_queued(&cancelled_progress).await;
     cancelled.abort();
-    let after = spawn("after");
+    assert!(
+        cancelled.await.expect_err("aborted").is_cancelled(),
+        "the queued request was cancelled, not finished"
+    );
+    let (after, _) = spawn_observed(&pipeline, "after");
 
     assert_eq!(first.await.expect("first").kind, OutcomeKind::Formatted);
     let after = after.await.expect("after");

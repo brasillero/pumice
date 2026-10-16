@@ -67,11 +67,12 @@ const FLOWS: &str = "  - id: raw
 ";
 
 /// An in-memory transcription transport. It records the deadline it was
-/// given and, like the real transport, stops at that deadline or when the
-/// operation is cancelled.
+/// given, signals `started` when a transcription begins and, like the real
+/// transport, stops at that deadline or when the operation is cancelled.
 struct FakeTranscriber {
     behavior: FakeStt,
     deadlines: Mutex<Vec<Instant>>,
+    started: Arc<tokio::sync::Notify>,
 }
 
 enum FakeStt {
@@ -85,6 +86,7 @@ impl FakeTranscriber {
         FakeTranscriber {
             behavior: FakeStt::Text(text.to_owned()),
             deadlines: Mutex::new(Vec::new()),
+            started: Arc::default(),
         }
     }
 
@@ -92,6 +94,7 @@ impl FakeTranscriber {
         FakeTranscriber {
             behavior: FakeStt::Hang,
             deadlines: Mutex::new(Vec::new()),
+            started: Arc::default(),
         }
     }
 
@@ -114,6 +117,7 @@ impl Transcriber for FakeTranscriber {
         assert!(path.ends_with("audio.wav"));
         assert_eq!(model, "turbo");
         self.deadlines.lock().expect("lock").push(deadline);
+        self.started.notify_one();
         match &self.behavior {
             FakeStt::Text(text) => Ok(TranscriptOutput {
                 text: text.clone(),
@@ -481,21 +485,21 @@ async fn a_client_disconnect_cancels_the_transcription() {
     let rig = rig(answering(CLEANED));
     let runtime = rig.runtime();
     let (handle, guard) = cancel::context();
+    let stt = FakeTranscriber::hang();
+    // The client goes away once the transcription really runs, not during
+    // the preparation before it.
+    let started = Arc::clone(&stt.started);
     let canceller = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::timeout(Duration::from_secs(10), started.notified())
+            .await
+            .expect("the transcription started");
         handle.cancel(CancelReason::ClientDisconnected);
     });
     let output = rig
-        .run_on(
-            &runtime,
-            "clean",
-            &FakeTranscriber::hang(),
-            Instant::now(),
-            guard,
-            None,
-        )
+        .run_on(&runtime, "clean", &stt, Instant::now(), guard, None)
         .await;
     canceller.await.expect("canceller");
+    assert_eq!(stt.deadlines().len(), 1, "one transcription");
     let error = output.error.as_ref().expect("cancelled");
     assert_eq!(error.stage, stage::TRANSCRIPTION);
     assert_eq!(error.code, "cancelled");

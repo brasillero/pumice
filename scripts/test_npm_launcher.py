@@ -13,6 +13,7 @@ pumice binary.
 
 import json
 import os
+import select
 import shutil
 import signal
 import subprocess
@@ -41,13 +42,33 @@ exit "${FAKE_PUMICE_EXIT:-0}"
 
 # Writes a marker file when terminated, so the test can prove the signal
 # reached the real process behind the launcher. `wait` is interruptible by
-# signals, unlike a foreground `sleep`, so the trap runs immediately.
+# signals, unlike a foreground `sleep`, so the trap runs immediately; the
+# trap also stops and reaps the `sleep` it started, so nothing outlives it.
 SIGNAL_BINARY = """#!/bin/sh
-trap 'echo termed >"$FAKE_PUMICE_MARKER"; exit 143' TERM INT
-echo ready
+trap 'kill "$sleeper" 2>/dev/null; wait "$sleeper"; echo termed >"$FAKE_PUMICE_MARKER"; exit 143' TERM INT
 sleep 30 &
-wait $!
+sleeper=$!
+echo ready
+wait "$sleeper"
 """
+
+
+def read_line_within(stream, timeout):
+    """One line from a binary pipe, or None if none arrives in `timeout`
+    seconds (or the pipe ends first). Reads the file descriptor directly,
+    so a missing line never blocks the test."""
+    deadline = time.monotonic() + timeout
+    fd = stream.fileno()
+    data = b""
+    while b"\n" not in data:
+        left = deadline - time.monotonic()
+        if left <= 0 or not select.select([fd], [], [], left)[0]:
+            return None
+        chunk = os.read(fd, 1024)
+        if not chunk:
+            return None
+        data += chunk
+    return data.decode()
 
 
 @unittest.skipIf(NODE is None, "node is required for launcher tests")
@@ -125,13 +146,13 @@ class LauncherTests(unittest.TestCase):
         process = subprocess.Popen(
             [NODE, str(self.front / "bin" / "pumice.js")],
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+            stderr=subprocess.DEVNULL,
             env={**os.environ, "FAKE_PUMICE_MARKER": str(marker)},
             cwd=self.root,
         )
         try:
-            self.assertEqual(process.stdout.readline().strip(), "ready")
+            ready = read_line_within(process.stdout, 15)
+            self.assertEqual((ready or "").strip(), "ready", "no ready line in time")
             process.send_signal(signal.SIGTERM)
             process.wait(timeout=15)
         finally:
@@ -139,7 +160,6 @@ class LauncherTests(unittest.TestCase):
                 process.kill()
                 process.wait(timeout=15)
             process.stdout.close()
-            process.stderr.close()
         self.assertTrue(marker.is_file(), "SIGTERM never reached the child")
         self.assertIn(
             process.returncode, (143, -signal.SIGTERM), process.returncode

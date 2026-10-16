@@ -57,6 +57,37 @@ impl EventCapture {
     }
 }
 
+/// The event a request's events end with: `Sent` when text is allowed,
+/// else `Responded`.
+#[derive(Clone, Copy, Debug)]
+enum Last {
+    Responded,
+    Sent,
+}
+
+/// Waits (bounded) until the request's last event was captured: the HTTP
+/// response can reach the client before the handler emits it.
+async fn settle(monitor: &EventCapture, last: Last) {
+    wait_for_event(monitor, &format!("{last:?}"), |kind| match last {
+        Last::Responded => matches!(kind, EventKind::Responded { .. }),
+        Last::Sent => matches!(kind, EventKind::Sent { .. }),
+    })
+    .await;
+}
+
+/// Polls the captured events until one matches, within 5 s.
+async fn wait_for_event(monitor: &EventCapture, what: &str, found: impl Fn(&EventKind) -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !monitor.events().iter().any(|event| found(&event.kind)) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no {what} event among {} events",
+            monitor.events().len()
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 async fn start_monitored_server(
     yaml: &str,
     scenario: Value,
@@ -103,20 +134,29 @@ fn handy_request(model: &str, text: &str) -> Vec<u8> {
     .unwrap()
 }
 
+/// Sends `request` (with `connection: close`) and reads the response to
+/// the end of the connection; connecting, sending and reading share one
+/// 30 s bound.
 async fn raw_http(port: u16, request: Vec<u8>) -> (u16, String) {
-    let mut stream = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
-        .await
-        .expect("connect");
-    stream.write_all(&request).await.expect("send");
-    let mut response = Vec::new();
-    let mut chunk = [0u8; 8 * 1024];
-    loop {
-        match stream.read(&mut chunk).await {
-            Ok(0) => break,
-            Ok(n) => response.extend_from_slice(&chunk[..n]),
-            Err(_) => break,
+    let exchange = async {
+        let mut stream = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+            .await
+            .expect("connect");
+        stream.write_all(&request).await.expect("send");
+        let mut response = Vec::new();
+        let mut chunk = [0u8; 8 * 1024];
+        loop {
+            match stream.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
         }
-    }
+        response
+    };
+    let response = tokio::time::timeout(Duration::from_secs(30), exchange)
+        .await
+        .expect("request timed out");
     let text = String::from_utf8_lossy(&response).into_owned();
     let status = text
         .lines()
@@ -162,8 +202,7 @@ async fn formatted_request_emits_arrived_parsed_started_attempt_ended_responded(
     .await;
     assert_eq!(status, 200);
 
-    // Give the response handler time to emit the final event.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    settle(&monitor, Last::Responded).await;
 
     let events = monitor.events();
     let kinds: Vec<_> = events.iter().map(|e| e.number).collect();
@@ -235,7 +274,7 @@ async fn debug_log_enabled_shows_input_and_reply_in_events() {
     )
     .await;
     assert_eq!(status, 200);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    settle(&monitor, Last::Sent).await;
 
     let events = monitor.events();
     let arrived = events.iter().find_map(|e| match &e.kind {
@@ -291,7 +330,7 @@ async fn debug_log_on_with_x_title_and_handy_request_captures_all_tabs() {
     )
     .await;
     assert_eq!(status, 200);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    settle(&monitor, Last::Sent).await;
 
     let events = monitor.events();
 
@@ -437,7 +476,7 @@ async fn a_huge_model_name_is_capped_in_events_with_the_debug_log_on_and_off() {
         )
         .await;
         assert_eq!(status, 404, "debug {debug}");
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        settle(&monitor, if debug { Last::Sent } else { Last::Responded }).await;
         let events = monitor.events();
         let parsed_model = events
             .iter()
@@ -475,7 +514,7 @@ async fn debug_log_off_hides_received_and_sent_and_parsed_text() {
     )
     .await;
     assert_eq!(status, 200);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    settle(&monitor, Last::Responded).await;
 
     let events = monitor.events();
     let arrived = events.iter().find_map(|e| match &e.kind {
@@ -526,7 +565,7 @@ async fn invalid_json_body_emits_arrived_and_responded_400() {
     )
     .await;
     assert_eq!(status, 400);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    settle(&monitor, Last::Responded).await;
 
     let kinds: Vec<_> = monitor
         .events()
@@ -571,7 +610,7 @@ async fn invalid_json_body_with_debug_log_emits_received_before_responded_400() 
     )
     .await;
     assert_eq!(status, 400);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    settle(&monitor, Last::Sent).await;
 
     let kinds: Vec<_> = monitor
         .events()
@@ -616,7 +655,7 @@ async fn provider_failure_emits_error_status_and_no_reply_even_with_debug_log() 
     )
     .await;
     assert_eq!(status, 502);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    settle(&monitor, Last::Sent).await;
 
     let responded = monitor.events().iter().find_map(|e| match &e.kind {
         EventKind::Responded {
@@ -656,18 +695,28 @@ async fn client_disconnect_while_cli_runs_emits_dropped() {
         .expect("connect");
     stream.write_all(&request).await.expect("send");
 
+    // The disconnect must come while the CLI runs: wait for its report.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !fake.report_path().exists() && std::time::Instant::now() < deadline {
+    while !fake.report_path().exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fake CLI never started"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     drop(stream);
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while monitor.events().len() < 4 && std::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-
+    wait_for_event(&monitor, "Dropped", |kind| {
+        matches!(kind, EventKind::Dropped)
+    })
+    .await;
     let events = monitor.events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::Started { .. })),
+        "the CLI started before the disconnect"
+    );
     let last = events.last().expect("at least one event");
     assert!(matches!(last.kind, EventKind::Dropped));
 }
@@ -756,7 +805,7 @@ async fn large_input_is_capped_in_events() {
     let body = handy_request("claude", &big);
     let (status, _) = raw_http(port, http_request("/v1/chat/completions", &body)).await;
     assert_eq!(status, 200);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    settle(&monitor, Last::Sent).await;
 
     let events = monitor.events();
     let received_body = events.iter().find_map(|e| match &e.kind {

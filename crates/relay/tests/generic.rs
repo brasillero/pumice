@@ -936,6 +936,11 @@ async fn failure_returns_raw_text_and_never_runs_another_provider() {
     assert_eq!(outcome.attempts, 1);
     assert_eq!(outcome.text, "ditado");
     assert_eq!(alpha.calls(), 1);
+    assert_eq!(
+        server.hit_count(),
+        0,
+        "the generic endpoint is never contacted"
+    );
 }
 
 /// Pipeline-level settings for a generic provider built directly with

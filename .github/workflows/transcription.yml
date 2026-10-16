@@ -30,6 +30,8 @@ jobs:
   transcription-engine:
     name: Transcription CPU engine smoke (Linux)
     runs-on: ubuntu-latest
+    # About 3x the slowest recent job (~16 min with a cold native build).
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v5
 
@@ -42,7 +44,9 @@ jobs:
       - name: cargo clippy -p pumice-transcription --features engine
         run: cargo clippy -p pumice-transcription --features engine --all-targets --locked -- -D warnings
 
+      # About 3x the slowest recent test step (~5 min with a cold build).
       - name: cargo test -p pumice-transcription --features opus
+        timeout-minutes: 15
         run: cargo test -p pumice-transcription --features opus --locked
 
       - name: cargo build --release -p pumice-transcription --features engine
@@ -90,6 +94,8 @@ jobs:
   transcription-cpu-variants:
     name: Transcription runtime CPU variants (Linux)
     runs-on: ubuntu-latest
+    # About 3x the slowest recent job (~16 min with a cold native build).
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v5
 
@@ -104,7 +110,9 @@ jobs:
       - name: cargo clippy -p pumice-transcription --features cpu-variants
         run: cargo clippy -p pumice-transcription --features cpu-variants --all-targets --locked -- -D warnings
 
+      # About 3x the slowest recent test step (~5 min with a cold build).
       - name: cargo test -p pumice-transcription --features cpu-variants
+        timeout-minutes: 15
         run: cargo test -p pumice-transcription --features cpu-variants --locked
 
       - name: Build and stage cpu-variants

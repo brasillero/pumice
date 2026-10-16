@@ -8,17 +8,18 @@
 mod support;
 
 use std::fs;
-use std::io::{BufRead, Read, Write};
-use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
-use std::sync::mpsc;
-use std::thread;
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use support::FakeCli;
+use support::bounded::{self, OwnedChild, last_stage, stage};
 use tempfile::TempDir;
+
+/// Every process and HTTP wait in these tests is bounded by this.
+const WAIT: Duration = Duration::from_secs(15);
 
 /// The recorded Handy transcript; `passthrough` must return it byte for byte.
 const FIXTURE_TRANSCRIPT: &str = "Reunião com a equipe às nove horas, não esquecer de enviar o relatório para o João e revisar o orçamento.";
@@ -60,35 +61,18 @@ fn grab_free_port() -> u16 {
 }
 
 /// A running `pumice` service child process. Killing and reaping are
-/// guaranteed: [`Server::stop`] does it for the happy path and `Drop` covers
-/// panics, with a bounded wait so a stuck child cannot hang the test suite.
+/// guaranteed: [`Server::stop`] does it for the happy path and the owner's
+/// `Drop` covers panics, with a bounded wait so a stuck child cannot hang
+/// the test suite.
 struct Server {
-    child: Child,
+    process: OwnedChild,
     port: u16,
 }
 
 impl Server {
-    /// Stops the service and asserts it reaps cleanly. `Drop` sees the
-    /// reaped child and does nothing.
+    /// Stops the service and reaps it.
     fn stop(mut self) {
-        self.child.kill().expect("stop pumice");
-        self.child.wait().expect("pumice reaped");
-    }
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        if self.child.try_wait().ok().flatten().is_some() {
-            return;
-        }
-        let _ = self.child.kill();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while self.child.try_wait().ok().flatten().is_none() {
-            if Instant::now() >= deadline {
-                break;
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
+        self.process.kill();
     }
 }
 
@@ -102,6 +86,7 @@ fn try_start(
     cwd: &Path,
     port: u16,
 ) -> Result<Server, String> {
+    stage(format!("start pumice-relay {args:?} on port {port}"));
     let mut command = Command::new(env!("CARGO_BIN_EXE_pumice-relay"));
     command
         .args(args)
@@ -113,51 +98,18 @@ fn try_start(
         command.env(key, value);
     }
     let mut server = Server {
-        child: command.spawn().expect("spawn pumice"),
+        process: OwnedChild::new("pumice-relay", command.spawn().expect("spawn pumice")),
         port,
     };
-    let child = &mut server.child;
 
-    // Read the first stdout line on a helper thread: the service prints its
-    // loopback address there once it is accepting connections.
-    let mut stdout = child.stdout.take().expect("piped stdout");
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let mut line = String::new();
-        let mut byte = [0u8; 1];
-        loop {
-            match stdout.read(&mut byte) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    line.push(byte[0] as char);
-                    if byte[0] == b'\n' {
-                        break;
-                    }
-                }
-            }
-        }
-        let _ = tx.send(if line.is_empty() { None } else { Some(line) });
-    });
-    let line = match rx.recv_timeout(Duration::from_secs(15)) {
-        Ok(line) => line,
-        Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("pumice did not print its startup line on port {port}");
-        }
-    };
-    let Some(line) = line else {
-        let status = child.wait().expect("child exits");
-        let stderr = child
-            .stderr
-            .take()
-            .map(|mut err| {
-                let mut text = String::new();
-                let _ = err.read_to_string(&mut text);
-                text
-            })
-            .unwrap_or_default();
-        return Err(format!("exit {status}: {stderr}"));
+    // The service prints its loopback address on stdout once it is
+    // accepting connections; the end of stdout means it exited.
+    let deadline = Instant::now() + WAIT;
+    let Some(line) = server.process.stdout_line(deadline) else {
+        server.process.wait_until(deadline);
+        let output = server.process.collect_until(deadline);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("exit {}: {stderr}", output.status));
     };
     assert!(
         line.contains(&format!("http://127.0.0.1:{port}/v1")),
@@ -178,14 +130,24 @@ fn assert_port_race(error: &str, attempt: usize) {
     );
 }
 
-/// Runs `pumice` with `args` to completion in `cwd` and returns its output.
+/// Runs `pumice` with `args` to completion in `cwd` and returns its output,
+/// within [`WAIT`].
 fn run(args: &[&str], cwd: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
-        .args(args)
-        .current_dir(cwd)
+    stage(format!("run pumice-relay {args:?}"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pumice-relay"));
+    command.args(args).current_dir(cwd);
+    output(&mut command)
+}
+
+/// Runs `command` to completion with piped output, within [`WAIT`].
+fn output(command: &mut Command) -> Output {
+    let child = command
         .stdin(Stdio::null())
-        .output()
-        .expect("run pumice")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run pumice");
+    OwnedChild::new("pumice-relay", child).finish(WAIT)
 }
 
 /// A parsed minimal HTTP response (status, body).
@@ -208,15 +170,15 @@ fn raw_http(port: u16, method: &str, path: &str, body: &[u8]) -> RawResponse {
         body.len()
     )
     .into_bytes();
+    stage(format!("{method} {path}"));
+    let deadline = Instant::now() + WAIT;
+    let fail = |what: &str| -> ! { panic!("{what} (last stage: {})", last_stage()) };
     let mut stream =
-        TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)).expect("connect");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(15)))
-        .expect("read timeout");
-    stream.write_all(&request).expect("write request");
-    stream.write_all(body).expect("write body");
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response).expect("read response");
+        bounded::connect(port, deadline).unwrap_or_else(|error| fail(&format!("connect: {error}")));
+    bounded::send(&mut stream, &[request, body.to_vec()].concat(), deadline)
+        .unwrap_or_else(|error| fail(&format!("write: {error}")));
+    let response = bounded::read_response(&mut stream, deadline)
+        .unwrap_or_else(|error| fail(&format!("read the response: {error:?}")));
     let split = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -645,28 +607,23 @@ fn occupied_port_exits_1_naming_the_port() {
     );
 }
 
-/// Reads `child`'s stderr until a line starting with `prefix` arrives, then
-/// kills and reaps the child. Panics with what was read when the service
-/// exits early or the line never comes.
-fn startup_stderr_line(child: &mut Child, prefix: &str) -> String {
-    let mut stderr = std::io::BufReader::new(child.stderr.take().expect("piped stderr"));
-    let mut line = String::new();
+/// Reads `process`'s stderr until a line starting with `prefix` arrives
+/// within [`WAIT`], then kills and reaps the process. Panics with what was
+/// read when the service exits early or the line never comes.
+fn startup_stderr_line(mut process: OwnedChild, prefix: &str) -> String {
+    stage(format!("wait for the stderr line '{prefix}'"));
+    let deadline = Instant::now() + WAIT;
     let mut seen = String::new();
     loop {
-        match stderr.read_line(&mut line) {
-            Ok(0) => panic!("service exited before printing '{prefix}'; stderr so far: {seen}"),
-            Ok(_) => {
-                seen.push_str(&line);
-                if line.starts_with(prefix) {
-                    let found = line.trim_end().to_owned();
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return found;
-                }
-                line.clear();
-            }
-            Err(error) => panic!("cannot read service stderr: {error}"),
+        let Some(line) = process.stderr_line(deadline) else {
+            panic!("service exited before printing '{prefix}'; stderr so far: {seen}");
+        };
+        if line.starts_with(prefix) {
+            process.kill();
+            return line.trim_end().to_owned();
         }
+        seen.push_str(&line);
+        seen.push('\n');
     }
 }
 
@@ -680,14 +637,14 @@ fn startup_prints_the_route_line_naming_the_enabled_providers() {
         claude.path().display(),
         codex.path().display()
     ));
-    let mut child = Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
+    let child = Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
         .args(["--config", path.to_str().expect("UTF-8 path")])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn pumice");
-    let line = startup_stderr_line(&mut child, "providers:");
+    let line = startup_stderr_line(OwnedChild::new("pumice-relay", child), "providers:");
     assert_eq!(
         line,
         "providers: claude (haiku), codex (gpt-6.1-sol); on failure or no model: an HTTP error, the app keeps its own text; total timeout 30s, up to 4 requests at once"
@@ -700,14 +657,17 @@ fn startup_with_no_enabled_providers_prints_one_clear_line() {
     let (_dir, path) = write_config(&format!(
         "port: {port}\nproviders:\n  - id: claude\n    enabled: false\n"
     ));
-    let mut child = Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
+    let child = Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
         .args(["--config", path.to_str().expect("UTF-8 path")])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn pumice");
-    let line = startup_stderr_line(&mut child, "no providers enabled");
+    let line = startup_stderr_line(
+        OwnedChild::new("pumice-relay", child),
+        "no providers enabled",
+    );
     assert!(
         line.contains(&format!(
             "no providers enabled: every request gets an error and the app keeps its own text (add providers to {})",
@@ -724,14 +684,13 @@ fn non_unicode_argument_is_a_usage_error_not_a_panic() {
     use std::os::unix::ffi::OsStrExt;
 
     let dir = TempDir::new().expect("temp dir");
-    let output = Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
-        .arg("check-config")
-        .arg("--config")
-        .arg(OsStr::from_bytes(b"bad-\xff.yaml"))
-        .current_dir(dir.path())
-        .stdin(Stdio::null())
-        .output()
-        .expect("run pumice");
+    let output = output(
+        Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
+            .arg("check-config")
+            .arg("--config")
+            .arg(OsStr::from_bytes(b"bad-\xff.yaml"))
+            .current_dir(dir.path()),
+    );
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

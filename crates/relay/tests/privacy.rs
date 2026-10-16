@@ -112,12 +112,13 @@ impl RawResponse {
 }
 
 /// Sends `request` verbatim over raw HTTP/1.1 and reads the whole response.
+/// Connecting, writing and reading share one bound.
 async fn raw_http(port: u16, request: Vec<u8>) -> RawResponse {
-    let mut stream = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
-        .await
-        .expect("connect to server");
-    let _ = stream.write_all(&request).await;
-    let read = async {
+    let exchange = async {
+        let mut stream = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+            .await
+            .expect("connect to server");
+        let _ = stream.write_all(&request).await;
         let mut response = Vec::new();
         stream
             .read_to_end(&mut response)
@@ -125,7 +126,7 @@ async fn raw_http(port: u16, request: Vec<u8>) -> RawResponse {
             .expect("read response");
         response
     };
-    let response = tokio::time::timeout(Duration::from_secs(30), read)
+    let response = tokio::time::timeout(Duration::from_secs(30), exchange)
         .await
         .expect("request timed out");
     parse_http(&response)

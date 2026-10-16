@@ -322,22 +322,51 @@ fn non_audio_file_returns_unsupported_format() {
     assert_eq!(err.code, ErrorCode::UnsupportedFormat);
 }
 
-#[test]
-fn non_regular_file_returns_invalid_input() {
-    // /dev/null is a character device, not a regular file.
-    let err = run_with_engine(
+/// Runs `file` on `audio` with an existing (empty) model file and returns
+/// the error.
+fn file_error(audio: &std::path::Path) -> pumice_transcription::Error {
+    let tmp = tempfile::tempdir().unwrap();
+    let model_path = tmp.path().join("model.gguf");
+    std::fs::write(&model_path, b"").unwrap();
+    run_with_engine(
         vec![
             "pumice-transcribe",
             "file",
-            "/dev/null",
+            audio.to_str().unwrap(),
             "--model-file",
-            "/dev/null",
+            model_path.to_str().unwrap(),
         ],
         Box::new(FakeEngine::new("x", None::<String>)),
     )
-    .unwrap_err();
+    .unwrap_err()
+}
+
+#[test]
+fn non_regular_file_returns_invalid_input() {
+    // A directory exists on every platform and is not a regular file.
+    let tmp = tempfile::tempdir().unwrap();
+    let err = file_error(tmp.path());
 
     assert_eq!(err.code, ErrorCode::InvalidInput);
+    assert!(
+        err.message.contains("not a regular file"),
+        "refused as a non-regular file: {}",
+        err.message
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn device_file_returns_invalid_input() {
+    // /dev/null is a character device, not a regular file.
+    let err = file_error(std::path::Path::new("/dev/null"));
+
+    assert_eq!(err.code, ErrorCode::InvalidInput);
+    assert!(
+        err.message.contains("not a regular file"),
+        "refused as a non-regular file: {}",
+        err.message
+    );
 }
 
 #[test]

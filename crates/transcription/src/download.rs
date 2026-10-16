@@ -902,8 +902,8 @@ fn hex_lower(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::net::{TcpListener, TcpStream};
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, mpsc};
 
     const TEST_BYTES: &[u8] = b"the quick brown fox jumps over the lazy dog";
 
@@ -926,7 +926,9 @@ mod tests {
         tmp
     }
 
-    /// A response a fake handler writes to one connection.
+    /// A response a fake handler writes to one connection. A client that
+    /// already gave up (the deadline tests) is not a handler failure, so
+    /// write errors are left to the client's side of the test.
     fn respond(stream: &mut TcpStream, status: u16, headers: &[(&str, &str)], body: &[u8]) {
         use std::io::Write as _;
         let head = format!(
@@ -944,55 +946,144 @@ mod tests {
                 .collect::<String>(),
             body.len()
         );
-        stream.write_all(head.as_bytes()).unwrap();
-        stream.write_all(body).unwrap();
+        let _ = stream.write_all(head.as_bytes());
+        let _ = stream.write_all(body);
     }
 
-    /// Serves `handler` on 127.0.0.1:0 in the background until dropped.
-    /// Returns the base URL and a request counter. Only for tests: reads one
-    /// request per connection and always answers HTTP/1.1 with connection
-    /// close.
-    fn serve(
-        handler: impl Fn(&str, &mut TcpStream) + Send + Sync + 'static,
-    ) -> (String, Arc<AtomicUsize>) {
+    /// Read and write limit on each accepted connection.
+    const SERVER_IO_TIMEOUT: Duration = Duration::from_secs(10);
+    /// How long the end of a test waits for running handlers.
+    const SERVER_DRAIN: Duration = Duration::from_secs(15);
+
+    /// A fake HTTP server on 127.0.0.1:0, owned by one test. Only for
+    /// tests: reads one request per connection (with read and write
+    /// limits) and hands it to the handler, which answers HTTP/1.1 with
+    /// connection close. Dropping it stops the listener, waits (bounded)
+    /// for the handlers and fails the test if one panicked or still runs.
+    struct FakeServer {
+        base: String,
+        requests: Arc<AtomicUsize>,
+        stop: Arc<AtomicBool>,
+        listener: Option<std::thread::JoinHandle<()>>,
+        /// One report per handler: `Err` carries its panic message.
+        reports: mpsc::Receiver<Result<(), String>>,
+    }
+
+    impl FakeServer {
+        /// How many connections the server accepted.
+        fn requests(&self) -> usize {
+            self.requests.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for FakeServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            // The listener polls `stop`, so this join is short.
+            if let Some(listener) = self.listener.take() {
+                let _ = listener.join();
+            }
+            let deadline = std::time::Instant::now() + SERVER_DRAIN;
+            let mut failures = Vec::new();
+            let mut running = 0;
+            for _ in 0..self.requests() {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                match self.reports.recv_timeout(left) {
+                    Ok(Ok(())) => {}
+                    Ok(Err(message)) => failures.push(message),
+                    Err(_) => running += 1,
+                }
+            }
+            if !std::thread::panicking() {
+                assert!(
+                    failures.is_empty(),
+                    "fake server handler failed: {failures:?}"
+                );
+                assert_eq!(running, 0, "fake server handlers still running at the end");
+            }
+        }
+    }
+
+    /// Serves `handler` on 127.0.0.1:0 until the returned server is
+    /// dropped.
+    fn serve(handler: impl Fn(&str, &mut TcpStream) + Send + Sync + 'static) -> FakeServer {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
         let requests = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&requests);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (report, reports) = mpsc::channel();
         let handler = Arc::new(handler);
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let mut stream = match stream {
-                    Ok(stream) => stream,
-                    Err(_) => continue,
-                };
-                let counter = Arc::clone(&counter);
-                let handler = Arc::clone(&handler);
-                std::thread::spawn(move || {
-                    counter.fetch_add(1, Ordering::SeqCst);
-                    let path = read_request_path(&mut stream);
-                    handler(&path, &mut stream);
-                });
-            }
-        });
-        (format!("http://{addr}"), requests)
+        let thread = {
+            let (requests, stop) = (Arc::clone(&requests), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    let mut stream = match listener.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(_) => {
+                            std::thread::sleep(Duration::from_millis(2));
+                            continue;
+                        }
+                    };
+                    // Accepted sockets can inherit non-blocking mode.
+                    let configured = stream
+                        .set_nonblocking(false)
+                        .and_then(|()| stream.set_read_timeout(Some(SERVER_IO_TIMEOUT)))
+                        .and_then(|()| stream.set_write_timeout(Some(SERVER_IO_TIMEOUT)));
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    let (handler, report) = (Arc::clone(&handler), report.clone());
+                    std::thread::spawn(move || {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            configured.expect("configure the accepted connection");
+                            // A client that sent no request (it gave up) is
+                            // not the handler's business.
+                            if let Some(path) = read_request_path(&mut stream) {
+                                handler(&path, &mut stream);
+                            }
+                        }));
+                        let _ = report.send(result.map_err(|panic| panic_message(&*panic)));
+                    });
+                }
+            })
+        };
+        FakeServer {
+            base: format!("http://{addr}"),
+            requests,
+            stop,
+            listener: Some(thread),
+            reports,
+        }
     }
 
-    fn read_request_path(stream: &mut TcpStream) -> String {
+    fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+        panic
+            .downcast_ref::<&str>()
+            .map(|text| (*text).to_owned())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "a non-text panic".to_owned())
+    }
+
+    /// The request's path, after reading its head; `None` when the client
+    /// sent no complete head.
+    fn read_request_path(stream: &mut TcpStream) -> Option<String> {
         use std::io::BufRead;
         let mut reader = io::BufReader::new(stream);
         let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
+        if reader.read_line(&mut line).ok()? == 0 {
+            return None;
+        }
         let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
         // Consume the remaining headers.
         loop {
             line.clear();
-            reader.read_line(&mut line).unwrap();
+            if reader.read_line(&mut line).ok()? == 0 {
+                return None;
+            }
             if line.trim_end().is_empty() {
                 break;
             }
         }
-        path
+        Some(path)
     }
 
     /// A spec pointing at `base_url/path` with matching size and hash.
@@ -1024,11 +1115,11 @@ mod tests {
     #[test]
     fn download_installs_verified_file() {
         let tmp = private_dir();
-        let (base, requests) = serve(|path, stream| {
+        let server = serve(|path, stream| {
             assert_eq!(path, "/file");
             respond(stream, 200, &[], TEST_BYTES);
         });
-        let spec = spec_for(&base, TEST_BYTES);
+        let spec = spec_for(&server.base, TEST_BYTES);
 
         let result = fetch(&spec, tmp.path(), false).unwrap();
 
@@ -1044,7 +1135,7 @@ mod tests {
         assert_eq!(sha256, spec.sha256);
         assert_eq!(std::fs::read(&path).unwrap(), TEST_BYTES);
         assert!(!part_path(&path).exists());
-        assert!(requests.load(Ordering::SeqCst) == 1);
+        assert!(server.requests() == 1);
         // The installed file verifies against the spec.
         verify_file(&path, &spec).unwrap();
     }
@@ -1052,8 +1143,8 @@ mod tests {
     #[test]
     fn wrong_hash_fails_and_cleans_up() {
         let tmp = private_dir();
-        let (base, _) = serve(|_, stream| respond(stream, 200, &[], TEST_BYTES));
-        let mut spec = spec_for(&base, TEST_BYTES);
+        let server = serve(|_, stream| respond(stream, 200, &[], TEST_BYTES));
+        let mut spec = spec_for(&server.base, TEST_BYTES);
         spec.sha256 = "0".repeat(64);
 
         let err = fetch(&spec, tmp.path(), false).unwrap_err();
@@ -1069,13 +1160,13 @@ mod tests {
         let tmp = private_dir();
         let mut bytes = TEST_BYTES.to_vec();
         bytes.extend_from_slice(b"extra");
-        let (base, _) = serve(move |_, stream| {
+        let server = serve(move |_, stream| {
             // No Content-Length: the excess is detected while streaming.
             use std::io::Write as _;
             stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
             stream.write_all(&bytes).unwrap();
         });
-        let spec = spec_for(&base, TEST_BYTES); // expects fewer bytes than served
+        let spec = spec_for(&server.base, TEST_BYTES); // expects fewer bytes than served
 
         let err = fetch(&spec, tmp.path(), false).unwrap_err();
         assert_eq!(err.code, ErrorCode::DownloadFailed);
@@ -1089,7 +1180,7 @@ mod tests {
     #[test]
     fn truncated_stream_fails_and_cleans_up() {
         let tmp = private_dir();
-        let (base, _) = serve(|_, stream| {
+        let server = serve(|_, stream| {
             // Announce the full length but close after half the bytes.
             use std::io::Write as _;
             let head = format!(
@@ -1100,7 +1191,7 @@ mod tests {
             let half = TEST_BYTES.len() / 2;
             stream.write_all(&TEST_BYTES[..half]).unwrap();
         });
-        let spec = spec_for(&base, TEST_BYTES);
+        let spec = spec_for(&server.base, TEST_BYTES);
 
         let err = fetch(&spec, tmp.path(), false).unwrap_err();
         assert_eq!(err.code, ErrorCode::DownloadFailed);
@@ -1113,7 +1204,7 @@ mod tests {
     #[test]
     fn wrong_content_length_fails_early() {
         let tmp = private_dir();
-        let (base, _) = serve(|_, stream| {
+        let server = serve(|_, stream| {
             // Body matches the spec but the announced length does not.
             let head = format!(
                 "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n",
@@ -1123,7 +1214,7 @@ mod tests {
             stream.write_all(head.as_bytes()).unwrap();
             stream.write_all(TEST_BYTES).unwrap();
         });
-        let spec = spec_for(&base, TEST_BYTES);
+        let spec = spec_for(&server.base, TEST_BYTES);
 
         let err = fetch(&spec, tmp.path(), false).unwrap_err();
         assert_eq!(err.code, ErrorCode::DownloadFailed);
@@ -1135,8 +1226,8 @@ mod tests {
     fn http_error_status_fails() {
         for status in [404u16, 500] {
             let tmp = private_dir();
-            let (base, _) = serve(move |_, stream| respond(stream, status, &[], b"nope"));
-            let spec = spec_for(&base, TEST_BYTES);
+            let server = serve(move |_, stream| respond(stream, status, &[], b"nope"));
+            let spec = spec_for(&server.base, TEST_BYTES);
 
             let err = fetch(&spec, tmp.path(), false).unwrap_err();
             assert_eq!(err.code, ErrorCode::DownloadFailed);
@@ -1148,12 +1239,12 @@ mod tests {
     #[test]
     fn https_only_policy_refuses_http_redirect() {
         let tmp = private_dir();
-        let (base, _) = serve(|path, stream| match path {
+        let server = serve(|path, stream| match path {
             "/file" => respond(stream, 302, &[("Location", "/elsewhere")], b""),
             "/elsewhere" => respond(stream, 200, &[], TEST_BYTES),
             other => panic!("unexpected path {other}"),
         });
-        let spec = spec_for(&base, TEST_BYTES);
+        let spec = spec_for(&server.base, TEST_BYTES);
 
         let err = Downloader::new(RedirectPolicy::HttpsOnly, test_timeouts())
             .fetch(&spec, tmp.path(), false, &mut |_| {})
@@ -1165,27 +1256,27 @@ mod tests {
     #[test]
     fn http_redirect_is_followed_under_test_policy() {
         let tmp = private_dir();
-        let (base, requests) = serve(|path, stream| match path {
+        let server = serve(|path, stream| match path {
             "/file" => respond(stream, 302, &[("Location", "/elsewhere")], b""),
             "/elsewhere" => respond(stream, 200, &[], TEST_BYTES),
             other => panic!("unexpected path {other}"),
         });
-        let spec = spec_for(&base, TEST_BYTES);
+        let spec = spec_for(&server.base, TEST_BYTES);
 
         let result = fetch(&spec, tmp.path(), false).unwrap();
         assert!(matches!(result, FetchResult::Downloaded { .. }));
-        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert_eq!(server.requests(), 2);
     }
 
     #[test]
     fn relative_redirect_is_resolved() {
         let tmp = private_dir();
-        let (base, _) = serve(|path, stream| match path {
+        let server = serve(|path, stream| match path {
             "/file" => respond(stream, 307, &[("Location", "./target")], b""),
             "/target" => respond(stream, 200, &[], TEST_BYTES),
             other => panic!("unexpected path {other}"),
         });
-        let spec = spec_for(&base, TEST_BYTES);
+        let spec = spec_for(&server.base, TEST_BYTES);
 
         assert!(matches!(
             fetch(&spec, tmp.path(), false).unwrap(),
@@ -1196,12 +1287,12 @@ mod tests {
     #[test]
     fn redirect_chain_over_limit_fails() {
         let tmp = private_dir();
-        let (base, _) = serve(|path, stream| {
+        let server = serve(|path, stream| {
             let next: u32 = path.trim_start_matches("/r").parse().unwrap_or(0);
             let location = format!("/r{}", next + 1);
             respond(stream, 302, &[("Location", &location)], b"");
         });
-        let spec = spec_for(&base, TEST_BYTES);
+        let spec = spec_for(&server.base, TEST_BYTES);
 
         let err = fetch(&spec, tmp.path(), false).unwrap_err();
         assert_eq!(err.code, ErrorCode::DownloadFailed);
@@ -1211,7 +1302,13 @@ mod tests {
     #[test]
     fn concurrent_download_fails_fast() {
         let tmp = private_dir();
-        let (base, _) = serve(|_, stream| {
+        // The handler reports the first transfer (the download took its
+        // lock before requesting) and holds it until released, bounded.
+        let (transferring, transfer) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let transferring = Mutex::new(transferring);
+        let released = Mutex::new(released);
+        let server = serve(move |_, stream| {
             use std::io::Write as _;
             let head = format!(
                 "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n",
@@ -1219,11 +1316,15 @@ mod tests {
             );
             stream.write_all(head.as_bytes()).unwrap();
             stream.write_all(&TEST_BYTES[..1]).unwrap();
-            // Hold the transfer so the first download keeps the lock.
-            std::thread::sleep(Duration::from_secs(3));
+            transferring.lock().unwrap().send(()).unwrap();
+            released
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .expect("released by the test");
             stream.write_all(&TEST_BYTES[1..]).unwrap();
         });
-        let spec = spec_for(&base, TEST_BYTES);
+        let spec = spec_for(&server.base, TEST_BYTES);
         let spec2 = spec.clone();
         let dir = tmp.path().to_path_buf();
 
@@ -1235,11 +1336,14 @@ mod tests {
                 &mut |_| {},
             )
         });
-        // Give the first download a moment to take the lock.
-        std::thread::sleep(Duration::from_millis(300));
+        transfer
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the first download started its transfer");
         let err = fetch(&spec, tmp.path(), false).unwrap_err();
+        release.send(()).unwrap();
         assert_eq!(err.code, ErrorCode::DownloadFailed);
         assert!(err.message.contains("already in progress"));
+        assert_eq!(server.requests(), 1, "the second never connected");
 
         assert!(matches!(
             first.join().unwrap().unwrap(),
@@ -1250,10 +1354,10 @@ mod tests {
     #[test]
     fn existing_verified_file_is_already_installed() {
         let tmp = private_dir();
-        let (base, requests) = serve(|_, _stream| {
+        let server = serve(|_, _stream| {
             panic!("the server must not be contacted");
         });
-        let spec = spec_for(&base, TEST_BYTES);
+        let spec = spec_for(&server.base, TEST_BYTES);
         std::fs::write(tmp.path().join("model.gguf"), TEST_BYTES).unwrap();
 
         let result = fetch(&spec, tmp.path(), false).unwrap();
@@ -1263,14 +1367,14 @@ mod tests {
         };
         assert_eq!(bytes, TEST_BYTES.len() as u64);
         assert_eq!(std::fs::read(path).unwrap(), TEST_BYTES);
-        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        assert_eq!(server.requests(), 0);
     }
 
     #[test]
     fn existing_corrupt_file_requires_force() {
         let tmp = private_dir();
-        let (base, _) = serve(|_, stream| respond(stream, 200, &[], TEST_BYTES));
-        let spec = spec_for(&base, TEST_BYTES);
+        let server = serve(|_, stream| respond(stream, 200, &[], TEST_BYTES));
+        let spec = spec_for(&server.base, TEST_BYTES);
         std::fs::write(tmp.path().join("model.gguf"), b"corrupt").unwrap();
 
         let err = fetch(&spec, tmp.path(), false).unwrap_err();
@@ -1294,8 +1398,8 @@ mod tests {
     #[test]
     fn stale_part_from_crashed_download_is_replaced() {
         let tmp = private_dir();
-        let (base, _) = serve(|_, stream| respond(stream, 200, &[], TEST_BYTES));
-        let spec = spec_for(&base, TEST_BYTES);
+        let server = serve(|_, stream| respond(stream, 200, &[], TEST_BYTES));
+        let spec = spec_for(&server.base, TEST_BYTES);
         let dest = tmp.path().join("model.gguf");
         std::fs::write(part_path(&dest), b"leftover bytes").unwrap();
 
@@ -1342,8 +1446,8 @@ mod tests {
         let tmp = private_dir();
         let chunk = vec![7u8; 100_000];
         let served = chunk.clone();
-        let (base, _) = serve(move |_, stream| respond(stream, 200, &[], &served));
-        let spec = spec_for(&base, &chunk);
+        let server = serve(move |_, stream| respond(stream, 200, &[], &served));
+        let spec = spec_for(&server.base, &chunk);
 
         let mut seen: Vec<(u64, u64)> = Vec::new();
         Downloader::new(RedirectPolicy::AllowHttp, test_timeouts())
@@ -1363,8 +1467,8 @@ mod tests {
     #[test]
     fn download_emits_state_events_before_each_phase() {
         let tmp = private_dir();
-        let (base, _) = serve(|_, stream| respond(stream, 200, &[], TEST_BYTES));
-        let spec = spec_for(&base, TEST_BYTES);
+        let server = serve(|_, stream| respond(stream, 200, &[], TEST_BYTES));
+        let spec = spec_for(&server.base, TEST_BYTES);
 
         let mut states = Vec::new();
         Downloader::new(RedirectPolicy::AllowHttp, test_timeouts())
@@ -1389,10 +1493,10 @@ mod tests {
     #[test]
     fn already_installed_emits_no_state_events() {
         let tmp = private_dir();
-        let (base, _) = serve(|_, _stream| {
+        let server = serve(|_, _stream| {
             panic!("the server must not be contacted");
         });
-        let spec = spec_for(&base, TEST_BYTES);
+        let spec = spec_for(&server.base, TEST_BYTES);
         std::fs::write(tmp.path().join("model.gguf"), TEST_BYTES).unwrap();
 
         let mut states = Vec::new();
@@ -1410,7 +1514,7 @@ mod tests {
     #[test]
     fn download_exceeding_total_deadline_fails_and_cleans_up() {
         let tmp = private_dir();
-        let (base, _) = serve(|_, stream| {
+        let server = serve(|_, stream| {
             use std::io::Write as _;
             let head = format!(
                 "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n",
@@ -1418,13 +1522,15 @@ mod tests {
             );
             stream.write_all(head.as_bytes()).unwrap();
             // A steady trickle: no socket stall, but far too slow overall.
+            // It ends when the client gives up.
             for &byte in TEST_BYTES {
-                stream.write_all(&[byte]).unwrap();
-                stream.flush().unwrap();
+                if stream.write_all(&[byte]).is_err() {
+                    return;
+                }
                 std::thread::sleep(Duration::from_millis(50));
             }
         });
-        let spec = spec_for(&base, TEST_BYTES);
+        let spec = spec_for(&server.base, TEST_BYTES);
         let timeouts = Timeouts {
             connect: Duration::from_secs(5),
             total: Duration::from_millis(200),
@@ -1455,22 +1561,22 @@ mod tests {
     #[test]
     fn header_trickle_past_deadline_fails_and_cleans_up() {
         let tmp = private_dir();
-        let (base, _) = serve(|_, stream| {
+        let server = serve(|_, stream| {
             use std::io::Write as _;
-            stream.write_all(b"HTTP/1.1 200 OK\r\n").unwrap();
+            // It ends when the client gives up.
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n");
             for i in 0..10 {
-                stream
-                    .write_all(format!("x-trickle-{i}: {i}\r\n").as_bytes())
-                    .unwrap();
-                stream.flush().unwrap();
+                let line = format!("x-trickle-{i}: {i}\r\n");
+                if stream.write_all(line.as_bytes()).is_err() {
+                    return;
+                }
                 std::thread::sleep(Duration::from_millis(300));
             }
-            stream
-                .write_all(format!("content-length: {}\r\n\r\n", TEST_BYTES.len()).as_bytes())
-                .unwrap();
-            stream.write_all(TEST_BYTES).unwrap();
+            let _ = stream
+                .write_all(format!("content-length: {}\r\n\r\n", TEST_BYTES.len()).as_bytes());
+            let _ = stream.write_all(TEST_BYTES);
         });
-        let spec = spec_for(&base, TEST_BYTES);
+        let spec = spec_for(&server.base, TEST_BYTES);
         let timeouts = Timeouts {
             connect: Duration::from_secs(5),
             total: Duration::from_millis(200),
@@ -1493,7 +1599,7 @@ mod tests {
     #[test]
     fn body_completing_after_deadline_is_not_installed() {
         let tmp = private_dir();
-        let (base, _) = serve(|_, stream| {
+        let server = serve(|_, stream| {
             use std::io::Write as _;
             // No Content-Length: the body ends at EOF, which is delayed
             // beyond the deadline even though every byte arrived early.
@@ -1502,7 +1608,7 @@ mod tests {
             stream.flush().unwrap();
             std::thread::sleep(Duration::from_millis(2500));
         });
-        let spec = spec_for(&base, TEST_BYTES);
+        let spec = spec_for(&server.base, TEST_BYTES);
         let timeouts = Timeouts {
             connect: Duration::from_secs(5),
             total: Duration::from_millis(200),
@@ -1525,7 +1631,7 @@ mod tests {
     #[test]
     fn redirect_chain_cannot_extend_deadline() {
         let tmp = private_dir();
-        let (base, requests) = serve(|path, stream| {
+        let server = serve(|path, stream| {
             std::thread::sleep(Duration::from_millis(700));
             match path {
                 "/file" => respond(stream, 302, &[("Location", "/hop2")], b""),
@@ -1534,7 +1640,7 @@ mod tests {
                 other => panic!("unexpected path {other}"),
             }
         });
-        let spec = spec_for(&base, TEST_BYTES);
+        let spec = spec_for(&server.base, TEST_BYTES);
         let timeouts = Timeouts {
             connect: Duration::from_secs(5),
             total: Duration::from_secs(1),
@@ -1557,7 +1663,7 @@ mod tests {
         // The second hop was cut off by the remaining budget; the third
         // request never happened.
         assert!(
-            requests.load(Ordering::SeqCst) < 3,
+            server.requests() < 3,
             "the redirect chain must not issue requests past the budget"
         );
     }
@@ -1585,10 +1691,10 @@ mod tests {
         let shared = tmp.path().join("shared");
         std::fs::create_dir(&shared).unwrap();
         std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o775)).unwrap();
-        let (base, requests) = serve(|_, _stream| {
+        let server = serve(|_, _stream| {
             panic!("the server must not be contacted");
         });
-        let spec = spec_for(&base, TEST_BYTES);
+        let spec = spec_for(&server.base, TEST_BYTES);
 
         let err = fetch(&spec, &shared, false).unwrap_err();
 
@@ -1598,7 +1704,7 @@ mod tests {
             "unexpected message: {}",
             err.message
         );
-        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        assert_eq!(server.requests(), 0);
     }
 
     #[cfg(unix)]
@@ -1607,8 +1713,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let tmp = private_dir();
         let nested = tmp.path().join("a").join("b").join("models");
-        let (base, _) = serve(|_, stream| respond(stream, 200, &[], TEST_BYTES));
-        let spec = spec_for(&base, TEST_BYTES);
+        let server = serve(|_, stream| respond(stream, 200, &[], TEST_BYTES));
+        let spec = spec_for(&server.base, TEST_BYTES);
 
         fetch(&spec, &nested, false).unwrap();
 
@@ -1635,7 +1741,7 @@ mod tests {
     #[test]
     fn swapped_part_during_download_is_detected_and_rejected() {
         let tmp = private_dir();
-        let (base, _) = serve(|_, stream| {
+        let server = serve(|_, stream| {
             use std::io::Write as _;
             let head = format!(
                 "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n",
@@ -1648,7 +1754,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(5));
             }
         });
-        let spec = spec_for(&base, TEST_BYTES);
+        let spec = spec_for(&server.base, TEST_BYTES);
         let dest = tmp.path().join("model.gguf");
         let aside = tmp.path().join("moved-aside.part");
         let mut swapped = false;
@@ -1683,8 +1789,8 @@ mod tests {
     #[test]
     fn symlinked_lock_file_is_rejected_without_touching_its_target() {
         let tmp = private_dir();
-        let (base, _) = serve(|_, stream| respond(stream, 200, &[], TEST_BYTES));
-        let spec = spec_for(&base, TEST_BYTES);
+        let server = serve(|_, stream| respond(stream, 200, &[], TEST_BYTES));
+        let spec = spec_for(&server.base, TEST_BYTES);
         let dest = tmp.path().join("model.gguf");
         let sentinel = tmp.path().join("sentinel.txt");
         std::fs::write(&sentinel, b"do not erase").unwrap();
