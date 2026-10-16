@@ -192,8 +192,13 @@ loader (CI checks that too). The modules find the core library they need
 `bundle.json`, the startup checks, the `cpu`/`auto`/`gpu` behavior and the
 messages are the same as on Windows (see above): the manifest is required,
 `gpu/` may be deleted for a CPU-only install, and nothing else may be added
-to `cpu/<variant>/` or `gpu/vulkan/`. The plain `cpu-variants` folder from
-`build-cpu-variants.sh` has no manifest and still works without one.
+to `cpu/<variant>/` or `gpu/vulkan/`. The core libraries are the
+executable's own imports, so the system loader maps them before any check
+runs: a core library damaged in a way the loader accepts fails the manifest
+check, but one the loader rejects stops the program with the loader's own
+`error while loading shared libraries` message (exit status 127). The plain
+`cpu-variants` folder from `build-cpu-variants.sh` has no manifest and still
+works without one.
 
 Check a machine with `backends`, which loads no model:
 

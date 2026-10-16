@@ -656,7 +656,7 @@ jobs:
           readelf -d "$VULKAN_SDK/lib/VulkanLoader/lib/libvulkan.so" | grep SONAME
           cmake --version | head -n 1
           gcc --version | head -n 1
-          ldd --version | head -n 1
+          ldd --version | sed -n 1p
           rustc --version --verbose
           echo "Vulkan loader on the runner before the runtime tests:"
           ldconfig -p | grep -i vulkan || echo "  none"
@@ -815,18 +815,31 @@ jobs:
               jq -e '.ok' case.json > /dev/null
             fi
           }
-          # flip FILE OFFSET: inverts one byte (OFFSET -1: the middle one).
+          # flip FILE WHERE: inverts one byte (WHERE: mid, last or an offset).
           flip() {
-            python3 -c 'import sys; p, o = sys.argv[1], int(sys.argv[2]); b = bytearray(open(p, "rb").read()); i = len(b) // 2 if o < 0 else o; b[i] ^= 0xFF; open(p, "wb").write(b)' "$1" "$2"
+            python3 -c 'import sys; p, w = sys.argv[1:]; b = bytearray(open(p, "rb").read()); i = {"mid": len(b) // 2, "last": len(b) - 1}.get(w) or int(w); b[i] ^= 0xFF; open(p, "wb").write(b)' "$1" "$2"
           }
 
           # One byte flipped in the middle of the module: same size, so only
           # the SHA-256 catches it.
           check_case corrupt-gpu-module auto 'gpu/vulkan/libggml-vulkan.so does not match its SHA-256' \
-            flip "$gpu" -1
+            flip "$gpu" mid
           check_case truncated-gpu-module auto 'bytes; bundle.json lists' truncate -s -4096 "$gpu"
+          # The core libraries are the executable's own imports: ld.so maps
+          # them before main, so the manifest catches damage only where the
+          # loader still accepts the file (here the last byte, in the
+          # section headers the loader does not read).
           check_case corrupt-core-library auto 'libggml-base.so.0 does not match its SHA-256' \
-            flip "$copy/libggml-base.so.0" 100
+            flip "$copy/libggml-base.so.0" last
+          # Damage the loader rejects stops the executable before it runs.
+          rm -rf "$copy"
+          cp -a "$STAGE" "$copy"
+          flip "$copy/libggml-base.so.0" 100
+          code=0
+          "$copy/pumice-transcribe" backends --backend auto --json > case.json 2> case.err || code=$?
+          sed 's/^/  [corrupt-core-library-header] /' case.err
+          test "$code" -eq 127
+          grep -qF 'error while loading shared libraries: libggml-base.so.0' case.err
           # An unlisted module-looking file where ggml scans would load
           # unchecked.
           check_case unlisted-gpu-file auto 'gpu/vulkan/libggml-vulkan-extra.so is not listed' \
