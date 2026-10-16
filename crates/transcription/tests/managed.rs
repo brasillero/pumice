@@ -229,6 +229,7 @@ struct Spawned {
     lines: mpsc::Receiver<String>,
     stdout: Option<thread::JoinHandle<Vec<String>>>,
     stderr: Arc<Mutex<String>>,
+    stderr_reader: Option<thread::JoinHandle<()>>,
 }
 
 fn spawn(setup: &Setup, engine: &str, load_ms: u64, extra: &[&str]) -> Spawned {
@@ -263,7 +264,7 @@ fn spawn(setup: &Setup, engine: &str, load_ms: u64, extra: &[&str]) -> Spawned {
     let stderr = Arc::new(Mutex::new(String::new()));
     let mut err = child.stderr.take().unwrap();
     let sink = Arc::clone(&stderr);
-    thread::spawn(move || {
+    let stderr_reader = thread::spawn(move || {
         let mut buf = [0u8; 1024];
         while let Ok(n) = err.read(&mut buf) {
             if n == 0 {
@@ -280,6 +281,7 @@ fn spawn(setup: &Setup, engine: &str, load_ms: u64, extra: &[&str]) -> Spawned {
         lines,
         stdout: Some(stdout),
         stderr,
+        stderr_reader: Some(stderr_reader),
     }
 }
 
@@ -308,6 +310,13 @@ impl Spawned {
         let started = Instant::now();
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
+                // The child has exited, but its stderr may still be in the
+                // pipe: let the reader reach end of file before callers read
+                // it. A grandchild holding the pipe open would block this, and
+                // the managed child spawns none.
+                if let Some(reader) = self.stderr_reader.take() {
+                    reader.join().unwrap();
+                }
                 return status;
             }
             if started.elapsed() > limit {
