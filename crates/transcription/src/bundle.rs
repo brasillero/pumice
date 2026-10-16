@@ -5,11 +5,13 @@
 //! against it. A damaged or mixed-version install then fails as an
 //! installation error instead of quietly running without its GPU module.
 //!
-//! Written by `scripts/build-windows-vulkan.ps1`, where startup requires it.
-//! The Linux `cpu-variants` stage has none yet; there it is checked only
-//! when present. The manifest guards against corruption and mismatched
-//! files, not against an attacker who can write to the install directory:
-//! that directory is trusted, as it already is for the modules themselves.
+//! Written by `scripts/build-windows-vulkan.ps1` and
+//! `scripts/build-linux-vulkan.sh`; startup requires it on Windows and in
+//! every `vulkan` build. The plain Linux `cpu-variants` stage has none; there
+//! it is checked only when present. The manifest guards against corruption
+//! and mismatched files, not against an attacker who can write to the
+//! install directory: that directory is trusted, as it already is for the
+//! modules themselves.
 
 // Only the dynamic-backends loader calls into this module; the tests run in
 // every build.

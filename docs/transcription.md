@@ -55,7 +55,8 @@ Windows notes.
 
 ## Faster CPU builds (runtime CPU variants)
 
-Linux x86-64, opt-in (x86-64 Windows: see the Vulkan preview below). The
+Linux x86-64, opt-in (x86-64 Windows: see the Vulkan preview below; the
+Linux Vulkan preview includes the same variants). The
 default build above is a single static binary with a portable x86-64 baseline;
 on modern CPUs it leaves a lot of transcription speed unused. The `cpu-variants` Cargo feature instead links the engine as
 shared libraries plus one ggml CPU module per x86 ISA tier (14 modules from
@@ -155,7 +156,8 @@ or `gpu/vulkan/` stops startup with an installation error that names the
 file and `(bundle manifest mismatch)`; reinstall the whole folder. Deleting
 `gpu/` is allowed and gives a CPU-only install (`auto` then reports
 `gpu_module_absent`); a Vulkan module that loads but finds no device (or no
-Vulkan driver) leaves `auto` on the CPU too.
+Vulkan driver), or only integrated or software GPUs, leaves `auto` on the CPU
+too.
 
 At startup the CPU variant is chosen as described above. With `backend: auto`
 or `gpu`, `gpu/vulkan/` is then scanned with the backend mask fixed to CPU and
@@ -173,6 +175,90 @@ pwsh crates/transcription/scripts/build-windows-vulkan.ps1
 # result: target\windows-vulkan\stage\
 ```
 
+## Linux Vulkan preview (experimental)
+
+**Not a release.** The same preview for x86-64 Linux with glibc (never
+musl). CI builds it in the `Transcription engine` workflow on Ubuntu 22.04
+and uploads it as the short-lived artifact
+`pumice-transcribe-linux-x64-vulkan-preview`, which holds one tarball (a
+tarball keeps the executable bit, which artifact downloads drop) and its
+`SHA256SUMS`; no release ships it. Extract it anywhere and keep the folder
+together:
+
+```text
+pumice-transcribe
+libtranscribe.so.0.3, libggml.so.0,              engine core, beside the
+  libggml-base.so.0                                executable ($ORIGIN rpath)
+cpu/<variant>/libggml-cpu-<variant>.so           runtime CPU variants (14)
+gpu/vulkan/libggml-vulkan.so                     optional Vulkan module
+bundle.json                                      manifest: every file's size and SHA-256
+```
+
+Prerequisites:
+
+- glibc 2.35 or newer and the C++ runtime (`libstdc++6` from GCC 12 or
+  newer) — Ubuntu 22.04, Debian 12, Fedora 36 or later. CI checks that no
+  file needs a newer symbol version and runs the bundle in a plain
+  `ubuntu:22.04` container.
+- For the GPU only: a Vulkan loader (`libvulkan.so.1`, Debian/Ubuntu package
+  `libvulkan1`) and a Vulkan driver: `mesa-vulkan-drivers` for Intel and AMD
+  GPUs, the vendor driver for NVIDIA.
+
+Nothing else: no Vulkan SDK, compiler, Rust or `LD_LIBRARY_PATH`. CI checks
+every file's dependencies after relocating the folder: only glibc, the C++
+runtime and the bundled core libraries, and only `gpu/vulkan/libggml-vulkan.so`
+needs `libvulkan.so.1`, so the CPU path starts on a machine without a Vulkan
+loader (CI checks that too). The modules find the core library they need
+(`libggml-base.so.0`) as the copy the executable already loaded.
+
+`bundle.json`, the startup checks, the `cpu`/`auto`/`gpu` behavior and the
+messages are the same as on Windows (see above): the manifest is required,
+`gpu/` may be deleted for a CPU-only install, and nothing else may be added
+to `cpu/<variant>/` or `gpu/vulkan/`. The core libraries are the
+executable's own imports, so the system loader maps them before any check
+runs: a core library damaged in a way the loader accepts fails the manifest
+check, but one the loader rejects stops the program with the loader's own
+`error while loading shared libraries` message (exit status 127). The plain
+`cpu-variants` folder from `build-cpu-variants.sh` has no manifest and still
+works without one.
+
+Check a machine with `backends`, which loads no model:
+
+```bash
+./pumice-transcribe backends --backend auto --json
+```
+
+`gpu_module: "scanned"` with `gpu_devices` ≥ 1 and your GPU listed with kind
+`vulkan` means `gpu` can use it; `auto` uses it only when its `gpu_class` is
+`discrete` (see [Compute backend](#compute-backend-cpu-auto-gpu)). An
+integrated GPU (`gpu_class: "integrated"`, `fallback_reason:
+"gpu_integrated_only"`) is used only with `backend: gpu`: on the Intel UHD 770
+of the owner's test machine it was about 1.7× slower than the CPU for Turbo.
+`gpu_devices: 0` with `fallback_reason: "gpu_unavailable"` means no usable
+device: install the loader and driver above (`vulkaninfo --summary` from
+`vulkan-tools` lists what the loader sees). ggml leaves out software Vulkan
+devices such as Mesa's lavapipe (`llvmpipe`) unless `GGML_VK_VISIBLE_DEVICES`
+selects them; then they are listed with `gpu_class: "software"` (their
+description names `llvmpipe`), `auto` stays
+on the CPU with `fallback_reason: "gpu_software_only"` and only `gpu` uses
+them. CI uses that to run the tiny model on lavapipe, which proves the module
+works but says nothing about speed or real hardware. For a real-GPU check,
+follow the [Windows checklist](#checking-a-real-gpu-on-windows) with
+`./pumice-transcribe`.
+
+Build it yourself (x86-64 Linux with glibc; CMake, a C++ compiler, `jq`, and
+the Vulkan headers, loader library, `glslc` and SPIRV-Headers at build time
+only — CI uses LunarG's Vulkan SDK 1.4.350.0):
+
+```bash
+crates/transcription/scripts/build-linux-vulkan.sh
+# result: target/linux-vulkan/stage/
+```
+
+The script also audits every staged file (allowed libraries, `$ORIGIN` as
+the only RUNPATH, no glibc symbol newer than 2.35), so on a build machine
+newer than Ubuntu 22.04 the audit fails by design.
+
 ## Compute backend (`cpu`, `auto`, `gpu`)
 
 `backend:` in `transcribe.yml` chooses what the model may run on; `--backend`
@@ -183,22 +269,53 @@ device index, no per-request choice and no backend setting in
 | Mode | GPU module | Model loads on | Without a usable GPU |
 | --- | --- | --- | --- |
 | `cpu` (default) | never checked or loaded | the CPU | — |
-| `auto` | checked and scanned | a GPU when one initializes (discrete before integrated), else the CPU | the CPU, with a `fallback_reason` |
-| `gpu` | checked and scanned | a GPU | error `gpu_unavailable`, never the CPU |
+| `auto` | checked and scanned | the first discrete GPU, else the CPU | the CPU, with a `fallback_reason` |
+| `gpu` | checked and scanned | a GPU of any class (the engine's choice: discrete before integrated) | error `gpu_unavailable`, never the CPU |
 
-Only the Windows Vulkan preview has a GPU module. In every other build (the
-default `engine` build, Linux `cpu-variants`, macOS) `auto` runs on the CPU
-with `fallback_reason: "gpu_not_built"` and `gpu` fails.
+Only the Vulkan previews (Windows, Linux) have a GPU module. In every other
+build (the default `engine` build, Linux `cpu-variants`, macOS) `auto` runs on
+the CPU with `fallback_reason: "gpu_not_built"` and `gpu` fails.
+
+**Which GPUs `auto` uses** (p14.5-linux-vulkan/D1, D2). `auto` only uses a
+GPU it can identify as discrete hardware. Each registered Vulkan device gets
+a class from the engine's device type, its PCI bus id and its description
+(the Vulkan device name):
+
+| `gpu_class` | When | `auto` | `gpu` |
+| --- | --- | --- | --- |
+| `integrated` | the engine reports an integrated GPU | skipped | usable |
+| `software` | a software rasterizer: the description names `llvmpipe`/`lavapipe` (Mesa), `SwiftShader` or `Microsoft Basic Render` (WARP), even behind a virtual layer; or a device the engine does not report as a GPU | skipped | usable |
+| `unverified` | the engine reports a GPU, but it has no PCI bus id, or its description names a virtual or layered implementation: `Venus`/`Virtio`/`virgl` (Mesa's Vulkan over virtio-gpu, `Virtio-GPU Venus (…)`) or `Dozen`/`Microsoft Direct3D12` (Mesa's Vulkan over Direct3D 12) | skipped | usable |
+| `discrete` | the engine reports a GPU, it has a PCI bus id and its description names none of the above | used | usable |
+
+The names are matched case-insensitively as substrings. The checks exist
+because the engine reports every Vulkan device that is not integrated as a
+GPU, including a CPU-type device forced in with `GGML_VK_VISIBLE_DEVICES`,
+and because a virtual GPU can report PCI information while it runs on a
+software renderer; environment variables therefore never make `auto` use a
+software device. A real card whose driver lacks the optional
+`VK_EXT_pci_bus_info` extension is `unverified`, so `auto` skips it; use
+`backend: gpu` for it. `auto` loads exactly the first discrete device in
+registry order, even when another device registered first. Integrated GPUs
+are skipped because they are usually slower than a modern CPU for this work
+(about 1.7× slower for Turbo on an Intel UHD 770); set `backend: gpu` to use
+one.
 
 `fallback_reason` (only when `auto` runs on the CPU):
 
 - `gpu_not_built` — this build has no GPU module;
 - `gpu_module_absent` — the build supports one, but `gpu/vulkan/` is not
   installed next to the executable;
-- `gpu_unavailable` — the module registered no GPU device, or no GPU device
-  initialized. The engine cannot tell a missing Vulkan loader, a missing
-  driver, an excluded device or a failed initialization apart, so neither
-  does this reason.
+- `gpu_unavailable` — the module registered no GPU device. The engine cannot
+  tell a missing Vulkan loader, a missing driver or an excluded device
+  apart, so neither does this reason;
+- `gpu_integrated_only` — no discrete GPU, but an integrated one (others
+  may be there too); `backend: gpu` uses it;
+- `gpu_unverified` — no discrete or integrated GPU, but a GPU that could not
+  be verified as discrete hardware (`gpu_class: "unverified"`, software ones
+  may be there too); `backend: gpu` uses it;
+- `gpu_software_only` — the only GPU devices are software rasterizers
+  (`gpu_class: "software"`); `backend: gpu` uses them.
 
 `gpu` fails before loading the model with `gpu_unavailable` (exit status 1)
 and one of three fixed messages: the build has no GPU support, no GPU module
@@ -234,7 +351,16 @@ in managed `ready` and `GET /ready`, and in `pumice serve`'s
 - A model that fails to load with `auto` or `gpu` on a GPU fails startup with
   `model_load_failed` and a message pointing to `backend: cpu`. It is not
   retried on the CPU: a GPU allocation failure after the device initialized
-  is not a fallback case.
+  is not a fallback case. With `auto` this includes a discrete GPU that
+  registered but does not initialize, because `auto` loads on that exact
+  device. p14.5-linux-vulkan/D3 would let `auto` fall back to the CPU
+  (`gpu_unavailable`) when the device fails to initialize before any weights
+  are allocated, but only if the engine can tell that apart, and
+  transcribe-cpp 0.3.1 cannot: it reports a device that fails to initialize
+  with the same `backend` error as an exception thrown while the weights
+  are uploaded (for example a failed Vulkan staging-buffer allocation), and
+  has no separate call to initialize a device before the model load. Use
+  `backend: cpu` on such a machine.
 - A request the engine refuses because of its content or input (output
   truncated or repeating before the end, an invalid or unsupported request,
   input too long for the model) answers with the usual error
@@ -267,13 +393,16 @@ without loading a model, and reports what the bundle ships and what
 registered:
 
 ```json
-{"schema_version":1,"ok":true,"result":{"requested":"auto","gpu_build":"vulkan","bundle":"verified","cpu_variant":"alderlake","gpu_module":"scanned","gpu_devices":0,"allowed_backends":["cpu","vulkan"],"devices":[{"name":"CPU","description":"Intel(R) Core(TM) i5-14500T","kind":"cpu","type":"cpu"}],"fallback_reason":"gpu_unavailable"}}
+{"schema_version":1,"ok":true,"result":{"requested":"auto","gpu_build":"vulkan","bundle":"verified","cpu_variant":"alderlake","gpu_module":"scanned","gpu_devices":1,"allowed_backends":["cpu","vulkan"],"devices":[{"name":"CPU","description":"Intel(R) Core(TM) i5-14500T","kind":"cpu","type":"cpu","gpu_class":null},{"name":"Vulkan0","description":"Intel(R) UHD Graphics 770 (ADL-S GT1)","kind":"vulkan","type":"igpu","gpu_class":"integrated"}],"fallback_reason":"gpu_integrated_only"}}
 ```
 
 `gpu_build` is `vulkan` or `null`; `bundle` is `verified`, `absent` (no
-manifest, Linux only) or `null` (no runtime modules); `gpu_module` is
+manifest, plain Linux `cpu-variants` only) or `null` (no runtime modules); `gpu_module` is
 `not_built`, `not_requested` (`cpu` mode), `absent` or `scanned`;
-`gpu_devices` counts registered GPU devices; `allowed_backends` is the
+`gpu_devices` counts registered GPU devices of every class; each device's
+`type` is the engine's own (`cpu`, `gpu`, `igpu`, `accel`, `unknown`) and
+`gpu_class` is the class `auto` decides by (`discrete`, `integrated`,
+`unverified`, `software`; `null` for the CPU); `allowed_backends` is the
 engine's backend mask (static builds report the engine's default mask, with
 only the CPU compiled in); `fallback_reason` is set when `auto` will run on
 the CPU whatever happens at load. A registered GPU can still fail to
@@ -304,8 +433,14 @@ the same model, audio and language for every run (for example
    DriverVersion`) and the Vulkan loader version
    (`(Get-Item $env:SystemRoot\System32\vulkan-1.dll).VersionInfo.FileVersion`).
 2. `& $exe backends --backend auto --json`: `gpu_module`
-   `scanned`, `gpu_devices` ≥ 1 and the GPU listed with kind `vulkan`. Run
-   with `--backend cpu` too: `gpu_module` `not_requested`, only the CPU.
+   `scanned`, `gpu_devices` ≥ 1 and the GPU listed with kind `vulkan`.
+   `fallback_reason` depends on the machine: `null` with a dedicated card,
+   `"gpu_integrated_only"` with only an integrated GPU, `"gpu_unverified"`
+   when the only other GPU is `unverified`. A dedicated card must be
+   classified `gpu_class: "discrete"`; if it shows `"unverified"` or
+   `"software"`, note its `description` and `type`, and whether
+   `--backend gpu` (step 4) works on it. Run with `--backend cpu` too:
+   `gpu_module` `not_requested`, only the CPU.
 3. CPU baseline: `& $exe file sample-pt.wav --model-file
    MODEL --language pt --backend cpu --json`, three times; note the text,
    `model_load_ms`, `transcription_ms` and `compute`.
@@ -313,10 +448,13 @@ the same model, audio and language for every run (for example
    `compute.backend` `vulkan` and `compute.device` your GPU; compare the text with the CPU run
    (identical text is not guaranteed) and the timings (first run cold, then
    warm; a longer clip, a short one and silence).
-5. `--backend auto` on the same machine must select the GPU:
-   `compute.backend` `vulkan`, the same device as step 4, with
-   `fallback_reason: null`.
-6. `serve --backend gpu --port 17568`: the startup line shows the GPU
+5. `--backend auto` on the same machine: on a machine with a discrete GPU,
+   `auto` must pick it (`compute.device` the dedicated card, even when the
+   machine also has an integrated GPU), with `fallback_reason: null`. On a
+   machine with only an integrated GPU, `auto` runs on the CPU with
+   `fallback_reason: "gpu_integrated_only"` by design; step 4 then measures
+   the integrated GPU, which needs `backend: gpu`.
+6. `& $exe serve --backend gpu --port 17568`: the startup line shows the GPU
    snapshot; send a few requests, stop it with Ctrl-C.
 7. Without a usable GPU (disable the GPU in Device Manager, or a machine or
    VM without a Vulkan driver): `--backend auto` runs on the CPU with

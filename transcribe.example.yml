@@ -22,11 +22,14 @@ threads: 8
 
 # Optional compute backend (default: cpu):
 #   cpu  - the CPU only; a GPU module is never loaded
-#   auto - a GPU when one initializes, else the CPU (the reported compute
-#          snapshot says why)
-#   gpu  - a GPU, or a startup error (never the CPU)
-# Only the Windows Vulkan preview bundle has a GPU module. Override for one
-# run with --backend on file and serve.
+#   auto - a GPU it can identify as discrete hardware, else the CPU (the
+#          reported compute snapshot says why). Integrated, software and
+#          unverified (virtual, or no PCI bus id) GPUs are skipped: they
+#          are usually no faster than the CPU for this work.
+#   gpu  - any GPU, integrated ones included (discrete first), or a startup
+#          error (never the CPU)
+# Only the Vulkan preview bundles (Windows, Linux) have a GPU module.
+# Override for one run with --backend on file and serve.
 # backend: auto
 
 # Optional HTTP server settings. Only used by `pumice-transcribe serve`.

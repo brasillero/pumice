@@ -590,3 +590,472 @@ jobs:
           path: target/windows-vulkan/stage
           retention-days: 7
           if-no-files-found: error
+
+  transcription-linux-vulkan:
+    # Experimental (P14.5): the Linux x86-64 (glibc) Vulkan bundle — CPU
+    # variants plus one loadable Vulkan module — built with a pinned Vulkan
+    # SDK on Ubuntu 22.04 (glibc 2.35, the bundle's floor), audited, and
+    # uploaded as a short-lived artifact for a real-GPU check. Not a release.
+    # Hosted runners have no GPU: this job proves the build, the dependency
+    # closure, the CPU path, a machine without a Vulkan loader and Mesa's
+    # software Vulkan device (lavapipe).
+    name: Transcription Vulkan preview bundle (Linux x64)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      # The LunarG Vulkan SDK the Windows job uses
+      # (p14.1-windows-vulkan/D8); SHA-256 as published by LunarG at
+      # https://vulkan.lunarg.com/sdk/sha/1.4.350.0/linux/vulkan_sdk.tar.xz.json
+      # Ubuntu 22.04's own glslc and headers are older than the pinned
+      # engine's shaders were written for.
+      VULKAN_SDK_VERSION: 1.4.350.0
+      VULKAN_SDK_SHA256: b65f068ab36263559da49d7cacd7e7b9df23824ca8b68ccc522a2b06f5725df2
+      # Must match build-linux-vulkan.sh, so clippy and the tests reuse the
+      # bundle's native build instead of configuring a second one.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/linux-vulkan
+      TRANSCRIBE_CMAKE_ARGS: -DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF
+      STAGE: ${{ github.workspace }}/target/linux-vulkan/stage
+      # Ubuntu 22.04 with nothing added: the glibc floor, and a machine
+      # without a Vulkan loader.
+      FLOOR_IMAGE: ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-vulkan
+
+      - name: Cache Vulkan SDK archive
+        id: cache-vulkan-sdk
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vulkan-sdk/vulkan_sdk.tar.xz
+          key: vulkan-sdk-linux-${{ env.VULKAN_SDK_VERSION }}-${{ env.VULKAN_SDK_SHA256 }}
+
+      - name: Download, verify and unpack the Vulkan SDK (pinned)
+        run: |
+          dir="$RUNNER_TEMP/vulkan-sdk"
+          archive="$dir/vulkan_sdk.tar.xz"
+          if [ ! -f "$archive" ]; then
+            mkdir -p "$dir"
+            curl -L --fail -o "$archive" \
+              "https://sdk.lunarg.com/sdk/download/$VULKAN_SDK_VERSION/linux/vulkansdk-linux-x86_64-$VULKAN_SDK_VERSION.tar.xz"
+          fi
+          echo "$VULKAN_SDK_SHA256  $archive" | sha256sum -c -
+          tar -xJf "$archive" -C "$dir"
+          sdk="$dir/$VULKAN_SDK_VERSION/x86_64"
+          echo "VULKAN_SDK=$sdk" >> "$GITHUB_ENV"
+          echo "$sdk/bin" >> "$GITHUB_PATH"
+          # This SDK keeps its loader in lib/VulkanLoader/lib, where CMake's
+          # FindVulkan does not look. The build links against it; only its
+          # SONAME (libvulkan.so.1) is recorded, resolved on the user's
+          # machine. No LD_LIBRARY_PATH: nothing at runtime comes from here.
+          echo "CMAKE_LIBRARY_PATH=$sdk/lib/VulkanLoader/lib" >> "$GITHUB_ENV"
+
+      - name: Preflight build tools
+        run: |
+          echo "VULKAN_SDK=$VULKAN_SDK"
+          glslc --version
+          for path in include/vulkan/vulkan.h include/vulkan/vulkan.hpp \
+            lib/VulkanLoader/lib/libvulkan.so share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake; do
+            if [ ! -f "$VULKAN_SDK/$path" ]; then
+              echo "::error::Vulkan SDK file missing: $path"
+              exit 1
+            fi
+          done
+          readelf -d "$VULKAN_SDK/lib/VulkanLoader/lib/libvulkan.so" | grep SONAME
+          cmake --version | head -n 1
+          gcc --version | head -n 1
+          ldd --version | sed -n 1p
+          rustc --version --verbose
+          echo "Vulkan loader on the runner before the runtime tests:"
+          ldconfig -p | grep -i vulkan || echo "  none"
+
+      # The audit's rules checked on synthetic inputs before the real audit
+      # (the build step runs it again).
+      - name: Dependency audit self-test
+        run: crates/transcription/scripts/build-linux-vulkan.sh --self-test
+
+      - name: Build, stage and audit the Vulkan bundle
+        timeout-minutes: 90
+        run: crates/transcription/scripts/build-linux-vulkan.sh
+
+      - name: cargo clippy -p pumice-transcription --features vulkan
+        run: cargo clippy --release -p pumice-transcription --features vulkan --all-targets --locked -- -D warnings
+
+      - name: cargo test -p pumice-transcription --features vulkan
+        timeout-minutes: 20
+        run: cargo test --release -p pumice-transcription --features vulkan --locked
+
+      - name: Record bundle sizes
+        run: |
+          {
+            echo '### Linux Vulkan preview bundle'
+            echo
+            echo '| File | Bytes |'
+            echo '| --- | ---: |'
+            (cd "$STAGE" && find . -type f -printf '| %P | %s |\n' | LC_ALL=C sort)
+            echo "| **total ($(find "$STAGE" -type f | wc -l) files)** | **$(find "$STAGE" -type f -printf '%s\n' | awk '{ total += $1 } END { print total }')** |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Runtime only, unpinned: the distribution's current loader and Mesa
+      # (versions recorded below). The build never uses them.
+      - name: Install the runtime test packages (Vulkan loader, Mesa)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers
+          dpkg-query -W -f='${Package} ${Version}\n' libvulkan1 mesa-vulkan-drivers
+          ls /usr/share/vulkan/icd.d/
+
+      - name: Write the test helpers
+        run: |
+          cat > "$RUNNER_TEMP/vulkan-checks.sh" <<'SH'
+          # backends LABEL MODE [EXE]: runs `backends --backend MODE --json`,
+          # shows its stderr and checks what every successful run must report.
+          backends() {
+            local label="$1" mode="$2" exe="${3:-$STAGE/pumice-transcribe}"
+            local out="$RUNNER_TEMP/backends-$label.json" err="$RUNNER_TEMP/backends-$label.err"
+            local code=0
+            "$exe" backends --backend "$mode" --json > "$out" 2> "$err" || code=$?
+            sed "s/^/  [$label] /" "$err"
+            echo "  [$label] $(cat "$out")"
+            if [ "$code" -ne 0 ]; then
+              echo "::error::$label exited with $code"
+              return 1
+            fi
+            expect "$label" "r['requested'] == '$mode'" "r['gpu_build'] == 'vulkan'" \
+              "sum(d['kind'] == 'cpu' for d in r['devices']) == 1" "r['cpu_variant']" \
+              "r['bundle'] == 'verified'" \
+              "r['gpu_devices'] == sum(d['kind'] == 'vulkan' for d in r['devices'])" \
+              "all((d['gpu_class'] is None) == (d['kind'] != 'vulkan') for d in r['devices'])"
+          }
+          # expect LABEL CONDITION...: Python conditions over the `backends`
+          # result `r` of LABEL.
+          expect() {
+            python3 - "$RUNNER_TEMP/backends-$1.json" "$1" "${@:2}" <<'PY'
+          import json
+          import sys
+
+          r = json.load(open(sys.argv[1]))["result"]
+          for condition in sys.argv[3:]:
+              assert eval(condition, {"r": r}), f"{sys.argv[2]}: {condition}: {json.dumps(r)}"
+          PY
+          }
+          SH
+
+      - name: Backend registration without a Vulkan device (backend cpu, auto and gpu)
+        run: |
+          . "$RUNNER_TEMP/vulkan-checks.sh"
+          # Runs from another cwd, so nothing resolves from the checkout.
+          cd "$RUNNER_TEMP"
+          # A loader with no driver: VK_DRIVER_FILES for current loaders,
+          # VK_ICD_FILENAMES for older ones, both naming a manifest that
+          # does not exist.
+          export VK_DRIVER_FILES="$RUNNER_TEMP/no-vulkan-driver/none.json"
+          export VK_ICD_FILENAMES="$VK_DRIVER_FILES"
+          unset GGML_VK_VISIBLE_DEVICES
+
+          # backend cpu: the GPU module is not even looked at.
+          backends cpu cpu
+          expect cpu "r['gpu_module'] == 'not_requested'" "r['gpu_devices'] == 0" \
+            "r['allowed_backends'] == ['cpu']" "all(d['kind'] == 'cpu' for d in r['devices'])" \
+            "r['fallback_reason'] is None"
+          variant="$(jq -r .result.cpu_variant backends-cpu.json)"
+
+          # backend auto: scanned with the CPU|VULKAN mask; no device, so
+          # auto plans the CPU with a reason.
+          backends auto auto
+          expect auto "r['gpu_module'] == 'scanned'" "r['allowed_backends'] == ['cpu', 'vulkan']" \
+            "r['cpu_variant'] == '$variant'" "r['gpu_devices'] == 0" \
+            "r['fallback_reason'] == 'gpu_unavailable'"
+
+          # backend gpu registers the same way; the model load is what refuses.
+          backends gpu gpu
+          expect gpu "r['gpu_module'] == 'scanned'" "r['gpu_devices'] == 0" "r['fallback_reason'] is None"
+
+          # GGML_BACKEND_PATH plugins stay out: the mask has no OTHER bit. A
+          # second, different CPU module would register a second CPU device.
+          plugin="$(find "$STAGE/cpu" -name 'libggml-cpu-*.so' ! -path "*/cpu/$variant/*" | head -n 1)"
+          export GGML_BACKEND_PATH="$plugin"
+          backends external-plugin-cpu cpu
+          backends external-plugin-auto auto
+          unset GGML_BACKEND_PATH
+
+          # A relocated, read-only copy under a path with spaces and
+          # non-ASCII characters loads the same way.
+          moved="$RUNNER_TEMP/pumice bundle ç"
+          cp -a "$STAGE" "$moved"
+          chmod -R a-w "$moved"
+          backends relocated auto "$moved/pumice-transcribe"
+          expect relocated "r['gpu_module'] == 'scanned'" "r['fallback_reason'] == 'gpu_unavailable'"
+          chmod -R u+w "$moved"
+          rm -rf "$moved"
+
+      - name: Bundle manifest checks (damaged, unlisted, missing)
+        run: |
+          # Each case damages a fresh copy of the bundle. A present module
+          # that does not match bundle.json is an installation error, never
+          # a CPU fallback; only an absent GPU module falls back.
+          cd "$RUNNER_TEMP"
+          export VK_DRIVER_FILES="$RUNNER_TEMP/no-vulkan-driver/none.json"
+          export VK_ICD_FILENAMES="$VK_DRIVER_FILES"
+          copy="$RUNNER_TEMP/pumice bundle check"
+          gpu="$copy/gpu/vulkan/libggml-vulkan.so"
+          # check_case LABEL MODE EXPECT DAMAGE...: EXPECT is the reason the
+          # installation error must name, or empty when the run must succeed.
+          check_case() {
+            local label="$1" mode="$2" expect="$3" code=0
+            shift 3
+            rm -rf "$copy"
+            cp -a "$STAGE" "$copy"
+            "$@"
+            "$copy/pumice-transcribe" backends --backend "$mode" --json > case.json 2> case.err || code=$?
+            sed "s/^/  [$label] /" case.err
+            echo "  [$label] $(cat case.json)"
+            if [ -n "$expect" ]; then
+              if [ "$code" -eq 0 ]; then echo "::error::$label: expected an installation error"; exit 1; fi
+              jq -e '.ok == false and .error.code == "engine_failed"' case.json > /dev/null
+              grep -qF '(bundle manifest mismatch)' case.err
+              grep -qF "$expect" case.err
+              if grep -qF 'selected ggml CPU module' case.err; then
+                echo "::error::$label: a module was registered before the check failed"
+                exit 1
+              fi
+            else
+              test "$code" -eq 0
+              jq -e '.ok' case.json > /dev/null
+            fi
+          }
+          # flip FILE WHERE: inverts one byte (WHERE: mid, last or an offset).
+          flip() {
+            python3 -c 'import sys; p, w = sys.argv[1:]; b = bytearray(open(p, "rb").read()); i = {"mid": len(b) // 2, "last": len(b) - 1}.get(w) or int(w); b[i] ^= 0xFF; open(p, "wb").write(b)' "$1" "$2"
+          }
+
+          # One byte flipped in the middle of the module: same size, so only
+          # the SHA-256 catches it.
+          check_case corrupt-gpu-module auto 'gpu/vulkan/libggml-vulkan.so does not match its SHA-256' \
+            flip "$gpu" mid
+          check_case truncated-gpu-module auto 'bytes; bundle.json lists' truncate -s -4096 "$gpu"
+          # The core libraries are the executable's own imports: ld.so maps
+          # them before main, so the manifest catches damage only where the
+          # loader still accepts the file (here the last byte, in the
+          # section headers the loader does not read).
+          check_case corrupt-core-library auto 'libggml-base.so.0 does not match its SHA-256' \
+            flip "$copy/libggml-base.so.0" last
+          # Damage the loader rejects stops the executable before it runs.
+          rm -rf "$copy"
+          cp -a "$STAGE" "$copy"
+          flip "$copy/libggml-base.so.0" 100
+          code=0
+          "$copy/pumice-transcribe" backends --backend auto --json > case.json 2> case.err || code=$?
+          sed 's/^/  [corrupt-core-library-header] /' case.err
+          test "$code" -eq 127
+          grep -qF 'error while loading shared libraries: libggml-base.so.0' case.err
+          # An unlisted module-looking file where ggml scans would load
+          # unchecked.
+          check_case unlisted-gpu-file auto 'gpu/vulkan/libggml-vulkan-extra.so is not listed' \
+            cp "$gpu" "$copy/gpu/vulkan/libggml-vulkan-extra.so"
+          # The module's $ORIGIN RUNPATH would resolve a planted loader from
+          # its own directory; the manifest allows nothing unlisted there.
+          check_case planted-vulkan-loader auto 'gpu/vulkan/libvulkan.so.1 is not listed' \
+            cp "$copy/libggml.so.0" "$copy/gpu/vulkan/libvulkan.so.1"
+          check_case missing-manifest auto 'bundle.json is missing' rm "$copy/bundle.json"
+          check_case missing-manifest-cpu-mode cpu 'bundle.json is missing' rm "$copy/bundle.json"
+          # backend gpu checks the GPU module exactly like auto.
+          check_case corrupt-gpu-module-gpu-mode gpu 'gpu/vulkan/libggml-vulkan.so does not match its SHA-256' \
+            flip "$gpu" 0
+          # backend cpu never loads the GPU module, so it is not checked.
+          check_case corrupt-gpu-module-cpu-mode cpu '' flip "$gpu" 0
+          jq -e '.result.gpu_module == "not_requested"' case.json > /dev/null
+          # Without the optional GPU module: auto plans the CPU, still verified.
+          check_case absent-gpu-module auto '' rm -r "$copy/gpu"
+          jq -e '.result.gpu_module == "absent" and .result.bundle == "verified"
+            and .result.fallback_reason == "gpu_module_absent"' case.json > /dev/null
+          rm -rf "$copy"
+
+      - name: Cache Whisper tiny Q8_0 model
+        id: cache-model
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.MODEL_DIR }}
+          key: whisper-tiny-q8_0-linux-vulkan-${{ env.MODEL_SHA256 }}
+
+      - name: Download and verify model
+        if: steps.cache-model.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$MODEL_DIR"
+          curl -L --fail -o "$MODEL_DIR/whisper-tiny-Q8_0.gguf" "$MODEL_URL"
+          echo "$MODEL_SHA256  $MODEL_DIR/whisper-tiny-Q8_0.gguf" | sha256sum -c -
+
+      - name: Verify cached model
+        if: steps.cache-model.outputs.cache-hit == 'true'
+        run: echo "$MODEL_SHA256  $MODEL_DIR/whisper-tiny-Q8_0.gguf" | sha256sum -c -
+
+      - name: Smoke test the staged bundle with tiny model (no Vulkan device; backend cpu, auto, gpu)
+        run: |
+          cd "$RUNNER_TEMP"
+          export VK_DRIVER_FILES="$RUNNER_TEMP/no-vulkan-driver/none.json"
+          export VK_ICD_FILENAMES="$VK_DRIVER_FILES"
+          bin="$STAGE/pumice-transcribe"
+          model="$MODEL_DIR/whisper-tiny-Q8_0.gguf"
+          fixtures="$GITHUB_WORKSPACE/crates/transcription/tests/fixtures"
+          echo '### Compute snapshots (hosted runner, no GPU)' >> "$GITHUB_STEP_SUMMARY"
+          for run in sample-pt.wav:auto:gpu_unavailable chrome-mediarecorder.webm:auto:gpu_unavailable \
+            sample-pt.wav:cpu:; do
+            IFS=: read -r fixture mode reason <<< "$run"
+            "$bin" file "$fixtures/$fixture" --model-file "$model" --backend "$mode" --json > smoke.json
+            python3 - smoke.json "$fixture" "$mode" "$reason" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          import re
+          import sys
+
+          path, fixture, mode, reason = sys.argv[1:]
+          data = json.load(open(path))
+          assert data["schema_version"] == 1 and data["ok"] is True, data
+          assert data["result"]["language"] == "pt" and data["result"]["text"], data
+          compute = data["result"]["compute"]
+          assert compute["requested"] == mode and compute["backend"] == "cpu", data
+          assert compute["fallback_reason"] == (reason or None), data
+          assert re.fullmatch(r"[a-z0-9]+", compute["cpu_variant"]), data
+          device = compute["device"]
+          assert device["name"] and device["description"] == device["description"].strip(), data
+          print(f"- `{mode}` {fixture}: `{json.dumps(compute)}`, {data['result']['transcription_ms']} ms")
+          PY
+          done
+          # backend gpu never falls back: the fixed error, before any audio
+          # is transcribed.
+          code=0
+          "$bin" file "$fixtures/sample-pt.wav" --model-file "$model" --backend gpu --json > gpu.json 2> /dev/null || code=$?
+          test "$code" -eq 1
+          jq -e '.ok == false and .error.code == "gpu_unavailable" and (.error.message | contains("backend: cpu"))' gpu.json
+          echo "- \`gpu\`: $(jq -r '.error.code + ": " + .error.message' gpu.json)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Ubuntu 22.04 without a Vulkan loader (container)
+        run: |
+          # The plain image has glibc 2.35 and the C++ runtime but no Vulkan
+          # loader: the GPU module cannot load and is skipped, so auto runs
+          # on the CPU and gpu refuses.
+          out="$RUNNER_TEMP/floor"
+          mkdir -p "$out"
+          docker run --rm --network none \
+            -v "$STAGE:/opt/pumice:ro" -v "$MODEL_DIR:/models:ro" \
+            -v "$GITHUB_WORKSPACE/crates/transcription/tests/fixtures:/fixtures:ro" \
+            -v "$out:/out" -w /tmp "$FLOOR_IMAGE" bash -c '
+              set -eu
+              . /etc/os-release
+              echo "$PRETTY_NAME; $(ldd --version | head -n 1)"
+              if ldconfig -p | grep -q libvulkan; then
+                echo "error: the image has a Vulkan loader" >&2
+                exit 1
+              fi
+              ldd /opt/pumice/gpu/vulkan/libggml-vulkan.so | grep "libvulkan.so.1 => not found"
+              if ldd /opt/pumice/pumice-transcribe | grep "not found"; then exit 1; fi
+              for mode in cpu auto gpu; do
+                /opt/pumice/pumice-transcribe backends --backend "$mode" --json > "/out/backends-$mode.json"
+              done
+              /opt/pumice/pumice-transcribe file /fixtures/sample-pt.wav \
+                --model-file /models/whisper-tiny-Q8_0.gguf --backend auto --json > /out/file-auto.json
+              code=0
+              /opt/pumice/pumice-transcribe file /fixtures/sample-pt.wav \
+                --model-file /models/whisper-tiny-Q8_0.gguf --backend gpu --json > /out/file-gpu.json || code=$?
+              echo "$code" > /out/file-gpu.code
+            '
+          python3 - "$out" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          out = pathlib.Path(sys.argv[1])
+          for mode in ("cpu", "auto", "gpu"):
+              r = json.loads((out / f"backends-{mode}.json").read_text())["result"]
+              assert r["bundle"] == "verified" and r["gpu_devices"] == 0, r
+              assert r["gpu_module"] == ("not_requested" if mode == "cpu" else "scanned"), r
+              assert r["fallback_reason"] == ("gpu_unavailable" if mode == "auto" else None), r
+          data = json.loads((out / "file-auto.json").read_text())
+          assert data["ok"] is True and data["result"]["language"] == "pt" and data["result"]["text"], data
+          compute = data["result"]["compute"]
+          assert compute["backend"] == "cpu" and compute["fallback_reason"] == "gpu_unavailable", data
+          assert (out / "file-gpu.code").read_text().strip() == "1"
+          gpu = json.loads((out / "file-gpu.json").read_text())
+          assert gpu["ok"] is False and gpu["error"]["code"] == "gpu_unavailable", gpu
+          print("no Vulkan loader ok: " + json.dumps(compute))
+          PY
+
+      - name: Software Vulkan device (Mesa lavapipe; auto stays on the CPU, gpu uses it)
+        timeout-minutes: 20
+        run: |
+          . "$RUNNER_TEMP/vulkan-checks.sh"
+          cd "$RUNNER_TEMP"
+          # Only Mesa's software driver.
+          icd="$(ls /usr/share/vulkan/icd.d/lvp_icd.*.json | head -n 1)"
+          export VK_DRIVER_FILES="$icd"
+          export VK_ICD_FILENAMES="$icd"
+          # ggml leaves CPU-type Vulkan devices out by default: with only
+          # software Vulkan, auto stays on the CPU.
+          unset GGML_VK_VISIBLE_DEVICES
+          backends lavapipe-excluded auto
+          expect lavapipe-excluded "r['gpu_devices'] == 0" "r['fallback_reason'] == 'gpu_unavailable'"
+          # Forced for these processes only. ggml then reports lavapipe as a
+          # `gpu`, but it has no PCI bus id: auto must still stay on the CPU
+          # (p14.5-linux-vulkan/D1), while gpu must really run on Vulkan on
+          # lavapipe; a gpu run that used the CPU does not count.
+          export GGML_VK_VISIBLE_DEVICES=0
+          backends lavapipe auto
+          expect lavapipe "r['gpu_devices'] == 1" "r['fallback_reason'] == 'gpu_software_only'" \
+            "[d['gpu_class'] for d in r['devices'] if d['kind'] == 'vulkan'] == ['software']"
+          backends lavapipe-gpu gpu
+          expect lavapipe-gpu "r['gpu_devices'] == 1" "r['fallback_reason'] is None"
+          timeout 900 "$STAGE/pumice-transcribe" file \
+            "$GITHUB_WORKSPACE/crates/transcription/tests/fixtures/sample-pt.wav" \
+            --model-file "$MODEL_DIR/whisper-tiny-Q8_0.gguf" --backend auto --json > lavapipe-auto.json
+          python3 - lavapipe-auto.json <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          import sys
+
+          data = json.load(open(sys.argv[1]))
+          assert data["ok"] is True and data["result"]["text"], data
+          compute = data["result"]["compute"]
+          assert compute["requested"] == "auto" and compute["backend"] == "cpu", data
+          assert compute["fallback_reason"] == "gpu_software_only", data
+          print(f"- lavapipe forced, `auto`: `{json.dumps(compute)}`")
+          PY
+          timeout 900 "$STAGE/pumice-transcribe" file \
+            "$GITHUB_WORKSPACE/crates/transcription/tests/fixtures/sample-pt.wav" \
+            --model-file "$MODEL_DIR/whisper-tiny-Q8_0.gguf" --backend gpu --json > lavapipe.json
+          python3 - lavapipe.json <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          import sys
+
+          data = json.load(open(sys.argv[1]))
+          assert data["ok"] is True, data
+          assert data["result"]["language"] == "pt" and data["result"]["text"], data
+          compute = data["result"]["compute"]
+          assert compute["requested"] == "gpu" and compute["backend"] == "vulkan", data
+          assert "llvmpipe" in compute["device"]["description"].lower(), data
+          assert compute["fallback_reason"] is None, data
+          print(f"- lavapipe `gpu`: `{json.dumps(compute)}`, {data['result']['transcription_ms']} ms")
+          PY
+
+      # Artifacts drop file modes; a tarball keeps the executable bit.
+      - name: Pack the preview bundle
+        run: |
+          mkdir -p "$RUNNER_TEMP/artifact"
+          tar -C "$(dirname "$STAGE")" --owner=0 --group=0 --numeric-owner \
+            --transform 's,^stage,pumice-transcribe-linux-x64-vulkan-preview,' \
+            -czf "$RUNNER_TEMP/artifact/pumice-transcribe-linux-x64-vulkan-preview.tar.gz" stage
+          cd "$RUNNER_TEMP/artifact"
+          sha256sum pumice-transcribe-linux-x64-vulkan-preview.tar.gz | tee SHA256SUMS
+          ls -l
+
+      - name: Upload the preview bundle
+        uses: actions/upload-artifact@v5
+        with:
+          name: pumice-transcribe-linux-x64-vulkan-preview
+          path: ${{ runner.temp }}/artifact
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
