@@ -13,6 +13,9 @@ jobs:
   build:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # About 3x the slowest recent job (~10 min on Windows), so a hung test
+    # fails the run instead of holding a runner for hours.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -35,7 +38,9 @@ jobs:
 
       # Tests only ever run the fake CLI (`pumice-test-cli`); no real AI CLI
       # is installed on the runners, so a test that reached one would fail.
+      # About 4x the slowest recent step (~2.5 min on Windows).
       - name: cargo test
+        timeout-minutes: 10
         run: cargo test --workspace --locked
 
       # Only the product executable; the fake CLI is a test-only binary.
