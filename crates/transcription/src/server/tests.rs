@@ -799,27 +799,31 @@ async fn serve_binds_loopback_and_drains_on_shutdown() {
 
 #[tokio::test]
 async fn total_deadline_counts_from_arrival_including_the_upload() {
+    // The upload stalls for half the total budget. Counted from the
+    // arrival, the deadline comes about 1 s after the upload ends (less if
+    // the stall overran); counted from the end of the upload, at least 2 s
+    // after it. The 1.5 s bound between them leaves 0.5 s of slack on each
+    // side, and the stall ends 1 s before the upload limit would apply.
     let engine = TestEngine::gated("late");
     let limits = Limits {
         upload_deadline: Duration::from_secs(5),
-        total_deadline: Duration::from_millis(400),
+        total_deadline: Duration::from_millis(2_000),
     };
     let state = state_with(Arc::clone(&engine), limits);
     let body = basic_body(&wav(1.0));
     let (stream, tx) = hanging_body(&body[..10]);
-    let started = Instant::now();
     let request = tokio::spawn(send_owned(state.clone(), post(stream)));
-    time::sleep(Duration::from_millis(300)).await;
+    time::sleep(Duration::from_millis(1_000)).await;
     tx.send(Bytes::copy_from_slice(&body[10..])).unwrap();
     drop(tx);
+    let uploaded = Instant::now();
 
     let response = request.await.unwrap();
     error(response, StatusCode::GATEWAY_TIMEOUT).await;
-    // Counted from the end of the upload it would take at least 700 ms.
     assert!(
-        started.elapsed() < Duration::from_millis(650),
-        "{:?}",
-        started.elapsed()
+        uploaded.elapsed() < Duration::from_millis(1_500),
+        "the deadline counted from the end of the upload: {:?}",
+        uploaded.elapsed()
     );
     engine.release();
     wait_until(|| state.admission.available_permits() == 1).await;
