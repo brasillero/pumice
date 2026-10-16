@@ -1,8 +1,8 @@
 //! `pumice serve`'s loopback frontend (p13.1-flow-seam/D1, D2, D7, D8).
 //!
-//! Routes: `GET /health`, `GET /ready`, `GET /pumice/v1/status` and
-//! `GET /pumice/v1/flows`; no OpenAI `/v1/*` routes (D2). The dictation
-//! route arrives with P13.4.
+//! Routes: `GET /health`, `GET /ready`, `GET /pumice/v1/status`,
+//! `GET /pumice/v1/flows` and `POST /pumice/v1/dictations` (`dictation`);
+//! no OpenAI `/v1/*` routes (D2).
 //!
 //! Before anything else, every request passes the origin guard (D8): the
 //! `Host` must be the literal `127.0.0.1:<port>`, a present `Origin` must
@@ -17,12 +17,22 @@
 //! [`HEADER_READ_TIMEOUT`] and [`MAX_HEADER_BYTES`]. Past the head, the
 //! route's [`RoutePolicy`] bounds the rest of the connection: the metadata
 //! routes (and every rejection) use [`METADATA`], a whole connection within
-//! 10 s and answers of at most 128 KiB; a long-running route (P13.4's
-//! dictation) brings its own policy instead. Metadata handlers only read
-//! in-memory snapshots: they never wait for the child, the network, a CLI
-//! or a model.
+//! 10 s and answers of at most 128 KiB; the dictation route brings its own
+//! policy ([`dictation::policy`]). Metadata handlers only read in-memory
+//! snapshots: they never wait for the child, the network, a CLI, a model or
+//! the dictations' work permit.
+//!
+//! A client that closes its connection while a dictation runs ends the
+//! connection (hyper notices the end of input while the answer is
+//! pending), which drops the handler and cancels the operation
+//! (`dictation`). A client must therefore not half-close its side while it
+//! waits for the answer. When the service stops, running dictations are
+//! cancelled and their connections get a bounded drain to send their
+//! answers ([`DRAIN_LIMIT`]).
 
 use std::convert::Infallible;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
@@ -38,8 +48,10 @@ use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use crate::orchestrator::cancel::{self, CancelGuard};
+use crate::orchestrator::cancel::{self, CancelGuard, CancelHandle, CancelReason};
 use crate::orchestrator::result::{MODULE, SCHEMA_VERSION};
+use crate::orchestrator::serve::dictation::{self, Admission, Dictations};
+use crate::orchestrator::serve::output::Reporter;
 use crate::orchestrator::serve::supervisor::{ChildState, SupervisorHandle};
 
 pub const MAX_CONNECTIONS: usize = 64;
@@ -68,6 +80,12 @@ pub const METADATA: RoutePolicy = RoutePolicy {
 /// A failed `accept` (for example, out of file descriptors) is retried
 /// after this pause instead of spinning.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
+/// After the stop, open connections and a running dictation's cleanup get
+/// this long to finish (a cancelled dictation still answers 503 with its
+/// transcript), then the rest is dropped.
+pub const DRAIN_LIMIT: Duration = Duration::from_millis(2_500);
+/// The dictation route.
+pub const DICTATIONS: &str = "/pumice/v1/dictations";
 
 /// The service's own state, as `/ready` and status report it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -89,10 +107,16 @@ pub struct FlowInfo {
 }
 
 /// Test seam, never set by `pumice serve` itself: called with the path of
-/// every request that passed the guard, before it is routed, so in-process
-/// tests can inject a panic into a request handler.
+/// every request that passed the guard, before it is routed, and with
+/// `dictation:<stage>` when a dictation starts a stage, so in-process tests
+/// can inject a panic into a request handler or a dictation's task.
 #[doc(hidden)]
 pub type RequestHook = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// Test seam, never set by `pumice serve` itself: when it returns true, a
+/// dictation's cleanup counts as unconfirmed.
+#[doc(hidden)]
+pub type CleanupHook = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// What the routes read.
 pub struct Frontend {
@@ -101,7 +125,15 @@ pub struct Frontend {
     supervisor: SupervisorHandle,
     model: String,
     flows: Vec<FlowInfo>,
+    dictations: Option<Arc<Dictations>>,
+    admission: Admission,
+    reporter: Reporter,
+    /// Fired when the service stops: running dictations are cancelled.
+    shutdown: (CancelHandle, CancelGuard),
+    /// Set when a dictation's task panicked (a core failure).
+    failed: watch::Sender<bool>,
     request_hook: Option<RequestHook>,
+    cleanup_hook: Option<CleanupHook>,
 }
 
 impl Frontend {
@@ -117,13 +149,80 @@ impl Frontend {
             supervisor,
             model,
             flows,
+            dictations: None,
+            admission: Admission::default(),
+            reporter: Reporter::silent(),
+            shutdown: cancel::context(),
+            failed: watch::channel(false).0,
             request_hook: None,
+            cleanup_hook: None,
         }
+    }
+
+    /// Serves `POST /pumice/v1/dictations` (404 without it).
+    pub fn set_dictations(&mut self, dictations: Dictations) {
+        self.dictations = Some(Arc::new(dictations));
+    }
+
+    /// Where dictations report their metadata-only events.
+    pub fn set_reporter(&mut self, reporter: Reporter) {
+        self.reporter = reporter;
     }
 
     #[doc(hidden)]
     pub fn set_request_hook(&mut self, hook: RequestHook) {
         self.request_hook = Some(hook);
+    }
+
+    #[doc(hidden)]
+    pub fn set_cleanup_hook(&mut self, hook: CleanupHook) {
+        self.cleanup_hook = Some(hook);
+    }
+
+    pub(crate) fn dictations(&self) -> Option<Arc<Dictations>> {
+        self.dictations.clone()
+    }
+
+    pub(crate) fn admission(&self) -> &Admission {
+        &self.admission
+    }
+
+    pub(crate) fn reporter(&self) -> Reporter {
+        self.reporter.clone()
+    }
+
+    pub(crate) fn supervisor(&self) -> &SupervisorHandle {
+        &self.supervisor
+    }
+
+    pub(crate) fn stopping(&self) -> bool {
+        self.state() == ServiceState::Stopping
+    }
+
+    pub(crate) fn shutdown_guard(&self) -> CancelGuard {
+        self.shutdown.1.clone()
+    }
+
+    /// Stops admission and cancels a running dictation: the service is
+    /// stopping. Idempotent.
+    pub fn begin_shutdown(&self) {
+        self.set_state(ServiceState::Stopping);
+        self.shutdown.0.cancel(CancelReason::Shutdown);
+    }
+
+    /// A dictation's task panicked: [`serve`] stops at once.
+    pub(crate) fn core_failed(&self) {
+        self.failed.send_replace(true);
+    }
+
+    pub(crate) fn hook(&self, stage: &str) {
+        if let Some(hook) = &self.request_hook {
+            hook(&format!("dictation:{stage}"));
+        }
+    }
+
+    pub(crate) fn cleanup_unconfirmed(&self) -> bool {
+        self.cleanup_hook.as_ref().is_some_and(|hook| hook())
     }
 
     pub fn set_state(&self, state: ServiceState) {
@@ -139,11 +238,14 @@ impl Frontend {
     }
 
     /// Why the service is not ready, or `None` when it is.
-    fn unavailable(&self) -> Option<&'static str> {
+    pub(crate) fn unavailable(&self) -> Option<&'static str> {
         match self.state() {
             ServiceState::Stopping => return Some("shutting_down"),
             ServiceState::Starting => return Some("service_starting"),
             ServiceState::Running => {}
+        }
+        if self.admission.stopped() {
+            return Some("admission_stopped");
         }
         match self.supervisor.snapshot().state {
             ChildState::Ready => None,
@@ -158,10 +260,12 @@ impl Frontend {
 #[derive(Debug, PartialEq, Eq)]
 pub struct HandlerPanicked;
 
-/// Serves `listener` until `stop` fires, then stops accepting and drops
-/// every open connection. Never panics on client behavior; when a
-/// connection's task panics anyway, it stops the same way at once and
-/// returns [`HandlerPanicked`] for the service to shut down.
+/// Serves `listener` until `stop` fires, then stops accepting, cancels
+/// running dictations and gives open connections [`DRAIN_LIMIT`] to
+/// answer before dropping them. Never panics on client behavior; when a
+/// connection's or a dictation's task panics anyway, it drops every
+/// connection at once and returns [`HandlerPanicked`] for the service to
+/// shut down.
 pub async fn serve(
     listener: TcpListener,
     frontend: Arc<Frontend>,
@@ -169,11 +273,16 @@ pub async fn serve(
 ) -> Result<(), HandlerPanicked> {
     let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let mut connections = JoinSet::new();
+    let mut failed = frontend.failed.subscribe();
     let mut result = Ok(());
     loop {
         tokio::select! {
             biased;
             _ = cancel::cancelled(&mut stop) => break,
+            () = core_failure(&mut failed) => {
+                result = Err(HandlerPanicked);
+                break;
+            }
             Some(joined) = connections.join_next(), if !connections.is_empty() => {
                 if joined.is_err_and(|error| error.is_panic()) {
                     result = Err(HandlerPanicked);
@@ -199,24 +308,68 @@ pub async fn serve(
         }
     }
     drop(listener);
+    frontend.begin_shutdown();
+    if result.is_ok() {
+        // Cancelled dictations answer and clean up within the drain.
+        let deadline = Instant::now() + DRAIN_LIMIT;
+        loop {
+            tokio::select! {
+                biased;
+                () = core_failure(&mut failed) => {
+                    result = Err(HandlerPanicked);
+                    break;
+                }
+                joined = connections.join_next() => match joined {
+                    Some(Err(error)) if error.is_panic() => {
+                        result = Err(HandlerPanicked);
+                        break;
+                    }
+                    Some(_) => {}
+                    None => break,
+                },
+                () = tokio::time::sleep_until(deadline) => break,
+            }
+        }
+        if result.is_ok() {
+            let _ = frontend.admission.idle(deadline).await;
+        }
+    }
     connections.abort_all();
     while connections.join_next().await.is_some() {}
     result
 }
+
+/// Resolves once a dictation's task reported a panic.
+async fn core_failure(failed: &mut watch::Receiver<bool>) {
+    if failed.wait_for(|failed| *failed).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+type Answer = Pin<Box<dyn Future<Output = Result<Response<Full<Bytes>>, Infallible>> + Send>>;
 
 async fn serve_connection(stream: tokio::net::TcpStream, frontend: Arc<Frontend>) {
     let arrival = Instant::now();
     // The request's route publishes its policy as soon as it is chosen.
     let (routed, policy) = watch::channel(None);
     let service = hyper::service::service_fn(move |request: Request<hyper::body::Incoming>| {
-        let (policy, response) = answer(
+        let answer: Answer = match route(
             &frontend,
             request.method(),
             request.uri(),
             request.headers(),
-        );
-        routed.send_replace(Some(policy));
-        async move { Ok::<_, Infallible>(response) }
+        ) {
+            Routed::Answer(policy, response) => {
+                routed.send_replace(Some(policy));
+                Box::pin(async move { Ok(response) })
+            }
+            Routed::Dictation(policy) => {
+                routed.send_replace(Some(policy));
+                let frontend = Arc::clone(&frontend);
+                Box::pin(async move { Ok(dictation::handle(frontend, request, arrival).await) })
+            }
+        };
+        answer
     });
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder
@@ -259,18 +412,66 @@ async fn drive(
     }
 }
 
-/// The whole request handling: guard, route, answer. Synchronous: it reads
-/// snapshots only.
+/// The whole request handling of the snapshot routes: guard, route,
+/// answer. Synchronous: it reads snapshots only. The dictation route needs
+/// its connection ([`serve`]); here it answers 500.
 pub fn respond(
     frontend: &Frontend,
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
 ) -> Response<Full<Bytes>> {
-    answer(frontend, method, uri, headers).1
+    match route(frontend, method, uri, headers) {
+        Routed::Answer(_, response) => response,
+        Routed::Dictation(_) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "internal",
+            "This route needs a connection.",
+        ),
+    }
 }
 
-/// [`respond`], with the policy that bounds the rest of the connection.
+/// Where a request goes, with the policy that bounds the rest of its
+/// connection.
+enum Routed {
+    Answer(RoutePolicy, Response<Full<Bytes>>),
+    Dictation(RoutePolicy),
+}
+
+fn route(frontend: &Frontend, method: &Method, uri: &Uri, headers: &HeaderMap) -> Routed {
+    let dictations = match &frontend.dictations {
+        Some(dictations) if uri.path() == DICTATIONS => dictations,
+        // Everything else, and the guard's rejections, are snapshots.
+        _ => {
+            let (policy, response) = answer(frontend, method, uri, headers);
+            return Routed::Answer(policy, response);
+        }
+    };
+    if check_origin(frontend.port, uri, headers).is_err() {
+        let (policy, response) = answer(frontend, method, uri, headers);
+        return Routed::Answer(policy, response);
+    }
+    if let Some(hook) = &frontend.request_hook {
+        hook(uri.path());
+    }
+    if method != Method::POST {
+        let mut response = error(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "invalid_request_error",
+            "method_not_allowed",
+            "This route only accepts POST.",
+        );
+        response
+            .headers_mut()
+            .insert(header::ALLOW, HeaderValue::from_static("POST"));
+        return Routed::Answer(METADATA, response);
+    }
+    Routed::Dictation(dictations.policy())
+}
+
+/// The snapshot routes and every rejection, with the policy that bounds the
+/// rest of the connection.
 fn answer(
     frontend: &Frontend,
     method: &Method,
@@ -384,6 +585,9 @@ fn not_ready_message(code: &str) -> &'static str {
         "transcription_failed" => {
             "The transcription module failed and is not restarted; restart pumice serve."
         }
+        "admission_stopped" => {
+            "A cleanup could not be confirmed; dictations are stopped until pumice serve is restarted."
+        }
         _ => "The service is shutting down.",
     }
 }
@@ -410,6 +614,12 @@ fn status(frontend: &Frontend) -> Value {
             "last_failure": child.last_failure,
         },
         "flows": {"enabled": frontend.flows.len()},
+        "dictations": {
+            "served": frontend.dictations.is_some(),
+            "admission": frontend.admission.state(),
+            "active": frontend.admission.active(),
+            "stage": frontend.admission.stage(),
+        },
     })
 }
 
@@ -520,6 +730,12 @@ fn json_response(status: StatusCode, body: &Value) -> Response<Full<Bytes>> {
                 .to_vec(),
         ),
     };
+    json_bytes_response(status, bytes)
+}
+
+/// A JSON answer with the frontend's headers: `no-store`, `nosniff`, no
+/// CORS.
+pub(crate) fn json_bytes_response(status: StatusCode, bytes: Vec<u8>) -> Response<Full<Bytes>> {
     let mut response = Response::new(Full::new(Bytes::from(bytes)));
     *response.status_mut() = status;
     let headers = response.headers_mut();
@@ -830,6 +1046,12 @@ mod tests {
                     "last_failure": null,
                 },
                 "flows": {"enabled": 1},
+                "dictations": {
+                    "served": false,
+                    "admission": "open",
+                    "active": false,
+                    "stage": null,
+                },
             })
         );
         assert!(

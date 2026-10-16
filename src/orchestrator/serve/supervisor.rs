@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use pumice_relay::process::CleanupScope;
 use serde::Serialize;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::orchestrator::cancel::{self, CancelGuard, CancelHandle, CancelReason};
@@ -163,6 +163,8 @@ pub struct ChildSnapshot {
     /// The last failure's fixed code.
     pub last_failure: Option<&'static str>,
     pub port: Option<u16>,
+    /// The newest generation confirmed killed and reaped (0: none yet).
+    pub retired: u64,
 }
 
 impl ChildSnapshot {
@@ -175,6 +177,7 @@ impl ChildSnapshot {
             model_load_ms: None,
             last_failure: None,
             port: None,
+            retired: 0,
         }
     }
 }
@@ -195,6 +198,8 @@ enum Command {
 #[derive(Clone)]
 pub struct SupervisorHandle {
     shared: Arc<Mutex<ChildSnapshot>>,
+    /// Woken on every snapshot change.
+    changed: Arc<Notify>,
     commands: mpsc::Sender<Command>,
 }
 
@@ -230,6 +235,28 @@ impl SupervisorHandle {
         }
         self.commands.try_send(Command::Recycle(generation)).is_ok()
     }
+
+    /// Waits until `generation` is gone: confirmed killed and reaped, or
+    /// owned by a supervisor that gave up on it (`failed`, `stopping`: its
+    /// own stop reaps it, and the service reports a cleanup failure).
+    /// False when `deadline` passed first.
+    pub async fn wait_retired(&self, generation: u64, deadline: Instant) -> bool {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let snapshot = self.snapshot();
+            if snapshot.retired >= generation
+                || matches!(snapshot.state, ChildState::Failed | ChildState::Stopping)
+            {
+                return true;
+            }
+            tokio::select! {
+                () = &mut changed => {}
+                () = tokio::time::sleep_until(deadline) => return false,
+            }
+        }
+    }
 }
 
 /// Why the initial startup failed.
@@ -253,12 +280,14 @@ pub struct Supervisor {
 /// Starts the supervisor: it spawns generation 1 at once.
 pub fn spawn(config: SupervisorConfig, reporter: Reporter) -> Supervisor {
     let shared = Arc::new(Mutex::new(ChildSnapshot::initial()));
+    let changed = Arc::new(Notify::new());
     let (commands, receiver) = mpsc::channel(4);
     let (initial_sender, initial) = oneshot::channel();
     let (stop, stop_guard) = cancel::context();
     let owner = Owner {
         config,
         shared: Arc::clone(&shared),
+        changed: Arc::clone(&changed),
         reporter,
         generation: 0,
         attempts: 0,
@@ -267,7 +296,11 @@ pub fn spawn(config: SupervisorConfig, reporter: Reporter) -> Supervisor {
     };
     let task = tokio::spawn(owner.run(receiver, stop_guard, initial_sender));
     Supervisor {
-        handle: SupervisorHandle { shared, commands },
+        handle: SupervisorHandle {
+            shared,
+            changed,
+            commands,
+        },
         initial: Some(initial),
         stop,
         task,
@@ -396,6 +429,7 @@ type ProbeFuture = Pin<Box<dyn Future<Output = Result<(), ProbeError>> + Send>>;
 struct Owner {
     config: SupervisorConfig,
     shared: Arc<Mutex<ChildSnapshot>>,
+    changed: Arc<Notify>,
     reporter: Reporter,
     generation: u64,
     /// Restarts used in the current episode.
@@ -415,6 +449,7 @@ impl Owner {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner()),
         );
+        self.changed.notify_waiters();
     }
 
     async fn run(
@@ -694,11 +729,15 @@ impl Owner {
         self.config
             .checkpoints
             .reach(Checkpoint::Retiring(generation.generation));
+        let number = generation.generation;
         match generation
             .kill_and_reap(self.config.timings.reap_limit)
             .await
         {
-            Ok(()) => true,
+            Ok(()) => {
+                self.update(|snapshot| snapshot.retired = snapshot.retired.max(number));
+                true
+            }
             Err(unreaped) => {
                 self.leftover = Some(unreaped);
                 self.enter_failed(code::CLEANUP_FAILED);
@@ -729,13 +768,17 @@ impl Owner {
             snapshot.port = None;
         });
         let timings = self.config.timings;
-        if let Err(unreaped) = generation
+        let number = generation.generation;
+        match generation
             .stop(timings.shutdown_grace, timings.reap_limit)
             .await
         {
-            // Dropped here: its kill-on-drop is the last defense.
-            drop(unreaped);
-            self.unclean = true;
+            Ok(()) => self.update(|snapshot| snapshot.retired = snapshot.retired.max(number)),
+            Err(unreaped) => {
+                // Dropped here: its kill-on-drop is the last defense.
+                drop(unreaped);
+                self.unclean = true;
+            }
         }
         self.reap_leftover().await && !self.unclean
     }
@@ -778,6 +821,7 @@ pub(crate) mod testing {
         }
         SupervisorHandle {
             shared: Arc::new(Mutex::new(snapshot)),
+            changed: Arc::new(Notify::new()),
             commands,
         }
     }
@@ -812,6 +856,7 @@ mod tests {
         let (commands, mut receiver) = mpsc::channel(4);
         let handle = SupervisorHandle {
             shared: Arc::clone(&shared),
+            changed: Arc::new(Notify::new()),
             commands,
         };
         assert!(!handle.recycle(1), "nothing is ready yet");

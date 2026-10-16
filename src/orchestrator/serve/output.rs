@@ -91,6 +91,7 @@ pub mod event {
     pub const CHILD_RESTARTING: &str = "child_restarting";
     pub const CHILD_RECYCLED: &str = "child_recycled";
     pub const TRANSCRIPTION_UNAVAILABLE: &str = "transcription_unavailable";
+    pub const ADMISSION_STOPPED: &str = "admission_stopped";
     pub const STOPPING: &str = "stopping";
     pub const STOPPED: &str = "stopped";
     pub const PANICKED: &str = "panicked";
@@ -135,6 +136,26 @@ impl Reporter {
                 .as_mut()
         {
             writer.emit_generation(event, generation, elapsed_ms, code);
+        }
+    }
+
+    /// One event of a dictation operation (`--json` only): metadata only,
+    /// under the dictation's own operation id.
+    pub fn operation_event(
+        &self,
+        operation_id: &str,
+        stage: Option<&'static str>,
+        event: &'static str,
+        elapsed_ms: Option<u64>,
+        code: Option<&'static str>,
+    ) {
+        if let Some(events) = &self.events
+            && let Some(writer) = events
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_mut()
+        {
+            writer.emit_for(operation_id, stage, event, elapsed_ms, code);
         }
     }
 
@@ -249,6 +270,14 @@ impl Reporter {
         self.event(event::CHILD_RESTARTING, None, Some(delay_ms), None);
         self.plain(format!(
             "pumice serve: restarting transcription in {delay_ms} ms (attempt {attempt} of {of})"
+        ));
+    }
+
+    /// Dictations are no longer admitted: a cleanup could not be confirmed.
+    pub fn admission_stopped(&self, code: &'static str) {
+        self.event(event::ADMISSION_STOPPED, None, None, Some(code));
+        self.plain(format!(
+            "pumice serve: dictations stopped ({code}); restart pumice serve"
         ));
     }
 
