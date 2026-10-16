@@ -5,9 +5,9 @@
 //! against it. A damaged or mixed-version install then fails as an
 //! installation error instead of quietly running without its GPU module.
 //!
-//! Written by `scripts/build-windows-vulkan.ps1` and
-//! `scripts/build-linux-vulkan.sh`; startup requires it on Windows and in
-//! every `vulkan` build. The plain Linux `cpu-variants` stage has none; there
+//! Written by `scripts/build-windows-vulkan.ps1`,
+//! `scripts/build-linux-vulkan.sh` and `scripts/build-macos-metal.sh`;
+//! startup requires it on Windows and in every `vulkan` or `metal` build. The plain Linux `cpu-variants` stage has none; there
 //! it is checked only when present. The manifest guards against corruption
 //! and mismatched files, not against an attacker who can write to the
 //! install directory: that directory is trusted, as it already is for the
@@ -29,6 +29,16 @@ pub const FILE_NAME: &str = "bundle.json";
 
 const SCHEMA_VERSION: u32 = 1;
 const PRODUCT: &str = "pumice-transcribe";
+
+/// Unlisted names a scanned module directory may still hold: macOS Finder
+/// writes `.DS_Store` into every folder it shows. Neither ggml (it loads only
+/// `libggml-*` names) nor dyld (the staged modules resolve `@rpath/` from the
+/// bundle root, never their own directory) ever opens it.
+const IGNORED_NAMES: &[&str] = if cfg!(target_os = "macos") {
+    &[".DS_Store"]
+} else {
+    &[]
+};
 
 /// Which build a manifest must describe.
 #[derive(Debug, Clone, Copy)]
@@ -262,9 +272,10 @@ impl Manifest {
             })?;
             let name = item.file_name();
             let known = name.to_str().is_some_and(|name| {
-                listed
-                    .iter()
-                    .any(|entry| &entry.path[prefix.len()..] == name)
+                IGNORED_NAMES.contains(&name)
+                    || listed
+                        .iter()
+                        .any(|entry| &entry.path[prefix.len()..] == name)
             });
             if !known {
                 return Err(BundleError::NotListed {
@@ -533,6 +544,32 @@ mod tests {
         // A subdirectory counts too: nothing unlisted at all.
         std::fs::remove_file(dir.join("ggml-vulkan-extra.dll")).unwrap();
         std::fs::create_dir(dir.join("extra")).unwrap();
+        assert!(matches!(
+            manifest.verify_dir(temp.path(), "gpu/vulkan"),
+            Err(BundleError::NotListed { .. })
+        ));
+    }
+
+    #[test]
+    fn finder_metadata_in_a_scanned_dir_is_ignored_on_macos_only() {
+        let (temp, manifest) = stage(BUNDLE);
+        let manifest = parse(&manifest).unwrap();
+        let dir = temp.path().join("gpu").join("vulkan");
+        std::fs::write(dir.join(".DS_Store"), b"Bud1").unwrap();
+        let verified = manifest.verify_dir(temp.path(), "gpu/vulkan");
+        if cfg!(target_os = "macos") {
+            assert!(verified.is_ok(), "{verified:?}");
+        } else {
+            assert_eq!(
+                verified,
+                Err(BundleError::NotListed {
+                    path: "gpu/vulkan/.DS_Store".into()
+                })
+            );
+        }
+        // Only that exact name.
+        std::fs::remove_file(dir.join(".DS_Store")).unwrap();
+        std::fs::write(dir.join("._ggml-vulkan.dll"), b"").unwrap();
         assert!(matches!(
             manifest.verify_dir(temp.path(), "gpu/vulkan"),
             Err(BundleError::NotListed { .. })

@@ -101,7 +101,26 @@ pub mod cpp {
     };
 
     /// The backend a `gpu` request loads with: the bundle's GPU module.
-    const GPU_BACKEND: Backend = Backend::Vulkan;
+    const GPU_BACKEND: Backend = if cfg!(pumice_metal) {
+        Backend::Metal
+    } else {
+        Backend::Vulkan
+    };
+
+    /// The engine's device kind for [`GPU_BACKEND`]'s devices.
+    const GPU_KIND: &str = if cfg!(pumice_metal) {
+        "metal"
+    } else {
+        "vulkan"
+    };
+
+    /// The GPU backend this build stages a module for, as `backends --json`
+    /// reports it (`gpu_build`); `None` without one.
+    const GPU_BUILD: Option<&str> = if cfg!(pumice_metal) || cfg!(pumice_vulkan) {
+        Some(GPU_KIND)
+    } else {
+        None
+    };
 
     pub struct TranscribeCppEngine {
         model: Model,
@@ -178,7 +197,7 @@ pub mod cpp {
     fn registered_gpus() -> Vec<(transcribe_cpp::Device, GpuClass)> {
         transcribe_cpp::devices()
             .into_iter()
-            .filter(|device| device.kind == "vulkan")
+            .filter(|device| device.kind == GPU_KIND)
             .map(|device| {
                 let class = GpuClass::of(
                     &device_type(&device),
@@ -387,7 +406,7 @@ pub mod cpp {
         // No /proc/self/maps here: report the module startup initialized
         // from. Its directory holds that one CPU module only, and
         // initialization fails unless it registered.
-        #[cfg(all(pumice_dynamic_backends, windows))]
+        #[cfg(all(pumice_dynamic_backends, not(target_os = "linux")))]
         if let Some(selection) = dynamic_backends::selection() {
             return Some(selection.variant.to_string());
         }
@@ -422,7 +441,7 @@ pub mod cpp {
             .into_iter()
             .map(|device| {
                 let device_type = device_type(&device);
-                let gpu_class = (device.kind == "vulkan").then(|| {
+                let gpu_class = (device.kind == GPU_KIND).then(|| {
                     GpuClass::of(
                         &device_type,
                         device.device_id.as_deref(),
@@ -443,7 +462,7 @@ pub mod cpp {
             .collect();
         Ok(serde_json::json!({
             "requested": mode,
-            "gpu_build": cfg!(pumice_vulkan).then_some("vulkan"),
+            "gpu_build": GPU_BUILD,
             "bundle": bundle,
             "cpu_variant": loaded_cpu_variant(),
             "gpu_module": gpu.module_state(),
@@ -540,7 +559,8 @@ pub mod cpp {
     }
 
     /// Runtime CPU-variant backend initialization (`cpu-variants` feature,
-    /// Linux and x86-64 Windows). The variant is chosen here, not by ggml: ggml's pinned
+    /// Linux and x86-64 Windows; Apple Silicon with `metal`). The variant is
+    /// chosen here, not by ggml: ggml's pinned
     /// scoring reads CPUID without checking OS-enabled state (the FIXME in
     /// transcribe-cpp-sys ggml/src/ggml-cpu/arch/x86/cpu-feats.cpp), so a CPU
     /// or guest advertising AVX/AVX-512 with the state disabled could win
@@ -563,6 +583,12 @@ pub mod cpp {
     /// same backend mask (D2 of p14.1-windows-vulkan). It is scanned only
     /// when the backend mode allows a GPU (`auto`, `gpu`); in `cpu` mode it
     /// is neither checked nor loaded.
+    ///
+    /// The `metal` build (Apple Silicon, experimental) has no x86 chooser:
+    /// ggml builds one portable arm64 CPU module there, `libggml-cpu.so`
+    /// without a variant suffix or score function, staged as
+    /// `<exe dir>/cpu/arm64/`. Its GPU module, `gpu/metal/libggml-metal.so`,
+    /// is scanned the same way with the CPU|METAL mask.
     #[cfg(pumice_dynamic_backends)]
     mod dynamic_backends {
         use crate::bundle::{BundleError, Expected, Manifest};
@@ -909,6 +935,8 @@ pub mod cpp {
         /// The rebuild hint for this build's staging script.
         const STAGER_HINT: &str = if cfg!(windows) {
             "rebuild the bundle with crates/transcription/scripts/build-windows-vulkan.ps1"
+        } else if cfg!(pumice_metal) {
+            "rebuild the bundle with crates/transcription/scripts/build-macos-metal.sh"
         } else if cfg!(pumice_vulkan) {
             "rebuild the bundle with crates/transcription/scripts/build-linux-vulkan.sh"
         } else {
@@ -1001,12 +1029,26 @@ pub mod cpp {
             }
         }
 
+        /// The one CPU module of a build without x86 variants: its
+        /// directory name under `cpu/` and the variant `cpu_variant`
+        /// reports. `None` where the x86 chooser picks among variants.
+        const PORTABLE_CPU_MODULE: Option<&str> = if cfg!(pumice_metal) {
+            Some("arm64")
+        } else {
+            None
+        };
+
         /// The file name ggml's loader matches for one CPU variant:
         /// `libggml-cpu-<variant>.so` on Linux, `ggml-cpu-<variant>.dll` on
-        /// Windows.
+        /// Windows. The portable module has no variant suffix
+        /// (`libggml-cpu.so`): it exports no `ggml_backend_score`, so ggml
+        /// only loads it under the plain backend name, never as a suffixed
+        /// variant.
         fn module_file_name(variant: &str) -> String {
             if cfg!(windows) {
                 format!("ggml-cpu-{variant}.dll")
+            } else if PORTABLE_CPU_MODULE == Some(variant) {
+                "libggml-cpu.so".to_string()
             } else {
                 format!("libggml-cpu-{variant}.so")
             }
@@ -1019,6 +1061,17 @@ pub mod cpp {
                 .join("cpu")
                 .join(variant)
                 .join(module_file_name(variant))
+        }
+
+        /// The staged directory of the portable CPU module, if its module is
+        /// staged: there is nothing to fall back to.
+        fn portable_module_dir(
+            exe_dir: &Path,
+            variant: &'static str,
+        ) -> Option<(&'static str, PathBuf)> {
+            variant_module_file(exe_dir, variant)
+                .is_file()
+                .then(|| (variant, exe_dir.join("cpu").join(variant)))
         }
 
         /// The staged module directory to initialize backends from: the
@@ -1048,30 +1101,49 @@ pub mod cpp {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub enum GpuDir {
             /// This build has no GPU module (`cpu-variants` without
-            /// `vulkan`, or a target without one).
+            /// `vulkan` or `metal`, or a target without one).
             NotBuilt,
             /// `cpu` mode: not looked at, not checked, not loaded.
             NotRequested,
-            /// No `gpu/vulkan/` module is staged next to the executable.
+            /// No GPU module is staged next to the executable.
             Absent,
             /// Scanned with the process's backend mask.
             Scanned,
         }
 
-        /// The staged Vulkan module: `<exe dir>/gpu/vulkan/ggml-vulkan.dll`
-        /// on Windows, `<exe dir>/gpu/vulkan/libggml-vulkan.so` on Linux.
-        fn gpu_module_file(exe_dir: &Path) -> PathBuf {
-            let file = if cfg!(windows) {
-                "ggml-vulkan.dll"
-            } else {
-                "libggml-vulkan.so"
-            };
-            exe_dir.join("gpu").join("vulkan").join(file)
-        }
+        /// Whether this build stages a GPU module.
+        const GPU_BUILT: bool = cfg!(pumice_vulkan) || cfg!(pumice_metal);
+
+        /// The GPU backend's directory under `gpu/` (and ggml's module name).
+        const GPU_NAME: &str = super::GPU_KIND;
+
+        /// The GPU backend's name in status lines.
+        const GPU_LABEL: &str = if cfg!(pumice_metal) {
+            "Metal"
+        } else {
+            "Vulkan"
+        };
 
         /// The GPU module directory, relative to the executable, as
         /// `bundle.json` and the status lines name it.
-        const GPU_DIR: &str = "gpu/vulkan";
+        const GPU_DIR: &str = if cfg!(pumice_metal) {
+            "gpu/metal"
+        } else {
+            "gpu/vulkan"
+        };
+
+        /// The staged GPU module: `<exe dir>/gpu/vulkan/ggml-vulkan.dll` on
+        /// Windows, `<exe dir>/gpu/vulkan/libggml-vulkan.so` on Linux,
+        /// `<exe dir>/gpu/metal/libggml-metal.so` on Apple Silicon (a CMake
+        /// MODULE is `.so` there too, the extension ggml's loader scans).
+        fn gpu_module_file(exe_dir: &Path) -> PathBuf {
+            let file = if cfg!(windows) {
+                format!("ggml-{GPU_NAME}.dll")
+            } else {
+                format!("libggml-{GPU_NAME}.so")
+            };
+            exe_dir.join("gpu").join(GPU_NAME).join(file)
+        }
 
         /// The GPU module directory to scan, or why none is scanned. In
         /// `cpu` mode (`wanted` false) the directory is not even looked at.
@@ -1086,7 +1158,7 @@ pub mod cpp {
             if !module.is_file() {
                 return Err(GpuDir::Absent);
             }
-            Ok(exe_dir.join("gpu").join("vulkan"))
+            Ok(exe_dir.join("gpu").join(GPU_NAME))
         }
 
         /// The one backend mask of this process. ggml fixes it at the first
@@ -1095,10 +1167,12 @@ pub mod cpp {
         /// Never `ALL`: its OTHER bit would also admit a `GGML_BACKEND_PATH`
         /// plugin.
         fn backend_mask(scan_gpu: bool) -> BackendMask {
-            if scan_gpu {
-                BackendMask::CPU | BackendMask::VULKAN
-            } else {
+            if !scan_gpu {
                 BackendMask::CPU
+            } else if cfg!(pumice_metal) {
+                BackendMask::CPU | BackendMask::METAL
+            } else {
+                BackendMask::CPU | BackendMask::VULKAN
             }
         }
 
@@ -1107,7 +1181,7 @@ pub mod cpp {
         /// always write one. The plain Linux `cpu-variants` stage has none
         /// (`build-cpu-variants.sh` writes no manifest), so there it is
         /// checked only when present and existing staged folders keep working.
-        const MANIFEST_REQUIRED: bool = cfg!(windows) || cfg!(pumice_vulkan);
+        const MANIFEST_REQUIRED: bool = cfg!(windows) || GPU_BUILT;
 
         /// What startup checked against `bundle.json`.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1133,11 +1207,11 @@ pub mod cpp {
             pub variant: &'static str,
             pub bundle: BundleCheck,
             pub gpu: GpuDir,
-            /// Vulkan devices registered after scanning the GPU module, by
+            /// GPU devices registered after scanning the GPU module, by
             /// class; `None` when it was not scanned. None registered: the
             /// module could not load (no Vulkan loader) or found no usable
             /// device.
-            pub vulkan_devices: Option<GpuDevices>,
+            pub gpu_devices: Option<GpuDevices>,
         }
 
         impl Selection {
@@ -1148,7 +1222,7 @@ pub mod cpp {
                     GpuDir::NotRequested => GpuAvailability::NotRequested,
                     GpuDir::Absent => GpuAvailability::ModuleAbsent,
                     GpuDir::Scanned => {
-                        GpuAvailability::Devices(self.vulkan_devices.unwrap_or_default())
+                        GpuAvailability::Devices(self.gpu_devices.unwrap_or_default())
                     }
                 }
             }
@@ -1229,13 +1303,16 @@ pub mod cpp {
             if manifest.is_none() && MANIFEST_REQUIRED {
                 return Err(bundle_error(BundleError::Missing));
             }
-            let chosen = choose_variant(TABLE, detect);
-            let (variant, module_dir) = select_module_dir(&exe_dir, TABLE, chosen, detect)
-                .ok_or_else(|| InitError::ModulesMissing {
-                    exe_dir: exe_dir.clone(),
-                    variant: chosen,
-                })?;
-            let gpu_plan = plan_gpu_dir(&exe_dir, cfg!(pumice_vulkan), scan_gpu);
+            let chosen = PORTABLE_CPU_MODULE.unwrap_or_else(|| choose_variant(TABLE, detect));
+            let staged = match PORTABLE_CPU_MODULE {
+                Some(portable) => portable_module_dir(&exe_dir, portable),
+                None => select_module_dir(&exe_dir, TABLE, chosen, detect),
+            };
+            let (variant, module_dir) = staged.ok_or_else(|| InitError::ModulesMissing {
+                exe_dir: exe_dir.clone(),
+                variant: chosen,
+            })?;
+            let gpu_plan = plan_gpu_dir(&exe_dir, GPU_BUILT, scan_gpu);
             let bundle = match &manifest {
                 Some(manifest) => {
                     let started = Instant::now();
@@ -1283,10 +1360,10 @@ pub mod cpp {
                     module_file_name(chosen)
                 );
             }
-            let (gpu, vulkan_devices) = match gpu_plan {
+            let (gpu, gpu_devices) = match gpu_plan {
                 Ok(gpu_dir) => {
                     // The CPU device is already registered, so this only
-                    // fails on a mask or path problem; a Vulkan module that
+                    // fails on a mask or path problem; a GPU module that
                     // cannot load or finds no device is skipped by ggml.
                     ::transcribe_cpp::init_backends_with(Some(&gpu_dir), mask).map_err(|_| {
                         InitError::GpuModuleRejected {
@@ -1297,24 +1374,25 @@ pub mod cpp {
                         .into_iter()
                         .map(|(_, class)| class)
                         .collect();
-                    let vulkan_devices = GpuDevices::count(&classes);
-                    if vulkan_devices.total() == 0 {
+                    let gpu_devices = GpuDevices::count(&classes);
+                    if gpu_devices.total() == 0 {
                         eprintln!(
-                            "cpu-variants: scanned {GPU_DIR}: no Vulkan device registered (no \
-                             Vulkan driver or device, or the module could not load); CPU only"
+                            "cpu-variants: scanned {GPU_DIR}: no {GPU_LABEL} device registered \
+                             (no {GPU_LABEL} driver or device, or the module could not load); \
+                             CPU only"
                         );
                     } else {
                         eprintln!(
-                            "cpu-variants: scanned {GPU_DIR}: {} Vulkan device(s) registered \
-                             ({} discrete, {} integrated, {} unverified, {} software)",
-                            vulkan_devices.total(),
-                            vulkan_devices.discrete,
-                            vulkan_devices.integrated,
-                            vulkan_devices.unverified,
-                            vulkan_devices.software
+                            "cpu-variants: scanned {GPU_DIR}: {} {GPU_LABEL} device(s) \
+                             registered ({} discrete, {} integrated, {} unverified, {} software)",
+                            gpu_devices.total(),
+                            gpu_devices.discrete,
+                            gpu_devices.integrated,
+                            gpu_devices.unverified,
+                            gpu_devices.software
                         );
                     }
-                    (GpuDir::Scanned, Some(vulkan_devices))
+                    (GpuDir::Scanned, Some(gpu_devices))
                 }
                 Err(GpuDir::NotRequested) => {
                     eprintln!("cpu-variants: {GPU_DIR} not scanned (backend cpu)");
@@ -1330,7 +1408,7 @@ pub mod cpp {
                 variant,
                 bundle,
                 gpu,
-                vulkan_devices,
+                gpu_devices,
             };
             let _ = SELECTION.set(selection);
             Ok(selection)
@@ -1819,13 +1897,13 @@ pub mod cpp {
                     Err(GpuDir::NotBuilt)
                 );
                 assert_eq!(plan_gpu_dir(temp.path(), true, true), Err(GpuDir::Absent));
-                // An empty gpu/vulkan/ directory does not count either.
-                std::fs::create_dir_all(temp.path().join("gpu").join("vulkan")).unwrap();
+                // An empty gpu/<backend>/ directory does not count either.
+                std::fs::create_dir_all(temp.path().join("gpu").join(GPU_NAME)).unwrap();
                 assert_eq!(plan_gpu_dir(temp.path(), true, true), Err(GpuDir::Absent));
                 stage_gpu_module(temp.path());
                 assert_eq!(
                     plan_gpu_dir(temp.path(), true, true),
-                    Ok(temp.path().join("gpu").join("vulkan"))
+                    Ok(temp.path().join("gpu").join(GPU_NAME))
                 );
                 // backend cpu: a staged module is never planned for a scan.
                 assert_eq!(
@@ -1855,11 +1933,11 @@ pub mod cpp {
 
             #[test]
             fn selections_map_to_the_policy_availability() {
-                let selection = |gpu, vulkan_devices| Selection {
+                let selection = |gpu, gpu_devices| Selection {
                     variant: "x64",
                     bundle: BundleCheck::Absent,
                     gpu,
-                    vulkan_devices,
+                    gpu_devices,
                 };
                 assert_eq!(
                     selection(GpuDir::NotBuilt, None).gpu_availability(),
@@ -1890,13 +1968,54 @@ pub mod cpp {
             }
 
             #[test]
-            fn backend_mask_is_cpu_or_cpu_plus_vulkan_never_other() {
+            fn backend_mask_is_cpu_or_cpu_plus_this_builds_gpu_never_other() {
+                let gpu = if cfg!(pumice_metal) {
+                    BackendMask::METAL
+                } else {
+                    BackendMask::VULKAN
+                };
                 assert_eq!(backend_mask(false), BackendMask::CPU);
-                assert_eq!(backend_mask(true), BackendMask::CPU | BackendMask::VULKAN);
+                assert_eq!(backend_mask(true), BackendMask::CPU | gpu);
                 for scan in [false, true] {
                     assert!(!backend_mask(scan).contains(BackendMask::OTHER));
                     assert_ne!(backend_mask(scan), BackendMask::ALL);
                 }
+            }
+
+            #[test]
+            fn gpu_module_names_match_the_build() {
+                let exe_dir = Path::new("bundle");
+                let (dir, file) = if cfg!(pumice_metal) {
+                    ("gpu/metal", "libggml-metal.so")
+                } else if cfg!(windows) {
+                    ("gpu/vulkan", "ggml-vulkan.dll")
+                } else {
+                    ("gpu/vulkan", "libggml-vulkan.so")
+                };
+                assert_eq!(GPU_DIR, dir);
+                assert_eq!(gpu_module_file(exe_dir), exe_dir.join(GPU_DIR).join(file));
+            }
+
+            #[test]
+            fn the_portable_cpu_module_has_no_variant_suffix_and_no_fallback() {
+                let temp = tempfile::tempdir().unwrap();
+                assert_eq!(portable_module_dir(temp.path(), "arm64"), None);
+                let module = temp.path().join("cpu").join("arm64").join("libggml-cpu.so");
+                std::fs::create_dir_all(module.parent().unwrap()).unwrap();
+                // A suffixed name is not the module ggml loads.
+                std::fs::write(module.with_file_name("libggml-cpu-arm64.so"), b"").unwrap();
+                if PORTABLE_CPU_MODULE.is_none() {
+                    // x86 builds suffix every variant name.
+                    assert_ne!(module_file_name("arm64"), "libggml-cpu.so");
+                    return;
+                }
+                assert_eq!(portable_module_dir(temp.path(), "arm64"), None);
+                std::fs::write(&module, b"").unwrap();
+                assert_eq!(
+                    portable_module_dir(temp.path(), "arm64"),
+                    Some(("arm64", temp.path().join("cpu").join("arm64")))
+                );
+                assert_eq!(module_file_name("arm64"), "libggml-cpu.so");
             }
         }
     }

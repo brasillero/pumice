@@ -18,6 +18,10 @@
 //! description names no known software or virtual Vulkan implementation
 //! (p14.5-linux-vulkan/D2).
 //!
+//! ggml-metal reports its device as `gpu` with no PCI bus id, so on Apple
+//! Silicon the Metal GPU is `unverified` and `auto` stays on the CPU with
+//! `gpu_unverified` (p14.4-macos-metal/D1); `gpu` uses it.
+//!
 //! After the model loads, one immutable [`Compute`] snapshot is built from the
 //! device the engine actually loaded it on — not from the request — and every
 //! report (`file --json`, `serve` startup, managed `ready` and `/ready`)
@@ -78,7 +82,7 @@ impl BackendMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuAvailability {
     /// This build has no GPU module (the default `engine` build, the Linux
-    /// `cpu-variants` build, macOS).
+    /// `cpu-variants` build, macOS on Intel).
     NotBuilt,
     /// `cpu` mode: the GPU module was not looked at.
     NotRequested,
@@ -100,8 +104,8 @@ pub enum GpuClass {
     /// A GPU sharing system memory with the CPU; `backend: gpu` only.
     Integrated,
     /// A `gpu` device Pumice cannot prove is discrete hardware: no PCI bus
-    /// id, or a virtual or layered implementation that may run on anything
-    /// (Venus, Dozen); `backend: gpu` only.
+    /// id (every Metal GPU), or a virtual or layered implementation that
+    /// may run on anything (Venus, Dozen); `backend: gpu` only.
     Unverified,
     /// A known software rasterizer, or a device of another engine type;
     /// `backend: gpu` only.
@@ -303,6 +307,7 @@ impl FallbackReason {
 pub enum ComputeBackend {
     Cpu,
     Vulkan,
+    Metal,
 }
 
 impl ComputeBackend {
@@ -312,6 +317,7 @@ impl ComputeBackend {
         match kind {
             "cpu" => Some(Self::Cpu),
             "vulkan" => Some(Self::Vulkan),
+            "metal" => Some(Self::Metal),
             _ => None,
         }
     }
@@ -320,6 +326,7 @@ impl ComputeBackend {
         match self {
             Self::Cpu => "cpu",
             Self::Vulkan => "vulkan",
+            Self::Metal => "metal",
         }
     }
 
@@ -451,9 +458,14 @@ impl Compute {
 /// `gpu` mode in a build without a GPU module.
 pub const GPU_NOT_BUILT: &str = "backend gpu needs a GPU build of pumice-transcribe; this build \
      runs on the CPU only. Use backend: cpu (or --backend cpu).";
-/// `gpu` mode without a staged GPU module.
-pub const GPU_MODULE_ABSENT: &str = "backend gpu found no GPU module (gpu/vulkan/) next to the \
-     executable. Use backend: cpu (or --backend cpu), or install the complete bundle.";
+/// `gpu` mode without a staged GPU module (this build's `gpu/<backend>/`).
+pub const GPU_MODULE_ABSENT: &str = if cfg!(pumice_metal) {
+    "backend gpu found no GPU module (gpu/metal/) next to the executable. Use backend: cpu \
+     (or --backend cpu), or install the complete bundle."
+} else {
+    "backend gpu found no GPU module (gpu/vulkan/) next to the executable. Use backend: cpu \
+     (or --backend cpu), or install the complete bundle."
+};
 /// `gpu` mode when no GPU device registered or initialized.
 pub const GPU_NO_DEVICE: &str = "backend gpu found no usable GPU device (none registered or \
      none initialized). Use backend: cpu (or --backend cpu), or backend: auto to fall back to \
@@ -600,6 +612,11 @@ mod tests {
             GpuClass::of("gpu", Some(" "), "NVIDIA GeForce RTX 4070"),
             Unverified
         );
+        // ggml-metal: every Metal device is a `gpu` without a PCI bus id,
+        // the Apple Silicon GPU and a VM's paravirtual one alike.
+        for description in ["Apple M2", "Apple Paravirtual device"] {
+            assert_eq!(GpuClass::of("gpu", None, description), Unverified);
+        }
         // lavapipe forced in through GGML_VK_VISIBLE_DEVICES: ggml reports
         // it as `gpu`; its name says it is a software rasterizer, with or
         // without PCI information, and also behind a virtual layer.
@@ -889,6 +906,31 @@ mod tests {
         .unwrap();
         assert_eq!(compute.backend, ComputeBackend::Vulkan);
         assert_eq!(compute.fallback_reason, None);
+        // Metal on Apple Silicon: `gpu` reports it; `auto` with only that
+        // (unverified) GPU stays on the CPU and says why.
+        let compute = Compute::from_loaded(
+            BackendMode::Gpu,
+            devices(0, 0, 1, 0),
+            "metal",
+            "MTL0",
+            "Apple M2",
+            Some("arm64"),
+        )
+        .unwrap();
+        assert_eq!(
+            compute.to_value().to_string(),
+            r#"{"requested":"gpu","backend":"metal","device":{"name":"MTL0","description":"Apple M2"},"cpu_variant":"arm64","fallback_reason":null}"#
+        );
+        let compute = Compute::from_loaded(
+            BackendMode::Auto,
+            devices(0, 0, 1, 0),
+            "cpu",
+            "CPU",
+            "Apple M2",
+            Some("arm64"),
+        )
+        .unwrap();
+        assert_eq!(compute.fallback_reason, Some(FallbackReason::GpuUnverified));
         // Whatever the engine loaded on is what is reported, even a CPU
         // `auto` did not plan for.
         let compute = Compute::from_loaded(

@@ -140,7 +140,7 @@ impl Compute {
                 && !text.chars().any(char::is_control)
         };
         let known_mode = matches!(self.requested.as_str(), "cpu" | "auto" | "gpu");
-        let known_backend = matches!(self.backend.as_str(), "cpu" | "vulkan");
+        let known_backend = matches!(self.backend.as_str(), "cpu" | "vulkan" | "metal");
         let on_cpu = self.backend == "cpu";
         let consistent = match self.requested.as_str() {
             "cpu" => on_cpu,
@@ -1045,6 +1045,9 @@ mod tests {
             serde_json::json!({"requested": "gpu", "backend": "vulkan",
                 "device": {"name": "Vulkan0", "description": "GPU"},
                 "cpu_variant": "x64", "fallback_reason": null}),
+            serde_json::json!({"requested": "gpu", "backend": "metal",
+                "device": {"name": "MTL0", "description": "Apple M2"},
+                "cpu_variant": "arm64", "fallback_reason": null}),
         ] {
             assert!(compute(valid.clone()).unwrap().is_valid(), "{valid}");
         }
