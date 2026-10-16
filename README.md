@@ -50,7 +50,7 @@ In Handy: **Settings → Advanced → Experimental Features → Post Processing*
 - Product spec: [`docs/spec.md`](docs/spec.md)
 - Transcription module guide: [`docs/transcription.md`](docs/transcription.md)
 - Formatter module guide: [`docs/formatter.md`](docs/formatter.md)
-- Orchestrator guide (`pumice run`): [`docs/orchestrator.md`](docs/orchestrator.md)
+- Orchestrator guide (`pumice run`, `pumice serve`): [`docs/orchestrator.md`](docs/orchestrator.md)
 - Plans, decisions and open work: [`.task-decisions/`](.task-decisions/README.md)
 - Rules for contributors and AI agents: [`AGENTS.md`](AGENTS.md)
 
