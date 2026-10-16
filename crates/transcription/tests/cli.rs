@@ -1,6 +1,7 @@
 use pumice_transcription::cli::{
     SuccessOutput, print_error, print_success, run_with_engine as run_with_engine_raw,
 };
+use pumice_transcription::compute::{BackendMode, Compute, ComputeBackend, FallbackReason};
 use pumice_transcription::{
     CancelToken, Engine, EngineError, ErrorCode, FakeEngine, Transcript, TranscriptionOptions,
     config,
@@ -545,7 +546,14 @@ fn json_success_envelope_shape() {
         audio_seconds: 1.5,
         model_load_ms: 100,
         transcription_ms: 200,
-        backend: Some("CPU [haswell]".to_string()),
+        compute: Some(Compute::new(
+            BackendMode::Auto,
+            ComputeBackend::Cpu,
+            "CPU",
+            "Test CPU  ",
+            Some("haswell"),
+            Some(FallbackReason::GpuUnavailable),
+        )),
     };
     let mut buf = Vec::new();
     print_success(&output, true, &mut buf).unwrap();
@@ -558,7 +566,17 @@ fn json_success_envelope_shape() {
     assert_eq!(json["result"]["audio_seconds"], 1.5);
     assert_eq!(json["result"]["model_load_ms"], 100);
     assert_eq!(json["result"]["transcription_ms"], 200);
-    assert_eq!(json["result"]["backend"], "CPU [haswell]");
+    assert_eq!(
+        json["result"]["compute"],
+        serde_json::json!({
+            "requested": "auto",
+            "backend": "cpu",
+            "device": {"name": "CPU", "description": "Test CPU"},
+            "cpu_variant": "haswell",
+            "fallback_reason": "gpu_unavailable",
+        })
+    );
+    assert!(json["result"].get("backend").is_none());
     assert!(json["error"].is_null());
 }
 

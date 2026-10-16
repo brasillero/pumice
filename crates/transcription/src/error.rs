@@ -13,6 +13,7 @@ pub enum ErrorCode {
     EngineFailed,
     ModelLoadFailed,
     ModelNotFound,
+    GpuUnavailable,
     ChecksumMismatch,
     DownloadFailed,
     Cancelled,
@@ -32,6 +33,7 @@ impl ErrorCode {
             Self::EngineFailed => "engine_failed",
             Self::ModelLoadFailed => "model_load_failed",
             Self::ModelNotFound => "model_not_found",
+            Self::GpuUnavailable => "gpu_unavailable",
             Self::ChecksumMismatch => "checksum_mismatch",
             Self::DownloadFailed => "download_failed",
             Self::Cancelled => "cancelled",
@@ -71,6 +73,8 @@ pub struct Error {
     pub code: ErrorCode,
     pub message: String,
     pub location: Option<ErrorLocation>,
+    /// See [`Error::engine_unusable`].
+    engine_unusable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -86,7 +90,21 @@ impl Error {
             code,
             message: message.into(),
             location: None,
+            engine_unusable: false,
         }
+    }
+
+    /// Marks a native failure that may have left the engine unsafe to reuse.
+    pub(crate) fn with_engine_unusable(mut self) -> Self {
+        self.engine_unusable = true;
+        self
+    }
+
+    /// Whether the engine that produced this error may be unsafe to reuse
+    /// ([`crate::EngineError::Failed`]). A server on a GPU retires then
+    /// (p14.2-backend-policy/D1); content and input errors never set it.
+    pub fn engine_unusable(&self) -> bool {
+        self.engine_unusable
     }
 
     pub fn invalid_arguments(message: impl Into<String>) -> Self {
@@ -130,6 +148,7 @@ impl Error {
                 line: config_error.line(),
                 column: config_error.column(),
             }),
+            engine_unusable: false,
         }
     }
 
@@ -153,6 +172,12 @@ impl Error {
             ErrorCode::ModelNotFound,
             format!("model file not found: {}", path.display()),
         )
+    }
+
+    /// `backend: gpu` cannot get a GPU (see [`crate::compute`]); `message`
+    /// is one of that module's fixed texts.
+    pub fn gpu_unavailable(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::GpuUnavailable, message)
     }
 
     pub fn checksum_mismatch(message: impl Into<String>) -> Self {

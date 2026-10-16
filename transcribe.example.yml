@@ -20,6 +20,15 @@ language: pt
 # Optional default thread count for inference (1-32).
 threads: 8
 
+# Optional compute backend (default: cpu):
+#   cpu  - the CPU only; a GPU module is never loaded
+#   auto - a GPU when one initializes, else the CPU (the reported compute
+#          snapshot says why)
+#   gpu  - a GPU, or a startup error (never the CPU)
+# Only the Windows Vulkan preview bundle has a GPU module. Override for one
+# run with --backend on file and serve.
+# backend: auto
+
 # Optional HTTP server settings. Only used by `pumice-transcribe serve`.
 server:
   # Port to listen on. The server always binds 127.0.0.1 only.

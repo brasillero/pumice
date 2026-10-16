@@ -178,6 +178,17 @@ async fn a_healthy_child_is_ready_and_stops_on_stdin_eof() {
     assert_eq!(snapshot.state, ChildState::Ready);
     assert_eq!(snapshot.generation, 1);
     assert_eq!(snapshot.model_load_ms, Some(7));
+    let compute = snapshot.compute.expect("a ready child has a snapshot");
+    assert_eq!(
+        serde_json::to_value(&compute).unwrap(),
+        json!({
+            "requested": "cpu",
+            "backend": "cpu",
+            "device": {"name": "CPU", "description": "Stub CPU"},
+            "cpu_variant": null,
+            "fallback_reason": null,
+        })
+    );
     assert!(handle.ready_child().is_some());
 
     let spawns = stub.spawns();
@@ -216,7 +227,33 @@ async fn handshake_mismatches_fail_the_startup_without_retry_or_leftover() {
             code::PROTOCOL,
         ),
         (
-            json!({"ready_overrides": {"protocol_version": 2}}),
+            json!({"ready_overrides": {"protocol_version": 1}}),
+            code::PROTOCOL,
+        ),
+        (
+            json!({"ready_overrides": {"protocol_version": 3}}),
+            code::PROTOCOL,
+        ),
+        (
+            // A protocol 1 child: no compute snapshot at all.
+            json!({"ready_overrides": {"protocol_version": 1, "compute": null}}),
+            code::PROTOCOL,
+        ),
+        (
+            json!({"ready_overrides": {"compute": {"requested": "cpu", "backend": "cpu",
+                "device": {"name": "CPU", "description": ""}, "cpu_variant": null}}}),
+            code::PROTOCOL,
+        ),
+        (
+            json!({"ready_overrides": {"compute": {"requested": "gpu", "backend": "cpu",
+                "device": {"name": "CPU", "description": ""}, "cpu_variant": null,
+                "fallback_reason": null}}}),
+            code::PROTOCOL,
+        ),
+        (
+            json!({"ready_overrides": {"compute": {"requested": "auto", "backend": "cpu",
+                "device": {"name": "CPU\u{7}", "description": ""}, "cpu_variant": null,
+                "fallback_reason": "gpu_unavailable"}}}),
             code::PROTOCOL,
         ),
         (
@@ -250,7 +287,12 @@ async fn handshake_mismatches_fail_the_startup_without_retry_or_leftover() {
             json!({"ready_ok_count": 0, "ready_failure": "wrong_instance"}),
             code::READY_CHECK_FAILED,
         ),
+        (
+            json!({"ready_ok_count": 0, "ready_failure": "wrong_compute"}),
+            code::READY_CHECK_FAILED,
+        ),
         (json!({"error_code": "invalid_config"}), code::MODULE_ERROR),
+        (json!({"error_code": "gpu_unavailable"}), code::MODULE_ERROR),
     ];
     for (behavior, expected) in cases {
         let stub = stub(json!([behavior.clone()]));
@@ -422,6 +464,53 @@ async fn a_probe_answering_for_another_instance_is_fatal() {
     let failed = wait_for(&handle, "failed", |s| s.state == ChildState::Failed).await;
     assert_eq!(failed.last_failure, Some(code::READY_CHECK_FAILED));
     assert_eq!(stub.spawns().len(), 1);
+    shutdown(supervisor).await;
+    stub.assert_all_reaped();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_probe_with_another_compute_snapshot_is_fatal() {
+    let stub = stub(json!([{"ready_ok_count": 1, "ready_failure": "wrong_compute"}]));
+    let supervisor = start(&stub, probing()).await;
+    let handle = supervisor.handle();
+    let failed = wait_for(&handle, "failed", |s| s.state == ChildState::Failed).await;
+    assert_eq!(failed.last_failure, Some(code::READY_CHECK_FAILED));
+    assert_eq!(failed.compute, None);
+    shutdown(supervisor).await;
+    stub.assert_all_reaped();
+}
+
+/// A child that retires itself after a GPU engine failure (`stopping` with
+/// reason `engine_failed`, then exit 1) is restarted like any other exit,
+/// and the replacement reports its own snapshot.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_child_retiring_after_a_gpu_failure_is_restarted() {
+    let gpu = json!({"requested": "auto", "backend": "vulkan",
+        "device": {"name": "Vulkan0", "description": "Stub GPU"},
+        "cpu_variant": "x64", "fallback_reason": null});
+    let stub = stub(json!([
+        {
+            "ready_overrides": {"compute": gpu},
+            "exit_after_ready_checks": 1,
+            "stdout_after": [
+                r#"{"schema_version":1,"event":"stopping","module":"transcription","instance_id":"__INSTANCE_ID__","reason":"engine_failed"}"#,
+                r#"{"schema_version":1,"event":"stopped","module":"transcription","instance_id":"__INSTANCE_ID__"}"#
+            ]
+        },
+        {}
+    ]));
+    // The first child retires right after its handshake, so its own ready
+    // snapshot may already be gone when `start` returns; the healthy-child
+    // test covers a ready snapshot.
+    let supervisor = start(&stub, fast()).await;
+    let handle = supervisor.handle();
+    let ready = wait_for(&handle, "the replacement", |s| {
+        s.state == ChildState::Ready && s.generation == 2
+    })
+    .await;
+    assert_eq!(ready.last_failure, Some(code::EXITED));
+    assert_eq!(ready.compute.unwrap().backend, "cpu");
+    assert_eq!(stub.spawns().len(), 2);
     shutdown(supervisor).await;
     stub.assert_all_reaped();
 }

@@ -378,6 +378,16 @@ fn serves_health_ready_status_and_flows_then_stops() {
     assert_eq!(body["transcription"]["model"], "turbo");
     assert_eq!(body["transcription"]["generation"], 1);
     assert_eq!(body["transcription"]["model_load_ms"], 7);
+    assert_eq!(
+        body["transcription"]["compute"],
+        json!({
+            "requested": "cpu",
+            "backend": "cpu",
+            "device": {"name": "CPU", "description": "Stub CPU"},
+            "cpu_variant": null,
+            "fallback_reason": null,
+        })
+    );
     assert_eq!(body["flows"], json!({"enabled": 1}));
     let text = body.to_string();
     assert!(

@@ -7,8 +7,17 @@
 //! log line is built from fixed text: nothing the client sent (model names,
 //! field names, prompts, file names) and nothing the engine produced is ever
 //! echoed or logged.
+//!
+//! When the caller passes a `retire` token (the engine runs on a GPU), a
+//! native failure that may leave the engine unsafe to reuse retires it: the
+//! worker cancels the token and withdraws admission and readiness before it
+//! releases its admission permit, so no other request starts on the failed
+//! device, and the request is answered with the usual `transcription_failed`
+//! (p14.2-backend-policy/D1). Content and input errors and cancellation
+//! never retire.
 
 use crate::audio::MAX_FILE_BYTES;
+use crate::compute::Compute;
 use crate::engine::{CancelToken, Engine};
 use crate::managed::{CAPABILITIES, PROTOCOL_VERSION};
 use crate::service::transcribe_pcm_from_reader;
@@ -70,12 +79,16 @@ struct ServerState {
     shutdown: CancellationToken,
     request_ids: Arc<AtomicU64>,
     managed: Option<Arc<ManagedState>>,
+    /// Cancelled when a native failure retires the engine; see the module
+    /// docs.
+    retire: Option<CancellationToken>,
 }
 
 struct ManagedState {
     instance_id: String,
     /// The only accepted `Host`: `127.0.0.1:<bound port>`.
     host: String,
+    compute: Compute,
 }
 
 impl ServerState {
@@ -95,15 +108,45 @@ impl ServerState {
             shutdown,
             request_ids: Arc::new(AtomicU64::new(1)),
             managed: None,
+            retire: None,
         }
     }
 
-    fn managed(mut self, instance_id: String, port: u16) -> Self {
+    fn managed(mut self, managed: Managed, port: u16) -> Self {
         self.managed = Some(Arc::new(ManagedState {
-            instance_id,
+            instance_id: managed.instance_id,
             host: format!("{}:{port}", Ipv4Addr::LOCALHOST),
+            compute: managed.compute,
         }));
         self
+    }
+
+    fn retire_on_engine_failure(mut self, retire: Option<CancellationToken>) -> Self {
+        self.retire = retire;
+        self
+    }
+
+    /// A native failure that may leave the engine unsafe to reuse: with a
+    /// `retire` token, ask the owner to stop and stop accepting work
+    /// (admission and `/ready` answer 503 from now on). Called by the worker
+    /// while it still holds the admission permit.
+    fn engine_unusable(&self) {
+        if let Some(retire) = &self.retire {
+            eprintln!(
+                "the GPU engine failed; withdrawing readiness and stopping so the process can \
+                 be restarted"
+            );
+            // Retire first: a handler that sees the shutdown then knows why.
+            retire.cancel();
+            self.shutdown.cancel();
+        }
+    }
+
+    /// Whether a native failure retired the engine.
+    fn retired(&self) -> bool {
+        self.retire
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
     }
 }
 
@@ -111,6 +154,8 @@ impl ServerState {
 pub struct Managed {
     /// Already validated by [`crate::managed::validate_instance_id`].
     pub instance_id: String,
+    /// The loaded model's compute snapshot, served by `/ready`.
+    pub compute: Compute,
 }
 
 /// Start the HTTP server on `127.0.0.1:port` and serve until `shutdown_signal`
@@ -130,6 +175,7 @@ pub async fn serve(
         served_model_id,
         default_language,
         None,
+        None,
         shutdown_signal,
     )
 }
@@ -139,14 +185,18 @@ pub async fn bind(port: u16) -> io::Result<TcpListener> {
     TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)).await
 }
 
-/// [`serve`] on a listener from [`bind`], optionally in managed mode. Must be
-/// called inside a Tokio runtime.
+/// [`serve`] on a listener from [`bind`], optionally in managed mode. With
+/// `retire`, a native failure that leaves the engine unsafe to reuse cancels
+/// it and withdraws readiness; the caller's `shutdown_signal` should then
+/// fire. Must be called inside a
+/// Tokio runtime.
 pub fn serve_on(
     listener: TcpListener,
     engine: Arc<dyn Engine>,
     served_model_id: String,
     default_language: Option<String>,
     managed: Option<Managed>,
+    retire: Option<CancellationToken>,
     shutdown_signal: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<tokio::task::JoinHandle<()>> {
     let local_addr = listener.local_addr()?;
@@ -167,8 +217,9 @@ pub fn serve_on(
         shutdown.clone(),
     );
     if let Some(managed) = managed {
-        state = state.managed(managed.instance_id, local_addr.port());
+        state = state.managed(managed, local_addr.port());
     }
+    state = state.retire_on_engine_failure(retire);
     let admission = Arc::clone(&state.admission);
     let app = router(state);
 
@@ -457,6 +508,7 @@ fn map_error(code: ErrorCode) -> ApiError {
         ErrorCode::InvalidArguments
         | ErrorCode::InvalidConfig
         | ErrorCode::ModelNotFound
+        | ErrorCode::GpuUnavailable
         | ErrorCode::EngineNotAvailable
         | ErrorCode::EngineFailed
         | ErrorCode::ModelLoadFailed
@@ -727,37 +779,50 @@ async fn transcribe(
     // server busy until the engine really stops.
     let cancel = CancelToken::new();
     let _cancel_on_drop = CancelOnDrop(cancel.clone());
-    let engine = Arc::clone(&state.engine);
+    let worker_state = state.clone();
     let worker_cancel = cancel.clone();
     let file = form.file;
-    let worker = tokio::task::spawn_blocking(move || {
+    let mut worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        transcribe_pcm_from_reader(
+        let result = transcribe_pcm_from_reader(
             io::Cursor::new(file),
-            engine.as_ref(),
+            worker_state.engine.as_ref(),
             &options,
             &worker_cancel,
-        )
+        );
+        // Before the permit is released, even if this request was abandoned.
+        if result.as_ref().is_err_and(crate::Error::engine_unusable) {
+            worker_state.engine_unusable();
+        }
+        result
     });
 
-    tokio::select! {
+    let joined = tokio::select! {
         biased;
-        () = state.shutdown.cancelled() => Err(SHUTTING_DOWN),
-        () = time::sleep_until(deadline) => Err(DEADLINE_EXCEEDED),
-        joined = worker => match joined {
-            Ok(Ok(result)) => Ok(Transcribed {
-                format: form.response_format,
-                text: result.transcript.text,
-                // The hint the engine was given wins over what it detected,
-                // as in the `file` command.
-                language: hint.or(result.transcript.language),
-                audio_seconds: result.audio_seconds,
-                inference: result.inference,
-            }),
-            Ok(Err(error)) => Err(map_error(error.code)),
-            // The worker panicked; its permit was released while unwinding.
-            Err(_) => Err(TRANSCRIPTION_FAILED),
-        },
+        () = state.shutdown.cancelled() => {
+            if !state.retired() {
+                return Err(SHUTTING_DOWN);
+            }
+            // This request's worker retired the engine and is returning:
+            // answer with its failure, not with the shutdown it caused.
+            worker.await
+        }
+        () = time::sleep_until(deadline) => return Err(DEADLINE_EXCEEDED),
+        joined = &mut worker => joined,
+    };
+    match joined {
+        Ok(Ok(result)) => Ok(Transcribed {
+            format: form.response_format,
+            text: result.transcript.text,
+            // The hint the engine was given wins over what it detected, as in
+            // the `file` command.
+            language: hint.or(result.transcript.language),
+            audio_seconds: result.audio_seconds,
+            inference: result.inference,
+        }),
+        Ok(Err(error)) => Err(map_error(error.code)),
+        // The worker panicked; its permit was released while unwinding.
+        Err(_) => Err(TRANSCRIPTION_FAILED),
     }
 }
 
@@ -993,7 +1058,7 @@ async fn retrieve_model(
 }
 
 /// GET /ready (managed mode only): the instance's identity while it accepts
-/// work; 503 once shutting down. A running transcription does not make it
+/// work; 503 once shutting down or retired. A running transcription does not make it
 /// unready.
 async fn ready(State(state): State<ServerState>, request: Request) -> Response {
     if let Err(error) = check_managed_request(&state, &request) {
@@ -1015,6 +1080,7 @@ async fn ready(State(state): State<ServerState>, request: Request) -> Response {
             "version": env!("CARGO_PKG_VERSION"),
             "model": &*state.served_model_id,
             "capabilities": CAPABILITIES,
+            "compute": managed.compute.to_value(),
             "state": "ready",
         }),
     )

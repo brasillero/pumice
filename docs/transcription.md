@@ -84,16 +84,16 @@ crates/transcription/scripts/build-cpu-variants.sh
 
 The staged binary resolves its libraries from its own directory and works
 from any location; copy the whole folder. Run it exactly like the regular
-CLI. It prints the selected CPU module on stderr at startup, `serve` reports
-the selected backend at model load, and `file --json` includes a `backend`
-field, e.g. `"CPU (...) [haswell]"`.
+CLI. It prints the selected CPU module on stderr at startup, and the
+[compute snapshot](#compute-backend-cpu-auto-gpu) that `file --json`, `serve`
+and managed mode report names it in `cpu_variant`.
 
 The portable build's engine linkage and compiler baseline are unaffected: the
 script uses its own `CARGO_TARGET_DIR` and overrides the conservative
 `TRANSCRIBE_CMAKE_ARGS` from `.cargo/config.toml`, so nothing in the portable
-build changes. (The one visible addition to ordinary `engine` builds from
-this work is the `backend` field in `file --json` and the startup backend
-line; the binary stays a single static portable executable.) macOS builds
+build changes. (Ordinary `engine` builds report the same compute snapshot,
+with `cpu_variant: null`; the binary stays a single static portable
+executable.) macOS builds
 are unchanged (the feature is off by default; other architectures have no
 module mapping). On x86-64 Windows the same mechanism loads
 `cpu/<variant>/ggml-cpu-<variant>.dll` from the nine variants an MSVC build
@@ -126,23 +126,23 @@ checks that every file uses the static C runtime and that only
 machine without a Vulkan driver.
 
 Before loading any engine module, startup checks the core DLLs, the selected
-CPU module and the Vulkan module against `bundle.json` (sizes and SHA-256,
-about 25–100 ms for the 43 MB Vulkan module depending on the CPU). A missing
+CPU module and, unless the backend is `cpu`, the Vulkan module against
+`bundle.json` (sizes and SHA-256, about 25–100 ms for the 43 MB Vulkan module
+depending on the CPU). A missing
 manifest, a damaged or replaced file, or an unlisted file inside `cpu/<variant>/`
 or `gpu/vulkan/` stops startup with an installation error that names the
 file and `(bundle manifest mismatch)`; reinstall the whole folder. Deleting
-`gpu/` is allowed and gives a CPU-only install; a Vulkan module that loads but
-finds no device (or no Vulkan driver) also leaves transcription on the CPU.
+`gpu/` is allowed and gives a CPU-only install (`auto` then reports
+`gpu_module_absent`); a Vulkan module that loads but finds no device (or no
+Vulkan driver) leaves `auto` on the CPU too.
 
-At startup the CPU variant is chosen as described above, then `gpu/vulkan/` is
-scanned with the backend mask fixed to CPU and Vulkan (plugins named by
-`GGML_BACKEND_PATH` are never loaded). In this preview the model still runs on
-the CPU: choosing the GPU (`backend: cpu|auto|gpu`) and reporting the device
-in use come in the next step, together with the full checking procedure. For
-CI only, `PUMICE_TRANSCRIBE_SKIP_GPU_DIR=1` keeps `gpu/vulkan/` unscanned, and
-the hidden `pumice-transcribe debug-backends` command prints what registered
-without loading a model; both are temporary and go away with the backend
-setting.
+At startup the CPU variant is chosen as described above. With `backend: auto`
+or `gpu`, `gpu/vulkan/` is then scanned with the backend mask fixed to CPU and
+Vulkan (plugins named by `GGML_BACKEND_PATH` are never loaded); with
+`backend: cpu`, the default, the GPU module is never checked or loaded, so a
+broken GPU driver cannot affect it. See
+[Compute backend](#compute-backend-cpu-auto-gpu) for the setting and the
+[real-GPU checklist](#checking-a-real-gpu-on-windows).
 
 Build it yourself (Windows, Visual Studio 2022 C++ tools and the Vulkan SDK
 1.4.350.0 at build time only):
@@ -151,6 +151,145 @@ Build it yourself (Windows, Visual Studio 2022 C++ tools and the Vulkan SDK
 pwsh crates/transcription/scripts/build-windows-vulkan.ps1
 # result: target\windows-vulkan\stage\
 ```
+
+## Compute backend (`cpu`, `auto`, `gpu`)
+
+`backend:` in `transcribe.yml` chooses what the model may run on; `--backend`
+on `file`, `serve` and `backends` overrides it for one run. There is no
+device index, no per-request choice and no backend setting in
+`orchestrator.yml`: `pumice serve`'s child reads it from `transcribe.yml`.
+
+| Mode | GPU module | Model loads on | Without a usable GPU |
+| --- | --- | --- | --- |
+| `cpu` (default) | never checked or loaded | the CPU | — |
+| `auto` | checked and scanned | a GPU when one initializes (discrete before integrated), else the CPU | the CPU, with a `fallback_reason` |
+| `gpu` | checked and scanned | a GPU | error `gpu_unavailable`, never the CPU |
+
+Only the Windows Vulkan preview has a GPU module. In every other build (the
+default `engine` build, Linux `cpu-variants`, macOS) `auto` runs on the CPU
+with `fallback_reason: "gpu_not_built"` and `gpu` fails.
+
+`fallback_reason` (only when `auto` runs on the CPU):
+
+- `gpu_not_built` — this build has no GPU module;
+- `gpu_module_absent` — the build supports one, but `gpu/vulkan/` is not
+  installed next to the executable;
+- `gpu_unavailable` — the module registered no GPU device, or no GPU device
+  initialized. The engine cannot tell a missing Vulkan loader, a missing
+  driver, an excluded device or a failed initialization apart, so neither
+  does this reason.
+
+`gpu` fails before loading the model with `gpu_unavailable` (exit status 1)
+and one of three fixed messages: the build has no GPU support, no GPU module
+is installed, or no usable GPU device registered or initialized. Each one
+points to `backend: cpu`.
+
+**The compute snapshot.** After the model loads, one snapshot is taken from
+the device the engine actually loaded it on, not from the request, and every
+report shows that same object:
+
+```json
+{"requested":"auto","backend":"vulkan","device":{"name":"Vulkan0","description":"NVIDIA GeForce RTX 4070"},"cpu_variant":"haswell","fallback_reason":null}
+```
+
+- `requested`: `cpu`, `auto` or `gpu`;
+- `backend`: `cpu` or `vulkan`, the device's own kind;
+- `device`: the engine's name (`CPU`, `Vulkan0`, …) and description (the
+  CPU or GPU model);
+- `cpu_variant`: the loaded ggml CPU module in `cpu-variants` builds, else
+  `null`; on a GPU it is the CPU helper, not the primary device;
+- `fallback_reason`: as above, else `null`.
+
+Hardware strings are trimmed, control characters become spaces, names and
+`cpu_variant` are cut to 128 bytes and descriptions to 256 bytes (at a
+character boundary). The snapshot appears in `file --json` (`result.compute`),
+in `serve`'s startup line on stderr (`loaded model … in N ms; compute: {…}`),
+in managed `ready` and `GET /ready`, and in `pumice serve`'s
+`GET /pumice/v1/status` (`transcription.compute`). The OpenAI
+`/v1/audio/transcriptions` response does not change.
+
+**Failures** (p14.1-windows-vulkan/D4, narrowed by p14.2-backend-policy/D1):
+
+- A model that fails to load with `auto` or `gpu` on a GPU fails startup with
+  `model_load_failed` and a message pointing to `backend: cpu`. It is not
+  retried on the CPU: a GPU allocation failure after the device initialized
+  is not a fallback case.
+- A request the engine refuses because of its content or input (output
+  truncated or repeating before the end, an invalid or unsupported request,
+  input too long for the model) answers with the usual error
+  (`engine_failed`; HTTP 500 `transcription_failed`) and leaves the process
+  serving, on a GPU too.
+- Any other native engine failure during a transcription on a GPU (out of
+  memory, a backend error, an unclassified failure) may leave the device or
+  engine unusable. It answers that request with the same error, is never
+  retried or replayed, and retires the process: before the next request can
+  be admitted it stops accepting work (new requests and `/ready` answer
+  503), then it drains and exits with status 1. This holds even if the
+  client already disconnected. Standalone `serve` prints why on stderr;
+  managed mode writes `stopping` with reason `engine_failed`, then
+  `stopped`, so `pumice serve` restarts it within its bounded restart
+  policy. Cancellation (a disconnect, a deadline, a shutdown) and audio
+  input errors never retire, and on the CPU nothing retires.
+- A crash or hang inside the native engine is handled by the process
+  supervision that already exists (managed mode's shutdown watchdog,
+  `pumice serve`'s liveness probes and restarts); there is no in-process
+  driver reset.
+
+### `backends`
+
+```bash
+pumice-transcribe backends --backend auto [--json]
+```
+
+Registers the compute backends exactly as a model load in that mode does,
+without loading a model, and reports what the bundle ships and what
+registered:
+
+```json
+{"schema_version":1,"ok":true,"result":{"requested":"auto","gpu_build":"vulkan","bundle":"verified","cpu_variant":"alderlake","gpu_module":"scanned","gpu_devices":0,"allowed_backends":["cpu","vulkan"],"devices":[{"name":"CPU","description":"Intel(R) Core(TM) i5-14500T","kind":"cpu","type":"cpu"}],"fallback_reason":"gpu_unavailable"}}
+```
+
+`gpu_build` is `vulkan` or `null`; `bundle` is `verified`, `absent` (no
+manifest, Linux only) or `null` (no runtime modules); `gpu_module` is
+`not_built`, `not_requested` (`cpu` mode), `absent` or `scanned`;
+`gpu_devices` counts registered GPU devices; `allowed_backends` is the
+engine's backend mask (static builds report the engine's default mask, with
+only the CPU compiled in); `fallback_reason` is set when `auto` will run on
+the CPU whatever happens at load. A registered GPU can still fail to
+initialize when the model loads; only the loaded snapshot is certain.
+`backends` exits 0 in `gpu` mode without a GPU (`gpu_devices: 0`); `file`
+and `serve` are what refuse. Installation errors (a damaged bundle) fail as
+they would at startup.
+
+### Checking a real GPU on Windows
+
+The owner's check of a preview artifact on a Windows machine with a GPU. Use
+the same model, audio and language for every run (for example
+`whisper-tiny-q8_0`, then Turbo, and the repository's `sample-pt.wav` with
+`--language pt`). Nothing is installed; only the extracted folder is used.
+
+1. Extract the artifact to a new folder (try a path with a space) and open a
+   terminal there.
+2. `pumice-transcribe.exe backends --backend auto --json`: `gpu_module`
+   `scanned`, `gpu_devices` ≥ 1 and the GPU listed with kind `vulkan`. Run
+   with `--backend cpu` too: `gpu_module` `not_requested`, only the CPU.
+3. CPU baseline: `pumice-transcribe.exe file sample-pt.wav --model-file
+   MODEL --language pt --backend cpu --json`, three times; note the text,
+   `model_load_ms`, `transcription_ms` and `compute`.
+4. Required GPU: the same with `--backend gpu`. `compute.backend` must be
+   `vulkan` and `compute.device` your GPU; compare the text with the CPU run
+   (identical text is not guaranteed) and the timings (first run cold, then
+   warm; a longer clip, a short one and silence).
+5. `--backend auto` on the same machine: the same device as step 4, with
+   `fallback_reason: null`.
+6. `serve --backend gpu --port 17568`: the startup line shows the GPU
+   snapshot; send a few requests, stop it with Ctrl-C.
+7. Without a usable GPU (disable the GPU in Device Manager, or a machine or
+   VM without a Vulkan driver): `--backend auto` runs on the CPU with
+   `fallback_reason: "gpu_unavailable"`, `--backend gpu` fails with
+   `gpu_unavailable`, `--backend cpu` is unaffected.
+8. Report the GPU model and driver version, the snapshots, the timings and
+   anything unexpected (crashes, hangs, wrong text, high memory or VRAM).
 
 ## Getting models
 
@@ -319,6 +458,7 @@ schema_version: 1
 default_model: tiny      # optional; must name an entry in models
 language: pt             # optional default language hint
 threads: 8               # optional default thread count (1-32)
+backend: cpu             # optional: cpu (default), auto or gpu
 models_dir: /absolute/path/to/models  # optional; where `catalog:` files live
                                       # (see "Downloading models" for the
                                       # default). `~` is NOT expanded here —
@@ -338,8 +478,8 @@ must be nonempty. Model ids
 must match `[a-z0-9][a-z0-9._-]*`. A model entry has exactly one of `path`
 (a local GGUF file) or `catalog` (a built-in catalog id, see "Downloading
 models"). Duplicate ids, dangling `default_model`, unknown catalog ids,
-unknown keys, and invalid `schema_version` are rejected with a
-file:line:column message.
+unknown keys, an unknown `backend` and invalid `schema_version` are
+rejected with a file:line:column message.
 
 Validate a file without loading a model:
 
@@ -364,7 +504,13 @@ pumice-transcribe file audio.wav
 
 # Override config values for one call
 pumice-transcribe file audio.wav --model turbo --language en --threads 4 --json
+
+# Choose the compute backend for one call
+pumice-transcribe file audio.wav --backend auto --json
 ```
+
+With `--json`, `result.compute` is the
+[compute snapshot](#compute-backend-cpu-auto-gpu) of the loaded model.
 
 `--model ID` and `--model-file PATH` are mutually exclusive. If neither is
 given, the configured `default_model` is used; if there is none, the command
@@ -414,7 +560,12 @@ and the actual bound address is printed on startup.
 
 `serve` loads one model at startup and keeps it in memory. The model is
 selected with `--model ID`; if omitted, the configured `default_model` is used.
-Startup load failure exits non-zero before the server starts listening.
+`--backend` overrides `backend:` in `transcribe.yml`; the startup line on
+stderr shows the [compute snapshot](#compute-backend-cpu-auto-gpu). Startup
+load failure exits non-zero before the server starts listening. On a GPU, a
+native engine failure that may leave the device unusable stops the server
+after answering that request (exit status 1); see
+[Failures](#compute-backend-cpu-auto-gpu).
 
 Only one transcription runs at a time. A second request is rejected
 immediately with HTTP 429 and no queue. `/v1/models` and `/health` stay
@@ -520,7 +671,8 @@ curl --fail http://127.0.0.1:17568/health
 
 #### Managed mode (used by `pumice serve`)
 
-Internal protocol, version 1. It exists so `pumice serve` can own one warm
+Internal protocol, version 2 (version 2 added the compute snapshot and the
+`engine_failed` stop). It exists so `pumice serve` can own one warm
 `pumice-transcribe` child; it is not meant for direct use and may change with
 the protocol version.
 
@@ -540,18 +692,23 @@ under 4096 bytes; human messages stay on stderr. A run writes `ready` or
 `error`, then possibly `stopping` and `stopped`:
 
 ```json
-{"schema_version":1,"event":"ready","module":"transcription","instance_id":"gen-1","protocol_version":1,"version":"0.2.0","host":"127.0.0.1","port":49152,"model":"turbo","capabilities":["openai_transcriptions","detailed_transcriptions","managed_shutdown"],"model_load_ms":362}
+{"schema_version":1,"event":"ready","module":"transcription","instance_id":"gen-1","protocol_version":2,"version":"0.2.0","host":"127.0.0.1","port":49152,"model":"turbo","capabilities":["openai_transcriptions","detailed_transcriptions","managed_shutdown"],"model_load_ms":362,"compute":{"requested":"cpu","backend":"cpu","device":{"name":"CPU","description":"Intel(R) Core(TM) i5-14500T"},"cpu_variant":null,"fallback_reason":null}}
 {"schema_version":1,"event":"stopping","module":"transcription","instance_id":"gen-1","reason":"stdin_closed"}
 {"schema_version":1,"event":"stopped","module":"transcription","instance_id":"gen-1"}
 ```
 
 - `ready` comes only after the model is loaded and the listener is bound, and
-  never after `stopping`.
+  never after `stopping`. `compute` is the
+  [compute snapshot](#compute-backend-cpu-auto-gpu); with the longest model
+  and instance ids and every snapshot string at its bound, `ready` still
+  fits in 4096 bytes.
 - `error` replaces `ready` when startup fails: `code` is one of the
   [error codes](#json-output-and-exit-codes) and `message` is cut to 512
   bytes. An invalid `--instance-id` or invalid arguments give
   `invalid_arguments` without `instance_id`. The exit status is non-zero.
-- `stopping` has `reason` `stdin_closed` or `signal`.
+- `stopping` has `reason` `stdin_closed`, `signal` or `engine_failed` (a
+  native failure that may leave the GPU unusable retired the instance; it then writes
+  `stopped` and exits with status 1).
 
 **stdin** is the owner's lifeline: end of file, or a read error, starts a
 shutdown; anything written to it is ignored. It is watched from the start,
@@ -578,8 +735,9 @@ the OpenAI error object with `code` always set (for example
 - `GET /ready` — `200` while the instance accepts work (a running
   transcription does not change that); `503` `shutting_down` once stopping:
   ```json
-  {"schema_version":1,"module":"transcription","instance_id":"gen-1","protocol_version":1,"version":"0.2.0","model":"turbo","capabilities":["openai_transcriptions","detailed_transcriptions","managed_shutdown"],"state":"ready"}
+  {"schema_version":1,"module":"transcription","instance_id":"gen-1","protocol_version":2,"version":"0.2.0","model":"turbo","capabilities":["openai_transcriptions","detailed_transcriptions","managed_shutdown"],"compute":{"requested":"cpu","backend":"cpu","device":{"name":"CPU","description":"Intel(R) Core(TM) i5-14500T"},"cpu_variant":null,"fallback_reason":null},"state":"ready"}
   ```
+  `compute` is the same snapshot as in `ready`.
 - `POST /pumice/v1/transcriptions` — the same multipart fields, limits,
   deadlines and single-transcription admission as `/v1/audio/transcriptions`
   (the two routes share it: either one busy gives 429), except that
@@ -647,6 +805,7 @@ Failures use the same envelope with `ok: false` and `error.code`:
 | `engine_failed` | Engine error during transcription | 1 |
 | `cancelled` | Transcription cancelled | 1 |
 | `model_load_failed` | Failed to load the model | 1 |
+| `gpu_unavailable` | `backend: gpu` without a GPU build, GPU module or usable GPU device | 1 |
 | `checksum_mismatch` | A downloaded or installed model file failed size or SHA-256 verification (see `--force`) | 1 |
 | `download_failed` | Network or HTTP failure during `models download` | 1 |
 | `internal` | Unexpected internal error | 1 |
@@ -655,7 +814,8 @@ Config errors include `error.location.file`, `line`, and `column` when the
 position is known.
 
 `serve --managed` uses exit status 3 when its shutdown grace runs out (see
-[Managed mode](#managed-mode-used-by-pumice-serve)).
+[Managed mode](#managed-mode-used-by-pumice-serve)). `serve` exits with
+status 1 after a native engine failure that retires a GPU process.
 
 ## Common errors
 
@@ -673,6 +833,16 @@ regular file. For a `catalog:` entry the error names the fixing command,
 e.g. `pumice-transcribe --config FILE models download whisper-tiny-q8_0`
 (`--config` is kept when you passed one, because a `models_dir` override
 only applies through that config file).
+- **"backend must be one of cpu, auto, gpu"**: the config's `backend` is not
+  one of the three modes.
+- **"backend gpu needs a GPU build ..." / "backend gpu found no GPU module
+  ..." / "backend gpu found no usable GPU device ..."** (`gpu_unavailable`):
+  `gpu` mode cannot get a GPU. Use `backend: cpu`, or `auto` to fall back to
+  the CPU.
+- **"failed to load model with backend auto|gpu; a GPU load failure is not
+  retried on the CPU ..."** (`model_load_failed`): the model could not be
+  loaded (for example not enough GPU memory, or a damaged model file). Try
+  `backend: cpu`.
 - **"unknown catalog model ..."**: the id passed to `models download`,
   `models verify` or a config `catalog:` entry is not in the built-in
   catalog; run `pumice-transcribe models catalog`.

@@ -57,7 +57,7 @@ document below.
 | --- | --- |
 | `POST /pumice/v1/dictations` | Multipart `file` (audio) + `flow` (an enabled flow id); answers the run envelope: the raw `transcript` and the final `result` apart, per-stage status and timings |
 | `GET /pumice/v1/flows` | The enabled flows and whether each can run now |
-| `GET /pumice/v1/status` | Service, transcription child and dictation admission state (metadata only) |
+| `GET /pumice/v1/status` | Service, transcription child (with its compute snapshot) and dictation admission state (metadata only) |
 | `GET /ready` | 200 when dictations can run, else 503 with a code |
 | `GET /health` | `{"status":"ok","version":…}` |
 

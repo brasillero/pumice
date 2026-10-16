@@ -5,11 +5,13 @@
 //! drained and discarded.
 //!
 //! The protocol is the one `docs/transcription.md` ("Managed mode")
-//! documents: `ready` (or `error`), then `stopping` and `stopped`, each one
-//! JSON object per line under 4096 bytes. Anything else — an oversized or
-//! malformed line, an unknown or duplicate record, another instance's id —
-//! is a protocol error. Record contents are never logged; an `error`
-//! record's message is not even kept.
+//! documents (version 2): `ready` (or `error`), then `stopping` and
+//! `stopped`, each one JSON object per line under 4096 bytes. `ready` and
+//! `/ready` carry the child's compute snapshot, checked field by field.
+//! Anything else — an oversized or malformed line, an unknown or duplicate
+//! record, another instance's id, a compute object of another shape — is a
+//! protocol error. Record contents are never logged; an `error` record's
+//! message is not even kept.
 
 use std::ffi::OsString;
 use std::net::Ipv4Addr;
@@ -20,8 +22,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Empty, Limited};
-use serde::Deserialize;
 use serde::de::IgnoredAny;
+use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 use tokio::sync::mpsc;
@@ -31,8 +33,9 @@ use pumice_relay::process::{CleanupScope, ProcessTree};
 
 use crate::orchestrator::cancel::{self, CancelGuard};
 
-/// Managed protocol version this core speaks.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// Managed protocol version this core speaks (2: `compute` in `ready` and
+/// `/ready`, p14.1-windows-vulkan/D5).
+pub const PROTOCOL_VERSION: u32 = 2;
 /// Capabilities the core needs from its child (p13.1-flow-seam/D4).
 pub const REQUIRED_CAPABILITIES: [&str; 3] = [
     "openai_transcriptions",
@@ -93,6 +96,83 @@ pub fn instance_id(generation: u64) -> String {
 pub struct ReadyInfo {
     pub port: u16,
     pub model_load_ms: u64,
+    pub compute: Box<Compute>,
+}
+
+/// Longest device name and CPU variant a child may report, in bytes.
+const MAX_COMPUTE_LABEL_BYTES: usize = 128;
+/// Longest device description a child may report, in bytes.
+const MAX_COMPUTE_DESCRIPTION_BYTES: usize = 256;
+
+/// The child's compute snapshot: the requested backend mode and what the
+/// loaded model actually runs on. Every field must be present (`null` where
+/// allowed) and [`Compute::is_valid`]; it is shown by the status route as
+/// received.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Compute {
+    pub requested: String,
+    pub backend: String,
+    pub device: ComputeDevice,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub cpu_variant: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub fallback_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComputeDevice {
+    pub name: String,
+    pub description: String,
+}
+
+impl Compute {
+    /// The documented values, bounds and combinations: a known mode and
+    /// backend, `cpu` only on the CPU, `gpu` never on it, a fallback reason
+    /// exactly when `auto` runs on the CPU, and trimmed, control-free,
+    /// bounded hardware strings.
+    pub fn is_valid(&self) -> bool {
+        let label_ok = |text: &str, max: usize, empty_ok: bool| {
+            text.len() <= max
+                && (empty_ok || !text.is_empty())
+                && text.trim() == text
+                && !text.chars().any(char::is_control)
+        };
+        let known_mode = matches!(self.requested.as_str(), "cpu" | "auto" | "gpu");
+        let known_backend = matches!(self.backend.as_str(), "cpu" | "vulkan");
+        let on_cpu = self.backend == "cpu";
+        let consistent = match self.requested.as_str() {
+            "cpu" => on_cpu,
+            "gpu" => !on_cpu,
+            _ => true,
+        };
+        let reason_ok = match &self.fallback_reason {
+            None => !(self.requested == "auto" && on_cpu),
+            Some(reason) => {
+                self.requested == "auto"
+                    && on_cpu
+                    && matches!(
+                        reason.as_str(),
+                        "gpu_not_built" | "gpu_module_absent" | "gpu_unavailable"
+                    )
+            }
+        };
+        known_mode
+            && known_backend
+            && consistent
+            && reason_ok
+            && label_ok(&self.device.name, MAX_COMPUTE_LABEL_BYTES, false)
+            && label_ok(
+                &self.device.description,
+                MAX_COMPUTE_DESCRIPTION_BYTES,
+                true,
+            )
+            && self
+                .cpu_variant
+                .as_deref()
+                .is_none_or(|variant| label_ok(variant, MAX_COMPUTE_LABEL_BYTES, false))
+    }
 }
 
 /// Why a generation is not (or no longer) usable. `code` is a fixed,
@@ -153,6 +233,8 @@ fn known_child_code(code: &str) -> Option<(&'static str, bool)> {
         "model_not_found" => ("model_not_found", true),
         "engine_not_available" => ("engine_not_available", true),
         "model_load_failed" => ("model_load_failed", false),
+        // `backend: gpu` without a usable GPU: a restart finds none either.
+        "gpu_unavailable" => ("gpu_unavailable", true),
         "engine_failed" => ("engine_failed", false),
         "internal" => ("internal", false),
         _ => return None,
@@ -162,7 +244,7 @@ fn known_child_code(code: &str) -> Option<(&'static str, bool)> {
 /// One lifecycle event from the stdout reader.
 #[derive(Debug, PartialEq, Eq)]
 enum Lifecycle {
-    Ready(ReadyRecord),
+    Ready(Box<ReadyRecord>),
     Error(Failure),
     Stopping,
     Stopped,
@@ -181,6 +263,7 @@ struct ReadyRecord {
     model: String,
     capabilities: Vec<String>,
     model_load_ms: u64,
+    compute: Box<Compute>,
 }
 
 /// The records as the child writes them. Field sets are exact: both sides
@@ -200,6 +283,7 @@ enum RawRecord {
         model: String,
         capabilities: Vec<String>,
         model_load_ms: u64,
+        compute: Box<Compute>,
     },
     #[serde(rename = "error")]
     Error {
@@ -274,8 +358,10 @@ impl RecordParser {
                 model,
                 capabilities,
                 model_load_ms,
+                compute,
             } => {
                 if !header_ok(schema_version, &module)
+                    || !compute.is_valid()
                     || instance_id != self.instance_id
                     || self.seen_ready
                     || self.seen_error
@@ -285,7 +371,7 @@ impl RecordParser {
                     return Lifecycle::Protocol;
                 }
                 self.seen_ready = true;
-                Lifecycle::Ready(ReadyRecord {
+                Lifecycle::Ready(Box::new(ReadyRecord {
                     protocol_version,
                     version,
                     host,
@@ -293,7 +379,8 @@ impl RecordParser {
                     model,
                     capabilities,
                     model_load_ms,
-                })
+                    compute,
+                }))
             }
             RawRecord::Error {
                 schema_version,
@@ -330,7 +417,7 @@ impl RecordParser {
             } => {
                 if !header_ok(schema_version, &module)
                     || instance_id != self.instance_id
-                    || !matches!(reason.as_str(), "stdin_closed" | "signal")
+                    || !matches!(reason.as_str(), "stdin_closed" | "signal" | "engine_failed")
                     || self.seen_stopping
                     || self.seen_stopped
                 {
@@ -593,7 +680,13 @@ impl Generation {
         let check = tokio::select! {
             biased;
             _ = cancel::cancelled(&mut stop) => return Err(None),
-            check = probe_ready(info.port, &self.instance_id, &spec.model, deadline) => check,
+            check = probe_ready(
+                info.port,
+                &self.instance_id,
+                &spec.model,
+                &info.compute,
+                deadline,
+            ) => check,
         };
         match check {
             Ok(()) => {
@@ -707,6 +800,7 @@ fn check_ready_record(
     Ok(ReadyInfo {
         port: record.port,
         model_load_ms: record.model_load_ms,
+        compute: record.compute.clone(),
     })
 }
 
@@ -733,16 +827,19 @@ struct ReadyBody {
     version: String,
     model: String,
     capabilities: Vec<String>,
+    compute: Compute,
     state: String,
 }
 
 /// `GET /ready` on the child at `127.0.0.1:<port>` (the only address the
 /// core ever builds: a validated numeric port, never request content),
 /// with the literal loopback `Host` and no redirects, proxy or `Origin`.
+/// Its compute snapshot must be the one `ready` announced.
 pub async fn probe_ready(
     port: u16,
     instance_id: &str,
     model: &str,
+    compute: &Compute,
     deadline: Instant,
 ) -> Result<(), ProbeError> {
     let (status, body) = tokio::time::timeout_at(deadline, get_ready(port))
@@ -763,6 +860,7 @@ pub async fn probe_ready(
         && REQUIRED_CAPABILITIES
             .iter()
             .all(|needed| body.capabilities.iter().any(|have| have == needed))
+        && body.compute == *compute
         && body.state == "ready";
     if matches {
         Ok(())
@@ -806,11 +904,21 @@ async fn get_ready(port: u16) -> Result<(hyper::StatusCode, Bytes), ProbeError> 
 mod tests {
     use super::*;
 
+    const COMPUTE: &str = r#"{"requested":"auto","backend":"vulkan","device":{"name":"Vulkan0","description":"NVIDIA GeForce RTX 4070"},"cpu_variant":"haswell","fallback_reason":null}"#;
+
     fn ready_line(id: &str) -> String {
+        ready_line_with_compute(id, COMPUTE)
+    }
+
+    fn ready_line_with_compute(id: &str, compute: &str) -> String {
         format!(
-            r#"{{"schema_version":1,"event":"ready","module":"transcription","instance_id":"{id}","protocol_version":1,"version":"{}","host":"127.0.0.1","port":49152,"model":"turbo","capabilities":["openai_transcriptions","detailed_transcriptions","managed_shutdown"],"model_load_ms":362}}"#,
+            r#"{{"schema_version":1,"event":"ready","module":"transcription","instance_id":"{id}","protocol_version":2,"version":"{}","host":"127.0.0.1","port":49152,"model":"turbo","capabilities":["openai_transcriptions","detailed_transcriptions","managed_shutdown"],"model_load_ms":362,"compute":{compute}}}"#,
             env!("CARGO_PKG_VERSION")
         )
+    }
+
+    fn compute(value: serde_json::Value) -> Result<Compute, serde_json::Error> {
+        serde_json::from_value(value)
     }
 
     fn spec() -> ChildSpec {
@@ -864,9 +972,14 @@ mod tests {
             panic!("ready expected");
         };
         assert_eq!(record.port, 49152);
+        let info = check_ready_record(&record, &spec()).unwrap();
+        assert_eq!(info.model_load_ms, 362);
+        assert_eq!(info.compute.backend, "vulkan");
+        assert_eq!(info.compute.device.name, "Vulkan0");
         assert_eq!(
-            check_ready_record(&record, &spec()).unwrap().model_load_ms,
-            362
+            serde_json::to_string(&info.compute).unwrap(),
+            COMPUTE,
+            "shown as received"
         );
         assert_eq!(
             parser.line(br#"{"schema_version":1,"event":"stopping","module":"transcription","instance_id":"g1-a","reason":"stdin_closed"}"#),
@@ -876,6 +989,126 @@ mod tests {
             parser.line(br#"{"schema_version":1,"event":"stopped","module":"transcription","instance_id":"g1-a"}"#),
             Lifecycle::Stopped
         );
+    }
+
+    #[test]
+    fn a_retiring_child_stops_with_engine_failed() {
+        let mut parser = RecordParser::new("g1-a");
+        assert!(matches!(
+            parser.line(ready_line("g1-a").as_bytes()),
+            Lifecycle::Ready(_)
+        ));
+        assert_eq!(
+            parser.line(br#"{"schema_version":1,"event":"stopping","module":"transcription","instance_id":"g1-a","reason":"engine_failed"}"#),
+            Lifecycle::Stopping
+        );
+        let mut parser = RecordParser::new("g1-a");
+        assert_eq!(
+            parser.line(br#"{"schema_version":1,"event":"stopping","module":"transcription","instance_id":"g1-a","reason":"gpu_lost"}"#),
+            Lifecycle::Protocol
+        );
+    }
+
+    #[test]
+    fn compute_snapshots_are_checked_field_by_field() {
+        let good = serde_json::json!({
+            "requested": "auto",
+            "backend": "cpu",
+            "device": {"name": "CPU", "description": "Intel(R) Core(TM) i5-14500T"},
+            "cpu_variant": "alderlake",
+            "fallback_reason": "gpu_unavailable",
+        });
+        assert!(compute(good.clone()).unwrap().is_valid());
+        let edited = |edit: &dyn Fn(&mut serde_json::Value)| {
+            let mut value = good.clone();
+            edit(&mut value);
+            value
+        };
+        for valid in [
+            edited(&|v| v["cpu_variant"] = serde_json::Value::Null),
+            edited(&|v| v["device"]["description"] = "".into()),
+            edited(&|v| v["fallback_reason"] = "gpu_not_built".into()),
+            edited(&|v| v["fallback_reason"] = "gpu_module_absent".into()),
+            edited(&|v| v["device"]["name"] = "n".repeat(128).into()),
+            edited(&|v| v["device"]["description"] = "é".repeat(128).into()),
+            serde_json::json!({"requested": "cpu", "backend": "cpu",
+                "device": {"name": "CPU", "description": ""},
+                "cpu_variant": null, "fallback_reason": null}),
+            serde_json::json!({"requested": "gpu", "backend": "vulkan",
+                "device": {"name": "Vulkan0", "description": "GPU"},
+                "cpu_variant": "x64", "fallback_reason": null}),
+        ] {
+            assert!(compute(valid.clone()).unwrap().is_valid(), "{valid}");
+        }
+        // Wrong shapes do not even parse.
+        for shape in [
+            edited(&|v| {
+                v.as_object_mut().unwrap().remove("cpu_variant");
+            }),
+            edited(&|v| {
+                v.as_object_mut().unwrap().remove("fallback_reason");
+            }),
+            edited(&|v| v["extra"] = 1.into()),
+            edited(&|v| v["device"]["id"] = serde_json::Value::Null),
+            edited(&|v| v["device"] = "CPU".into()),
+            edited(&|v| v["backend"] = 1.into()),
+            serde_json::json!(null),
+            serde_json::json!("cpu"),
+        ] {
+            assert!(compute(shape.clone()).is_err(), "{shape}");
+        }
+        // Parsed, but not a documented snapshot.
+        for invalid in [
+            edited(&|v| v["requested"] = "vulkan".into()),
+            edited(&|v| v["backend"] = "cuda".into()),
+            edited(&|v| v["fallback_reason"] = serde_json::Value::Null),
+            edited(&|v| v["fallback_reason"] = "driver_missing".into()),
+            edited(&|v| v["requested"] = "cpu".into()),
+            edited(&|v| v["requested"] = "gpu".into()),
+            edited(&|v| {
+                v["backend"] = "vulkan".into();
+            }),
+            edited(&|v| v["device"]["name"] = "".into()),
+            edited(&|v| v["device"]["name"] = " CPU".into()),
+            edited(&|v| v["device"]["name"] = "C\nPU".into()),
+            edited(&|v| v["device"]["name"] = "n".repeat(129).into()),
+            edited(&|v| v["device"]["description"] = "d".repeat(257).into()),
+            edited(&|v| v["device"]["description"] = "trailing ".into()),
+            edited(&|v| v["cpu_variant"] = "".into()),
+            edited(&|v| v["cpu_variant"] = "v".repeat(129).into()),
+            serde_json::json!({"requested": "cpu", "backend": "vulkan",
+                "device": {"name": "Vulkan0", "description": ""},
+                "cpu_variant": null, "fallback_reason": null}),
+        ] {
+            assert!(!compute(invalid.clone()).unwrap().is_valid(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn a_worst_case_ready_record_fits_and_parses() {
+        // Longest instance id, model id and every compute string at its
+        // bound in characters JSON escapes to two bytes.
+        let id = format!("g1-{}", "x".repeat(61));
+        let model = "m".repeat(512);
+        let compute = serde_json::json!({
+            "requested": "auto",
+            "backend": "cpu",
+            "device": {"name": "\"".repeat(128), "description": "\\".repeat(256)},
+            "cpu_variant": "\"".repeat(128),
+            "fallback_reason": "gpu_module_absent",
+        });
+        let line = format!(
+            r#"{{"schema_version":1,"event":"ready","module":"transcription","instance_id":"{id}","protocol_version":2,"version":"{}","host":"127.0.0.1","port":65535,"model":"{model}","capabilities":["openai_transcriptions","detailed_transcriptions","managed_shutdown"],"model_load_ms":{},"compute":{compute}}}"#,
+            env!("CARGO_PKG_VERSION"),
+            u64::MAX
+        );
+        assert!(line.len() < MAX_RECORD_BYTES, "{} bytes", line.len());
+        let mut parser = RecordParser::new(&id);
+        let Lifecycle::Ready(record) = parser.line(line.as_bytes()) else {
+            panic!("ready expected");
+        };
+        assert_eq!(record.model, model);
+        assert_eq!(record.compute.device.description.len(), 256);
     }
 
     #[test]
@@ -894,6 +1127,22 @@ mod tests {
             (
                 vec![ready.replace("\"module\":\"transcription\"", "\"module\":\"relay\"").into_bytes()],
                 "wrong module",
+            ),
+            (
+                vec![ready.replace(",\"compute\":", ",\"no_compute\":").into_bytes()],
+                "compute missing",
+            ),
+            (
+                vec![ready_line_with_compute("g1-a", "null").into_bytes()],
+                "null compute",
+            ),
+            (
+                vec![ready.replace("\"backend\":\"vulkan\"", "\"backend\":\"cuda\"").into_bytes()],
+                "unknown backend",
+            ),
+            (
+                vec![ready.replace("\"fallback_reason\":null", "\"fallback_reason\":\"gpu_unavailable\"").into_bytes()],
+                "fallback reason on a GPU",
             ),
             (
                 vec![br#"{"schema_version":1,"event":"error","module":"transcription","code":"made_up","message":"x"}"#.to_vec()],
@@ -950,6 +1199,17 @@ mod tests {
             event,
             Lifecycle::Error(Failure { fatal: false, .. })
         ));
+        // `backend: gpu` without a GPU: restarting cannot help.
+        let mut parser = RecordParser::new("g1-a");
+        let event = parser.line(br#"{"schema_version":1,"event":"error","module":"transcription","instance_id":"g1-a","code":"gpu_unavailable","message":"x"}"#);
+        assert_eq!(
+            event,
+            Lifecycle::Error(Failure {
+                code: code::MODULE_ERROR,
+                fatal: true,
+                child_code: Some("gpu_unavailable"),
+            })
+        );
     }
 
     #[test]
@@ -966,7 +1226,8 @@ mod tests {
                 .unwrap()
                 .code
         };
-        assert_eq!(check(&|r| r.protocol_version = 2), code::PROTOCOL);
+        assert_eq!(check(&|r| r.protocol_version = 1), code::PROTOCOL);
+        assert_eq!(check(&|r| r.protocol_version = 3), code::PROTOCOL);
         assert_eq!(
             check(&|r| r.version = "9.9.9".into()),
             code::VERSION_MISMATCH
