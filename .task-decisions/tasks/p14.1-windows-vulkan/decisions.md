@@ -78,7 +78,7 @@
 
 **Rejected.** Shipping or requiring the VC++ redistributable.
 
-### D7 · Active · The Vulkan SDK and its install action are pinned
+### D7 · Superseded by D8 · The Vulkan SDK and its install action are pinned
 - date: 2026-10-16
 - decided by: claude (orchestrator, owner-delegated 2026-10-16)
 - origin: reports/2026-10-16-gpu-design.md
@@ -90,3 +90,16 @@
 **Why.** Reproducible builds; the SDK is build-host tooling only.
 
 **Rejected.** Headers+loader-only setups (no `glslc`); unpinned `windows-latest` with the latest SDK.
+
+### D8 · Active · CI installs the Vulkan SDK with LunarG's own installer, checked by SHA-256
+- date: 2026-10-16
+- decided by: claude (orchestrator, owner-delegated 2026-10-16)
+- origin: D7
+- area: distribution
+- revisit if: the pinned SDK version stops being downloadable or fails to build the pinned engine
+
+**Decision.** The Windows job downloads LunarG Vulkan SDK 1.4.350.0's installer, verifies its SHA-256 against the value LunarG publishes, and runs it silently, as the pinned engine's own CI does; the runner image stays pinned (`windows-2022`). It then checks `glslc`, the Vulkan headers and `vulkan-1.lib` before building. End users still need only their GPU driver's Vulkan loader.
+
+**Why.** `humbletim/install-vulkan-sdk@30ba978` unpacks only `Bin\` from this installer (no `Include\`, no `Lib\vulkan-1.lib`, no SPIRV-Headers), so the build cannot find them (P14.1 CI run 2).
+
+**Rejected.** The install action of D7; building shaderc and the headers from source in CI.
