@@ -276,6 +276,16 @@ pub mod cpp {
             | Native::OutputRepetition { .. }
             | Native::Nul(_)
             | Native::Busy(_) => EngineError::Rejected,
+            Native::ModelFileNotFound(_)
+            | Native::ModelLoad(_)
+            | Native::OutOfMemory(_)
+            | Native::Backend(_)
+            | Native::BadStructSize(_)
+            | Native::VersionMismatch(_)
+            | Native::Other(_) => EngineError::Failed,
+            // `transcribe_cpp::Error` is non-exhaustive. A kind added by a
+            // later version is not known to be safe to reuse after, so it
+            // retires a GPU process until it is classified here.
             _ => EngineError::Failed,
         }
     }
