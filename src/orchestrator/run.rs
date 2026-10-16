@@ -76,6 +76,7 @@ pub async fn execute(
                 stages: StageReports::default(),
                 total: Duration::ZERO,
                 error: Some(error),
+                cleanup_failed: false,
             };
         }
     };

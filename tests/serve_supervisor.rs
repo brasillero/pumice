@@ -691,7 +691,9 @@ async fn start_service(
         supervisor: config,
         model: "turbo".to_owned(),
         flows: Vec::new(),
+        dictations: None,
         request_hook,
+        cleanup_hook: None,
     };
     let task = tokio::spawn(async move { serve::run(service, &Reporter::silent(), signals).await });
     (task, port, signal)

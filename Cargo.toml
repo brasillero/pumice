@@ -86,6 +86,11 @@ bytes = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["server"] }
 hyper-util = { workspace = true }
+# `pumice serve`'s dictation upload: the multipart parser the transcription
+# child already uses for the same fields and limits (same versions, already
+# in the lockfile), so both ends read a form the same way.
+futures-core = "0.3"
+multer = "3.1.0"
 serde = { workspace = true }
 serde-saphyr = { workspace = true }
 serde_json = { workspace = true }

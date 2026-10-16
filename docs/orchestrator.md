@@ -168,11 +168,13 @@ that must stay private on a shared machine.
 `pumice serve` runs the local stack as a service on `127.0.0.1`: one
 loopback frontend and one warm `pumice-transcribe serve --managed` child
 (the sibling program, found like `pumice run` finds it) with the served
-model loaded for the service's lifetime. This release exposes the service's
-health, readiness, status and flow list; **dictations arrive in the next
-release** (`POST /pumice/v1/dictations`). There are no OpenAI routes here:
-clients that want `/v1/chat/completions` or `/v1/audio/transcriptions` keep
-using `pumice relay serve` and `pumice-transcribe serve`.
+model loaded for the service's lifetime. It takes dictations
+(`POST /pumice/v1/dictations`: audio plus a flow id in, the raw transcript
+and the final text out, through the same flows as `pumice run`) and
+exposes its health, readiness, status and flow list. There are no OpenAI
+routes here: clients that want `/v1/chat/completions` or
+`/v1/audio/transcriptions` keep using `pumice relay serve` and
+`pumice-transcribe serve` (all HTTP APIs: [`api.md`](api.md)).
 
 ```sh
 pumice serve                          # per-user orchestrator.yml, port 17570
@@ -222,14 +224,17 @@ episode. When the restarts are used up the transcription state stays
 configuration error goes to `failed` at once. A previous child is always
 reaped before the next one starts. Nothing is ever replayed.
 
-**Shutdown.** Ctrl-C or SIGTERM stops admission (the frontend closes), closes
-the child's stdin, gives it 2.5 s to exit, then kills and reaps it; exit 130
+**Shutdown.** Ctrl-C or SIGTERM stops admission (the frontend closes) and
+cancels a running dictation, which still answers 503 within a 2.5 s drain
+(with its raw transcript if transcription had finished); then it closes the
+child's stdin, gives it 2.5 s to exit, then kills and reaps it; exit 130
 (Ctrl-C) or 143 (SIGTERM), or 1 when an owned process could not be confirmed
 stopped. The whole stop stays within 5 s. Windows and macOS console teardown
 is checked manually.
 
-**Core failures.** A panic inside `pumice serve` itself (its supervisor or a
-request handler) is a core failure, not something it recovers from: the
+**Core failures.** A panic inside `pumice serve` itself (its supervisor, a
+request handler or a dictation's task, including the in-process relay and
+formatter) is a core failure, not something it recovers from: the
 service takes the same bounded stop (admission first, then the child, then
 any killed process still to reap) and exits 1 with the error code
 `internal`. The panic is reported as a fixed line with its source location
@@ -247,15 +252,21 @@ it is `same-origin` or `none`; anything else gets 403 `host_not_allowed`,
 CORS headers are sent. All answers are JSON with `Cache-Control: no-store`;
 errors use the OpenAI error object (`message`, `type`, `param`, `code`),
 including 404 `not_found` and 405 `method_not_allowed` (with `Allow: GET`).
-The routes only read in-memory state: they never wait for the transcription
-child, a provider or a model.
+On the dictation route every answer, its 403 and its 405
+`method_not_allowed` (with `Allow: POST`) included, is the dictation
+document below, whose `error` is that object with a few more fields. The
+guard still comes first: a refused origin gets 403 whatever the method. The
+metadata routes only read
+in-memory state: they never wait for the transcription child, a provider, a
+model or a running dictation.
 
 - `GET /health` — `200` `{"status":"ok","version":"0.2.0"}` while the
   service runs, whatever the child's state.
-- `GET /ready` — `200` only when the transcription child is ready and the
-  service is not stopping; otherwise `503` with `code`
-  `service_starting`, `transcription_restarting`, `transcription_failed` or
-  `shutting_down`.
+- `GET /ready` — `200` only when the transcription child is ready, the
+  service is not stopping and dictations are admitted (a running dictation
+  does not change that); otherwise `503` with `code` `service_starting`,
+  `transcription_restarting`, `transcription_failed`, `admission_stopped`
+  or `shutting_down`.
 - `GET /pumice/v1/status`:
   ```json
   {"schema_version":1,"module":"orchestrator","version":"0.2.0",
@@ -263,13 +274,19 @@ child, a provider or a model.
    "transcription":{"state":"ready","model":"turbo","generation":1,
      "restart_attempts":0,"next_retry_delay_ms":null,"model_load_ms":362,
      "last_failure":null},
-   "flows":{"enabled":2}}
+   "flows":{"enabled":2},
+   "dictations":{"served":true,"admission":"busy","active":true,
+     "stage":"transcription"}}
   ```
   `service.state` is `starting`, `running` or `stopping`;
   `transcription.state` is `starting`, `ready`, `restarting`, `failed` or
   `stopping`; `generation` counts the children started (1 is the first);
-  `last_failure` is a fixed code such as `transcription_exited` or
-  `transcription_probe_failed`. No paths, child address or content.
+  `last_failure` is a fixed code such as `transcription_exited`,
+  `transcription_probe_failed` or `transcription_recycled`.
+  `dictations.admission` is `open`, `busy` (one is running; `stage` names
+  its current stage: `prepare`, `transcription`, `formatter`, `relay` or
+  `cleanup`) or `stopped` (a cleanup could not be confirmed; see below).
+  No paths, child address, operation ids or content.
 - `GET /pumice/v1/flows` — the enabled flows:
   ```json
   {"schema_version":1,"module":"orchestrator","flows":[
@@ -282,7 +299,121 @@ child, a provider or a model.
 Limits: at most 64 connections (more are closed at once), one request per
 connection, request headers within 5 s and 16 KiB. These metadata routes, and
 every rejection, also bound the whole connection to 10 s from its arrival and
-answers to 128 KiB; longer-running routes get their own deadlines.
+answers to 128 KiB; a dictation's connection may last its longest enabled
+flow's total budget plus 5 s, with answers up to 16 MiB.
+
+### Dictations
+
+`POST /pumice/v1/dictations` takes `multipart/form-data` with exactly two
+parts, in either order:
+
+- `file`: one uploaded, non-empty audio file (a file part). Its bytes are
+  passed to the transcription child unchanged, held in memory only (never
+  written to disk); its file name and declared type are not passed on. The
+  format is detected by the transcription module ([formats and
+  limits](transcription.md#supported-formats-and-limits)).
+- `flow`: the id of an enabled flow (a text part, UTF-8 without NUL, at
+  most 128 bytes). The flow chooses the formatter and the relay route;
+  transcription options (language, prompt) come from `transcribe.yml`.
+
+Anything else — a missing, duplicated or unknown part, a `file` sent as
+text or a `flow` sent as a file — is refused with 400 before any work.
+
+```sh
+curl --fail-with-body --max-time 200 http://127.0.0.1:17570/pumice/v1/dictations \
+  -F 'file=@clip.wav' -F 'flow=clean'
+```
+
+The answer is the same `schema_version: 1` document as `pumice run --json`,
+with an HTTP status. Success is `200`:
+
+```json
+{"schema_version":1,"operation_id":"…","module":"orchestrator","ok":true,"flow":"clean","transcript":{"text":"raw words","language":"en","audio_seconds":2.1},"result":{"text":"Raw words."},"stages":{"prepare":{"status":"ok","elapsed_ms":2},"transcription":{"status":"ok","elapsed_ms":5900,"inference_ms":5800},"formatter":{"status":"ok","elapsed_ms":0},"relay":{"status":"ok","elapsed_ms":2400}},"timings_ms":{"total":8303}}
+```
+
+`prepare` measures receiving the upload and selecting the flow;
+`inference_ms` is the engine call alone (the model was loaded once, at
+startup: see status). A whitespace-only transcript succeeds unchanged, with
+the formatter and relay skipped; a `passthrough` flow returns the
+transcript without a provider call.
+
+Every failure is non-2xx and carries the same document with `ok: false`, no
+`result`, and the raw transcript in `transcript` whenever transcription had
+finished (also after a provider failure or a shutdown) — read the body of an
+error answer to recover the dictation; nothing is stored, so a lost answer
+cannot be fetched again. The error object has the OpenAI fields plus the
+flow's:
+
+```json
+{"schema_version":1,"operation_id":"…","module":"orchestrator","ok":false,"flow":"clean","transcript":{"text":"raw words","audio_seconds":2.1},"stages":{"prepare":{"status":"ok","elapsed_ms":2},"transcription":{"status":"ok","elapsed_ms":5900,"inference_ms":5800},"formatter":{"status":"ok","elapsed_ms":0},"relay":{"status":"error","elapsed_ms":900}},"timings_ms":{"total":6802},"error":{"message":"The provider returned output that could not be parsed.","type":"server_error","param":null,"code":"relay_invalid_output","stage":"relay","retryable":false,"cause_code":"invalid_output"}}
+```
+
+`code` is one of the [stable codes](#results-errors-and-exit-codes) or a
+request code below; `param` names `file` or `flow` when one of them is at
+fault; there is no `location` (no server paths). Messages are fixed text
+and never quote what the client sent (flow ids, part names, file names),
+the transcript or the transcription module's own messages. A request
+refused before its flow was selected has no `flow`, and its later stages
+are `skipped`.
+
+| Status | `type` | When (`code`) |
+| --- | --- | --- |
+| 400 | `invalid_request_error` | `not_multipart`, `malformed_multipart`, `missing_file`, `missing_flow`, `duplicate_parameter`, `unsupported_parameter`, `empty_file`, `file_not_upload`, `flow_not_text`, `invalid_utf8`, `nul_in_text`, `flow_disabled`; undecodable, unsupported or too long audio (`transcription_invalid_input`, with the module's `cause_code`) |
+| 403 | `invalid_request_error` | the `Host`/`Origin`/`Sec-Fetch-Site` guard: `host_not_allowed`, `origin_not_allowed`, `cross_site_not_allowed` |
+| 404 | `invalid_request_error` | `flow_not_found` |
+| 405 | `invalid_request_error` | `method_not_allowed` (not a `POST`; `Allow: POST`) |
+| 408 | `invalid_request_error` | `upload_timeout` |
+| 413 | `invalid_request_error` | `body_too_large`, `file_too_large`, `field_too_large` |
+| 429 | `rate_limit_error` | `rate_limit_exceeded` (another dictation is running; `Retry-After: 1`), `relay_quota_exceeded`, `relay_rate_limited` |
+| 500 | `server_error` | `transcription_engine_failed`, `cleanup_failed`, `internal`, server configuration codes |
+| 502 | `server_error` | `transcription_unavailable` (the child crashed or closed the connection), `transcription_protocol_error`, `relay_failed`, `relay_invalid_output` |
+| 503 | `server_error` | `service_starting`, `transcription_restarting`, `transcription_failed`, `transcription_busy`, `admission_stopped`, `shutting_down`, `relay_not_installed`, `relay_not_logged_in`; `cancelled` with `cause_code` `service_shutdown` |
+| 504 | `server_error` | `transcription_timeout`, `formatter_timeout`, `relay_timeout`, `flow_timeout` |
+
+**Admission.** One dictation runs at a time. A second one gets 429 with
+`Retry-After: 1` at once, before its body is read; there is no queue. When
+the service is starting, the child is restarting or failed, or the service
+is stopping, a dictation gets 503 before its body is read. The work permit
+is held from admission to the end of the dictation's cleanup. The metadata
+routes never wait for it.
+
+**Limits and deadlines.** The whole body (chunked or not, epilogue
+included) is at most 26,000,000 bytes, the file at most 25,000,000 bytes,
+a declared larger `Content-Length` is refused before reading. Every clock
+starts at the request's arrival: the upload must be complete within
+`min(15 s, smallest enabled flow's budgets_ms.total − 2.5 s)` (408 after
+that; one unusually short flow shortens the window for all), and the
+selected flow's whole budget is counted from the arrival too, so a slow
+upload leaves less for the flow, never more. Each stage's deadline is the
+earlier of its own budget and the flow's; the transcription module's own
+120 s cap still applies. The child's answer is read up to 1 MiB, the whole
+answer is at most 16 MiB: a final text that does not fit fails as
+`relay_invalid_output` with `cause_code` `output_too_large`, never cut.
+No stage is retried and nothing falls back to another provider.
+
+**Cancellation.** A client that closes or resets its connection cancels its
+dictation at once with `cancelled`, `cause_code` `client_disconnected`,
+during the upload, the transcription or the provider call (the provider's
+process tree is killed and reaped; a provider call not started yet never
+starts). Half-close is not supported: the client must keep its connection
+open, including its write side, until the response arrives. A client that
+half-closes (`shutdown(SHUT_WR)`) after sending its request is treated as
+gone, like a reset — its dictation is cancelled and the connection closes
+without an answer — because the service cannot tell it apart from a client
+that closed or was killed. A transcription abandoned after it was sent to
+the child — by a disconnect, a deadline or a shutdown — leaves the child
+busy with work nobody waits for, so that child is killed, reaped and
+replaced (status: a new `generation`, `last_failure`
+`transcription_recycled`) before the next dictation is admitted; it is never
+asked to cancel and nothing is replayed. A cancellation during the formatter
+or the provider call leaves the child alone. After every dictation the
+killed provider processes are reaped and the provider's temporary directory
+is removed; if any of that, or the recycle (the old child confirmed reaped),
+cannot be confirmed within its bound, the dictation fails with
+`cleanup_failed` (never a success; after another failure that error stays
+the reported one) and no further dictation is admitted (`admission:
+"stopped"`, `/ready` 503 `admission_stopped`) until `pumice serve` is
+restarted, so no paid call starts over processes that may still run.
 
 ### Output
 
@@ -302,8 +433,17 @@ line:
 one `{"event":"error","code":…,"message":…}` record (with `cause_code` when
 the transcription module reported its own error code). stderr then carries
 metadata-only events (`child_starting`, `child_ready`, `child_failed`,
-`child_restarting`, `transcription_unavailable`, `stopping`, `panicked`, …)
-with the child `generation` and fixed codes. Both streams are bounded and
+`child_restarting`, `child_recycled`, `transcription_unavailable`,
+`admission_stopped`, `stopping`, `panicked`, …) with the child `generation`
+and fixed codes, and each dictation's own events (`started`,
+`stage_started`, `stage_finished`, `finished`, with stage names, elapsed
+milliseconds and error codes) under the dictation's `operation_id`, as
+`pumice run --json` writes them. No event, record or plain line ever
+carries audio, a transcript, a final text, a flow id sent by a client or a
+file name. Like `pumice run`, dictations call the relay's pipeline
+in-process, so the relay's `debug_log` (written by `pumice relay serve`'s
+HTTP handlers) does not record them; `pumice serve` keeps no content log of
+its own. Both streams are bounded and
 written by their own threads; a stalled reader loses events, never blocks
 the service.
 The child's own stderr is drained and discarded, never shown.

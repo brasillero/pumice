@@ -94,11 +94,26 @@ impl EventWriter {
         code: Option<&'static str>,
     ) {
         let stage = generation.map(|_| crate::orchestrator::result::stage::TRANSCRIPTION);
-        self.queue(stage, event, elapsed_ms, code, generation);
+        self.queue(None, stage, event, elapsed_ms, code, generation);
+    }
+
+    /// Queues one event of another operation than the writer's own
+    /// (`pumice serve`'s dictations share the service's writer); dropped
+    /// silently when the queue is full.
+    pub fn emit_for(
+        &mut self,
+        operation_id: &str,
+        stage: Option<&'static str>,
+        event: &'static str,
+        elapsed_ms: Option<u64>,
+        code: Option<&'static str>,
+    ) {
+        self.queue(Some(operation_id), stage, event, elapsed_ms, code, None);
     }
 
     fn queue(
         &mut self,
+        operation_id: Option<&str>,
         stage: Option<&str>,
         event: &str,
         elapsed_ms: Option<u64>,
@@ -107,7 +122,7 @@ impl EventWriter {
     ) {
         let Ok(line) = serde_json::to_string(&Event {
             schema_version: SCHEMA_VERSION,
-            operation_id: &self.operation_id,
+            operation_id: operation_id.unwrap_or(&self.operation_id),
             seq: self.seq,
             module: MODULE,
             stage,
@@ -215,7 +230,7 @@ impl EventSink for EventWriter {
         elapsed_ms: Option<u64>,
         code: Option<&'static str>,
     ) {
-        self.queue(stage, event, elapsed_ms, code, None);
+        self.queue(None, stage, event, elapsed_ms, code, None);
     }
 }
 

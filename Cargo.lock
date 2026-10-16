@@ -1435,10 +1435,12 @@ name = "pumice"
 version = "0.2.0"
 dependencies = [
  "bytes",
+ "futures-core",
  "http-body-util",
  "hyper",
  "hyper-util",
  "libc",
+ "multer",
  "pumice-formatter",
  "pumice-relay",
  "serde",

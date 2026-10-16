@@ -68,6 +68,11 @@ pub enum SttFailure {
         code: String,
         location: Option<ErrorLocation>,
     },
+    /// `pumice serve` only: the warm child could not be reached, broke the
+    /// connection or is not ready (crashed, restarting, stopping).
+    Unavailable(&'static str),
+    /// `pumice serve` only: the warm child refused the request as busy.
+    Busy,
 }
 
 /// The sibling executable and the transcription config it is given.
@@ -281,6 +286,9 @@ impl Transcriber for Transcribe {
     ) -> Result<TranscriptOutput, SttFailure> {
         match audio {
             AudioSource::File(path) => self.transcribe_file(path, model, deadline, cancel).await,
+            AudioSource::Bytes(_) => Err(SttFailure::Protocol(
+                "in-memory audio needs the warm transcription child",
+            )),
         }
     }
 }

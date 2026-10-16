@@ -1,8 +1,9 @@
 //! `pumice serve` (p13.3-serve-supervisor): the local stack's service.
 //!
 //! One loopback frontend (`http`), one owned warm transcription child
-//! (`supervisor`, `child`) and, from P13.4, the shared flow execution
-//! (`flow.rs`) in-process. Startup follows design §4:
+//! (`supervisor`, `child`) and the dictation route (`dictation`, `warm`),
+//! which runs the shared flow execution (`flow.rs`) in-process on one
+//! [`Runtime`] built at startup. Startup follows design §4:
 //!
 //! 1. signal handlers, before anything is loaded or spawned;
 //! 2. the orchestrator file and its `serve:` section, the relay pipeline,
@@ -13,18 +14,21 @@
 //!    fails, with no fallback);
 //! 5. the child, until its handshake succeeds (never retried).
 //!
-//! Shutdown (D9): Ctrl-C or SIGTERM stops admission, closes the child's
-//! stdin, waits a 2.5 s grace and kills and reaps what is left; exit 130 or
-//! 143, or 1 when cleanup could not be confirmed. A core failure — the
+//! Shutdown (D9): Ctrl-C or SIGTERM stops admission and cancels a running
+//! dictation (which still answers, within the frontend's drain), closes the
+//! child's stdin, waits a 2.5 s grace and kills and reaps what is left;
+//! exit 130 or 143, or 1 when cleanup could not be confirmed. A core failure — the
 //! supervisor's task or a request handler panicked — takes the same
 //! bounded path and exits 1; the panic itself is reported as metadata only
 //! (`output::PanicHook`).
 
 pub mod child;
 pub mod cli;
+pub mod dictation;
 pub mod http;
 pub mod output;
 pub mod supervisor;
+pub mod warm;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -42,7 +46,10 @@ use crate::orchestrator::error::StageError;
 use crate::orchestrator::flow::{self, Runtime, set_reference_location};
 use crate::orchestrator::result::stage;
 use crate::orchestrator::serve::child::{ChildSpec, Failure, code};
-use crate::orchestrator::serve::http::{FlowInfo, Frontend, RequestHook, ServiceState};
+use crate::orchestrator::serve::dictation::Dictations;
+use crate::orchestrator::serve::http::{
+    CleanupHook, FlowInfo, Frontend, RequestHook, ServiceState,
+};
 use crate::orchestrator::serve::output::Reporter;
 use crate::orchestrator::serve::supervisor::{
     Checkpoints, Event, StartupError, SupervisorConfig, Timings,
@@ -53,8 +60,11 @@ use crate::orchestrator::transcription::Transcribe;
 const MODELS_LIST_CAP: Duration = Duration::from_secs(5);
 /// The supervisor's whole stop: the 2.5 s grace plus the reap.
 const SUPERVISOR_STOP_LIMIT: Duration = Duration::from_millis(3_750);
-/// The frontend task's own end, after it was told to stop.
-const FRONTEND_STOP_LIMIT: Duration = Duration::from_millis(100);
+/// The frontend task's own end, after it was told to stop: its drain
+/// ([`http::DRAIN_LIMIT`]) and a little more.
+const FRONTEND_STOP_LIMIT: Duration = Duration::from_millis(2_600);
+/// After the supervisor stopped, the frontend gets at least this long.
+const FRONTEND_STOP_MIN: Duration = Duration::from_millis(100);
 /// The service's cleanup scope's drain at the end.
 const SCOPE_DRAIN_LIMIT: Duration = Duration::from_millis(250);
 
@@ -101,11 +111,16 @@ pub struct Service {
     pub model: String,
     /// The enabled flows.
     pub flows: Vec<FlowInfo>,
+    /// The dictation route's runtime and flows; `None` serves no
+    /// dictations (404).
+    pub dictations: Option<Dictations>,
     /// The service's cleanup scope, drained at the end; the supervisor's
-    /// configuration carries the same one.
+    /// configuration and the dictations' runtime carry the same one.
     pub scope: Arc<CleanupScope>,
     #[doc(hidden)]
     pub request_hook: Option<RequestHook>,
+    #[doc(hidden)]
+    pub cleanup_hook: Option<CleanupHook>,
 }
 
 async fn serve(params: &ServeParams, reporter: &Reporter, signals: cancel::CancelGuard) -> u8 {
@@ -126,9 +141,10 @@ async fn serve(params: &ServeParams, reporter: &Reporter, signals: cancel::Cance
         }
     };
     let scope = Arc::new(CleanupScope::new());
-    // Kept for the service's lifetime: P13.4 runs the flows on it.
-    let _runtime = match Runtime::build(&loaded, Arc::clone(&scope)) {
-        Ok(runtime) => runtime,
+    // Built once, for the service's lifetime: every dictation runs on it, so
+    // the relay pipeline's own limits keep applying (design §6).
+    let runtime = match Runtime::build(&loaded, Arc::clone(&scope)) {
+        Ok(runtime) => Arc::new(runtime),
         Err(error) => return report_stage_error(reporter, &error),
     };
 
@@ -194,8 +210,13 @@ async fn serve(params: &ServeParams, reporter: &Reporter, signals: cancel::Cance
         },
         model: settings.transcription_model,
         flows,
+        dictations: Some(Dictations {
+            runtime,
+            flows: loaded.config.flows.clone(),
+        }),
         scope,
         request_hook: None,
+        cleanup_hook: None,
     };
     run(service, reporter, signals).await
 }
@@ -208,8 +229,10 @@ pub async fn run(service: Service, reporter: &Reporter, mut signals: cancel::Can
         supervisor,
         model,
         flows,
+        dictations,
         scope,
         request_hook,
+        cleanup_hook,
     } = service;
     let port = match listener.local_addr() {
         Ok(address) => address.port(),
@@ -222,8 +245,15 @@ pub async fn run(service: Service, reporter: &Reporter, mut signals: cancel::Can
 
     let mut supervisor = supervisor::spawn(supervisor, reporter.clone());
     let mut frontend = Frontend::new(port, supervisor.handle(), model, flows);
+    frontend.set_reporter(reporter.clone());
+    if let Some(dictations) = dictations {
+        frontend.set_dictations(dictations);
+    }
     if let Some(hook) = request_hook {
         frontend.set_request_hook(hook);
+    }
+    if let Some(hook) = cleanup_hook {
+        frontend.set_cleanup_hook(hook);
     }
     let frontend = Arc::new(frontend);
     let (frontend_stop, frontend_guard) = cancel::context();
@@ -252,16 +282,21 @@ pub async fn run(service: Service, reporter: &Reporter, mut signals: cancel::Can
         }
     };
 
-    // Teardown: admission first, then the child, then the cleanup scope
-    // (the relay's trees and any the supervisor dropped when it failed).
-    frontend.set_state(ServiceState::Stopping);
+    // Teardown: admission first (a running dictation is cancelled and
+    // answers within the frontend's drain), then the child, then the
+    // cleanup scope (the relay's trees and any the supervisor dropped when
+    // it failed).
+    frontend.begin_shutdown();
     if matches!(ending, Ending::Signal(_)) {
         reporter.stopping();
     }
+    let stop_started = Instant::now();
     frontend_stop.cancel(CancelReason::Shutdown);
     let child_cleaned = supervisor.shutdown(SUPERVISOR_STOP_LIMIT).await;
+    let frontend_deadline =
+        (stop_started + FRONTEND_STOP_LIMIT).max(Instant::now() + FRONTEND_STOP_MIN);
     if !frontend_ended
-        && tokio::time::timeout(FRONTEND_STOP_LIMIT, &mut frontend_task)
+        && tokio::time::timeout_at(frontend_deadline, &mut frontend_task)
             .await
             .is_err()
     {

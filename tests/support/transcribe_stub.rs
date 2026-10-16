@@ -47,6 +47,11 @@
 //! previous spawn's process still existed, zombie included) and later
 //! `{"event":"eof",…}` when its stdin closes. The n-th spawn follows
 //! `generations[n]` (the last entry repeats); see [`Managed`] for the knobs.
+//!
+//! The managed child also answers `POST /pumice/v1/transcriptions` (the
+//! detailed route `pumice serve`'s dictations use) as its `transcription`
+//! script says, after appending `{"event":"transcription","pid":…,…}` with
+//! what it received (Host, Origin, content type, body length) to the log.
 
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
@@ -234,6 +239,46 @@ struct Managed {
     /// After stdin EOF, wait this long before `stopping`/`stopped` and exit.
     #[serde(default)]
     exit_delay_ms: u64,
+    /// How `POST /pumice/v1/transcriptions` answers.
+    #[serde(default)]
+    transcription: Transcription,
+}
+
+/// One managed child's detailed transcription answer.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct Transcription {
+    /// HTTP status of the answer.
+    status: u16,
+    /// The JSON answer; defaults to a detailed result.
+    body: Option<serde_json::Value>,
+    /// A raw answer body instead of `body`.
+    raw_body: Option<String>,
+    /// Filler bytes appended to the raw answer.
+    repeat_bytes: Option<u64>,
+    /// Delay before answering.
+    delay_ms: u64,
+    /// Never answer (until killed).
+    hang: bool,
+    /// Abort right after the answer was written.
+    crash_after_answer: bool,
+    /// Write the received request body (the rebuilt multipart form) here.
+    body_path: Option<PathBuf>,
+}
+
+impl Default for Transcription {
+    fn default() -> Transcription {
+        Transcription {
+            status: 200,
+            body: None,
+            raw_body: None,
+            repeat_bytes: None,
+            delay_ms: 0,
+            hang: false,
+            crash_after_answer: false,
+            body_path: None,
+        }
+    }
 }
 
 fn scenario_mode(args: &[OsString], scenario_path: &Path) -> ! {
@@ -479,8 +524,17 @@ fn managed_mode(args: &[OsString], scenario: &ManagedScenario) -> ! {
         let instance_id = instance_id.clone();
         let model = model.clone();
         let behavior = behavior.clone();
+        let log = log.clone();
         std::thread::spawn(move || {
-            serve_ready(listener, port, instance_id, model, behavior, answered_ok)
+            serve_ready(
+                listener,
+                port,
+                instance_id,
+                model,
+                behavior,
+                answered_ok,
+                log,
+            )
         });
     }
 
@@ -529,7 +583,8 @@ fn managed_mode(args: &[OsString], scenario: &ManagedScenario) -> ! {
     }
 }
 
-/// A minimal HTTP/1.1 `GET /ready` server, one thread per connection.
+/// A minimal HTTP/1.1 `GET /ready` and `POST /pumice/v1/transcriptions`
+/// server, one thread per connection.
 fn serve_ready(
     listener: std::net::TcpListener,
     port: u16,
@@ -537,6 +592,7 @@ fn serve_ready(
     model: String,
     behavior: Managed,
     answered_ok: std::sync::mpsc::Sender<()>,
+    log: Option<PathBuf>,
 ) {
     let answered = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     for stream in listener.incoming() {
@@ -546,6 +602,7 @@ fn serve_ready(
         let instance_id = instance_id.clone();
         let model = model.clone();
         let behavior = behavior.clone();
+        let log = log.clone();
         std::thread::spawn(move || {
             let mut head = Vec::new();
             let mut byte = [0u8; 1];
@@ -559,6 +616,10 @@ fn serve_ready(
             let host_ok = head
                 .lines()
                 .any(|line| line.eq_ignore_ascii_case(&format!("host: 127.0.0.1:{port}")));
+            if head.starts_with("POST /pumice/v1/transcriptions ") {
+                transcribe(&mut stream, &head, host_ok, &behavior.transcription, &log);
+                return;
+            }
             let (status, body) = if !head.starts_with("GET /ready ") {
                 (
                     "404 Not Found",
@@ -607,6 +668,80 @@ fn serve_ready(
                 let _ = answered_ok.send(());
             }
         });
+    }
+}
+
+/// The value of a request header (case-insensitive name).
+fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim()
+            .eq_ignore_ascii_case(name)
+            .then_some(value.trim())
+    })
+}
+
+/// Reads the request body (`Content-Length` only), logs what arrived and
+/// answers as scripted.
+fn transcribe(
+    stream: &mut std::net::TcpStream,
+    head: &str,
+    host_ok: bool,
+    script: &Transcription,
+    log: &Option<PathBuf>,
+) {
+    let length: usize = header_value(head, "content-length")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let mut body = vec![0u8; length];
+    if std::io::Read::read_exact(stream, &mut body).is_err() {
+        return;
+    }
+    append_log(
+        log,
+        serde_json::json!({
+            "event": "transcription",
+            "pid": std::process::id(),
+            "host_ok": host_ok,
+            "origin": header_value(head, "origin").is_some(),
+            "content_type": header_value(head, "content-type"),
+            "body_len": length,
+        }),
+    );
+    if let Some(path) = &script.body_path {
+        let _ = std::fs::write(path, &body);
+    }
+    if script.hang {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(script.delay_ms));
+    let mut answer = match (&script.raw_body, &script.body) {
+        (Some(raw), _) => raw.clone(),
+        (None, Some(body)) => body.to_string(),
+        (None, None) => serde_json::json!({
+            "schema_version": 1,
+            "text": "stub transcript",
+            "language": "en",
+            "audio_seconds": 2.1,
+            "inference_ms": 5,
+        })
+        .to_string(),
+    };
+    if let Some(n) = script.repeat_bytes {
+        answer.push_str(&"x".repeat(n as usize));
+    }
+    let response = format!(
+        "HTTP/1.1 {} Stub\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
+        script.status,
+        answer.len()
+    );
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
+    if script.crash_after_answer {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        std::process::abort();
     }
 }
 
