@@ -1594,10 +1594,11 @@ jobs:
 
       # Informational (p14.4-macos-metal#1): the hosted VM's paravirtual
       # Metal device produced degenerate text above. Rerun it without flash
-      # attention to see whether that path is involved. Only the
-      # backend == metal / no-fallback assertions can fail this step; the
-      # text is recorded, never compared.
+      # attention to see whether that path is involved. The text is
+      # recorded, never compared; a timeout, crash or a run that is not on
+      # Metal is recorded in the summary and never fails the job.
       - name: 'Metal diagnostics: backend gpu without flash attention (text recorded only)'
+        continue-on-error: true
         timeout-minutes: 20
         run: |
           . "$RUNNER_TEMP/metal-checks.sh"
@@ -1611,17 +1612,26 @@ jobs:
             "$bin" file "$wav" --model-file "$model" --backend gpu --json > noflash.json 2> noflash.err || code=$?
           sed 's/^/  [gpu no-flash] /' noflash.err | tail -n 40
           echo "  [gpu no-flash] exit $code: $(cat noflash.json)"
-          cpu_text="$("$bin" file "$wav" --model-file "$model" --backend cpu --json | jq -r .result.text)"
+          cpu_text="$("$bin" file "$wav" --model-file "$model" --backend cpu --json | jq -r .result.text)" || true
           python3 - noflash.json "$code" "$cpu_text" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json
           import sys
 
           path, code, cpu_text = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-          data = json.loads(open(path).read())
-          assert data["ok"] is True and code == 0, (code, data)
+          # 142 is the alarm (900 s).
+          outcome = "timed out" if code == 142 else f"exit {code}"
+          try:
+              data = json.loads(open(path).read())
+          except ValueError as error:
+              print(f"- `gpu` with `TRANSCRIBE_NO_FLASH=1`: {outcome}, no JSON result ({error})")
+              sys.exit(1)
+          if data.get("ok") is not True or code != 0:
+              print(f"- `gpu` with `TRANSCRIBE_NO_FLASH=1`: {outcome}: `{json.dumps(data)[:300]}`")
+              sys.exit(1)
           compute = data["result"]["compute"]
-          assert compute["requested"] == "gpu" and compute["backend"] == "metal", data
-          assert compute["fallback_reason"] is None, data
+          if compute["requested"] != "gpu" or compute["backend"] != "metal" or compute["fallback_reason"] is not None:
+              print(f"- `gpu` with `TRANSCRIBE_NO_FLASH=1`: did not run on Metal: `{json.dumps(compute)}`")
+              sys.exit(1)
           text = data["result"]["text"]
           same = "same text as the CPU" if text == cpu_text else "text differs from the CPU"
           print(f"- `gpu` with `TRANSCRIBE_NO_FLASH=1`: ran on Metal, {data['result']['transcription_ms']} ms,"
@@ -1655,41 +1665,62 @@ jobs:
             > "$RUNNER_TEMP/ggml-build.log"
           tbo="$RUNNER_TEMP/ggml-build/bin/test-backend-ops"
           cd "$RUNNER_TEMP"
-          # The ops whisper's graphs use, each bounded on its own (`-o` is a
-          # regex on the op name, so MUL_MAT also runs MUL_MAT_ID); exit 142
-          # is the alarm.
+          # The ops the whisper encoder and decoder graphs build (transcribe.cpp
+          # src/arch/whisper and the conformer helpers it calls; the
+          # activation is GELU_ERF, not GELU), each bounded on its own. A
+          # plain uppercase `-o` entry matches the op name exactly, so
+          # MUL_MAT does not run MUL_MAT_ID. ggml-metal logs each pipeline it
+          # compiles to stderr between a case's name and its result on
+          # stdout, so stderr goes to its own file; exit 142 is the alarm.
           : > tbo.log
-          for op in MUL_MAT FLASH_ATTN_EXT SOFT_MAX ADD MUL NORM GELU CONV_TRANSPOSE_1D IM2COL GET_ROWS CPY CONT SCALE; do
+          : > tbo.err
+          for op in MUL_MAT FLASH_ATTN_EXT SOFT_MAX ADD MUL NORM GELU_ERF IM2COL GET_ROWS SET_ROWS CPY CONT; do
             echo "=== $op" >> tbo.log
             code=0
-            with_alarm 60 "$tbo" test -b MTL0 -o "$op" >> tbo.log 2>&1 || code=$?
+            with_alarm 60 "$tbo" test -b MTL0 -o "$op" >> tbo.log 2>> tbo.err || code=$?
             echo "=== $op exit $code" >> tbo.log
           done
           grep -E '^=== ' tbo.log
-          python3 - tbo.log <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 - tbo.log tbo.err <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import re
           import sys
 
           # Results are colored: drop the escapes before matching.
-          log = re.sub(r"\x1b\[[0-9;]*m", "", open(sys.argv[1], errors="replace").read())
+          def read(path):
+              return re.sub(r"\x1b\[[0-9;]*m", "", open(path, errors="replace").read())
+
+          log, err = read(sys.argv[1]), read(sys.argv[2])
           print("### ggml test-backend-ops, MTL0 vs CPU (hosted VM, informational)")
           print()
-          caps = sorted({line.strip() for line in log.splitlines()
+          caps = sorted({line.strip() for line in err.splitlines()
                          if re.search(r"ggml_metal.*(simdgroup|has |GPU name|GPU family|use |bfloat|residency)", line)})
           print("Device capabilities reported by ggml-metal:")
           print()
           for line in caps[:30]:
               print(f"    {line}")
           print()
-          print("| op | exit | passed | failed | not supported |")
-          print("| --- | ---: | ---: | ---: | ---: |")
+          print("| op | exit | cases | passed | failed | not supported | coverage |")
+          print("| --- | ---: | ---: | ---: | ---: | ---: | --- |")
+          empty = []
           for block in re.findall(r"^=== (\S+)\n(.*?)^=== \1 exit (\d+)", log, re.S | re.M):
               op, body, code = block
+              cases = len(re.findall(rf"^.*?  {op}\(.*\): ", body, re.M))
               ok = len(re.findall(r"\): OK$", body, re.M))
-              fail = len(re.findall(r"\): FAIL$", body, re.M))
+              fail = len(re.findall(r"\): .*FAIL$", body, re.M))
               unsupported = len(re.findall(r"\): not supported \[", body))
-              print(f"| {op} | {code} | {ok} | {fail} | {unsupported} |")
-          failed = [line.strip() for line in log.splitlines() if re.search(r"\): FAIL$", line)]
+              if cases == 0:
+                  coverage = "**empty: no case matched**"
+              elif ok + fail == 0:
+                  coverage = "**empty: no case ran on MTL0**"
+              else:
+                  coverage = f"{ok + fail} ran"
+              if ok + fail == 0:
+                  empty.append(op)
+              print(f"| {op} | {code} | {cases} | {ok} | {fail} | {unsupported} | {coverage} |")
+          if empty:
+              print()
+              print(f"Ops with empty coverage on MTL0: {', '.join(empty)}.")
+          failed = [line.strip() for line in log.splitlines() if re.search(r"\): .*FAIL$", line)]
           if failed:
               print()
               print(f"First failing cases ({len(failed)} total):")
