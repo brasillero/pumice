@@ -267,6 +267,20 @@ impl Rig {
         }
     }
 
+    /// Waits until the stub logged `count` spawns: that generation really
+    /// runs. Status shows a new generation just before it is spawned, and
+    /// on Windows a kill of `pumice serve` inside the spawn leaves the
+    /// child suspended outside its Job Object, holding pumice's inherited
+    /// output pipes (chore-small-fixes#1).
+    fn wait_spawns(&self, count: usize) {
+        stage(format!("wait for {count} child spawn(s)"));
+        let deadline = Instant::now() + WAIT;
+        while self.log_events("spawn").len() < count {
+            assert!(Instant::now() < deadline, "child {count} never ran");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// No overlapping children, and on Unix none left alive.
     fn assert_children_gone(&self) {
         for spawn in self.log_events("spawn") {
@@ -1033,6 +1047,9 @@ fn an_unready_service_refuses_before_reading_the_body() {
     running.wait_status("restarting", |status| {
         status["transcription"]["generation"] == 2
     });
+    // Generation 2 runs (and stays unready for a minute) before the test
+    // goes on, so the stop below never lands inside its spawn.
+    rig.wait_spawns(2);
     let mut stream = dictate_partially(running.port);
     let response = read_response(&mut stream).expect("an answer without the body");
     assert_error(&response, 503, "transcription_restarting", "prepare");

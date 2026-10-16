@@ -513,6 +513,15 @@ fn status_answers_while_the_child_is_still_starting() {
     assert_eq!(flows["flows"][0]["ready"], false);
 
     // A stop during startup is still bounded and leaves nothing behind.
+    // The child itself runs first: on Windows a kill of `pumice serve`
+    // inside the spawn leaves the child suspended outside its Job Object,
+    // holding pumice's inherited output pipes (chore-small-fixes#1).
+    stage("wait for the child to run");
+    let deadline = Instant::now() + WAIT;
+    while rig.spawns().is_empty() {
+        assert!(Instant::now() < deadline, "the child never ran");
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let (code, elapsed, _) = running.stop();
     if cfg!(unix) {
         assert_eq!(code, Some(143));
