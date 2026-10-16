@@ -1510,6 +1510,7 @@ dependencies = [
  "tokio-util",
  "tower",
  "transcribe-cpp",
+ "transcribe-cpp-sys",
  "ureq",
  "url",
  "webm-iterable",
