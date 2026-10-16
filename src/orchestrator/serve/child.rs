@@ -43,7 +43,8 @@ pub const MAX_RECORD_BYTES: usize = 4096;
 /// A run writes at most `ready`/`error`, `stopping` and `stopped`; a few
 /// more lines than that are already a protocol error.
 const MAX_RECORDS: usize = 4;
-/// After the child exits, its already written records are read this long.
+/// After the child exits, its already written records are read this long
+/// (at most [`MAX_RECORDS`] lines of [`MAX_RECORD_BYTES`] each).
 const EXIT_GRACE: Duration = Duration::from_millis(250);
 /// The child's `/ready` body is a small identity object.
 const MAX_READY_BODY_BYTES: usize = 16 * 1024;
@@ -434,7 +435,8 @@ pub struct Generation {
     stdin: Option<ChildStdin>,
     lifecycle: mpsc::Receiver<Lifecycle>,
     lifecycle_done: bool,
-    exited: bool,
+    /// When the direct child's exit was observed.
+    exited_at: Option<Instant>,
     ready: Option<ReadyInfo>,
     _stdout_task: TaskGuard,
     _stderr_task: TaskGuard,
@@ -488,7 +490,7 @@ impl Generation {
             stdin,
             lifecycle,
             lifecycle_done: false,
-            exited: false,
+            exited_at: None,
             ready: None,
             _stdout_task: TaskGuard(stdout_task),
             _stderr_task: TaskGuard(stderr_task),
@@ -518,7 +520,11 @@ impl Generation {
                 biased;
                 _ = cancel::cancelled(&mut stop) => return Err(None),
                 () = tokio::time::sleep_until(limit) => {
-                    let code = if self.exited { code::EXITED } else { code::STARTUP_TIMEOUT };
+                    let code = if self.exited_at.is_some() {
+                        code::EXITED
+                    } else {
+                        code::STARTUP_TIMEOUT
+                    };
                     return Err(Some(Failure::transient(code)));
                 }
                 event = self.lifecycle.recv(), if !self.lifecycle_done => match event {
@@ -537,15 +543,15 @@ impl Generation {
                         self.lifecycle_done = true;
                     }
                 },
-                result = self.tree.exited(), if !self.exited => {
-                    self.exited = true;
+                result = self.tree.exited(), if self.exited_at.is_none() => {
+                    self.exited_at = Some(Instant::now());
                     if result.is_err() || self.lifecycle_done {
                         return Err(Some(Failure::transient(code::EXITED)));
                     }
                     limit = deadline.min(Instant::now() + EXIT_GRACE);
                 }
             }
-            if self.exited && self.lifecycle_done {
+            if self.exited_at.is_some() && self.lifecycle_done {
                 return Err(Some(Failure::transient(code::EXITED)));
             }
         };
@@ -570,18 +576,37 @@ impl Generation {
 
     /// Waits until the ready child exits or breaks its lifecycle protocol.
     /// `stopping`/`stopped` records and stdout EOF are expected on the way
-    /// out and only noted. Cancellation-safe.
+    /// out and only noted. After the exit, what the child already wrote is
+    /// still read for [`EXIT_GRACE`], so a protocol error it wrote before
+    /// exiting stays a protocol error (fatal, p13.1-flow-seam/D5) instead of
+    /// a plain exit. Cancellation-safe: the grace is anchored to the exit.
     pub async fn watch(&mut self) -> Watched {
         loop {
-            if self.exited {
-                return Watched::Exited;
+            if let Some(exited_at) = self.exited_at {
+                if self.lifecycle_done {
+                    return Watched::Exited;
+                }
+                tokio::select! {
+                    biased;
+                    event = self.lifecycle.recv() => match event {
+                        Some(Lifecycle::Protocol | Lifecycle::Ready(_) | Lifecycle::Error(_)) => {
+                            self.lifecycle_done = true;
+                            return Watched::Protocol;
+                        }
+                        Some(Lifecycle::Stopping | Lifecycle::Stopped) => {}
+                        Some(Lifecycle::Eof) | None => self.lifecycle_done = true,
+                    },
+                    // A descendant may hold stdout open.
+                    () = tokio::time::sleep_until(exited_at + EXIT_GRACE) => return Watched::Exited,
+                }
+                continue;
             }
             tokio::select! {
                 result = self.tree.exited() => {
                     // An error polling the child is treated as its exit: the
                     // owner kills and reaps the tree next.
                     let _ = result;
-                    self.exited = true;
+                    self.exited_at = Some(Instant::now());
                 }
                 event = self.lifecycle.recv(), if !self.lifecycle_done => match event {
                     Some(Lifecycle::Protocol | Lifecycle::Ready(_) | Lifecycle::Error(_)) => {
@@ -615,7 +640,7 @@ impl Generation {
         reap_limit: Duration,
     ) -> Result<(), Box<Generation>> {
         self.stdin = None;
-        if !self.exited {
+        if self.exited_at.is_none() {
             let _ = tokio::time::timeout(grace, self.tree.exited()).await;
         }
         self.kill_and_reap(reap_limit).await

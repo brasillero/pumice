@@ -202,9 +202,14 @@ struct Managed {
     /// Raw lines written before `ready`.
     #[serde(default)]
     stdout_before: Vec<String>,
-    /// Raw lines written after `ready`.
+    /// Raw lines written after `ready` (or, with `exit_after_ready_checks`,
+    /// just before that exit).
     #[serde(default)]
     stdout_after: Vec<String>,
+    /// After answering this many `GET /ready` with 200, write
+    /// `stdout_after` and exit with status 0 at once.
+    #[serde(default)]
+    exit_after_ready_checks: Option<u32>,
     /// Write a startup `error` record with this code and exit 2.
     #[serde(default)]
     error_code: Option<String>,
@@ -469,11 +474,14 @@ fn managed_mode(args: &[OsString], scenario: &ManagedScenario) -> ! {
 
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind the stub listener");
     let port = listener.local_addr().expect("stub address").port();
+    let (answered_ok, ready_checks) = std::sync::mpsc::channel::<()>();
     {
         let instance_id = instance_id.clone();
         let model = model.clone();
         let behavior = behavior.clone();
-        std::thread::spawn(move || serve_ready(listener, port, instance_id, model, behavior));
+        std::thread::spawn(move || {
+            serve_ready(listener, port, instance_id, model, behavior, answered_ok)
+        });
     }
 
     std::thread::sleep(std::time::Duration::from_millis(behavior.ready_delay_ms));
@@ -495,6 +503,15 @@ fn managed_mode(args: &[OsString], scenario: &ManagedScenario) -> ! {
             ready[key] = value.clone();
         }
         stdout_line(&ready.to_string());
+    }
+    if let Some(checks) = behavior.exit_after_ready_checks {
+        for _ in 0..checks {
+            let _ = ready_checks.recv();
+        }
+        for line in &behavior.stdout_after {
+            stdout_line(line);
+        }
+        exit(0);
     }
     for line in &behavior.stdout_after {
         stdout_line(line);
@@ -519,11 +536,13 @@ fn serve_ready(
     instance_id: String,
     model: String,
     behavior: Managed,
+    answered_ok: std::sync::mpsc::Sender<()>,
 ) {
     let answered = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
         let answered = std::sync::Arc::clone(&answered);
+        let answered_ok = answered_ok.clone();
         let instance_id = instance_id.clone();
         let model = model.clone();
         let behavior = behavior.clone();
@@ -583,6 +602,10 @@ fn serve_ready(
                 body.len()
             );
             let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+            if status == "200 OK" {
+                let _ = answered_ok.send(());
+            }
         });
     }
 }

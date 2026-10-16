@@ -421,6 +421,28 @@ async fn a_lifecycle_protocol_error_after_ready_is_fatal() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_protocol_error_written_just_before_an_exit_stays_fatal() {
+    // Once the handshake's own `/ready` check is answered, the child writes
+    // a broken line and exits at once: the line and the exit race, and
+    // whichever the supervisor sees first, the protocol error wins and
+    // nothing is restarted (p13.1-flow-seam/D5).
+    for line in ["not a record", "{\"event\":\"ready\"}"] {
+        let stub = stub(json!([
+            {"stdout_after": [line], "exit_after_ready_checks": 1},
+            {}
+        ]));
+        let supervisor = start(&stub, fast()).await;
+        let handle = supervisor.handle();
+        let failed = wait_for(&handle, "failed", |s| s.state == ChildState::Failed).await;
+        assert_eq!(failed.last_failure, Some(code::PROTOCOL), "{line}");
+        assert_eq!(failed.generation, 1, "{line}");
+        shutdown(supervisor).await;
+        assert_eq!(stub.spawns().len(), 1, "no restart after {line:?}");
+        stub.assert_all_reaped();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_recycle_hook_replaces_the_ready_generation_only() {
     let stub = stub(json!([{}]));
     let supervisor = start(&stub, Timings::default()).await;
