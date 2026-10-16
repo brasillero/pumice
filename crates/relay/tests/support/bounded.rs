@@ -96,6 +96,15 @@ impl Pipe {
         self.chunks.is_none()
     }
 
+    /// Takes what already arrived, without waiting.
+    fn take_ready(&mut self) {
+        if let Some(chunks) = &self.chunks {
+            while let Ok(chunk) = chunks.try_recv() {
+                self.bytes.extend_from_slice(&chunk);
+            }
+        }
+    }
+
     /// Takes what arrived, waiting until `deadline` for more. False only
     /// when the deadline passed with the pipe still open.
     fn pull(&mut self, deadline: Instant) -> bool {
@@ -106,10 +115,7 @@ impl Pipe {
         match chunks.recv_timeout(wait) {
             Ok(chunk) => {
                 self.bytes.extend_from_slice(&chunk);
-                // Take whatever else is already there without waiting.
-                while let Ok(chunk) = chunks.try_recv() {
-                    self.bytes.extend_from_slice(&chunk);
-                }
+                self.take_ready();
                 true
             }
             Err(RecvTimeoutError::Disconnected) => {
@@ -191,15 +197,16 @@ impl OwnedChild {
     /// Fails the test: kills the child and reports the stage and output.
     fn fail(&mut self, problem: &str) -> ! {
         self.kill();
+        let stderr = self.stderr_tail();
         panic!(
-            "{}: {problem} (last stage: {}); stderr so far: {}",
+            "{}: {problem} (last stage: {}); stderr so far: {stderr}",
             self.what,
-            last_stage(),
-            self.stderr_tail()
+            last_stage()
         );
     }
 
-    fn stderr_tail(&self) -> String {
+    fn stderr_tail(&mut self) -> String {
+        self.stderr.take_ready();
         let bytes = &self.stderr.bytes;
         let tail = &bytes[bytes.len().saturating_sub(4096)..];
         format!("{:?}", String::from_utf8_lossy(tail))
@@ -284,11 +291,11 @@ impl Drop for OwnedChild {
     fn drop(&mut self) {
         self.kill();
         if std::thread::panicking() {
+            let stderr = self.stderr_tail();
             eprintln!(
-                "{} at the failure: last stage: {}; stderr so far: {}",
+                "{} at the failure: last stage: {}; stderr so far: {stderr}",
                 self.what,
-                last_stage(),
-                self.stderr_tail()
+                last_stage()
             );
         }
     }
