@@ -21,8 +21,10 @@
 //!    stdout and stderr, so it keeps the caller's pipes open after this
 //!    process exits.
 //! 5. Write the report if `report_path` is set.
-//! 6. Wait until `wait_for_path` exists, if set (at most a minute, so the
-//!    fake never outlives a failed test for long), then sleep `sleep_ms`.
+//! 6. Wait until `wait_for_path` exists, if set, then sleep `sleep_ms`. The
+//!    wait also ends when the file's directory is gone (a failed test drops
+//!    its temporary gate directory) and after a minute at most, so the fake
+//!    never outlives a failed test.
 //! 7. Write `stdout`, then `stdout_repeat_bytes` filler bytes, then `stderr`.
 //! 8. Exit with `exit_code` without waiting for the grandchild.
 //!
@@ -96,8 +98,9 @@ struct Scenario {
     /// Delay before writing any output.
     #[serde(default)]
     sleep_ms: Option<u64>,
-    /// A gate: before `sleep_ms`, wait until this file exists. Lets a test
-    /// hold the fake mid-run for exactly as long as it needs.
+    /// A gate: before `sleep_ms`, wait until this file exists (or its
+    /// directory is gone). Lets a test hold the fake mid-run for exactly
+    /// as long as it needs.
     #[serde(default)]
     wait_for_path: Option<PathBuf>,
     /// Spawn a grandchild that inherits stdout/stderr and sleeps this long.
@@ -201,7 +204,8 @@ fn main() {
 
     if let Some(path) = &scenario.wait_for_path {
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
-        while !path.exists() && std::time::Instant::now() < deadline {
+        let gate_dir = path.parent().unwrap_or(Path::new("."));
+        while !path.exists() && gate_dir.exists() && std::time::Instant::now() < deadline {
             thread::sleep(Duration::from_millis(5));
         }
     }
