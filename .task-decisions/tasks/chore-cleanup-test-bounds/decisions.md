@@ -38,3 +38,16 @@
 **Why.** Untracked local files may hold work git has no copy of; the S10.1 evidence lives on the retained branch (`arch-modules/D15`).
 
 **Rejected.** Deleting it as part of the cleanup.
+
+### D4 · Active · Fix the Windows spawn race in Pumice, and leave the upstream report to the owner
+- date: 2026-10-16
+- decided by: claude (orchestrator, owner-delegated 2026-10-16)
+- origin: conversation
+- area: process
+- revisit if: process-wrap creates children directly inside their Job Object
+
+**Decision.** The Windows CI hang (`chore-small-fixes#1`) is a production race, not only a test bug: process-wrap 10.0.1 creates a child suspended, assigns it to the Job Object, then resumes it (`src/tokio/job_object.rs`, `wrap_child`). If the parent is killed between creation and assignment, the child stays suspended outside any job and keeps every inheritable handle it got, including the parent's own stdout and stderr. Pumice fixes its side in a separate PR (#1): its standard handles are made non-inheritable at startup on Windows, so an orphan cannot pin its caller's pipes, with a test. An upstream report to process-wrap (create the child inside the job with `PROC_THREAD_ATTRIBUTE_JOB_LIST`) is drafted in that item for the owner to file; the orchestrator does not post to external trackers.
+
+**Why.** The window is tiny, but its effect is a stuck caller (seen twice on CI). AGENTS.md and the owner's rules prefer durable fixes; patching the vendored crate is not one.
+
+**Rejected.** Fixing only the tests (Cleanup A already makes them wait for the child to run, but production stays exposed); patching process-wrap locally.
