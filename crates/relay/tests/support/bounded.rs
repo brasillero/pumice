@@ -213,6 +213,11 @@ impl OwnedChild {
             report.push_str("; context: ");
             report.push_str(&context());
         }
+        #[cfg(windows)]
+        {
+            report.push_str("; children left: ");
+            report.push_str(&windows_children(self.child.id()));
+        }
         report
     }
 
@@ -346,6 +351,43 @@ pub fn process_state(pid: u64) -> &'static str {
         Ok(true) => "alive",
         Ok(false) => "gone",
         Err(_) => "unknown",
+    }
+}
+
+/// The processes whose parent was `pid` (they keep that parent ID after it
+/// exits) and their threads' wait reasons ("Suspended" for a child that
+/// never ran), for failure reports. Bounded: "unknown" after 30 s.
+#[cfg(windows)]
+fn windows_children(pid: u32) -> String {
+    let script = format!(
+        "Get-CimInstance Win32_Process -Filter 'ParentProcessId={pid}' | ForEach-Object {{ \
+         $w = (Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue).Threads | \
+         ForEach-Object {{ $_.WaitReason }}; \
+         \"$($_.ProcessId) $($_.Name) [$($w -join ',')]\" }}"
+    );
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .stdin(std::process::Stdio::null())
+            .output();
+        let _ = sender.send(output);
+    });
+    match receiver.recv_timeout(Duration::from_secs(30)) {
+        Ok(Ok(output)) => {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let lines: Vec<&str> = text
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect();
+            if lines.is_empty() {
+                "none".to_owned()
+            } else {
+                lines.join("; ")
+            }
+        }
+        _ => "unknown".to_owned(),
     }
 }
 
