@@ -1,4 +1,4 @@
-# Pumice orchestrator (`pumice run`)
+# Pumice orchestrator (`pumice run`, `pumice serve`)
 
 `pumice run` combines the modules into one dictation flow: it transcribes an
 audio file with the sibling `pumice-transcribe` program, applies an
@@ -13,9 +13,9 @@ pumice run meeting.wav --flow clean --json     # one JSON result document
 ```
 
 Because the transcription program starts cold, every run pays the model load
-once (a fraction of a second for the small models). For frequent dictations a
-warm service is a planned, additive option; the result contract below stays
-the same.
+once (a fraction of a second for the small models). For frequent dictations,
+[`pumice serve`](#pumice-serve) keeps one transcription model loaded behind a
+local service.
 
 ## Setup
 
@@ -162,3 +162,148 @@ argv (the formatter's instructions go into a private agent file). While
 that call runs, other local users can see the transcript in the process
 list. Use another provider for dictation
 that must stay private on a shared machine.
+
+## `pumice serve`
+
+`pumice serve` runs the local stack as a service on `127.0.0.1`: one
+loopback frontend and one warm `pumice-transcribe serve --managed` child
+(the sibling program, found like `pumice run` finds it) with the served
+model loaded for the service's lifetime. This release exposes the service's
+health, readiness, status and flow list; **dictations arrive in the next
+release** (`POST /pumice/v1/dictations`). There are no OpenAI routes here:
+clients that want `/v1/chat/completions` or `/v1/audio/transcriptions` keep
+using `pumice relay serve` and `pumice-transcribe serve`.
+
+```sh
+pumice serve                          # per-user orchestrator.yml, port 17570
+pumice serve --config ./orchestrator.yml --port 0 --json
+```
+
+It needs a `serve:` section in the orchestrator file; files without one stay
+valid for `pumice run`:
+
+```yaml
+serve:
+  enabled: true               # default false: nothing starts implicitly
+  port: 17570                 # optional; 7567 is refused; 0 picks a free port
+  transcription_model: turbo  # required when enabled
+  startup_timeout_ms: 60000   # optional, 1000 to 300000
+```
+
+- Every **enabled** flow must use `serve.transcription_model` (one model is
+  loaded; a flow naming another is a startup error at its
+  `transcription_model` line). Disabled flows may use any model. At most 128
+  enabled flows, with ids of at most 128 bytes.
+- `--port` overrides `serve.port` only, with the same rules. Port 7567 (the
+  relay's) is always refused. An occupied port fails; there is no fallback
+  port.
+- A missing or disabled `serve:` section, and every other configuration
+  problem, is reported with its `file:line:column` and exit status 2.
+
+**Startup.** Signals are handled from the start. The configuration, the relay
+and formatter configurations and every enabled flow's references are checked;
+`pumice-transcribe models list` confirms the served model is configured and
+installed. The frontend then claims its port (before any child starts), and
+the child is started with `--port 0 --managed --instance-id <fresh id>` and
+the absolute transcription configuration. Its `ready` record must match the
+requested instance id, protocol version 1, pumice's exact version, the
+served model, the required capabilities and `127.0.0.1` with a nonzero port,
+and so must the child's own `GET /ready`. A failed initial startup is not
+retried: the child is killed and reaped and `pumice serve` exits 1 (2 when
+the transcription module reports a configuration error).
+
+**Recovery.** Once ready, the child's exit is watched continuously and its
+`/ready` is probed every second (500 ms deadline, one probe at a time; a
+transcription in progress still answers). After an exit, or three failed
+probes in a row, the child is killed, reaped and restarted after 0.5, 1 and
+2 s — at most three restarts per episode; 60 s continuously ready ends the
+episode. When the restarts are used up the transcription state stays
+`failed` until `pumice serve` is restarted. A protocol, version or
+configuration error goes to `failed` at once. A previous child is always
+reaped before the next one starts. Nothing is ever replayed.
+
+**Shutdown.** Ctrl-C or SIGTERM stops admission (the frontend closes), closes
+the child's stdin, gives it 2.5 s to exit, then kills and reaps it; exit 130
+(Ctrl-C) or 143 (SIGTERM), or 1 when an owned process could not be confirmed
+stopped. The whole stop stays within 5 s. Windows and macOS console teardown
+is checked manually.
+
+**Core failures.** A panic inside `pumice serve` itself (its supervisor or a
+request handler) is a core failure, not something it recovers from: the
+service takes the same bounded stop (admission first, then the child, then
+any killed process still to reap) and exits 1 with the error code
+`internal`. The panic is reported as a fixed line with its source location
+(`--json`: a `panicked` event with code `internal`), never its message,
+which could quote request content. A crash of the transcription child is
+not a core failure: it is restarted as above.
+
+### Routes
+
+Every request must carry the `Host` `127.0.0.1:<port>` (no `localhost` or
+other names), a request with an `Origin` header is accepted only when it is
+`http://127.0.0.1:<port>`, and one with a `Sec-Fetch-Site` header only when
+it is `same-origin` or `none`; anything else gets 403 `host_not_allowed`,
+`origin_not_allowed` or `cross_site_not_allowed`, before any routing. No
+CORS headers are sent. All answers are JSON with `Cache-Control: no-store`;
+errors use the OpenAI error object (`message`, `type`, `param`, `code`),
+including 404 `not_found` and 405 `method_not_allowed` (with `Allow: GET`).
+The routes only read in-memory state: they never wait for the transcription
+child, a provider or a model.
+
+- `GET /health` — `200` `{"status":"ok","version":"0.2.0"}` while the
+  service runs, whatever the child's state.
+- `GET /ready` — `200` only when the transcription child is ready and the
+  service is not stopping; otherwise `503` with `code`
+  `service_starting`, `transcription_restarting`, `transcription_failed` or
+  `shutting_down`.
+- `GET /pumice/v1/status`:
+  ```json
+  {"schema_version":1,"module":"orchestrator","version":"0.2.0",
+   "service":{"state":"running","ready":true},
+   "transcription":{"state":"ready","model":"turbo","generation":1,
+     "restart_attempts":0,"next_retry_delay_ms":null,"model_load_ms":362,
+     "last_failure":null},
+   "flows":{"enabled":2}}
+  ```
+  `service.state` is `starting`, `running` or `stopping`;
+  `transcription.state` is `starting`, `ready`, `restarting`, `failed` or
+  `stopping`; `generation` counts the children started (1 is the first);
+  `last_failure` is a fixed code such as `transcription_exited` or
+  `transcription_probe_failed`. No paths, child address or content.
+- `GET /pumice/v1/flows` — the enabled flows:
+  ```json
+  {"schema_version":1,"module":"orchestrator","flows":[
+    {"id":"clean","transcription_model":"turbo","formatter":"builtin:clean",
+     "relay_route":"claude","ready":true}]}
+  ```
+  When the service is not ready, each flow has `"ready":false` and an
+  `unavailable` code (the same codes as `/ready`).
+
+Limits: at most 64 connections (more are closed at once), one request per
+connection, request headers within 5 s and 16 KiB. These metadata routes, and
+every rejection, also bound the whole connection to 10 s from its arrival and
+answers to 128 KiB; longer-running routes get their own deadlines.
+
+### Output
+
+Plain mode writes short lines on stderr, starting with
+`pumice serve: listening on http://127.0.0.1:<port>`, and nothing on
+stdout. With `--json`, stdout carries lifecycle records, one JSON object per
+line:
+
+```json
+{"schema_version":1,"event":"listening","module":"orchestrator","version":"0.2.0","host":"127.0.0.1","port":17570}
+{"schema_version":1,"event":"ready","module":"orchestrator","version":"0.2.0","host":"127.0.0.1","port":17570}
+{"schema_version":1,"event":"stopped","module":"orchestrator","exit_code":143}
+```
+
+`listening` comes once the port is claimed (with the actual port, also for
+`--port 0`), `ready` once the first child is ready; a failure instead writes
+one `{"event":"error","code":…,"message":…}` record (with `cause_code` when
+the transcription module reported its own error code). stderr then carries
+metadata-only events (`child_starting`, `child_ready`, `child_failed`,
+`child_restarting`, `transcription_unavailable`, `stopping`, `panicked`, …)
+with the child `generation` and fixed codes. Both streams are bounded and
+written by their own threads; a stalled reader loses events, never blocks
+the service.
+The child's own stderr is drained and discarded, never shown.
