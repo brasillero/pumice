@@ -116,7 +116,7 @@ pub struct HttpClass {
 /// The HTTP status and OpenAI error type for a flow error, shared by every
 /// HTTP presentation; the CLI uses the same error's exit code instead.
 ///
-/// 400/403/404/408/413 are the client's request (`invalid_request_error`),
+/// 400/403/404/405/408/413 are the client's request (`invalid_request_error`),
 /// 429 a busy service or a provider limit (`rate_limit_error`), everything
 /// else a `server_error`: 503 when a dependency is not available (starting,
 /// restarting, stopping, the provider's CLI missing or logged out), 502
@@ -140,7 +140,9 @@ pub fn http_class(error: &StageError) -> HttpClass {
         | "invalid_utf8"
         | "nul_in_text"
         | "flow_disabled" => (400, REQUEST),
+        "host_not_allowed" | "origin_not_allowed" | "cross_site_not_allowed" => (403, REQUEST),
         "flow_not_found" | "not_found" => (404, REQUEST),
+        "method_not_allowed" => (405, REQUEST),
         "upload_timeout" => (408, REQUEST),
         "body_too_large" | "file_too_large" | "field_too_large" => (413, REQUEST),
         "transcription_invalid_input" => match cause {

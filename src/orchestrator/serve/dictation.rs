@@ -44,7 +44,7 @@ use crate::orchestrator::error::StageError;
 use crate::orchestrator::events::{EventSink, event, operation_id};
 use crate::orchestrator::flow::{AudioSource, Deadlines, Operation, PreparedFlow, Runtime};
 use crate::orchestrator::result::{
-    HttpFlowError, RunEnvelope, RunOutput, StageStatus, http_error, stage,
+    HttpFlowError, RunEnvelope, RunOutput, StageReports, StageStatus, http_error, stage,
 };
 use crate::orchestrator::serve::http::{Frontend, RoutePolicy, json_bytes_response};
 use crate::orchestrator::serve::output::Reporter;
@@ -298,20 +298,15 @@ pub async fn handle(
     let mut on_drop = CancelOnDrop(Some(Arc::clone(&handle)));
     let (answer, answered) = oneshot::channel();
     let task_frontend = Arc::clone(&frontend);
+    let job = Job {
+        request,
+        arrival,
+        operation_id: operation_id.clone(),
+        handle,
+        guard,
+    };
     let task = tokio::spawn(async move {
-        let response = run(
-            &task_frontend,
-            &dictations,
-            permit,
-            Job {
-                request,
-                arrival,
-                operation_id,
-                handle,
-                guard,
-            },
-        )
-        .await;
+        let response = run(&task_frontend, &dictations, permit, job).await;
         let _ = answer.send(response);
     });
     // Whatever happens to this handler, a panic of the operation's task is
@@ -330,12 +325,38 @@ pub async fn handle(
         Ok(response) => response,
         // The operation's task panicked: a core failure the service is
         // already handling.
-        Err(_) => json_bytes_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            br#"{"error":{"message":"The request failed.","type":"server_error","param":null,"code":"internal"}}"#
-                .to_vec(),
-        ),
+        Err(_) => panicked(operation_id, arrival),
     }
+}
+
+/// The answer when the operation's task panicked: its stage reports went
+/// down with it, so every stage reads skipped.
+fn panicked(operation_id: String, arrival: Instant) -> Response<Full<Bytes>> {
+    envelope_response(RunOutput {
+        operation_id,
+        flow: None,
+        transcript: None,
+        result: None,
+        stages: StageReports::default(),
+        total: arrival.elapsed(),
+        error: Some(StageError::new(
+            stage::PREPARE,
+            "internal",
+            "the request failed",
+            1,
+        )),
+        cleanup_failed: false,
+    })
+}
+
+/// The route's guard or method refusal (`http`), answered like the
+/// route's other refusals.
+pub(crate) async fn refuse(
+    frontend: &Frontend,
+    arrival: Instant,
+    error: StageError,
+) -> Response<Full<Bytes>> {
+    reject(frontend, operation_id(), arrival, error).await
 }
 
 /// One admitted request.
@@ -793,12 +814,10 @@ async fn reject(
 }
 
 /// The envelope as the answer: its status, `Retry-After: 1` for a local
-/// busy refusal, and the 16 MiB bound (design §5).
+/// busy refusal, `Allow: POST` for a wrong method, and the 16 MiB bound
+/// (design §5).
 fn envelope_response(output: RunOutput) -> Response<Full<Bytes>> {
-    let busy = output
-        .error
-        .as_ref()
-        .is_some_and(|error| error.code == "rate_limit_exceeded");
+    let code = output.error.as_ref().map(|error| error.code);
     let (status, envelope) = output.into_http_envelope();
     let (status, bytes) = match serde_json::to_vec(&envelope) {
         Ok(bytes) if bytes.len() <= MAX_RESPONSE_BYTES => (status, Some(bytes)),
@@ -814,10 +833,18 @@ fn envelope_response(output: RunOutput) -> Response<Full<Bytes>> {
         );
     };
     let mut response = json_bytes_response(status, bytes);
-    if busy {
-        response
-            .headers_mut()
-            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    match code {
+        Some("rate_limit_exceeded") => {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+        }
+        Some("method_not_allowed") => {
+            response
+                .headers_mut()
+                .insert(header::ALLOW, HeaderValue::from_static("POST"));
+        }
+        _ => {}
     }
     response
 }
@@ -1005,6 +1032,35 @@ mod tests {
         ] {
             let error = parse(&parts).err().expect("refused");
             assert!(!error.message.contains(sentinel), "{}", error.message);
+        }
+    }
+
+    fn body(response: Response<Full<Bytes>>) -> serde_json::Value {
+        let bytes = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(response.into_body().collect())
+            .unwrap()
+            .to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn a_panicked_operation_still_answers_with_the_envelope() {
+        let response = panicked("op-1".to_owned(), Instant::now());
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let body = body(response);
+        assert_eq!(body["schema_version"], 1);
+        assert_eq!(body["operation_id"], "op-1");
+        assert_eq!(body["module"], "orchestrator");
+        assert_eq!(body["ok"], false);
+        assert!(body.get("flow").is_none(), "{body}");
+        assert_eq!(body["error"]["code"], "internal");
+        assert_eq!(body["error"]["type"], "server_error");
+        assert_eq!(body["error"]["message"], "The request failed.");
+        for stage in ["prepare", "transcription", "formatter", "relay"] {
+            assert_eq!(body["stages"][stage]["status"], "skipped", "{body}");
         }
     }
 

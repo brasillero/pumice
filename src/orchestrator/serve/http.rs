@@ -10,7 +10,9 @@
 //! `same-origin` or `none`, otherwise 403. No CORS headers are ever
 //! sent. Every answer is JSON with `Cache-Control: no-store`, errors use the
 //! OpenAI error object (`message`, `type`, `param`, `code`), including 404
-//! and 405 (with `Allow`).
+//! and 405 (with `Allow`). On the dictation route every answer, its guard
+//! and method refusals included, is the versioned dictation envelope
+//! (design §5), whose `error` is that same object with a few more fields.
 //!
 //! Bounds (design §7): at most [`MAX_CONNECTIONS`] connections (more are
 //! closed at once), one request per connection and request headers within
@@ -49,7 +51,8 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use crate::orchestrator::cancel::{self, CancelGuard, CancelHandle, CancelReason};
-use crate::orchestrator::result::{MODULE, SCHEMA_VERSION};
+use crate::orchestrator::error::StageError;
+use crate::orchestrator::result::{MODULE, SCHEMA_VERSION, stage};
 use crate::orchestrator::serve::dictation::{self, Admission, Dictations};
 use crate::orchestrator::serve::output::Reporter;
 use crate::orchestrator::serve::supervisor::{ChildState, SupervisorHandle};
@@ -368,6 +371,11 @@ async fn serve_connection(stream: tokio::net::TcpStream, frontend: Arc<Frontend>
                 let frontend = Arc::clone(&frontend);
                 Box::pin(async move { Ok(dictation::handle(frontend, request, arrival).await) })
             }
+            Routed::Refused(error) => {
+                routed.send_replace(Some(METADATA));
+                let frontend = Arc::clone(&frontend);
+                Box::pin(async move { Ok(dictation::refuse(&frontend, arrival, error).await) })
+            }
         };
         answer
     });
@@ -423,7 +431,7 @@ pub fn respond(
 ) -> Response<Full<Bytes>> {
     match route(frontend, method, uri, headers) {
         Routed::Answer(_, response) => response,
-        Routed::Dictation(_) => error(
+        Routed::Dictation(_) | Routed::Refused(_) => error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "server_error",
             "internal",
@@ -437,6 +445,9 @@ pub fn respond(
 enum Routed {
     Answer(RoutePolicy, Response<Full<Bytes>>),
     Dictation(RoutePolicy),
+    /// The dictation route's guard or method refusal: answered with the
+    /// dictation envelope, under [`METADATA`].
+    Refused(StageError),
 }
 
 fn route(frontend: &Frontend, method: &Method, uri: &Uri, headers: &HeaderMap) -> Routed {
@@ -448,24 +459,21 @@ fn route(frontend: &Frontend, method: &Method, uri: &Uri, headers: &HeaderMap) -
             return Routed::Answer(policy, response);
         }
     };
-    if check_origin(frontend.port, uri, headers).is_err() {
-        let (policy, response) = answer(frontend, method, uri, headers);
-        return Routed::Answer(policy, response);
+    // The guard first, then the method, as on every route.
+    if let Err(rejection) = check_origin(frontend.port, uri, headers) {
+        let (code, message) = rejection.describe();
+        return Routed::Refused(StageError::new(stage::PREPARE, code, message, 2));
     }
     if let Some(hook) = &frontend.request_hook {
         hook(uri.path());
     }
     if method != Method::POST {
-        let mut response = error(
-            StatusCode::METHOD_NOT_ALLOWED,
-            "invalid_request_error",
+        return Routed::Refused(StageError::new(
+            stage::PREPARE,
             "method_not_allowed",
             "This route only accepts POST.",
-        );
-        response
-            .headers_mut()
-            .insert(header::ALLOW, HeaderValue::from_static("POST"));
-        return Routed::Answer(METADATA, response);
+            2,
+        ));
     }
     Routed::Dictation(dictations.policy())
 }
@@ -479,20 +487,7 @@ fn answer(
     headers: &HeaderMap,
 ) -> (RoutePolicy, Response<Full<Bytes>>) {
     if let Err(rejection) = check_origin(frontend.port, uri, headers) {
-        let (code, message) = match rejection {
-            Rejected::Host => (
-                "host_not_allowed",
-                "This service only accepts the Host 127.0.0.1 with its own port.",
-            ),
-            Rejected::Origin => (
-                "origin_not_allowed",
-                "This service only accepts requests from its own origin.",
-            ),
-            Rejected::FetchSite => (
-                "cross_site_not_allowed",
-                "This service does not accept cross-site browser requests.",
-            ),
-        };
+        let (code, message) = rejection.describe();
         return (
             METADATA,
             error(
@@ -657,6 +652,26 @@ enum Rejected {
     Host,
     Origin,
     FetchSite,
+}
+
+impl Rejected {
+    /// The refusal's code and fixed message.
+    fn describe(&self) -> (&'static str, &'static str) {
+        match self {
+            Rejected::Host => (
+                "host_not_allowed",
+                "This service only accepts the Host 127.0.0.1 with its own port.",
+            ),
+            Rejected::Origin => (
+                "origin_not_allowed",
+                "This service only accepts requests from its own origin.",
+            ),
+            Rejected::FetchSite => (
+                "cross_site_not_allowed",
+                "This service does not accept cross-site browser requests.",
+            ),
+        }
+    }
 }
 
 /// The D8 guard: exactly one `Host`, the literal `127.0.0.1:<port>` (an

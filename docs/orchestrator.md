@@ -251,8 +251,12 @@ it is `same-origin` or `none`; anything else gets 403 `host_not_allowed`,
 `origin_not_allowed` or `cross_site_not_allowed`, before any routing. No
 CORS headers are sent. All answers are JSON with `Cache-Control: no-store`;
 errors use the OpenAI error object (`message`, `type`, `param`, `code`),
-including 404 `not_found` and 405 `method_not_allowed` (with `Allow: GET`,
-or `Allow: POST` on the dictation route). The metadata routes only read
+including 404 `not_found` and 405 `method_not_allowed` (with `Allow: GET`).
+On the dictation route every answer, its 403 and its 405
+`method_not_allowed` (with `Allow: POST`) included, is the dictation
+document below, whose `error` is that object with a few more fields. The
+guard still comes first: a refused origin gets 403 whatever the method. The
+metadata routes only read
 in-memory state: they never wait for the transcription child, a provider, a
 model or a running dictation.
 
@@ -355,8 +359,9 @@ are `skipped`.
 | Status | `type` | When (`code`) |
 | --- | --- | --- |
 | 400 | `invalid_request_error` | `not_multipart`, `malformed_multipart`, `missing_file`, `missing_flow`, `duplicate_parameter`, `unsupported_parameter`, `empty_file`, `file_not_upload`, `flow_not_text`, `invalid_utf8`, `nul_in_text`, `flow_disabled`; undecodable, unsupported or too long audio (`transcription_invalid_input`, with the module's `cause_code`) |
-| 403 | `invalid_request_error` | the `Host`/`Origin`/`Sec-Fetch-Site` guard |
+| 403 | `invalid_request_error` | the `Host`/`Origin`/`Sec-Fetch-Site` guard: `host_not_allowed`, `origin_not_allowed`, `cross_site_not_allowed` |
 | 404 | `invalid_request_error` | `flow_not_found` |
+| 405 | `invalid_request_error` | `method_not_allowed` (not a `POST`; `Allow: POST`) |
 | 408 | `invalid_request_error` | `upload_timeout` |
 | 413 | `invalid_request_error` | `body_too_large`, `file_too_large`, `field_too_large` |
 | 429 | `rate_limit_error` | `rate_limit_exceeded` (another dictation is running; `Retry-After: 1`), `relay_quota_exceeded`, `relay_rate_limited` |

@@ -1093,19 +1093,57 @@ fn invalid_uploads_get_fixed_errors_before_any_work() {
     // Not multipart, and the wrong method.
     let response = request(port, b"POST", "/pumice/v1/dictations", &[], b"{}");
     assert_error(&response, 400, "not_multipart", "prepare");
-    let (status, headers, body) = request(port, b"GET", "/pumice/v1/dictations", &[], b"");
-    assert_eq!(status, 405, "{body}");
-    assert_eq!(header(&headers, "allow"), Some("POST"));
-    // The origin guard comes first.
-    let response = request(
-        port,
-        b"POST",
-        "/pumice/v1/dictations",
-        &[multipart_type(), ("Origin", "http://localhost".to_owned())],
-        &form(&[file, flow]),
-    );
-    assert_eq!(response.0, 403);
-    assert_eq!(response.2["error"]["code"], "origin_not_allowed");
+    // Every refusal on this route is its envelope, nothing attempted.
+    let refused = |response: &HttpResponse, status: u16, code: &str| {
+        assert_error(response, status, code, "prepare");
+        assert_eq!(response.2["error"]["type"], "invalid_request_error");
+        assert!(response.2.get("flow").is_none());
+        for stage in ["prepare", "transcription", "formatter", "relay"] {
+            assert_eq!(response.2["stages"][stage]["status"], "skipped");
+        }
+    };
+    let response = request(port, b"GET", "/pumice/v1/dictations", &[], b"");
+    refused(&response, 405, "method_not_allowed");
+    assert_eq!(header(&response.1, "allow"), Some("POST"));
+    // The origin guard comes first, before the method too.
+    for (method, headers, code) in [
+        (
+            &b"POST"[..],
+            vec![("Origin", "http://localhost".to_owned())],
+            "origin_not_allowed",
+        ),
+        (
+            b"GET",
+            vec![("Origin", "http://localhost".to_owned())],
+            "origin_not_allowed",
+        ),
+        (
+            b"POST",
+            vec![("Sec-Fetch-Site", "cross-site".to_owned())],
+            "cross_site_not_allowed",
+        ),
+    ] {
+        let mut headers = headers;
+        headers.push(multipart_type());
+        let response = request(
+            port,
+            method,
+            "/pumice/v1/dictations",
+            &headers,
+            &form(&[file, flow]),
+        );
+        refused(&response, 403, code);
+        assert!(header(&response.1, "allow").is_none());
+    }
+    // A wrong Host, written by hand: `head` always sends the right one.
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .write_all(
+            b"POST /pumice/v1/dictations HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+        )
+        .unwrap();
+    let response = read_response(&mut stream).expect("an answer");
+    refused(&response, 403, "host_not_allowed");
 
     // A declared length over the limit is refused without the body.
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();

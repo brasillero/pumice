@@ -49,7 +49,9 @@ The whole flow — transcription with a warm model, the formatter and the
 relay — behind custom routes only (no OpenAI routes, `p13.1-flow-seam/D2`).
 Every request needs the `Host` `127.0.0.1:<port>`; an `Origin` other than
 `http://127.0.0.1:<port>` or a cross-site `Sec-Fetch-Site` gets 403. No CORS
-headers; every answer is JSON with `Cache-Control: no-store`.
+headers; every answer is JSON with `Cache-Control: no-store`. On
+`/pumice/v1/dictations` every answer, 403 and 405 included, is the run
+document below.
 
 | Route | Purpose |
 | --- | --- |

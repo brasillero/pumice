@@ -239,9 +239,21 @@ async fn a_panic_in_a_dictation_task_stops_the_service_with_its_cleanup() {
     wait_ready(port).await;
     let started = Instant::now();
     let answer = send(port, "POST", "/pumice/v1/dictations", &dictation("plain")).await;
+    // The connection may be dropped by the service's stop first; an answer
+    // that makes it is the route's envelope.
     if let Some((status, body)) = answer {
         assert_eq!(status, 500, "{body}");
         assert!(!body.to_string().contains("S3NT1NEL"), "{body}");
+        assert_eq!(body["schema_version"], 1, "{body}");
+        assert_eq!(body["module"], "orchestrator");
+        assert_eq!(body["ok"], false);
+        assert!(body["operation_id"].is_string());
+        assert!(body.get("flow").is_none() && body.get("result").is_none());
+        assert_eq!(body["error"]["code"], "internal");
+        assert_eq!(body["error"]["type"], "server_error");
+        for stage in ["prepare", "transcription", "formatter", "relay"] {
+            assert_eq!(body["stages"][stage]["status"], "skipped", "{body}");
+        }
     }
     let exit = tokio::time::timeout(WAIT, task)
         .await
