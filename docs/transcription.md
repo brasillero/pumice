@@ -403,8 +403,12 @@ device index, no per-request choice and no backend setting in
 | Mode | GPU module | Model loads on | Without a usable GPU |
 | --- | --- | --- | --- |
 | `cpu` (default) | never checked or loaded | the CPU | — |
-| `auto` | checked and scanned | the first discrete GPU, else the CPU | the CPU, with a `fallback_reason` |
+| `auto` | checked and scanned (Vulkan); never checked or loaded with Metal (D2) | the first discrete GPU, else the CPU (always the CPU with Metal) | the CPU, with a `fallback_reason` |
 | `gpu` | checked and scanned | a GPU of any class (the engine's choice: discrete before integrated) | error `gpu_unavailable`, never the CPU |
+
+With Metal (Apple Silicon), inference with `auto` registers the CPU only and
+reports `fallback_reason: "gpu_auto_disabled"` (p14.4-macos-metal/D2); only
+the `backends --backend auto` diagnostic scans the Metal module.
 
 Only the Vulkan previews (Windows, Linux) and the macOS Metal preview have a
 GPU module. In every other build (the default `engine` build, Linux
@@ -531,10 +535,13 @@ pumice-transcribe backends --backend auto [--json]
 
 Registers the compute backends exactly as a model load in that mode does,
 without loading a model, and reports what the bundle ships and what
-registered:
+registered. The one exception is `auto` with Metal (p14.4-macos-metal/D2):
+the diagnostic still scans the Metal module so the device is listed, while
+inference with `auto` registers the CPU only; it reports
+`auto_uses_gpu_module: false` and `fallback_reason: "gpu_auto_disabled"`.
 
 ```json
-{"schema_version":1,"ok":true,"result":{"requested":"auto","gpu_build":"vulkan","bundle":"verified","cpu_variant":"alderlake","gpu_module":"scanned","gpu_devices":1,"allowed_backends":["cpu","vulkan"],"devices":[{"name":"CPU","description":"Intel(R) Core(TM) i5-14500T","kind":"cpu","type":"cpu","gpu_class":null},{"name":"Vulkan0","description":"Intel(R) UHD Graphics 770 (ADL-S GT1)","kind":"vulkan","type":"igpu","gpu_class":"integrated"}],"fallback_reason":"gpu_integrated_only"}}
+{"schema_version":1,"ok":true,"result":{"requested":"auto","gpu_build":"vulkan","auto_uses_gpu_module":true,"bundle":"verified","cpu_variant":"alderlake","gpu_module":"scanned","gpu_devices":1,"allowed_backends":["cpu","vulkan"],"devices":[{"name":"CPU","description":"Intel(R) Core(TM) i5-14500T","kind":"cpu","type":"cpu","gpu_class":null},{"name":"Vulkan0","description":"Intel(R) UHD Graphics 770 (ADL-S GT1)","kind":"vulkan","type":"igpu","gpu_class":"integrated"}],"fallback_reason":"gpu_integrated_only"}}
 ```
 
 `gpu_build` is `vulkan`, `metal` or `null`; `auto_uses_gpu_module` is whether
