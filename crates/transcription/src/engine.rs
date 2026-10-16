@@ -94,7 +94,7 @@ impl Engine for FakeEngine {
 pub mod cpp {
     use super::*;
     use crate::Error;
-    use crate::compute::{self, GpuAvailability, LoadRequest};
+    use crate::compute::{self, GpuAvailability, GpuClass, LoadRequest};
     use ::transcribe_cpp::{
         Backend, CancelToken as CppCancelToken, Model, ModelOptions, RunExtension, RunOptions,
         SessionOptions, WhisperRunOptions,
@@ -120,19 +120,33 @@ pub mod cpp {
             transcribe_cpp::disable_logging();
             let gpu = init_backends(mode)?;
             let load = compute::load_request(mode, gpu)?;
-            let backend = match load {
-                LoadRequest::Cpu => Backend::Cpu,
-                LoadRequest::Auto => Backend::Auto,
-                LoadRequest::Gpu => GPU_BACKEND,
-            };
-            let model = Model::load_with(
-                request.model_path,
-                &ModelOptions {
-                    backend,
-                    ..Default::default()
+            let options = match load {
+                LoadRequest::Cpu => ModelOptions {
+                    backend: Backend::Cpu,
+                    device: None,
                 },
-            )
-            .map_err(|error| {
+                // Exactly the discrete GPU the policy picks: the engine's
+                // own automatic choice would take any `gpu`-typed device,
+                // software ones included, and fall back to the next.
+                LoadRequest::Discrete => {
+                    let (devices, classes): (Vec<_>, Vec<_>) =
+                        registered_gpus().into_iter().unzip();
+                    let device = compute::auto_device(&classes)
+                        .map(|index| devices[index].clone())
+                        .ok_or_else(|| {
+                            Error::internal("backend auto lost the discrete GPU it registered")
+                        })?;
+                    ModelOptions {
+                        backend: GPU_BACKEND,
+                        device: Some(device),
+                    }
+                }
+                LoadRequest::Gpu => ModelOptions {
+                    backend: GPU_BACKEND,
+                    device: None,
+                },
+            };
+            let model = Model::load_with(request.model_path, &options).map_err(|error| {
                 compute::load_failed(
                     mode,
                     load,
@@ -159,6 +173,25 @@ pub mod cpp {
                 compute,
             })
         }
+    }
+
+    /// The registered GPU devices of this build's GPU backend, in registry
+    /// order, with the class the backend policy gives each.
+    fn registered_gpus() -> Vec<(transcribe_cpp::Device, GpuClass)> {
+        transcribe_cpp::devices()
+            .into_iter()
+            .filter(|device| device.kind == "vulkan")
+            .map(|device| {
+                let class = GpuClass::of(&device_type(&device), device.device_id.as_deref());
+                (device, class)
+            })
+            .collect()
+    }
+
+    /// The engine's device type as `backends --json` reports it: `cpu`,
+    /// `gpu`, `igpu`, `accel` or `unknown`.
+    fn device_type(device: &transcribe_cpp::Device) -> String {
+        format!("{:?}", device.device_type).to_lowercase()
     }
 
     /// Registers the compute backends `mode` allows and reports what the GPU
@@ -383,6 +416,9 @@ pub mod cpp {
         let devices: Vec<serde_json::Value> = transcribe_cpp::devices()
             .into_iter()
             .map(|device| {
+                let device_type = device_type(&device);
+                let gpu_class = (device.kind == "vulkan")
+                    .then(|| GpuClass::of(&device_type, device.device_id.as_deref()));
                 serde_json::json!({
                     "name": compute::sanitize(&device.name, compute::MAX_LABEL_BYTES),
                     "description": compute::sanitize(
@@ -390,7 +426,8 @@ pub mod cpp {
                         compute::MAX_DESCRIPTION_BYTES,
                     ),
                     "kind": compute::sanitize(&device.kind, compute::MAX_LABEL_BYTES),
-                    "type": format!("{:?}", device.device_type).to_lowercase(),
+                    "type": device_type,
+                    "gpu_class": gpu_class,
                 })
             })
             .collect();
@@ -519,7 +556,7 @@ pub mod cpp {
     #[cfg(pumice_dynamic_backends)]
     mod dynamic_backends {
         use crate::bundle::{BundleError, Expected, Manifest};
-        use crate::compute::GpuAvailability;
+        use crate::compute::{GpuAvailability, GpuDevices};
         use ::transcribe_cpp::BackendMask;
         use std::fmt;
         use std::path::{Path, PathBuf};
@@ -1071,10 +1108,11 @@ pub mod cpp {
             pub variant: &'static str,
             pub bundle: BundleCheck,
             pub gpu: GpuDir,
-            /// Vulkan devices registered after scanning the GPU module;
-            /// `None` when it was not scanned. `Some(0)`: the module could
-            /// not load (no Vulkan loader) or found no usable device.
-            pub vulkan_devices: Option<usize>,
+            /// Vulkan devices registered after scanning the GPU module, by
+            /// class; `None` when it was not scanned. None registered: the
+            /// module could not load (no Vulkan loader) or found no usable
+            /// device.
+            pub vulkan_devices: Option<GpuDevices>,
         }
 
         impl Selection {
@@ -1084,7 +1122,9 @@ pub mod cpp {
                     GpuDir::NotBuilt => GpuAvailability::NotBuilt,
                     GpuDir::NotRequested => GpuAvailability::NotRequested,
                     GpuDir::Absent => GpuAvailability::ModuleAbsent,
-                    GpuDir::Scanned => GpuAvailability::Devices(self.vulkan_devices.unwrap_or(0)),
+                    GpuDir::Scanned => {
+                        GpuAvailability::Devices(self.vulkan_devices.unwrap_or_default())
+                    }
                 }
             }
         }
@@ -1185,19 +1225,24 @@ pub mod cpp {
                             module_dir: gpu_dir.clone(),
                         }
                     })?;
-                    let vulkan_devices = ::transcribe_cpp::devices()
-                        .iter()
-                        .filter(|device| device.kind == "vulkan")
-                        .count();
-                    if vulkan_devices == 0 {
+                    let classes: Vec<_> = super::registered_gpus()
+                        .into_iter()
+                        .map(|(_, class)| class)
+                        .collect();
+                    let vulkan_devices = GpuDevices::count(&classes);
+                    if vulkan_devices.total() == 0 {
                         eprintln!(
                             "cpu-variants: scanned {GPU_DIR}: no Vulkan device registered (no \
                              Vulkan driver or device, or the module could not load); CPU only"
                         );
                     } else {
                         eprintln!(
-                            "cpu-variants: scanned {GPU_DIR}: {vulkan_devices} Vulkan device(s) \
-                             registered"
+                            "cpu-variants: scanned {GPU_DIR}: {} Vulkan device(s) registered \
+                             ({} discrete, {} integrated, {} software)",
+                            vulkan_devices.total(),
+                            vulkan_devices.discrete,
+                            vulkan_devices.integrated,
+                            vulkan_devices.software
                         );
                     }
                     (GpuDir::Scanned, Some(vulkan_devices))
@@ -1752,13 +1797,18 @@ pub mod cpp {
                     selection(GpuDir::Absent, None).gpu_availability(),
                     GpuAvailability::ModuleAbsent
                 );
+                let found = GpuDevices {
+                    discrete: 1,
+                    integrated: 1,
+                    software: 0,
+                };
                 assert_eq!(
-                    selection(GpuDir::Scanned, Some(0)).gpu_availability(),
-                    GpuAvailability::Devices(0)
+                    selection(GpuDir::Scanned, Some(GpuDevices::default())).gpu_availability(),
+                    GpuAvailability::Devices(GpuDevices::default())
                 );
                 assert_eq!(
-                    selection(GpuDir::Scanned, Some(2)).gpu_availability(),
-                    GpuAvailability::Devices(2)
+                    selection(GpuDir::Scanned, Some(found)).gpu_availability(),
+                    GpuAvailability::Devices(found)
                 );
             }
 

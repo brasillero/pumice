@@ -154,7 +154,11 @@ impl Compute {
                     && on_cpu
                     && matches!(
                         reason.as_str(),
-                        "gpu_not_built" | "gpu_module_absent" | "gpu_unavailable"
+                        "gpu_not_built"
+                            | "gpu_module_absent"
+                            | "gpu_unavailable"
+                            | "gpu_integrated_only"
+                            | "gpu_software_only"
                     )
             }
         };
@@ -1029,6 +1033,8 @@ mod tests {
             edited(&|v| v["device"]["description"] = "".into()),
             edited(&|v| v["fallback_reason"] = "gpu_not_built".into()),
             edited(&|v| v["fallback_reason"] = "gpu_module_absent".into()),
+            edited(&|v| v["fallback_reason"] = "gpu_integrated_only".into()),
+            edited(&|v| v["fallback_reason"] = "gpu_software_only".into()),
             edited(&|v| v["device"]["name"] = "n".repeat(128).into()),
             edited(&|v| v["device"]["description"] = "é".repeat(128).into()),
             serde_json::json!({"requested": "cpu", "backend": "cpu",
