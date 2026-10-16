@@ -45,6 +45,15 @@ toml = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+# Clears the inherit flag on the standard handles at startup
+# (process::make_std_handles_non_inheritable). Already in the tree through
+# tokio and tempfile.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+] }
+
 [dev-dependencies]
 pumice-relay = { path = ".", features = ["test-helpers"] }
 tokio = { workspace = true, features = ["test-util"] }

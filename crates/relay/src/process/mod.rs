@@ -12,6 +12,7 @@
 mod invocation;
 mod private_temp;
 mod resolve;
+mod std_handles;
 mod tree;
 
 use std::ffi::OsString;
@@ -30,6 +31,7 @@ pub use invocation::{
     toml_basic_string,
 };
 pub use resolve::{ResolvedProgram, resolve_program};
+pub use std_handles::make_std_handles_non_inheritable;
 pub use tree::{CleanupScope, ProcessTree};
 
 use crate::providers::{ProviderError, ProviderErrorCode};
