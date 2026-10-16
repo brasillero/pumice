@@ -507,8 +507,9 @@ if ! (cd /tmp && DYLD_PRINT_LIBRARIES=1 "$moved/pumice-transcribe" backends --ba
     exit 1
 fi
 jq -c .result "$target_dir/relocation-backends.json" | sed 's/^/  backends: /'
-# dyld4 prints `dyld[PID]: <UUID> PATH` per image (older dyld: no UUID).
-read_lines images < <(sed -n 's/^dyld\[[0-9]*\]: \(<[^>]*> \)\{0,1\}//p' "$loaded" | sort -u)
+# dyld4 prints `dyld[PID]: <UUID> PATH` per image (older dyld: no UUID),
+# among other lines such as `move delayed to loaded: NAME`.
+read_lines images < <(sed -n 's|^dyld\[[0-9]*\]: \(<[^>]*> \)\{0,1\}\(/.*\)$|\2|p' "$loaded" | sort -u)
 echo "images dyld loaded (relocated, backend auto): ${#images[@]}"
 outside=""
 for image in ${images[@]+"${images[@]}"}; do
