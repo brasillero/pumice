@@ -565,6 +565,9 @@ jobs:
           $summary += "- ``gpu``: ``$($data.error.code)``: $($data.error.message)"
           Write-Host "backend gpu refused: $($data.error.message)"
           $summary | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+          # The expected refusal above is the last native exit status, which
+          # the runner's pwsh wrapper would return as the step's own.
+          $global:LASTEXITCODE = 0
 
       - name: Upload the preview bundle
         uses: actions/upload-artifact@v5
