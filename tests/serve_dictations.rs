@@ -1320,6 +1320,8 @@ fn a_client_gone_during_transcription_recycles_the_child() {
         json!([child(json!({"hang": true}))]),
     );
     let running = rig.start();
+    // A reset is only produced portably on Unix.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut closes: Vec<(&str, Close)> =
         vec![("close", drop::<TcpStream>), ("half-close", half_close)];
     #[cfg(unix)]
