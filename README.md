@@ -64,7 +64,12 @@ In Handy: **Settings → Advanced → Experimental Features → Post Processing*
 | Kiro plugin | Implemented |
 | Antigravity, generic loopback adapter | Archived; OpenCode support removed |
 | Distribution: GitHub release archives + npm package | Released (v0.2.0) |
-| `pumice setup` configuration wizard | Next |
+| Module dispatcher: `pumice relay`, `pumice format`, `pumice transcribe` | Implemented (unreleased) |
+| Transcription module `pumice-transcribe`: local files, HTTP, model downloads, runtime CPU variants | Implemented (unreleased, built from source) |
+| Formatter module (`pumice format`) | Implemented (unreleased) |
+| Whole stack: `pumice run`, `pumice serve` | Implemented (unreleased) |
+| Windows Vulkan (GPU) transcription | Experimental preview, CI artifact only |
+| `pumice setup` configuration wizard | Paused |
 | Tauri installer, auto-update, start-with-the-system | Deferred |
 
 ## License

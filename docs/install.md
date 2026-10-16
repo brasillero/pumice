@@ -166,7 +166,7 @@ documented in [`relay.example.yml`](../relay.example.yml), which shows
 every supported provider. Gateways, routing and logins are configured in
 each CLI itself; Pumice inherits them. Validate the file with `pumice relay check-config`. The
 config lives outside the install folder, so upgrading never touches it.
-A `pumice setup` wizard that writes this file is planned next.
+A `pumice setup` wizard that writes this file is planned (paused for now).
 
 `max_parallel` (default 4, at most 32) sets how many requests may run their
 provider at the same time. Extra requests wait in line, first come first
