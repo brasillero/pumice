@@ -182,6 +182,10 @@ foreach ($file in $files) {
             }
         } elseif ($bundled -contains $lower) {
             # Resolved from the executable's directory.
+        } elseif ($lower -match '^api-ms-win-core-') {
+            # An OS API set, resolved by the loader's ApiSet schema (Rust's
+            # std imports one for WaitOnAddress); not a file to ship. The
+            # UCRT's api-ms-win-crt-* sets are rejected above.
         } elseif (-not (Test-Path (Join-Path $system32 $import) -PathType Leaf)) {
             $failures += "$relative imports $import, which is neither bundled nor an OS DLL"
         }
