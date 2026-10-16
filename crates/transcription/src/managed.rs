@@ -157,8 +157,8 @@ impl Lifecycle {
             .map(|_| ())
     }
 
-    /// Request a graceful shutdown: arm the watchdog, cancel, and announce
-    /// `stopping`. Later requests only keep the first one's reason.
+    /// Request a graceful shutdown: arm the watchdog, announce `stopping`,
+    /// then cancel. Later requests only keep the first one's reason.
     pub fn request_stop(&self, reason: StopReason) {
         // The watchdog comes first: nothing after it may block the exit.
         self.watchdog.call_once(|| {
@@ -174,14 +174,23 @@ impl Lifecycle {
                 hard_exit(FORCED_EXIT_CODE);
             }
         });
-        self.stop.cancel();
-        let mut output = self.lock();
-        if matches!(output.phase, Phase::Starting | Phase::Ready) {
-            output.phase = Phase::Stopping;
-            let record =
-                base_record("stopping", Some(&self.instance_id)).with("reason", reason.as_str());
-            write_line(&mut output.out, record);
+        self.announce_stopping_and_cancel(reason);
+    }
+
+    /// `stopping` is written before the token is cancelled: once cancelled,
+    /// the server may drain and announce `stopped` at any moment, and a
+    /// `stopping` after it would be dropped.
+    fn announce_stopping_and_cancel(&self, reason: StopReason) {
+        {
+            let mut output = self.lock();
+            if matches!(output.phase, Phase::Starting | Phase::Ready) {
+                output.phase = Phase::Stopping;
+                let record = base_record("stopping", Some(&self.instance_id))
+                    .with("reason", reason.as_str());
+                write_line(&mut output.out, record);
+            }
         }
+        self.stop.cancel();
     }
 
     pub fn is_stopping(&self) -> bool {
@@ -476,6 +485,58 @@ mod tests {
             .map(|r| r["event"].as_str().unwrap().to_string())
             .collect();
         assert_eq!(events, ["stopped"]);
+    }
+
+    /// Notes, for each record written, whether the stop token was already
+    /// cancelled at that moment.
+    #[derive(Clone, Default)]
+    struct CancelProbe {
+        token: Arc<std::sync::OnceLock<CancellationToken>>,
+        seen: Arc<Mutex<Vec<bool>>>,
+    }
+
+    impl Write for CancelProbe {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let cancelled = self.token.get().unwrap().is_cancelled();
+            self.seen.lock().unwrap().push(cancelled);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn stopping_is_written_before_the_server_is_cancelled() {
+        for ready in [false, true] {
+            let probe = CancelProbe::default();
+            let lifecycle = Lifecycle::new("gen-1", Box::new(probe.clone()));
+            probe.token.set(lifecycle.stop.clone()).unwrap();
+            if ready {
+                assert!(lifecycle.announce_ready(1, "turbo", 0, &cpu_compute()));
+            }
+            // Skips the watchdog, which would end the test run.
+            lifecycle.announce_stopping_and_cancel(StopReason::EngineFailed);
+            assert!(lifecycle.is_stopping());
+            lifecycle.announce_stopping_and_cancel(StopReason::StdinClosed);
+            lifecycle.announce_stopped();
+            let mut expected = vec![false; usize::from(ready)];
+            expected.extend([false, true]);
+            assert_eq!(*probe.seen.lock().unwrap(), expected, "ready: {ready}");
+        }
+    }
+
+    #[test]
+    fn a_later_stop_request_keeps_the_first_reason() {
+        let out = Shared::default();
+        let lifecycle = Lifecycle::new("gen-1", Box::new(out.clone()));
+        lifecycle.announce_stopping_and_cancel(StopReason::EngineFailed);
+        lifecycle.announce_stopping_and_cancel(StopReason::StdinClosed);
+        lifecycle.announce_stopped();
+        let records = out.records();
+        let events: Vec<_> = records.iter().map(|r| r["event"].clone()).collect();
+        assert_eq!(events, ["stopping", "stopped"]);
+        assert_eq!(records[0]["reason"], "engine_failed");
     }
 
     #[test]
