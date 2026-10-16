@@ -393,6 +393,129 @@ fn help_and_version_print_without_starting_the_service() {
 }
 
 #[test]
+fn help_after_a_subcommand_prints_its_help_without_running_it() {
+    let cwd = TempDir::new().expect("temp dir");
+    // `--help` anywhere among a command's flags wins, even next to flags
+    // that would otherwise be a usage error or start the service.
+    for (args, usage) in [
+        (
+            &["serve"][..],
+            "usage: pumice-relay serve [--config <path>] [--plain]",
+        ),
+        (
+            &["serve", "--plain", "--config", "missing.yml"][..],
+            "usage: pumice-relay serve [--config <path>] [--plain]",
+        ),
+        (
+            &["check-config"][..],
+            "usage: pumice-relay check-config [--config <path>]",
+        ),
+        (
+            &["--config", "missing.yml", "check-config"][..],
+            "usage: pumice-relay check-config [--config <path>]",
+        ),
+        (
+            &["doctor"][..],
+            "usage: pumice-relay doctor [--config <path>] [--login-check --provider <id>]",
+        ),
+        (
+            &["doctor", "--provider", "claude"][..],
+            "usage: pumice-relay doctor [--config <path>] [--login-check --provider <id>]",
+        ),
+        // The bare form prints the full usage.
+        (&["--plain"][..], "pumice-relay [--config <path>] [--plain]"),
+        (
+            &["--config", "missing.yml"][..],
+            "pumice-relay [--config <path>] [--plain]",
+        ),
+    ] {
+        for flag in ["--help", "-h"] {
+            let args = [args, &[flag]].concat();
+            let output = run(&args, cwd.path());
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "args {args:?}: {:?}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(stdout.contains(usage), "args {args:?} help: {stdout}");
+            assert!(
+                output.stderr.is_empty(),
+                "args {args:?} must not write stderr: {:?}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+}
+
+#[test]
+fn an_option_value_spelled_like_help_is_a_value_not_a_help_flag() {
+    let (_fakes, yaml) = hermetic_yaml(grab_free_port());
+    let cwd = TempDir::new().expect("temp dir");
+    // A config file literally named `--help`.
+    fs::write(cwd.path().join("--help"), yaml).expect("write config");
+    for args in [
+        &["check-config", "--config", "--help"][..],
+        &["--config", "--help", "check-config"][..],
+        &["doctor", "--config", "--help"][..],
+        &["--config", "--help", "doctor"][..],
+    ] {
+        let output = run(args, cwd.path());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "args {args:?}: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.starts_with("config: ") && stdout.contains("--help"),
+            "args {args:?} must read the file named --help: {stdout}"
+        );
+        assert!(!stdout.contains("usage:"), "args {args:?}: {stdout}");
+    }
+
+    // `--provider --help` names a provider `--help`: an unknown one, so the
+    // check stops before any call.
+    for args in [
+        &[
+            "doctor",
+            "--config",
+            "--help",
+            "--login-check",
+            "--provider",
+            "--help",
+        ][..],
+        &[
+            "--config",
+            "--help",
+            "doctor",
+            "--login-check",
+            "--provider",
+            "--help",
+        ][..],
+    ] {
+        let output = run(args, cwd.path());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "args {args:?}: {stderr}");
+        assert!(
+            stderr.contains("provider \"--help\" is not registered"),
+            "args {args:?}: {stderr}"
+        );
+        assert!(output.stdout.is_empty(), "args {args:?} printed help");
+    }
+
+    // A help flag after an option's value still asks for help.
+    let output = run(&["check-config", "--config", "--help", "-h"], cwd.path());
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("usage: pumice-relay check-config [--config <path>]")
+    );
+}
+
+#[test]
 fn malformed_args_exit_2_with_usage_without_starting_the_service() {
     let cwd = TempDir::new().expect("temp dir");
     for args in [

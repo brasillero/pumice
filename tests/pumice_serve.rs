@@ -4,10 +4,13 @@
 //! as the sibling `pumice-transcribe`. Ports are always `127.0.0.1:0`; no
 //! real AI CLI, transcription module or model is involved.
 
+#[path = "../crates/relay/tests/support/install.rs"]
+mod install;
+
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -64,10 +67,7 @@ fn rig(serve: &str, generations: Value) -> Rig {
             "pumice-transcribe",
         ),
     ] {
-        let dest = install.join(exe(name));
-        if fs::hard_link(source, &dest).is_err() {
-            fs::copy(source, &dest).expect("copy executable");
-        }
+        install::install_executable(Path::new(source), &install.join(exe(name)));
     }
     let log = dir.path().join("spawns.jsonl");
     let models = json!({

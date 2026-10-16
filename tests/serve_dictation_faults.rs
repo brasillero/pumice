@@ -5,6 +5,10 @@
 //! seams to inject a panic into a dictation's task and an unconfirmed
 //! cleanup. No real transcription module, model or AI CLI is involved.
 
+#[path = "../crates/relay/tests/support/install.rs"]
+mod install;
+use install::install_executable;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -35,12 +39,6 @@ fn exe(name: &str) -> String {
     format!("{name}{}", std::env::consts::EXE_SUFFIX)
 }
 
-fn link(source: &str, dest: &Path) {
-    if fs::hard_link(source, dest).is_err() {
-        fs::copy(source, dest).expect("copy executable");
-    }
-}
-
 fn scenario_path(exe_path: &Path) -> PathBuf {
     let mut path = exe_path.as_os_str().to_owned();
     path.push(".scenario.json");
@@ -57,7 +55,10 @@ struct Setup {
 fn setup() -> Setup {
     let dir = TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp dir");
     let stub = dir.path().join(exe("pumice-transcribe"));
-    link(env!("CARGO_BIN_EXE_pumice-test-transcribe"), &stub);
+    install_executable(
+        Path::new(env!("CARGO_BIN_EXE_pumice-test-transcribe")),
+        &stub,
+    );
     let log = dir.path().join("spawns.jsonl");
     fs::write(
         scenario_path(&stub),
@@ -65,7 +66,7 @@ fn setup() -> Setup {
     )
     .unwrap();
     let fake = dir.path().join(exe("fake-claude"));
-    link(env!("CARGO_BIN_EXE_pumice-test-cli"), &fake);
+    install_executable(Path::new(env!("CARGO_BIN_EXE_pumice-test-cli")), &fake);
     fs::write(
         scenario_path(&fake),
         json!({

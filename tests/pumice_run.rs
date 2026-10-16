@@ -5,6 +5,10 @@
 //! relay's portable `pumice-test-cli` behind the real Claude adapter,
 //! pipeline and process runner. No real AI CLI or model is ever invoked.
 
+#[path = "../crates/relay/tests/support/install.rs"]
+mod install;
+use install::install_executable;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -116,16 +120,8 @@ fn exe(name: &str) -> String {
     format!("{name}{}", std::env::consts::EXE_SUFFIX)
 }
 
-/// Copies an executable (hard link preferred: copying at the moment another
-/// test thread forks can fail with ETXTBSY on Linux).
-fn install_executable(src: &Path, dest: &Path) {
-    if fs::hard_link(src, dest).is_err() {
-        fs::copy(src, dest).expect("copy executable");
-    }
-}
-
 fn make_rig(script: &Script) -> Rig {
-    let keep = TempDir::new().expect("temp dir");
+    let keep = TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp dir");
     let install = keep.path().join("bin");
     let cfg = keep.path().join("cfg");
     let fake_dir = keep.path().join("fake");
@@ -963,7 +959,7 @@ fn a_symlinked_pumice_finds_the_sibling_next_to_the_real_executable() {
 #[test]
 fn an_install_directory_with_spaces_and_unicode_works() {
     let script = Script::default();
-    let spaced_root = TempDir::new().unwrap();
+    let spaced_root = TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let spaced = spaced_root.path().join("my install ünï");
     fs::create_dir_all(&spaced).unwrap();
     // Rebuild a rig inside the spaced directory by moving a fresh rig's

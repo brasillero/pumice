@@ -7,6 +7,10 @@
 //! `127.0.0.1:0`. Waits poll observable state (status, the stub's log,
 //! the fake's report) with a bound instead of sleeping for an order.
 
+#[path = "../crates/relay/tests/support/install.rs"]
+mod install;
+use install::install_executable;
+
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -74,12 +78,6 @@ struct Rig {
     fake: PathBuf,
 }
 
-fn link(source: &str, dest: &Path) {
-    if fs::hard_link(source, dest).is_err() {
-        fs::copy(source, dest).expect("copy executable");
-    }
-}
-
 fn scenario_path(exe_path: &Path) -> PathBuf {
     let mut path = exe_path.as_os_str().to_owned();
     path.push(".scenario.json");
@@ -94,11 +92,17 @@ fn rig(flows: &str, generations: Value) -> Rig {
     for path in [&install, &cfg, &fake_dir] {
         fs::create_dir_all(path).unwrap();
     }
-    link(env!("CARGO_BIN_EXE_pumice"), &install.join(exe("pumice")));
+    install_executable(
+        Path::new(env!("CARGO_BIN_EXE_pumice")),
+        &install.join(exe("pumice")),
+    );
     let stub = install.join(exe("pumice-transcribe"));
-    link(env!("CARGO_BIN_EXE_pumice-test-transcribe"), &stub);
+    install_executable(
+        Path::new(env!("CARGO_BIN_EXE_pumice-test-transcribe")),
+        &stub,
+    );
     let fake = fake_dir.join(exe("fake-claude"));
-    link(env!("CARGO_BIN_EXE_pumice-test-cli"), &fake);
+    install_executable(Path::new(env!("CARGO_BIN_EXE_pumice-test-cli")), &fake);
 
     let log = dir.path().join("spawns.jsonl");
     let models = json!({
@@ -169,6 +173,21 @@ impl Rig {
     fn fake_report(&self) -> Option<Value> {
         let text = fs::read_to_string(self.fake_dir().join("report.json")).ok()?;
         serde_json::from_str(&text).ok()
+    }
+
+    /// The running provider's PID, once the fake has written its report:
+    /// the relay stage starts before the provider process does. Only the
+    /// Unix tests check a PID.
+    #[cfg(unix)]
+    fn wait_provider_pid(&self) -> u32 {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            if let Some(report) = self.fake_report() {
+                return report["pid"].as_u64().unwrap() as u32;
+            }
+            assert!(Instant::now() < deadline, "the provider never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn body_path(&self) -> PathBuf {
@@ -1363,14 +1382,7 @@ fn a_client_gone_during_the_provider_call_reaps_it_without_recycling() {
     {
         let _ = fs::remove_file(rig.fake_dir().join("report.json"));
         let stream = dictate_and_hold(running.port, "clean");
-        let deadline = Instant::now() + WAIT;
-        let pid = loop {
-            if let Some(report) = rig.fake_report() {
-                break report["pid"].as_u64().unwrap() as u32;
-            }
-            assert!(Instant::now() < deadline, "the provider never started");
-            std::thread::sleep(Duration::from_millis(10));
-        };
+        let pid = rig.wait_provider_pid();
         running.wait_status("the relay stage", |status| {
             status["dictations"]["stage"] == "relay"
         });
@@ -1406,7 +1418,7 @@ fn a_shutdown_answers_a_running_dictation_with_its_transcript() {
     running.wait_status("the relay stage", |status| {
         status["dictations"]["stage"] == "relay"
     });
-    let pid = rig.fake_report().unwrap()["pid"].as_u64().unwrap() as u32;
+    let pid = rig.wait_provider_pid();
     running.signal(libc::SIGTERM);
     let response = read_response(&mut stream).expect("an answer before the stop");
     assert_error(&response, 503, "cancelled", "relay");
@@ -1458,9 +1470,13 @@ impl Rig {
         let record = fake_dir.join("locked-cwds.txt");
         let reply = fake_dir.join("reply.txt");
         fs::write(&reply, stdout).unwrap();
-        let script = fake_dir.join("locking-claude");
+        // Written as a plain file and copied into place by a `cp` child, so
+        // this process never holds the script open for writing: a test
+        // thread forking meanwhile could make running it fail with "text
+        // file busy" (ETXTBSY).
+        let source = fake_dir.join("locking-claude.sh");
         fs::write(
-            &script,
+            &source,
             format!(
                 "#!/bin/sh\ncat >/dev/null\necho x >> '{count}'\npwd >> '{record}'\nmkdir -p locked/inner\nchmod 500 locked\ncat '{reply}'\nexit {exit_code}\n",
                 count = fake_dir.join("count.txt").display(),
@@ -1469,6 +1485,8 @@ impl Rig {
             ),
         )
         .unwrap();
+        let script = fake_dir.join("locking-claude");
+        install::copy_executable(&source, &script);
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(
             self.cfg.join("relay.yml"),

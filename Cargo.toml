@@ -65,6 +65,7 @@ path = "src/main.rs"
 [[bin]]
 name = "pumice-test-transcribe"
 path = "tests/support/transcribe_stub.rs"
+required-features = ["test-helpers"]
 test = false
 bench = false
 
@@ -74,8 +75,15 @@ bench = false
 [[bin]]
 name = "pumice-test-cli"
 path = "crates/relay/tests/support/fake_cli.rs"
+required-features = ["test-helpers"]
 test = false
 bench = false
+
+[features]
+# Builds the test helper binaries above. Only the self dev-dependency below
+# turns it on, so `cargo test` and `clippy --all-targets` build them and
+# `cargo install` / `cargo build --bin pumice` leave them out.
+test-helpers = []
 
 [dependencies]
 pumice-formatter = { path = "crates/formatter" }
@@ -104,6 +112,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+pumice = { path = ".", features = ["test-helpers"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 

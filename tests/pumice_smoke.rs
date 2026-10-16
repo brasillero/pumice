@@ -8,14 +8,15 @@
 //! exit codes are native). No provider CLI is ever invoked — `check-config`
 //! only validates YAML.
 
+#[path = "../crates/relay/tests/support/install.rs"]
+mod install;
+use install::install_executable;
+
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 #[cfg(unix)]
 use std::time::{Duration, Instant};
-
-#[cfg(unix)]
-use std::path::Path;
 
 use tempfile::TempDir;
 
@@ -254,6 +255,40 @@ fn the_overview_lists_the_format_command() {
 }
 
 #[test]
+fn help_after_a_relay_subcommand_prints_its_help() {
+    let home = HermeticHome::new();
+    for (command, usage) in [
+        (
+            "serve",
+            "usage: pumice relay serve [--config <path>] [--plain]",
+        ),
+        (
+            "check-config",
+            "usage: pumice relay check-config [--config <path>]",
+        ),
+        (
+            "doctor",
+            "usage: pumice relay doctor [--config <path>] [--login-check --provider <id>]",
+        ),
+    ] {
+        for flag in ["--help", "-h"] {
+            let output = run(&mut home.command(&["relay", command, flag]));
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "{command} {flag}: {}",
+                stderr(&output)
+            );
+            assert!(
+                stdout(&output).contains(usage),
+                "{command} {flag}: {}",
+                stdout(&output)
+            );
+        }
+    }
+}
+
+#[test]
 fn relay_check_config_reads_the_per_user_relay_yml() {
     let home = HermeticHome::new();
     let dir = home.pumice_dir();
@@ -322,6 +357,49 @@ fn legacy_pumice_yaml_in_the_config_dir_is_ignored() {
     );
 }
 
+/// The copy fallback for file systems without hard links: copied while other
+/// threads keep spawning children, the copy runs at once instead of failing
+/// with "text file busy" (ETXTBSY), because a `cp` child writes it.
+#[cfg(unix)]
+#[test]
+fn the_copy_fallback_runs_at_once_while_other_threads_spawn() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Stops the spawning threads even when the copy panics, so the scope
+    /// cannot wait for them forever.
+    struct StopOnDrop<'a>(&'a AtomicBool);
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let dir = TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp dir");
+    let stop = AtomicBool::new(false);
+    let failures = std::thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = Command::new("true").status();
+                }
+            });
+        }
+        let _stop = StopOnDrop(&stop);
+        let mut failures = Vec::new();
+        for round in 0..20 {
+            let dest = dir.path().join(format!("pumice-{round}"));
+            install::copy_executable(Path::new(env!("CARGO_BIN_EXE_pumice")), &dest);
+            match Command::new(&dest).arg("--version").output() {
+                Ok(output) if output.status.success() => {}
+                other => failures.push(format!("round {round}: {other:?}")),
+            }
+            fs::remove_file(&dest).expect("remove the copy");
+        }
+        failures
+    });
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
 /// A temp directory holding a copy of `pumice` and, optionally, the
 /// `pumice-transcribe` stand-in next to it.
 struct Install {
@@ -330,24 +408,23 @@ struct Install {
 }
 
 impl Install {
-    /// Copies `pumice` alone: no transcription sibling installed.
+    /// Installs `pumice` alone: no transcription sibling installed.
     fn without_transcribe() -> Self {
-        let keep = TempDir::new().expect("temp install dir");
+        let keep = TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp install dir");
         let dir = keep.path().join("bin");
         fs::create_dir_all(&dir).expect("create install dir");
-        fs::copy(env!("CARGO_BIN_EXE_pumice"), dir.join("pumice")).expect("copy pumice");
+        install_executable(Path::new(env!("CARGO_BIN_EXE_pumice")), &dir.join("pumice"));
         Install { _keep: keep, dir }
     }
 
-    /// Copies `pumice` together with the test stand-in as `pumice-transcribe`.
+    /// Installs `pumice` together with the test stand-in as
+    /// `pumice-transcribe`.
     fn with_transcribe() -> Self {
         let install = Self::without_transcribe();
-        let name = transcribe_name();
-        fs::copy(
-            env!("CARGO_BIN_EXE_pumice-test-transcribe"),
-            install.dir.join(name),
-        )
-        .expect("copy pumice-transcribe stand-in");
+        install_executable(
+            Path::new(env!("CARGO_BIN_EXE_pumice-test-transcribe")),
+            &install.dir.join(transcribe_name()),
+        );
         install
     }
 
@@ -539,16 +616,14 @@ fn transcribe_neither_searches_path_nor_the_working_directory() {
     let cwd = install._keep.path().join("cwd-decoy");
     fs::create_dir_all(&path_dir).expect("create PATH decoy dir");
     fs::create_dir_all(&cwd).expect("create cwd decoy dir");
-    fs::copy(
-        env!("CARGO_BIN_EXE_pumice-test-transcribe"),
-        path_dir.join(transcribe_name()),
-    )
-    .expect("copy PATH decoy");
-    fs::copy(
-        env!("CARGO_BIN_EXE_pumice-test-transcribe"),
-        cwd.join(transcribe_name()),
-    )
-    .expect("copy cwd decoy");
+    install_executable(
+        Path::new(env!("CARGO_BIN_EXE_pumice-test-transcribe")),
+        &path_dir.join(transcribe_name()),
+    );
+    install_executable(
+        Path::new(env!("CARGO_BIN_EXE_pumice-test-transcribe")),
+        &cwd.join(transcribe_name()),
+    );
 
     let mut command = install.command(&["transcribe", "0"]);
     command.env("PATH", &path_dir).current_dir(&cwd);
