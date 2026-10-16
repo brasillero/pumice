@@ -373,7 +373,12 @@ running model tests on it. This is not established: CI records, as
 diagnostics that never fail the job, the same run without flash attention
 (`TRANSCRIBE_NO_FLASH=1`) and ggml's `test-backend-ops` for the ops Whisper
 uses on `MTL0` against the CPU, with the capabilities ggml-metal reports.
-Only a real Mac settles it (p14.4-macos-metal#1).
+On the first such run (`macos-15`, transcribe.cpp 3f32fbc) ggml-metal
+reported `simdgroup reduction` and `simdgroup matrix mul.` as false, so
+`test-backend-ops` found `MUL_MAT`, `FLASH_ATTN_EXT`, `SOFT_MAX` and `NORM`
+unsupported on `MTL0` (no failures among the ops it did run), and the text
+stayed degenerate without flash attention. Only a real Mac settles it
+(p14.4-macos-metal#1).
 
 Build it yourself (an Apple Silicon Mac with the Xcode command line tools,
 CMake and `jq`; build time only):
