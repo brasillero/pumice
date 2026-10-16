@@ -266,7 +266,14 @@ jobs:
         run: cargo clippy --release --target x86_64-pc-windows-msvc -p pumice-transcription --features vulkan --all-targets --locked -- -D warnings
 
       - name: cargo test -p pumice-transcription --features vulkan
-        run: cargo test --release --target x86_64-pc-windows-msvc -p pumice-transcription --features vulkan --locked
+        run: |
+          # The CLI tests spawn target\...\release\pumice-transcribe.exe. The
+          # engine's build script copies its DLLs next to cargo's artifacts
+          # only when it runs, and rust-cache drops them from the profile
+          # root, so on a cached native build that exe would not start
+          # (0xC0000135). The staged core DLLs come from this same build.
+          $env:PATH = "$env:STAGE;$env:PATH"
+          cargo test --release --target x86_64-pc-windows-msvc -p pumice-transcription --features vulkan --locked
 
       - name: Record bundle sizes
         run: |
