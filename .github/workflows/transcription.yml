@@ -166,3 +166,323 @@ jobs:
           print("smoke ok")
           PY
           chmod -R u+w target/cpu-variants/stage
+
+  transcription-windows-vulkan:
+    # Experimental (P14.1): the Windows x64 Vulkan bundle — CPU variants plus
+    # one loadable Vulkan module — built with a pinned Vulkan SDK, audited for
+    # a static CRT, and uploaded as a short-lived artifact for the owner's
+    # real-GPU check. Not a release. Hosted runners have no GPU, so this job
+    # proves the build, the dependency closure and the CPU path only.
+    name: Transcription Vulkan preview bundle (Windows x64)
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      # LunarG Vulkan SDK used by the pinned engine revision
+      # (p14.1-windows-vulkan/D7); SHA-256 as published by LunarG at
+      # https://vulkan.lunarg.com/sdk/sha/1.4.350.0/windows/vulkan_sdk.exe.json
+      VULKAN_SDK_VERSION: 1.4.350.0
+      VULKAN_SDK_SHA256: 855b27ba05d2d8119c5114c5d4ff870ca38f2c632b11e1bb9923b9b7e6ecfe7b
+      # Must match build-windows-vulkan.ps1, so clippy and the tests reuse
+      # the bundle's native build instead of configuring a second one.
+      CARGO_TARGET_DIR: ${{ github.workspace }}\target\windows-vulkan
+      TRANSCRIBE_CMAKE_ARGS: -DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+      STAGE: ${{ github.workspace }}\target\windows-vulkan\stage
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-vulkan
+
+      - name: Cache Vulkan SDK installer
+        id: cache-vulkan-sdk
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\vulkan-sdk\vulkan_sdk.exe
+          key: vulkan-sdk-windows-${{ env.VULKAN_SDK_VERSION }}-${{ env.VULKAN_SDK_SHA256 }}
+
+      - name: Download and verify Vulkan SDK installer
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'vulkan-sdk'
+          $installer = Join-Path $dir 'vulkan_sdk.exe'
+          if (-not (Test-Path $installer)) {
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            $url = "https://sdk.lunarg.com/sdk/download/$env:VULKAN_SDK_VERSION/windows/vulkan_sdk.exe?Human=true"
+            Invoke-WebRequest -Uri $url -OutFile $installer
+          }
+          $hash = (Get-FileHash -Algorithm SHA256 -Path $installer).Hash.ToLowerInvariant()
+          if ($hash -ne $env:VULKAN_SDK_SHA256) {
+            throw "Vulkan SDK installer SHA-256 mismatch: got $hash"
+          }
+          Write-Host "Vulkan SDK installer verified: $hash ($((Get-Item $installer).Length) bytes)"
+
+      # LunarG's own unattended install of the verified installer, as the
+      # pinned engine's CI does. humbletim/install-vulkan-sdk (7z extraction)
+      # yields only Bin\ for this SDK: no headers, vulkan-1.lib or
+      # SPIRV-Headers.
+      - name: Install Vulkan SDK (pinned)
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'vulkan-sdk\vulkan_sdk.exe'
+          $root = "C:\VulkanSDK\$env:VULKAN_SDK_VERSION"
+          $process = Start-Process -FilePath $installer -Wait -PassThru -NoNewWindow -ArgumentList @(
+            '--root', $root, '--accept-licenses', '--default-answer', '--confirm-command', 'install'
+          )
+          if ($process.ExitCode -ne 0) { throw "Vulkan SDK installer exited with $($process.ExitCode)" }
+          Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_SDK=$root"
+          Add-Content -Path $env:GITHUB_PATH -Value "$root\Bin"
+
+      - name: Preflight build tools
+        run: |
+          Write-Host "VULKAN_SDK=$env:VULKAN_SDK"
+          Get-ChildItem -Path $env:VULKAN_SDK -Directory | ForEach-Object { Write-Host "  $($_.Name)\" }
+          Write-Host "System32\vulkan-1.dll present: $(Test-Path (Join-Path $env:SystemRoot 'System32\vulkan-1.dll'))"
+          glslc --version
+          if ($LASTEXITCODE -ne 0) { throw 'glslc is not usable' }
+          foreach ($path in 'Include\vulkan\vulkan.h', 'Include\vulkan\vulkan.hpp', 'Lib\vulkan-1.lib') {
+            if (-not (Test-Path (Join-Path $env:VULKAN_SDK $path) -PathType Leaf)) {
+              throw "Vulkan SDK file missing: $path"
+            }
+          }
+          $spirv = Get-ChildItem -Path $env:VULKAN_SDK -Recurse -Filter 'SPIRV-HeadersConfig.cmake' |
+            Select-Object -First 1
+          if (-not $spirv) { throw 'SPIRV-Headers CMake package missing from the Vulkan SDK' }
+          Write-Host "SPIRV-Headers: $($spirv.FullName)"
+          cmake --version
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property catalog_productDisplayVersion
+          rustc --version --verbose
+
+      # The audit's allowlist checked on synthetic import lists before the
+      # real audit (the build step runs it again).
+      - name: Dependency audit self-test
+        run: crates/transcription/scripts/build-windows-vulkan.ps1 -SelfTestOnly
+
+      - name: Build, stage and audit the Vulkan bundle
+        timeout-minutes: 90
+        run: crates/transcription/scripts/build-windows-vulkan.ps1 -TargetDir $env:CARGO_TARGET_DIR
+
+      - name: cargo clippy -p pumice-transcription --features vulkan
+        run: cargo clippy --release --target x86_64-pc-windows-msvc -p pumice-transcription --features vulkan --all-targets --locked -- -D warnings
+
+      - name: cargo test -p pumice-transcription --features vulkan
+        run: |
+          # The CLI tests spawn target\...\release\pumice-transcribe.exe. The
+          # engine's build script copies its DLLs next to cargo's artifacts
+          # only when it runs, and rust-cache drops them from the profile
+          # root, so on a cached native build that exe would not start
+          # (0xC0000135). The staged core DLLs come from this same build.
+          $env:PATH = "$env:STAGE;$env:PATH"
+          cargo test --release --target x86_64-pc-windows-msvc -p pumice-transcription --features vulkan --locked
+
+      - name: Record bundle sizes
+        run: |
+          $files = Get-ChildItem -Path $env:STAGE -Recurse -File | Sort-Object FullName
+          $total = ($files | Measure-Object -Property Length -Sum).Sum
+          $lines = @('### Windows Vulkan preview bundle', '', '| File | Bytes |', '| --- | ---: |')
+          foreach ($file in $files) {
+            $lines += "| $($file.FullName.Substring($env:STAGE.Length + 1)) | $($file.Length) |"
+          }
+          $lines += "| **total ($($files.Count) files)** | **$total** |"
+          $lines | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+          $lines | ForEach-Object { Write-Host $_ }
+
+      - name: Backend registration without a model (GPU dir excluded and included)
+        run: |
+          # Runs from another cwd, so nothing resolves from the checkout.
+          Set-Location $env:RUNNER_TEMP
+          $exe = Join-Path $env:STAGE 'pumice-transcribe.exe'
+          function Invoke-Backends([string]$label) {
+            # Native stderr (the loader's status lines) is expected output.
+            $ErrorActionPreference = 'Continue'
+            $out = & $exe debug-backends 2>&1
+            $code = $LASTEXITCODE
+            $ErrorActionPreference = 'Stop'
+            $out | ForEach-Object { Write-Host "  [$label] $_" }
+            if ($code -ne 0) { throw "$label exited with $code" }
+            $json = ($out | Where-Object { "$_".StartsWith('{') } | Select-Object -Last 1)
+            $report = ("$json" | ConvertFrom-Json).result
+            $cpu = @($report.devices | Where-Object { $_.kind -eq 'cpu' })
+            if ($cpu.Count -ne 1) { throw "$label registered $($cpu.Count) CPU devices" }
+            if (-not $report.cpu_variant) { throw "$label reported no CPU variant" }
+            if ($report.bundle -ne 'verified') { throw "${label}: bundle=$($report.bundle)" }
+            return $report
+          }
+
+          $env:PUMICE_TRANSCRIBE_SKIP_GPU_DIR = '1'
+          $excluded = Invoke-Backends 'excluded'
+          Remove-Item Env:PUMICE_TRANSCRIBE_SKIP_GPU_DIR
+          if ($excluded.gpu_dir -ne 'skipped') { throw "excluded: gpu_dir=$($excluded.gpu_dir)" }
+          if ($null -ne $excluded.vulkan_devices) { throw "excluded: vulkan_devices=$($excluded.vulkan_devices)" }
+          if (($excluded.allowed_backends -join ',') -ne 'cpu') { throw "excluded: mask $($excluded.allowed_backends -join ',')" }
+          if (@($excluded.devices | Where-Object { $_.kind -ne 'cpu' }).Count -ne 0) { throw 'excluded: non-CPU device registered' }
+
+          $included = Invoke-Backends 'included'
+          if ($included.gpu_dir -ne 'scanned') { throw "included: gpu_dir=$($included.gpu_dir)" }
+          if (($included.allowed_backends -join ',') -ne 'cpu,vulkan') { throw "included: mask $($included.allowed_backends -join ',')" }
+          if ($included.cpu_variant -ne $excluded.cpu_variant) { throw 'CPU variant differs between runs' }
+          $vulkan = @($included.devices | Where-Object { $_.kind -eq 'vulkan' }).Count
+          if ($included.vulkan_devices -ne $vulkan) { throw "included: vulkan_devices=$($included.vulkan_devices), devices list $vulkan" }
+          Write-Host "included: $vulkan Vulkan device(s) on this runner"
+
+          # GGML_BACKEND_PATH plugins stay out: the mask has no OTHER bit. A
+          # second, different CPU module would register a second CPU device.
+          $plugin = Get-ChildItem -Path (Join-Path $env:STAGE 'cpu') -Recurse -Filter 'ggml-cpu-*.dll' |
+            Where-Object { $_.Directory.Name -ne $included.cpu_variant } | Select-Object -First 1
+          $env:GGML_BACKEND_PATH = $plugin.FullName
+          $null = Invoke-Backends 'external-plugin'
+          Remove-Item Env:GGML_BACKEND_PATH
+
+          # Informational: the same run without the Vulkan SDK on PATH, which
+          # is closer to an end user's machine (the runner may still have a
+          # system loader).
+          $system = Test-Path (Join-Path $env:SystemRoot 'System32\vulkan-1.dll')
+          Write-Host "System32\vulkan-1.dll present: $system"
+          $savedPath = $env:PATH
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -and $_ -notlike "$env:VULKAN_SDK*" -and $_ -notlike '*VULKAN_SDK*' }) -join ';'
+          $noSdk = Invoke-Backends 'no-sdk-path'
+          $env:PATH = $savedPath
+          Write-Host "no-sdk-path: $(@($noSdk.devices | Where-Object { $_.kind -eq 'vulkan' }).Count) Vulkan device(s)"
+
+          # A relocated bundle under a path with spaces and non-ASCII
+          # characters loads the same way.
+          $moved = Join-Path $env:RUNNER_TEMP 'pumice bundle ç'
+          Copy-Item -Recurse -Path $env:STAGE -Destination $moved
+          $exe = Join-Path $moved 'pumice-transcribe.exe'
+          $relocated = Invoke-Backends 'relocated'
+          if ($relocated.gpu_dir -ne 'scanned') { throw "relocated: gpu_dir=$($relocated.gpu_dir)" }
+          Remove-Item -Recurse -Force -Path $moved
+
+      - name: Bundle manifest checks (damaged, unlisted, missing)
+        run: |
+          # Each case damages a fresh copy of the bundle. A present module
+          # that does not match bundle.json is an installation error, never
+          # a CPU fallback; only an absent GPU module falls back.
+          Set-Location $env:RUNNER_TEMP
+          $copy = Join-Path $env:RUNNER_TEMP 'pumice bundle check'
+          function Invoke-Case([string]$label, [scriptblock]$damage, [string]$expect) {
+            if (Test-Path $copy) { Remove-Item -Recurse -Force -Path $copy }
+            Copy-Item -Recurse -Path $env:STAGE -Destination $copy
+            & $damage
+            $ErrorActionPreference = 'Continue'
+            $out = & (Join-Path $copy 'pumice-transcribe.exe') debug-backends 2>&1
+            $code = $LASTEXITCODE
+            $ErrorActionPreference = 'Stop'
+            $out | ForEach-Object { Write-Host "  [$label] $_" }
+            $json = ($out | Where-Object { "$_".StartsWith('{') } | Select-Object -Last 1)
+            $envelope = "$json" | ConvertFrom-Json
+            if ($expect) {
+              if ($code -eq 0 -or $envelope.ok) { throw "${label}: expected an installation error, got exit $code" }
+              if ($envelope.error.code -ne 'engine_failed') { throw "${label}: error code $($envelope.error.code)" }
+              $stderr = ($out | Where-Object { -not "$_".StartsWith('{') }) -join "`n"
+              if (-not $stderr.Contains('(bundle manifest mismatch)')) { throw "${label}: no bundle manifest mismatch reported" }
+              if (-not $stderr.Contains($expect)) { throw "${label}: reason '$expect' not reported" }
+              if ($stderr.Contains('selected ggml CPU module')) { throw "${label}: a module was registered before the check failed" }
+            } elseif ($code -ne 0 -or -not $envelope.ok) {
+              throw "${label}: exited with $code"
+            }
+            return $envelope.result
+          }
+          $vulkanDll = { Join-Path $copy 'gpu\vulkan\ggml-vulkan.dll' }
+
+          # One byte flipped in the middle of the 43 MB module: same size,
+          # so only the SHA-256 catches it.
+          $null = Invoke-Case 'corrupt-gpu-module' {
+            $path = & $vulkanDll
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            $bytes[[int]($bytes.Length / 2)] = $bytes[[int]($bytes.Length / 2)] -bxor 0xff
+            [System.IO.File]::WriteAllBytes($path, $bytes)
+          } 'gpu/vulkan/ggml-vulkan.dll does not match its SHA-256'
+          $null = Invoke-Case 'truncated-gpu-module' {
+            $stream = [System.IO.File]::Open((& $vulkanDll), 'Open', 'ReadWrite')
+            $stream.SetLength($stream.Length - 4096)
+            $stream.Dispose()
+          } 'bytes; bundle.json lists'
+          $null = Invoke-Case 'corrupt-core-dll' {
+            $path = Join-Path $copy 'ggml-base.dll'
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            $bytes[$bytes.Length - 1] = $bytes[$bytes.Length - 1] -bxor 0xff
+            [System.IO.File]::WriteAllBytes($path, $bytes)
+          } 'ggml-base.dll does not match its SHA-256'
+          # An unlisted module-looking file where ggml scans would load
+          # unchecked.
+          $null = Invoke-Case 'unlisted-gpu-file' {
+            Copy-Item -Path (& $vulkanDll) -Destination (Join-Path $copy 'gpu\vulkan\ggml-vulkan-extra.dll')
+          } 'gpu/vulkan/ggml-vulkan-extra.dll is not listed'
+          $null = Invoke-Case 'missing-manifest' {
+            Remove-Item -Path (Join-Path $copy 'bundle.json')
+          } 'bundle.json is missing'
+          # The skip switch never loads the GPU module, so it is not checked.
+          $env:PUMICE_TRANSCRIBE_SKIP_GPU_DIR = '1'
+          $skipped = Invoke-Case 'corrupt-gpu-module-skipped' {
+            $path = & $vulkanDll
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            $bytes[0] = $bytes[0] -bxor 0xff
+            [System.IO.File]::WriteAllBytes($path, $bytes)
+          } $null
+          Remove-Item Env:PUMICE_TRANSCRIBE_SKIP_GPU_DIR
+          if ($skipped.gpu_dir -ne 'skipped') { throw "corrupt-gpu-module-skipped: gpu_dir=$($skipped.gpu_dir)" }
+          # Without the optional GPU module: CPU, still verified.
+          $absent = Invoke-Case 'absent-gpu-module' {
+            Remove-Item -Recurse -Force -Path (Join-Path $copy 'gpu')
+          } $null
+          if ($absent.gpu_dir -ne 'absent' -or $absent.bundle -ne 'verified') { throw "absent-gpu-module: gpu_dir=$($absent.gpu_dir) bundle=$($absent.bundle)" }
+          Remove-Item -Recurse -Force -Path $copy
+
+      - name: Cache Whisper tiny Q8_0 model
+        id: cache-model
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.MODEL_DIR }}
+          key: whisper-tiny-q8_0-windows-${{ env.MODEL_SHA256 }}
+
+      - name: Download and verify model
+        run: |
+          $model = Join-Path $env:MODEL_DIR 'whisper-tiny-Q8_0.gguf'
+          if (-not (Test-Path $model)) {
+            New-Item -ItemType Directory -Force -Path $env:MODEL_DIR | Out-Null
+            Invoke-WebRequest -Uri $env:MODEL_URL -OutFile $model
+          }
+          $hash = (Get-FileHash -Algorithm SHA256 -Path $model).Hash.ToLowerInvariant()
+          if ($hash -ne $env:MODEL_SHA256) { throw "model SHA-256 mismatch: got $hash" }
+
+      - name: Smoke test the staged bundle on CPU with tiny model
+        run: |
+          Set-Location $env:RUNNER_TEMP
+          $exe = Join-Path $env:STAGE 'pumice-transcribe.exe'
+          $model = Join-Path $env:MODEL_DIR 'whisper-tiny-Q8_0.gguf'
+          $fixtures = Join-Path $env:GITHUB_WORKSPACE 'crates\transcription\tests\fixtures'
+          $runs = @(
+            @{ fixture = 'sample-pt.wav'; skip = $false },
+            @{ fixture = 'chrome-mediarecorder.webm'; skip = $false },
+            @{ fixture = 'sample-pt.wav'; skip = $true }
+          )
+          foreach ($run in $runs) {
+            if ($run.skip) { $env:PUMICE_TRANSCRIBE_SKIP_GPU_DIR = '1' }
+            $out = & $exe file (Join-Path $fixtures $run.fixture) --model-file $model --json
+            $code = $LASTEXITCODE
+            Remove-Item Env:PUMICE_TRANSCRIBE_SKIP_GPU_DIR -ErrorAction SilentlyContinue
+            if ($code -ne 0) { throw "$($run.fixture) exited with $code" }
+            $data = $out | ConvertFrom-Json
+            if ($data.schema_version -ne 1 -or -not $data.ok) { throw "bad envelope: $out" }
+            if ($data.result.language -ne 'pt') { throw "language: $out" }
+            if (-not $data.result.text) { throw "empty text: $out" }
+            if ($data.result.backend -notmatch '^CPU.*\[[a-z0-9]+\]$') { throw "backend: $out" }
+            Write-Host "$($run.fixture) (gpu dir skipped: $($run.skip)) smoke ok: backend $($data.result.backend), $($data.result.transcription_ms) ms"
+          }
+
+      - name: Upload the preview bundle
+        uses: actions/upload-artifact@v5
+        with:
+          name: pumice-transcribe-windows-x64-vulkan-preview
+          path: target/windows-vulkan/stage
+          retention-days: 7
+          if-no-files-found: error

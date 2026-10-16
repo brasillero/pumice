@@ -520,7 +520,7 @@ pub fn verify_file(path: &Path, spec: &DownloadSpec) -> Result<VerifiedFile, Err
     })
 }
 
-fn sha256_reader(reader: &mut impl Read) -> io::Result<String> {
+pub(crate) fn sha256_reader(reader: &mut impl Read) -> io::Result<String> {
     let mut hasher = sha2::Sha256::new();
     let mut buffer = vec![0u8; BUFFER_SIZE];
     loop {

@@ -1,4 +1,5 @@
 pub mod audio;
+mod bundle;
 pub mod catalog;
 pub mod cli;
 pub mod config;

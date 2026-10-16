@@ -47,6 +47,11 @@ pub enum Command {
         #[command(subcommand)]
         command: ModelsCommand,
     },
+    /// Temporary diagnostic (P14.1, removed by P14.2's backend reporting):
+    /// initialize the compute backends without a model and print what
+    /// registered as a JSON envelope.
+    #[command(hide = true)]
+    DebugBackends,
 }
 
 #[derive(ClapArgs, Debug)]
@@ -234,6 +239,7 @@ enum CommandOutput {
     ModelsCatalog(Vec<CatalogListEntry>),
     Download(DownloadOutput),
     Verify(VerifyOutput),
+    DebugBackends(serde_json::Value),
     None,
 }
 
@@ -366,6 +372,21 @@ where
                 ExitCode::from(1)
             }
         },
+        Ok(CommandOutput::DebugBackends(report)) => {
+            let envelope = Envelope {
+                schema_version: 1,
+                ok: true,
+                result: Some(report),
+                error: None,
+            };
+            match writeln!(stdout, "{}", serde_json::to_string(&envelope).unwrap()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(_) => {
+                    let _ = stderr.write_all(b"failed to write output\n");
+                    ExitCode::from(1)
+                }
+            }
+        }
         Ok(CommandOutput::None) => ExitCode::SUCCESS,
         Err(e) => match print_error(&e, json, &mut stdout, &mut stderr) {
             Ok(()) => exit_code(&e),
@@ -453,6 +474,18 @@ where
             ConfigSource::NoFile => None,
         })),
         Command::Models { command } => run_models_command(command, &loaded.config),
+        Command::DebugBackends => debug_backends().map(CommandOutput::DebugBackends),
+    }
+}
+
+fn debug_backends() -> Result<serde_json::Value, Error> {
+    #[cfg(feature = "engine")]
+    {
+        crate::engine::cpp::backend_report().map_err(crate::EngineError::to_error)
+    }
+    #[cfg(not(feature = "engine"))]
+    {
+        Err(Error::engine_not_available())
     }
 }
 
@@ -1208,6 +1241,7 @@ fn json_flag(args: &Args) -> bool {
             ModelsCommand::Download(args) => args.json,
             ModelsCommand::Verify(args) => args.json,
         },
+        Command::DebugBackends => true,
     }
 }
 
