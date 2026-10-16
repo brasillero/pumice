@@ -23,11 +23,16 @@ harness = false
 default = []
 opus = ["dep:opus", "dep:opusic-sys", "dep:webm-iterable"]
 engine = ["dep:transcribe-cpp", "opus"]
-# Opt-in Linux-only mode: the engine links as shared libraries plus one ggml
-# CPU module per x86 ISA tier; the best module for the running CPU is selected
-# at startup from a directory next to the executable. The default `engine`
-# build stays a single static portable binary.
+# Opt-in mode for Linux and x86-64 Windows: the engine links as shared
+# libraries plus one ggml CPU module per x86 ISA tier; the best module for the
+# running CPU is selected at startup from a directory next to the executable.
+# The default `engine` build stays a single static portable binary.
 cpu-variants = ["engine", "transcribe-cpp/dynamic-backends"]
+# Experimental (P14): `cpu-variants` plus one loadable ggml Vulkan module,
+# scanned from `gpu/vulkan/` next to the executable. Only x86-64 Windows gets
+# the native Vulkan build (the target-scoped dependency below); elsewhere the
+# feature builds plain `cpu-variants`.
+vulkan = ["cpu-variants", "dep:transcribe-cpp-sys"]
 
 [dependencies]
 axum = { workspace = true }
@@ -52,6 +57,12 @@ transcribe-cpp = { version = "=0.3.1", optional = true, default-features = false
 ureq = { version = "2.12.1", default-features = false, features = ["tls"] }
 url = "2"
 webm-iterable = { version = "=0.7.1", default-features = false, optional = true }
+
+# The pinned engine's native crate, named only so the `vulkan` feature can
+# turn on its Vulkan build for this target alone (`transcribe-cpp/vulkan` does
+# nothing but forward to it). Cargo unifies it with the engine's own copy.
+[target.'cfg(all(windows, target_arch = "x86_64"))'.dependencies]
+transcribe-cpp-sys = { version = "=0.3.1", optional = true, default-features = false, features = ["vulkan"] }
 
 [dev-dependencies]
 hound = { workspace = true }

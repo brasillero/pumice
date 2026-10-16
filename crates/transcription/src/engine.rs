@@ -86,7 +86,7 @@ pub mod cpp {
         pub fn new(model_path: &Path, threads: i32) -> Result<Self, EngineError> {
             // Native logs can contain dictated text; disable them before loading.
             transcribe_cpp::disable_logging();
-            #[cfg(all(feature = "cpu-variants", target_os = "linux"))]
+            #[cfg(pumice_dynamic_backends)]
             dynamic_backends::init_from_exe_dir().map_err(|error| {
                 eprintln!("cpu-variants: {error}");
                 EngineError::Failed
@@ -202,7 +202,75 @@ pub mod cpp {
         if let Some(variant) = selected_cpu_variant() {
             return Some(format!("{label} [{variant}]"));
         }
+        // No /proc/self/maps here: report the module startup initialized
+        // from. Its directory holds that one CPU module only, and
+        // initialization fails unless it registered.
+        #[cfg(all(pumice_dynamic_backends, windows))]
+        if let Some(selection) = dynamic_backends::selection() {
+            return Some(format!("{label} [{}]", selection.variant));
+        }
         Some(label)
+    }
+
+    /// Temporary diagnostic behind the hidden `debug-backends` command
+    /// (P14.1): initializes the compute backends exactly as a model load
+    /// does, without a model, and lists what registered. The `compute`
+    /// report planned for P14.2 replaces it. Fixed field names plus
+    /// hardware names only.
+    pub fn backend_report() -> Result<serde_json::Value, EngineError> {
+        transcribe_cpp::disable_logging();
+        #[cfg(pumice_dynamic_backends)]
+        let selection = dynamic_backends::init_from_exe_dir().map_err(|error| {
+            eprintln!("cpu-variants: {error}");
+            EngineError::Failed
+        })?;
+        #[cfg(pumice_dynamic_backends)]
+        let (cpu_variant, bundle, gpu_dir, vulkan_devices) = (
+            Some(selection.variant),
+            Some(selection.bundle.as_str()),
+            Some(selection.gpu.as_str()),
+            selection.vulkan_devices,
+        );
+        #[cfg(not(pumice_dynamic_backends))]
+        let (cpu_variant, bundle, gpu_dir, vulkan_devices): (
+            Option<&str>,
+            Option<&str>,
+            Option<&str>,
+            Option<usize>,
+        ) = (None, None, None, None);
+
+        let allowed = transcribe_cpp::allowed_backends();
+        let allowed_backends: Vec<&str> = [
+            ("cpu", transcribe_cpp::BackendMask::CPU),
+            ("metal", transcribe_cpp::BackendMask::METAL),
+            ("vulkan", transcribe_cpp::BackendMask::VULKAN),
+            ("cuda", transcribe_cpp::BackendMask::CUDA),
+            ("rocm", transcribe_cpp::BackendMask::ROCM),
+            ("other", transcribe_cpp::BackendMask::OTHER),
+        ]
+        .into_iter()
+        .filter(|(_, bit)| allowed.contains(*bit))
+        .map(|(name, _)| name)
+        .collect();
+        let devices: Vec<serde_json::Value> = transcribe_cpp::devices()
+            .into_iter()
+            .map(|device| {
+                serde_json::json!({
+                    "name": device.name,
+                    "description": device.description,
+                    "kind": device.kind,
+                    "type": format!("{:?}", device.device_type).to_lowercase(),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "cpu_variant": cpu_variant,
+            "bundle": bundle,
+            "gpu_dir": gpu_dir,
+            "vulkan_devices": vulkan_devices,
+            "allowed_backends": allowed_backends,
+            "devices": devices,
+        }))
     }
 
     /// Name of the dlopen'd ggml CPU variant module (e.g. `haswell`), read
@@ -291,7 +359,7 @@ pub mod cpp {
     }
 
     /// Runtime CPU-variant backend initialization (`cpu-variants` feature,
-    /// Linux x86-64 only). The variant is chosen here, not by ggml: ggml's pinned
+    /// Linux and x86-64 Windows). The variant is chosen here, not by ggml: ggml's pinned
     /// scoring reads CPUID without checking OS-enabled state (the FIXME in
     /// transcribe-cpp-sys ggml/src/ggml-cpu/arch/x86/cpu-feats.cpp), so a CPU
     /// or guest advertising AVX/AVX-512 with the state disabled could win
@@ -307,18 +375,36 @@ pub mod cpp {
     /// directory — never cwd, PATH or a temp dir, and nothing is copied or
     /// written at runtime, so a read-only install directory works. The plain
     /// `x64` module is the portable floor when nothing better is safe.
-    #[cfg(all(feature = "cpu-variants", target_os = "linux"))]
+    ///
+    /// With the `vulkan` build (x86-64 Windows, experimental) the optional
+    /// GPU module sits alone in `<exe dir>/gpu/vulkan/` and is scanned after
+    /// the CPU module, with the same backend mask (D2 of
+    /// p14.1-windows-vulkan). The backend policy that decides when to scan it
+    /// comes in P14.2; until then it is scanned whenever it is staged.
+    #[cfg(pumice_dynamic_backends)]
     mod dynamic_backends {
+        use crate::bundle::{BundleError, Expected, Manifest};
+        use ::transcribe_cpp::BackendMask;
         use std::fmt;
         use std::path::{Path, PathBuf};
+        use std::sync::OnceLock;
+        use std::time::Instant;
 
         /// One x86 ISA feature a ggml CPU variant can require, mirroring the
         /// GGML_* compile definitions in ggml's pinned CMake variant table
         /// (transcribe-cpp-sys ggml/src/CMakeLists.txt,
         /// ggml_add_cpu_backend_variant). `Avx512` stands for the five base
-        /// flags of ggml's AVX512 tier (-mavx512f/cd/vl/dq/bw).
+        /// flags of ggml's AVX512 tier (-mavx512f/cd/vl/dq/bw). `Sse3` to
+        /// `Lzcnt` are never in ggml's lists; they are the extra features an
+        /// MSVC `/arch` switch lets the compiler emit (`msvc_implied`).
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         enum CpuFeature {
+            Sse3,
+            Ssse3,
+            Sse41,
+            Popcnt,
+            Bmi1,
+            Lzcnt,
             Sse42,
             Avx,
             F16c,
@@ -480,16 +566,95 @@ pub mod cpp {
             ),
         ];
 
+        /// The variants an MSVC x86-64 build produces: the same pinned CMake
+        /// table minus the entries it skips under MSVC — ivybridge and
+        /// piledriver (MSVC defines no `__F16C__`/`__FMA__`), cooperlake and
+        /// zen4 (no AVX512-BF16 intrinsics without `/arch:AVX10.1`) and
+        /// sapphirerapids (no AMX). Feature lists come from `VARIANTS`, so
+        /// both tables stay one source.
+        const MSVC_BUILT: &[&str] = &[
+            "x64",
+            "sse42",
+            "sandybridge",
+            "haswell",
+            "skylakex",
+            "cannonlake",
+            "cascadelake",
+            "icelake",
+            "alderlake",
+        ];
+
+        /// Which entries of `VARIANTS` a build produces, and what else its
+        /// compiler may emit for each of them.
+        struct VariantTable {
+            /// `None`: every entry.
+            built: Option<&'static [&'static str]>,
+            /// Features required beyond a variant's ggml list.
+            implied: fn(&[CpuFeature]) -> &'static [CpuFeature],
+        }
+
+        const GNU_TABLE: VariantTable = VariantTable {
+            built: None,
+            implied: no_implied,
+        };
+
+        const MSVC_TABLE: VariantTable = VariantTable {
+            built: Some(MSVC_BUILT),
+            implied: msvc_implied,
+        };
+
+        /// The table of the modules this executable was built with.
+        const TABLE: &VariantTable = if cfg!(target_env = "msvc") {
+            &MSVC_TABLE
+        } else {
+            &GNU_TABLE
+        };
+
+        /// GCC/Clang only emit what ggml's `-m` flags list.
+        fn no_implied(_: &[CpuFeature]) -> &'static [CpuFeature] {
+            &[]
+        }
+
+        /// What MSVC's `/arch` switches may emit beyond ggml's list. ggml
+        /// compiles its SSE4.2 tier with `/arch:SSE4.2` ("the full set of SSE
+        /// instructions"), the AVX tier with `/arch:AVX`, and the AVX2 and
+        /// AVX-512 tiers with `/arch:AVX2`/`/arch:AVX512`; Microsoft
+        /// documents that each switch "may also enable the use of other
+        /// nonvector instructions", naming BMI for `/arch:AVX2`, and MSVC's
+        /// STL skips its runtime ISA check for POPCNT and LZCNT/TZCNT under
+        /// AVX/AVX2. Real CPUs at those tiers all have these, so requiring
+        /// them costs nothing there and keeps a guest that masks one of them
+        /// on a lower tier.
+        fn msvc_implied(required: &[CpuFeature]) -> &'static [CpuFeature] {
+            use CpuFeature::*;
+            if required.contains(&Avx2) {
+                &[Sse3, Ssse3, Sse41, Popcnt, Bmi1, Lzcnt]
+            } else if required.contains(&Sse42) {
+                &[Sse3, Ssse3, Sse41, Popcnt]
+            } else {
+                &[]
+            }
+        }
+
         /// Variants whose features are all usable on this host, weakest
         /// first, in the preference order `choose_variant` uses: feature
         /// count ascending, table order on ties (the later entry wins).
-        /// `x64` has no requirements, so the list is never empty.
+        /// Implied features gate compatibility but not the ranking, so both
+        /// tables rank shared variants alike. `x64` has no requirements, so
+        /// the list is never empty.
         fn compatible_variants(
+            table: &VariantTable,
             detect: impl Fn(CpuFeature) -> bool,
         ) -> Vec<(&'static str, &'static [CpuFeature])> {
             let mut variants: Vec<_> = VARIANTS
                 .iter()
-                .filter(|(_, required)| required.iter().all(|&f| detect(f)))
+                .filter(|(name, _)| table.built.is_none_or(|built| built.contains(name)))
+                .filter(|(_, required)| {
+                    required
+                        .iter()
+                        .chain((table.implied)(required))
+                        .all(|&f| detect(f))
+                })
                 .copied()
                 .collect();
             variants.sort_by_key(|(_, required)| required.len());
@@ -499,8 +664,11 @@ pub mod cpp {
         /// The best variant whose features are all usable on this host, or
         /// the `x64` portable floor. The detector is injected so the choice
         /// is unit-testable independent of the host.
-        fn choose_variant(detect: impl Fn(CpuFeature) -> bool) -> &'static str {
-            compatible_variants(detect)
+        fn choose_variant(
+            table: &VariantTable,
+            detect: impl Fn(CpuFeature) -> bool,
+        ) -> &'static str {
+            compatible_variants(table, detect)
                 .last()
                 .map(|(name, _)| *name)
                 .unwrap_or("x64")
@@ -517,6 +685,12 @@ pub mod cpp {
         fn detect(feature: CpuFeature) -> bool {
             use CpuFeature::*;
             match feature {
+                Sse3 => std::arch::is_x86_feature_detected!("sse3"),
+                Ssse3 => std::arch::is_x86_feature_detected!("ssse3"),
+                Sse41 => std::arch::is_x86_feature_detected!("sse4.1"),
+                Popcnt => std::arch::is_x86_feature_detected!("popcnt"),
+                Bmi1 => std::arch::is_x86_feature_detected!("bmi1"),
+                Lzcnt => std::arch::is_x86_feature_detected!("lzcnt"),
                 Sse42 => std::arch::is_x86_feature_detected!("sse4.2"),
                 Avx => std::arch::is_x86_feature_detected!("avx"),
                 F16c => std::arch::is_x86_feature_detected!("f16c"),
@@ -549,13 +723,28 @@ pub mod cpp {
             false
         }
 
+        /// The rebuild hint for this target's staging script.
+        const STAGER_HINT: &str = if cfg!(windows) {
+            "rebuild the bundle with crates/transcription/scripts/build-windows-vulkan.ps1"
+        } else {
+            "rebuild the staged folder with crates/transcription/scripts/build-cpu-variants.sh"
+        };
+
         /// Why backend initialization failed, in fixed text safe to show on
         /// stderr: paths and variant names only, never native error strings.
         /// Each variant names its category (modules missing / no usable CPU
-        /// module) and carries the same recovery hint.
+        /// module / GPU module rejected / bundle manifest mismatch) and
+        /// carries the same recovery hint.
         #[derive(Debug)]
         pub enum InitError {
             ExeDir,
+            /// The staged files do not match `bundle.json`, or a target that
+            /// requires it has none: an installation error, never a reason
+            /// to fall back.
+            Bundle {
+                exe_dir: PathBuf,
+                error: BundleError,
+            },
             ModulesMissing {
                 exe_dir: PathBuf,
                 variant: &'static str,
@@ -564,21 +753,31 @@ pub mod cpp {
                 variant: &'static str,
                 module_dir: PathBuf,
             },
+            GpuModuleRejected {
+                module_dir: PathBuf,
+            },
         }
 
         impl fmt::Display for InitError {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                let hint = "rebuild the staged folder with \
-                            crates/transcription/scripts/build-cpu-variants.sh";
+                let hint = STAGER_HINT;
                 match self {
                     InitError::ExeDir => {
                         write!(f, "cannot locate the executable directory; {hint}")
                     }
+                    InitError::Bundle { exe_dir, error } => write!(
+                        f,
+                        "the bundle at {} does not match its manifest: {error} (bundle manifest \
+                         mismatch); the installation is damaged or mixes files from different \
+                         builds; {hint}",
+                        exe_dir.display()
+                    ),
                     InitError::ModulesMissing { exe_dir, variant } => write!(
                         f,
-                        "no staged ggml CPU module for libggml-cpu-{variant}.so or any lower \
+                        "no staged ggml CPU module for {} or any lower \
                          variant under {} (modules missing); the staged build is incomplete; \
                          {hint}",
+                        module_file_name(variant),
                         exe_dir.join("cpu").display()
                     ),
                     InitError::NoUsableCpuModule {
@@ -586,22 +785,40 @@ pub mod cpp {
                         module_dir,
                     } => write!(
                         f,
-                        "ggml could not load the selected CPU module libggml-cpu-{variant}.so \
+                        "ggml could not load the selected CPU module {} \
                          from {} (no usable CPU module); the staged libraries may not match \
                          this executable; {hint}",
+                        module_file_name(variant),
+                        module_dir.display()
+                    ),
+                    InitError::GpuModuleRejected { module_dir } => write!(
+                        f,
+                        "ggml rejected the GPU module directory {} (GPU module rejected); \
+                         {hint}",
                         module_dir.display()
                     ),
                 }
             }
         }
 
+        /// The file name ggml's loader matches for one CPU variant:
+        /// `libggml-cpu-<variant>.so` on Linux, `ggml-cpu-<variant>.dll` on
+        /// Windows.
+        fn module_file_name(variant: &str) -> String {
+            if cfg!(windows) {
+                format!("ggml-cpu-{variant}.dll")
+            } else {
+                format!("libggml-cpu-{variant}.so")
+            }
+        }
+
         /// The staged module file for one variant:
-        /// `<exe dir>/cpu/<variant>/libggml-cpu-<variant>.so`.
+        /// `<exe dir>/cpu/<variant>/<module file name>`.
         fn variant_module_file(exe_dir: &Path, variant: &str) -> PathBuf {
             exe_dir
                 .join("cpu")
                 .join(variant)
-                .join(format!("libggml-cpu-{variant}.so"))
+                .join(module_file_name(variant))
         }
 
         /// The staged module directory to initialize backends from: the
@@ -614,10 +831,11 @@ pub mod cpp {
         /// module was staged.
         fn select_module_dir(
             exe_dir: &Path,
+            table: &VariantTable,
             chosen: &'static str,
             detect: impl Fn(CpuFeature) -> bool,
         ) -> Option<(&'static str, PathBuf)> {
-            let candidates = compatible_variants(detect);
+            let candidates = compatible_variants(table, detect);
             let chosen_idx = candidates.iter().position(|(name, _)| *name == chosen)?;
             candidates[..=chosen_idx]
                 .iter()
@@ -626,37 +844,247 @@ pub mod cpp {
                 .map(|(name, _)| (*name, exe_dir.join("cpu").join(name)))
         }
 
+        /// Temporary switch (P14.1 only, for CI): `1` keeps the staged GPU
+        /// module unscanned, so one bundle can be checked with and without
+        /// it. It can only narrow what loads. P14.2 replaces it with the
+        /// `backend: cpu|auto|gpu` setting.
+        const SKIP_GPU_ENV: &str = "PUMICE_TRANSCRIBE_SKIP_GPU_DIR";
+
+        /// What startup did with the optional GPU module directory.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum GpuDir {
+            /// This build has no GPU module (`cpu-variants` without
+            /// `vulkan`, or a target without one).
+            NotBuilt,
+            /// No `gpu/vulkan/` module is staged next to the executable.
+            Absent,
+            /// Staged, but kept out by the temporary skip switch.
+            Skipped,
+            /// Scanned with the process's backend mask.
+            Scanned,
+        }
+
+        impl GpuDir {
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    GpuDir::NotBuilt => "not_built",
+                    GpuDir::Absent => "absent",
+                    GpuDir::Skipped => "skipped",
+                    GpuDir::Scanned => "scanned",
+                }
+            }
+        }
+
+        /// The staged Vulkan module: `<exe dir>/gpu/vulkan/ggml-vulkan.dll`
+        /// (`libggml-vulkan.so` on Linux, for the later Linux bundle).
+        fn gpu_module_file(exe_dir: &Path) -> PathBuf {
+            let file = if cfg!(windows) {
+                "ggml-vulkan.dll"
+            } else {
+                "libggml-vulkan.so"
+            };
+            exe_dir.join("gpu").join("vulkan").join(file)
+        }
+
+        /// The GPU module directory, relative to the executable, as
+        /// `bundle.json` and the status lines name it.
+        const GPU_DIR: &str = "gpu/vulkan";
+
+        /// The GPU module directory to scan, or why none is scanned.
+        fn plan_gpu_dir(exe_dir: &Path, built: bool, skip: bool) -> Result<PathBuf, GpuDir> {
+            if !built {
+                return Err(GpuDir::NotBuilt);
+            }
+            let module = gpu_module_file(exe_dir);
+            if !module.is_file() {
+                return Err(GpuDir::Absent);
+            }
+            if skip {
+                return Err(GpuDir::Skipped);
+            }
+            Ok(exe_dir.join("gpu").join("vulkan"))
+        }
+
+        /// The one backend mask of this process. ggml fixes it at the first
+        /// registration and rejects a wider one later, so the CPU directory
+        /// is already loaded with the GPU bit when a GPU directory follows.
+        /// Never `ALL`: its OTHER bit would also admit a `GGML_BACKEND_PATH`
+        /// plugin.
+        fn backend_mask(scan_gpu: bool) -> BackendMask {
+            if scan_gpu {
+                BackendMask::CPU | BackendMask::VULKAN
+            } else {
+                BackendMask::CPU
+            }
+        }
+
+        /// Whether this target's bundles must carry a `bundle.json`. Only
+        /// the Windows stager writes one so far; the Linux stage is checked
+        /// only when it has one.
+        const MANIFEST_REQUIRED: bool = cfg!(windows);
+
+        /// What startup checked against `bundle.json`.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum BundleCheck {
+            /// No manifest, on a target that does not require one.
+            Absent,
+            /// Every library startup relies on matched it.
+            Verified,
+        }
+
+        impl BundleCheck {
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    BundleCheck::Absent => "absent",
+                    BundleCheck::Verified => "verified",
+                }
+            }
+        }
+
+        /// What startup loaded.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub struct Selection {
+            pub variant: &'static str,
+            pub bundle: BundleCheck,
+            pub gpu: GpuDir,
+            /// Vulkan devices registered after scanning the GPU module;
+            /// `None` when it was not scanned. `Some(0)` is the CPU
+            /// fallback: the module could not load (no Vulkan loader) or
+            /// found no usable device.
+            pub vulkan_devices: Option<usize>,
+        }
+
+        static SELECTION: OnceLock<Selection> = OnceLock::new();
+
+        /// The selection of the last successful initialization, if any.
+        #[cfg_attr(not(windows), allow(dead_code))]
+        pub fn selection() -> Option<Selection> {
+            SELECTION.get().copied()
+        }
+
         /// Initialize backends, returning a fixed-text reason on failure.
-        pub fn init_from_exe_dir() -> Result<(), InitError> {
+        /// Runs once per process: later calls return the first success
+        /// (ggml could not load anything new anyway, and the files are not
+        /// hashed twice).
+        ///
+        /// With a `bundle.json`, everything is checked before the first
+        /// registration: the core libraries, the selected CPU module's
+        /// directory and, when it will be scanned, the GPU module's
+        /// directory. A present module that does not match is an
+        /// installation error, not a fallback; only an absent GPU module, or
+        /// one that loads and finds no device, leaves the process on CPU.
+        pub fn init_from_exe_dir() -> Result<Selection, InitError> {
+            if let Some(selection) = SELECTION.get() {
+                return Ok(*selection);
+            }
             let exe_dir = std::env::current_exe()
                 .ok()
                 .and_then(|path| path.parent().map(Path::to_path_buf))
                 .ok_or(InitError::ExeDir)?;
-            let chosen = choose_variant(detect);
-            let (variant, module_dir) =
-                select_module_dir(&exe_dir, chosen, detect).ok_or_else(|| {
-                    InitError::ModulesMissing {
-                        exe_dir: exe_dir.clone(),
-                        variant: chosen,
-                    }
+            let bundle_error = |error| InitError::Bundle {
+                exe_dir: exe_dir.clone(),
+                error,
+            };
+            let manifest =
+                Manifest::load(&exe_dir, Expected::this_build()).map_err(bundle_error)?;
+            if manifest.is_none() && MANIFEST_REQUIRED {
+                return Err(bundle_error(BundleError::Missing));
+            }
+            let chosen = choose_variant(TABLE, detect);
+            let (variant, module_dir) = select_module_dir(&exe_dir, TABLE, chosen, detect)
+                .ok_or_else(|| InitError::ModulesMissing {
+                    exe_dir: exe_dir.clone(),
+                    variant: chosen,
                 })?;
-            ::transcribe_cpp::init_backends_with(
-                Some(&module_dir),
-                ::transcribe_cpp::BackendMask::CPU,
-            )
-            .map_err(|_| InitError::NoUsableCpuModule {
-                variant,
-                module_dir: module_dir.clone(),
+            let skip_gpu = std::env::var_os(SKIP_GPU_ENV).is_some_and(|value| value == "1");
+            let gpu_plan = plan_gpu_dir(&exe_dir, cfg!(pumice_vulkan), skip_gpu);
+            let bundle = match &manifest {
+                Some(manifest) => {
+                    let started = Instant::now();
+                    let mut verified = manifest.verify_core(&exe_dir).map_err(bundle_error)?;
+                    verified += manifest
+                        .verify_dir(&exe_dir, &format!("cpu/{variant}"))
+                        .map_err(bundle_error)?;
+                    if gpu_plan.is_ok() {
+                        verified += manifest
+                            .verify_dir(&exe_dir, GPU_DIR)
+                            .map_err(bundle_error)?;
+                    }
+                    eprintln!(
+                        "cpu-variants: {} verified: {} files, {} bytes in {} ms",
+                        crate::bundle::FILE_NAME,
+                        verified.files,
+                        verified.bytes,
+                        started.elapsed().as_millis()
+                    );
+                    BundleCheck::Verified
+                }
+                None => BundleCheck::Absent,
+            };
+            let mask = backend_mask(gpu_plan.is_ok());
+            ::transcribe_cpp::init_backends_with(Some(&module_dir), mask).map_err(|_| {
+                InitError::NoUsableCpuModule {
+                    variant,
+                    module_dir: module_dir.clone(),
+                }
             })?;
             if variant == chosen {
-                eprintln!("cpu-variants: selected ggml CPU module libggml-cpu-{variant}.so");
+                eprintln!(
+                    "cpu-variants: selected ggml CPU module {}",
+                    module_file_name(variant)
+                );
             } else {
                 eprintln!(
-                    "cpu-variants: selected ggml CPU module libggml-cpu-{variant}.so (fallback: \
-                     libggml-cpu-{chosen}.so is not staged)"
+                    "cpu-variants: selected ggml CPU module {} (fallback: {} is not staged)",
+                    module_file_name(variant),
+                    module_file_name(chosen)
                 );
             }
-            Ok(())
+            let (gpu, vulkan_devices) = match gpu_plan {
+                Ok(gpu_dir) => {
+                    // The CPU device is already registered, so this only
+                    // fails on a mask or path problem; a Vulkan module that
+                    // cannot load or finds no device is skipped by ggml.
+                    ::transcribe_cpp::init_backends_with(Some(&gpu_dir), mask).map_err(|_| {
+                        InitError::GpuModuleRejected {
+                            module_dir: gpu_dir.clone(),
+                        }
+                    })?;
+                    let vulkan_devices = ::transcribe_cpp::devices()
+                        .iter()
+                        .filter(|device| device.kind == "vulkan")
+                        .count();
+                    if vulkan_devices == 0 {
+                        eprintln!(
+                            "cpu-variants: scanned {GPU_DIR}: no Vulkan device registered (no \
+                             Vulkan driver or device, or the module could not load); CPU only"
+                        );
+                    } else {
+                        eprintln!(
+                            "cpu-variants: scanned {GPU_DIR}: {vulkan_devices} Vulkan device(s) \
+                             registered"
+                        );
+                    }
+                    (GpuDir::Scanned, Some(vulkan_devices))
+                }
+                Err(GpuDir::Skipped) => {
+                    eprintln!("cpu-variants: {GPU_DIR} not scanned ({SKIP_GPU_ENV}=1)");
+                    (GpuDir::Skipped, None)
+                }
+                Err(GpuDir::Absent) => {
+                    eprintln!("cpu-variants: no GPU module staged; CPU only");
+                    (GpuDir::Absent, None)
+                }
+                Err(state) => (state, None),
+            };
+            let selection = Selection {
+                variant,
+                bundle,
+                gpu,
+                vulkan_devices,
+            };
+            let _ = SELECTION.set(selection);
+            Ok(selection)
         }
 
         #[cfg(test)]
@@ -678,71 +1106,94 @@ pub mod cpp {
 
             #[test]
             fn x64_is_the_portable_floor() {
-                assert_eq!(choose_variant(detector(&[])), "x64");
+                assert_eq!(choose_variant(&GNU_TABLE, detector(&[])), "x64");
             }
 
             #[test]
             fn sse42_only_cpu_gets_sse42() {
-                assert_eq!(choose_variant(detector(&[Sse42])), "sse42");
+                assert_eq!(choose_variant(&GNU_TABLE, detector(&[Sse42])), "sse42");
             }
 
             #[test]
             fn avx_tiers_upgrade_stepwise() {
                 let sandybridge = [Sse42, Avx];
-                assert_eq!(choose_variant(detector(&sandybridge)), "sandybridge");
+                assert_eq!(
+                    choose_variant(&GNU_TABLE, detector(&sandybridge)),
+                    "sandybridge"
+                );
                 let ivybridge = [Sse42, Avx, F16c];
-                assert_eq!(choose_variant(detector(&ivybridge)), "ivybridge");
+                assert_eq!(
+                    choose_variant(&GNU_TABLE, detector(&ivybridge)),
+                    "ivybridge"
+                );
                 let piledriver = [Sse42, Avx, F16c, Fma];
-                assert_eq!(choose_variant(detector(&piledriver)), "piledriver");
+                assert_eq!(
+                    choose_variant(&GNU_TABLE, detector(&piledriver)),
+                    "piledriver"
+                );
             }
 
             #[test]
             fn haswell_set_chooses_haswell() {
                 let haswell = [Sse42, Avx, F16c, Fma, Avx2, Bmi2];
-                assert_eq!(choose_variant(detector(&haswell)), "haswell");
+                assert_eq!(choose_variant(&GNU_TABLE, detector(&haswell)), "haswell");
             }
 
             #[test]
             fn avx_vnni_upgrades_haswell_to_alderlake() {
                 let alderlake = [Sse42, Avx, F16c, Fma, Avx2, Bmi2, AvxVnni];
-                assert_eq!(choose_variant(detector(&alderlake)), "alderlake");
+                assert_eq!(
+                    choose_variant(&GNU_TABLE, detector(&alderlake)),
+                    "alderlake"
+                );
             }
 
             #[test]
             fn os_enabled_avx512_reaches_the_avx512_tiers() {
                 let base = [Sse42, Avx, F16c, Fma, Avx2, Bmi2];
                 assert_eq!(
-                    choose_variant(detector(&[base.as_slice(), &[Avx512]].concat())),
+                    choose_variant(&GNU_TABLE, detector(&[base.as_slice(), &[Avx512]].concat())),
                     "skylakex"
                 );
                 assert_eq!(
-                    choose_variant(detector(&[base.as_slice(), &[Avx512, Avx512Vbmi]].concat())),
+                    choose_variant(
+                        &GNU_TABLE,
+                        detector(&[base.as_slice(), &[Avx512, Avx512Vbmi]].concat())
+                    ),
                     "cannonlake"
                 );
                 assert_eq!(
-                    choose_variant(detector(&[base.as_slice(), &[Avx512, Avx512Vnni]].concat())),
+                    choose_variant(
+                        &GNU_TABLE,
+                        detector(&[base.as_slice(), &[Avx512, Avx512Vnni]].concat())
+                    ),
                     "cascadelake"
                 );
                 assert_eq!(
-                    choose_variant(detector(
-                        &[base.as_slice(), &[Avx512, Avx512Vbmi, Avx512Vnni]].concat()
-                    )),
+                    choose_variant(
+                        &GNU_TABLE,
+                        detector(&[base.as_slice(), &[Avx512, Avx512Vbmi, Avx512Vnni]].concat())
+                    ),
                     "icelake"
                 );
                 assert_eq!(
-                    choose_variant(detector(
-                        &[base.as_slice(), &[Avx512, Avx512Vnni, Avx512Bf16]].concat()
-                    )),
+                    choose_variant(
+                        &GNU_TABLE,
+                        detector(&[base.as_slice(), &[Avx512, Avx512Vnni, Avx512Bf16]].concat())
+                    ),
                     "cooperlake"
                 );
                 assert_eq!(
-                    choose_variant(detector(
-                        &[
-                            base.as_slice(),
-                            &[Avx512, Avx512Vbmi, Avx512Vnni, Avx512Bf16]
-                        ]
-                        .concat()
-                    )),
+                    choose_variant(
+                        &GNU_TABLE,
+                        detector(
+                            &[
+                                base.as_slice(),
+                                &[Avx512, Avx512Vbmi, Avx512Vnni, Avx512Bf16]
+                            ]
+                            .concat()
+                        )
+                    ),
                     "zen4"
                 );
             }
@@ -753,7 +1204,10 @@ pub mod cpp {
                     Sse42, Avx, F16c, Fma, Avx2, Bmi2, Avx512, Avx512Vbmi, Avx512Vnni, Avx512Bf16,
                     AmxTile, AmxInt8,
                 ];
-                assert_eq!(choose_variant(detector(&sapphire)), "sapphirerapids");
+                assert_eq!(
+                    choose_variant(&GNU_TABLE, detector(&sapphire)),
+                    "sapphirerapids"
+                );
             }
 
             #[test]
@@ -767,7 +1221,10 @@ pub mod cpp {
                     Sse42, Avx, F16c, Fma, Avx2, Bmi2, Avx512Vbmi, Avx512Vnni, Avx512Bf16, AmxTile,
                     AmxInt8,
                 ];
-                assert_eq!(choose_variant(detector(&avx512_os_disabled)), "haswell");
+                assert_eq!(
+                    choose_variant(&GNU_TABLE, detector(&avx512_os_disabled)),
+                    "haswell"
+                );
             }
 
             #[test]
@@ -775,7 +1232,10 @@ pub mod cpp {
                 // Same shape for plain AVX: with the OS AVX state disabled,
                 // only the non-AVX tiers are selectable.
                 let avx_os_disabled = [Sse42];
-                assert_eq!(choose_variant(detector(&avx_os_disabled)), "sse42");
+                assert_eq!(
+                    choose_variant(&GNU_TABLE, detector(&avx_os_disabled)),
+                    "sse42"
+                );
             }
 
             #[test]
@@ -796,18 +1256,31 @@ pub mod cpp {
                         },
                         "no usable CPU module",
                     ),
+                    (
+                        InitError::GpuModuleRejected {
+                            module_dir: temp.path().to_path_buf(),
+                        },
+                        "GPU module rejected",
+                    ),
+                    (
+                        InitError::Bundle {
+                            exe_dir: temp.path().to_path_buf(),
+                            error: BundleError::Missing,
+                        },
+                        "bundle manifest mismatch",
+                    ),
                 ];
                 for (error, category) in cases {
                     let message = error.to_string();
                     assert!(message.contains(category), "{message}");
-                    assert!(message.contains("build-cpu-variants.sh"), "{message}");
+                    assert!(message.contains(STAGER_HINT), "{message}");
                 }
             }
 
             fn stage_module(exe_dir: &Path, variant: &str) {
                 let dir = exe_dir.join("cpu").join(variant);
                 std::fs::create_dir_all(&dir).unwrap();
-                std::fs::write(dir.join(format!("libggml-cpu-{variant}.so")), b"").unwrap();
+                std::fs::write(dir.join(module_file_name(variant)), b"").unwrap();
             }
 
             #[test]
@@ -816,7 +1289,8 @@ pub mod cpp {
                 stage_module(temp.path(), "x64");
                 stage_module(temp.path(), "haswell");
                 let (variant, dir) =
-                    select_module_dir(temp.path(), "haswell", detector(HOST_FEATURES)).unwrap();
+                    select_module_dir(temp.path(), &GNU_TABLE, "haswell", detector(HOST_FEATURES))
+                        .unwrap();
                 assert_eq!(variant, "haswell");
                 assert_eq!(dir, temp.path().join("cpu").join("haswell"));
             }
@@ -827,7 +1301,8 @@ pub mod cpp {
                 stage_module(temp.path(), "sse42");
                 stage_module(temp.path(), "x64");
                 let (variant, dir) =
-                    select_module_dir(temp.path(), "haswell", detector(HOST_FEATURES)).unwrap();
+                    select_module_dir(temp.path(), &GNU_TABLE, "haswell", detector(HOST_FEATURES))
+                        .unwrap();
                 assert_eq!(variant, "sse42");
                 assert_eq!(dir, temp.path().join("cpu").join("sse42"));
             }
@@ -843,8 +1318,13 @@ pub mod cpp {
                 stage_module(temp.path(), "zen4");
                 stage_module(temp.path(), "haswell");
                 stage_module(temp.path(), "x64");
-                let (variant, dir) =
-                    select_module_dir(temp.path(), "alderlake", detector(&alderlake_host)).unwrap();
+                let (variant, dir) = select_module_dir(
+                    temp.path(),
+                    &GNU_TABLE,
+                    "alderlake",
+                    detector(&alderlake_host),
+                )
+                .unwrap();
                 assert_eq!(variant, "haswell");
                 assert_eq!(dir, temp.path().join("cpu").join("haswell"));
             }
@@ -861,9 +1341,13 @@ pub mod cpp {
                 stage_module(temp.path(), "cooperlake");
                 stage_module(temp.path(), "skylakex");
                 stage_module(temp.path(), "x64");
-                let (variant, dir) =
-                    select_module_dir(temp.path(), "cascadelake", detector(&cascadelake_host))
-                        .unwrap();
+                let (variant, dir) = select_module_dir(
+                    temp.path(),
+                    &GNU_TABLE,
+                    "cascadelake",
+                    detector(&cascadelake_host),
+                )
+                .unwrap();
                 assert_eq!(variant, "skylakex");
                 assert_eq!(dir, temp.path().join("cpu").join("skylakex"));
             }
@@ -872,8 +1356,13 @@ pub mod cpp {
             fn only_x64_staged_still_runs() {
                 let temp = tempfile::tempdir().unwrap();
                 stage_module(temp.path(), "x64");
-                let (variant, dir) =
-                    select_module_dir(temp.path(), "alderlake", detector(HOST_FEATURES)).unwrap();
+                let (variant, dir) = select_module_dir(
+                    temp.path(),
+                    &GNU_TABLE,
+                    "alderlake",
+                    detector(HOST_FEATURES),
+                )
+                .unwrap();
                 assert_eq!(variant, "x64");
                 assert_eq!(dir, temp.path().join("cpu").join("x64"));
             }
@@ -884,7 +1373,8 @@ pub mod cpp {
                 std::fs::create_dir_all(temp.path().join("cpu").join("haswell")).unwrap();
                 stage_module(temp.path(), "x64");
                 let (variant, _) =
-                    select_module_dir(temp.path(), "haswell", detector(HOST_FEATURES)).unwrap();
+                    select_module_dir(temp.path(), &GNU_TABLE, "haswell", detector(HOST_FEATURES))
+                        .unwrap();
                 assert_eq!(variant, "x64");
             }
 
@@ -892,7 +1382,7 @@ pub mod cpp {
             fn no_staged_variant_is_an_error() {
                 let temp = tempfile::tempdir().unwrap();
                 assert_eq!(
-                    select_module_dir(temp.path(), "haswell", detector(HOST_FEATURES)),
+                    select_module_dir(temp.path(), &GNU_TABLE, "haswell", detector(HOST_FEATURES)),
                     None
                 );
             }
@@ -906,11 +1396,12 @@ pub mod cpp {
                 std::fs::write(temp.path().join("libggml-base.so"), b"").unwrap();
                 std::fs::write(temp.path().join("notes.txt"), b"").unwrap();
                 assert_eq!(
-                    select_module_dir(temp.path(), "haswell", detector(HOST_FEATURES)),
+                    select_module_dir(temp.path(), &GNU_TABLE, "haswell", detector(HOST_FEATURES)),
                     None
                 );
             }
 
+            #[cfg(unix)]
             #[test]
             fn read_only_install_dir_needs_no_writes() {
                 use std::os::unix::fs::PermissionsExt;
@@ -921,13 +1412,179 @@ pub mod cpp {
                 for dir in [&cpu, &x64] {
                     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
                 }
-                let (variant, dir) =
-                    select_module_dir(temp.path(), "alderlake", detector(HOST_FEATURES)).unwrap();
+                let (variant, dir) = select_module_dir(
+                    temp.path(),
+                    &GNU_TABLE,
+                    "alderlake",
+                    detector(HOST_FEATURES),
+                )
+                .unwrap();
                 assert_eq!(variant, "x64");
                 assert_eq!(dir, x64);
                 assert!(variant_module_file(temp.path(), "x64").is_file());
                 for dir in [&cpu, &x64] {
                     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+                }
+            }
+
+            /// Everything MSVC's `/arch` switches may additionally emit.
+            const MSVC_IMPLIED: &[CpuFeature] = &[Sse3, Ssse3, Sse41, Popcnt, Bmi1, Lzcnt];
+
+            fn msvc_host(features: &[CpuFeature]) -> Vec<CpuFeature> {
+                [features, MSVC_IMPLIED].concat()
+            }
+
+            #[test]
+            fn msvc_table_lists_only_known_variants() {
+                for name in MSVC_BUILT {
+                    assert!(
+                        VARIANTS.iter().any(|(known, _)| known == name),
+                        "{name} is not in VARIANTS"
+                    );
+                }
+                assert_eq!(MSVC_BUILT.len(), 9);
+            }
+
+            #[test]
+            fn msvc_table_never_offers_variants_msvc_does_not_build() {
+                let everything = msvc_host(&[
+                    Sse42, Avx, F16c, Fma, Bmi2, Avx2, AvxVnni, Avx512, Avx512Vbmi, Avx512Vnni,
+                    Avx512Bf16, AmxTile, AmxInt8,
+                ]);
+                let names: Vec<_> = compatible_variants(&MSVC_TABLE, detector(&everything))
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect();
+                for missing in [
+                    "ivybridge",
+                    "piledriver",
+                    "cooperlake",
+                    "zen4",
+                    "sapphirerapids",
+                ] {
+                    assert!(!names.contains(&missing), "{missing} offered: {names:?}");
+                }
+                // Same ranking as the GNU table among shared variants: the
+                // AVX-512 VBMI+VNNI tier beats alderlake.
+                assert_eq!(
+                    choose_variant(&MSVC_TABLE, detector(&everything)),
+                    "icelake"
+                );
+            }
+
+            #[test]
+            fn msvc_tiers_match_their_gnu_counterparts_on_real_cpus() {
+                let cases: [(&[CpuFeature], &str); 6] = [
+                    (&[], "x64"),
+                    (&[Sse42], "sse42"),
+                    (&[Sse42, Avx, F16c, Fma], "sandybridge"),
+                    (&[Sse42, Avx, F16c, Fma, Avx2, Bmi2], "haswell"),
+                    (&[Sse42, Avx, F16c, Fma, Avx2, Bmi2, AvxVnni], "alderlake"),
+                    (
+                        &[Sse42, Avx, F16c, Fma, Avx2, Bmi2, Avx512, Avx512Vnni],
+                        "cascadelake",
+                    ),
+                ];
+                for (features, expected) in cases {
+                    let host = msvc_host(features);
+                    assert_eq!(
+                        choose_variant(&MSVC_TABLE, detector(&host)),
+                        expected,
+                        "{features:?}"
+                    );
+                }
+            }
+
+            #[test]
+            fn msvc_avx2_tiers_need_the_bit_manipulation_features_arch_avx2_implies() {
+                // A guest that masks LZCNT (or BMI1) while exposing AVX2:
+                // /arch:AVX2 code may use them, so stay on the AVX tier.
+                let base = [Sse42, Avx, F16c, Fma, Avx2, Bmi2, AvxVnni];
+                for masked in [Lzcnt, Bmi1] {
+                    let host: Vec<_> = msvc_host(&base)
+                        .into_iter()
+                        .filter(|&f| f != masked)
+                        .collect();
+                    assert_eq!(
+                        choose_variant(&MSVC_TABLE, detector(&host)),
+                        "sandybridge",
+                        "{masked:?} masked"
+                    );
+                }
+            }
+
+            #[test]
+            fn msvc_sse_tiers_need_the_full_sse_set_and_popcnt() {
+                for masked in [Sse3, Ssse3, Sse41, Popcnt] {
+                    let host: Vec<_> = msvc_host(&[Sse42, Avx])
+                        .into_iter()
+                        .filter(|&f| f != masked)
+                        .collect();
+                    assert_eq!(
+                        choose_variant(&MSVC_TABLE, detector(&host)),
+                        "x64",
+                        "{masked:?} masked"
+                    );
+                }
+            }
+
+            #[test]
+            fn gnu_table_ignores_the_msvc_implied_features() {
+                // Linux behavior is unchanged: no implied feature is checked.
+                let haswell = [Sse42, Avx, F16c, Fma, Avx2, Bmi2];
+                assert_eq!(choose_variant(&GNU_TABLE, detector(&haswell)), "haswell");
+            }
+
+            #[test]
+            fn msvc_fallback_skips_variants_msvc_does_not_build() {
+                // A stray ivybridge module in an MSVC bundle is never used.
+                let host = msvc_host(&[Sse42, Avx, F16c, Fma]);
+                let temp = tempfile::tempdir().unwrap();
+                stage_module(temp.path(), "ivybridge");
+                stage_module(temp.path(), "x64");
+                let chosen = choose_variant(&MSVC_TABLE, detector(&host));
+                assert_eq!(chosen, "sandybridge");
+                let (variant, _) =
+                    select_module_dir(temp.path(), &MSVC_TABLE, chosen, detector(&host)).unwrap();
+                assert_eq!(variant, "x64");
+            }
+
+            fn stage_gpu_module(exe_dir: &Path) {
+                let file = gpu_module_file(exe_dir);
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(file, b"").unwrap();
+            }
+
+            #[test]
+            fn gpu_dir_is_scanned_only_when_built_and_staged() {
+                let temp = tempfile::tempdir().unwrap();
+                assert_eq!(
+                    plan_gpu_dir(temp.path(), false, false),
+                    Err(GpuDir::NotBuilt)
+                );
+                assert_eq!(plan_gpu_dir(temp.path(), true, false), Err(GpuDir::Absent));
+                // An empty gpu/vulkan/ directory does not count either.
+                std::fs::create_dir_all(temp.path().join("gpu").join("vulkan")).unwrap();
+                assert_eq!(plan_gpu_dir(temp.path(), true, false), Err(GpuDir::Absent));
+                stage_gpu_module(temp.path());
+                assert_eq!(
+                    plan_gpu_dir(temp.path(), true, false),
+                    Ok(temp.path().join("gpu").join("vulkan"))
+                );
+                assert_eq!(plan_gpu_dir(temp.path(), true, true), Err(GpuDir::Skipped));
+                assert_eq!(
+                    plan_gpu_dir(temp.path(), false, false),
+                    Err(GpuDir::NotBuilt)
+                );
+            }
+
+            #[test]
+            fn backend_mask_is_cpu_or_cpu_plus_vulkan_never_other() {
+                assert_eq!(backend_mask(false), BackendMask::CPU);
+                assert_eq!(backend_mask(true), BackendMask::CPU | BackendMask::VULKAN);
+                for scan in [false, true] {
+                    assert!(!backend_mask(scan).contains(BackendMask::OTHER));
+                    assert_ne!(backend_mask(scan), BackendMask::ALL);
                 }
             }
         }
