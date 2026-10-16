@@ -3,7 +3,7 @@ title: Windows: a child spawned during a hard kill must not pin the caller's pip
 state: Done
 ticket: —
 branch: fix-windows-spawn-race
-mr: —
+mr: PR #115
 start: 2026-10-16
 end: 2026-10-16
 ---
