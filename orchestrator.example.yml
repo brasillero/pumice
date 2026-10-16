@@ -29,7 +29,8 @@ modules:
     location: in_process
     config: ./relay.yml
 
-# Named flows; `pumice run <AUDIO> --flow <ID>` runs one of them. Nothing is
+# Named flows; `pumice run <AUDIO> --flow <ID>` runs one of them, and so
+# does a `pumice serve` dictation naming its id. Nothing is
 # enabled implicitly: a flow needs `enabled: true`, and `formatter` must be
 # written explicitly — an id or null (null adds no instructions; combine it
 # with `relay_route: passthrough` for a raw-only flow).
@@ -42,9 +43,12 @@ flows:
     formatter: builtin:clean
     relay_route: claude
     # Optional; the defaults are shown below. One overall clock from command
-    # start; a stage's deadline is the earlier of its own cap and the
+    # start (for `pumice serve`, from the request's arrival, upload
+    # included); a stage's deadline is the earlier of its own cap and the
     # remaining total (which never resets). The last 2500 ms of the total
-    # are always reserved for cleanup and output.
+    # are always reserved for cleanup and output. Under `pumice serve` the
+    # smallest enabled total also bounds every upload: at most
+    # min(15 s, total - 2500 ms).
     budgets_ms:
       total: 180000
       transcription: 120000

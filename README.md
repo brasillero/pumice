@@ -41,7 +41,7 @@ With the [transcription module](docs/transcription.md) installed next to `pumice
 ./target/release/pumice run meeting.wav --flow clean --json   # one JSON document: raw transcript and result apart
 ```
 
-See [`docs/orchestrator.md`](docs/orchestrator.md) and [`orchestrator.example.yml`](orchestrator.example.yml) for flows, budgets, the result schema and exit codes.
+See [`docs/orchestrator.md`](docs/orchestrator.md) and [`orchestrator.example.yml`](orchestrator.example.yml) for flows, budgets, the result schema and exit codes. `pumice serve` keeps the transcription model loaded and takes the same flows over HTTP (`POST /pumice/v1/dictations`); every HTTP API Pumice serves is summarized in [`docs/api.md`](docs/api.md).
 
 In Handy: **Settings → Advanced → Experimental Features → Post Processing**, set the provider to **Custom**, base URL `http://127.0.0.1:7567/v1`, API key empty, model `claude`, `codex`, `kimi` or `kiro`. Choose `passthrough` to return the original transcript exactly, including whitespace and line breaks, without calling an AI. With Handy, only the text inside its `<transcript>` envelope is returned; its formatting prompt is omitted. Choose `inspect` to echo the full JSON request body that Pumice received, including Handy's attached prompt and every message and option; the result is pasted as JSON, which is useful for diagnostics, and it never calls an AI. See [`relay.example.yml`](relay.example.yml) for every configuration setting. On WSL, use `127.0.0.1`, not `localhost` (see [`docs/research/S0.5-wsl-localhost.md`](docs/research/S0.5-wsl-localhost.md)).
 
@@ -51,6 +51,7 @@ In Handy: **Settings → Advanced → Experimental Features → Post Processing*
 - Transcription module guide: [`docs/transcription.md`](docs/transcription.md)
 - Formatter module guide: [`docs/formatter.md`](docs/formatter.md)
 - Orchestrator guide (`pumice run`, `pumice serve`): [`docs/orchestrator.md`](docs/orchestrator.md)
+- HTTP APIs (relay, transcription, `pumice serve`): [`docs/api.md`](docs/api.md)
 - Plans, decisions and open work: [`.task-decisions/`](.task-decisions/README.md)
 - Rules for contributors and AI agents: [`AGENTS.md`](AGENTS.md)
 
