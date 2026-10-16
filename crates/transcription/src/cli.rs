@@ -1,7 +1,8 @@
 use crate::catalog;
+use crate::compute::{BackendMode, Compute};
 use crate::config::{self, Config, ConfigSource, LoadedConfig};
 use crate::download::{self, DownloadSpec, Downloader, FetchResult};
-use crate::engine::{CancelToken, Engine};
+use crate::engine::{CancelToken, Engine, EngineRequest};
 use crate::managed::{self, Lifecycle, StopReason};
 use crate::models_dir;
 use crate::service::{
@@ -18,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -47,11 +49,9 @@ pub enum Command {
         #[command(subcommand)]
         command: ModelsCommand,
     },
-    /// Temporary diagnostic (P14.1, removed by P14.2's backend reporting):
-    /// initialize the compute backends without a model and print what
-    /// registered as a JSON envelope.
-    #[command(hide = true)]
-    DebugBackends,
+    /// Show the compute backends this build ships and what registers in a
+    /// backend mode, without loading a model.
+    Backends(BackendsArgs),
 }
 
 #[derive(ClapArgs, Debug)]
@@ -78,6 +78,23 @@ pub struct FileArgs {
     #[arg(long, value_name = "N")]
     threads: Option<usize>,
 
+    /// Compute backend. Overrides `backend` in the configuration file
+    /// (default: cpu).
+    #[arg(long, value_name = "MODE")]
+    backend: Option<BackendMode>,
+
+    /// Output a JSON envelope instead of plain text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(ClapArgs, Debug)]
+pub struct BackendsArgs {
+    /// Backend mode to register for. Overrides `backend` in the
+    /// configuration file (default: cpu).
+    #[arg(long, value_name = "MODE")]
+    backend: Option<BackendMode>,
+
     /// Output a JSON envelope instead of plain text.
     #[arg(long)]
     json: bool,
@@ -99,6 +116,11 @@ pub struct ServeArgs {
     /// Port to listen on. Overrides `server.port` in the configuration file.
     #[arg(long, value_name = "PORT")]
     port: Option<u16>,
+
+    /// Compute backend. Overrides `backend` in the configuration file
+    /// (default: cpu).
+    #[arg(long, value_name = "MODE")]
+    backend: Option<BackendMode>,
 
     /// Run as a child owned by `pumice serve` (internal protocol): lifecycle
     /// JSON Lines on stdout, shutdown when stdin closes.
@@ -168,10 +190,10 @@ pub struct SuccessOutput {
     pub audio_seconds: f64,
     pub model_load_ms: u64,
     pub transcription_ms: u64,
-    /// Compute backend in use, e.g. `CPU [haswell]`; only present in builds
-    /// that can know it.
+    /// The loaded model's compute snapshot; present whenever the engine
+    /// reports one (every native engine build).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub backend: Option<String>,
+    pub compute: Option<Compute>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -239,7 +261,7 @@ enum CommandOutput {
     ModelsCatalog(Vec<CatalogListEntry>),
     Download(DownloadOutput),
     Verify(VerifyOutput),
-    DebugBackends(serde_json::Value),
+    Backends(serde_json::Value),
     None,
 }
 
@@ -252,8 +274,8 @@ impl From<SuccessOutput> for serde_json::Value {
             "model_load_ms": out.model_load_ms,
             "transcription_ms": out.transcription_ms,
         });
-        if let Some(backend) = out.backend {
-            result["backend"] = serde_json::Value::String(backend);
+        if let Some(compute) = out.compute {
+            result["compute"] = compute.to_value();
         }
         result
     }
@@ -264,16 +286,16 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let make_engine = |path: &Path, threads: i32| -> Result<Box<dyn Engine>, Error> {
+    let make_engine = |request: EngineRequest<'_>| -> Result<Box<dyn Engine>, Error> {
         #[cfg(feature = "engine")]
         {
             Ok(Box::new(crate::engine::cpp::TranscribeCppEngine::new(
-                path, threads,
+                request,
             )?))
         }
         #[cfg(not(feature = "engine"))]
         {
-            let _ = (path, threads);
+            let _ = request;
             Err(Error::engine_not_available())
         }
     };
@@ -286,7 +308,7 @@ pub fn run_with_engine_factory<I, T, F>(args: I, make_engine: F) -> ExitCode
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
-    F: FnOnce(&Path, i32) -> Result<Box<dyn Engine>, Error>,
+    F: FnOnce(EngineRequest<'_>) -> Result<Box<dyn Engine>, Error>,
 {
     let raw: Vec<OsString> = args.into_iter().map(Into::into).collect();
     let wants_json = raw.iter().any(|a| a.as_encoded_bytes() == b"--json");
@@ -372,21 +394,13 @@ where
                 ExitCode::from(1)
             }
         },
-        Ok(CommandOutput::DebugBackends(report)) => {
-            let envelope = Envelope {
-                schema_version: 1,
-                ok: true,
-                result: Some(report),
-                error: None,
-            };
-            match writeln!(stdout, "{}", serde_json::to_string(&envelope).unwrap()) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(_) => {
-                    let _ = stderr.write_all(b"failed to write output\n");
-                    ExitCode::from(1)
-                }
+        Ok(CommandOutput::Backends(report)) => match print_backends(&report, json, &mut stdout) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => {
+                let _ = stderr.write_all(b"failed to write output\n");
+                ExitCode::from(1)
             }
-        }
+        },
         Ok(CommandOutput::None) => ExitCode::SUCCESS,
         Err(e) => match print_error(&e, json, &mut stdout, &mut stderr) {
             Ok(()) => exit_code(&e),
@@ -444,7 +458,7 @@ where
     let loaded = load_config(&args)?;
     match args.command {
         Command::File(file_args) => {
-            run_file(file_args, &loaded.config, args.config.as_deref(), |_, _| {
+            run_file(file_args, &loaded.config, args.config.as_deref(), |_| {
                 Ok(engine)
             })
         }
@@ -456,7 +470,7 @@ where
 
 fn run_command<F>(args: Args, make_engine: F) -> Result<CommandOutput, Error>
 where
-    F: FnOnce(&Path, i32) -> Result<Box<dyn Engine>, Error>,
+    F: FnOnce(EngineRequest<'_>) -> Result<Box<dyn Engine>, Error>,
 {
     let loaded = load_config(&args)?;
     let config_arg = args.config.as_deref();
@@ -466,26 +480,60 @@ where
             Ok(CommandOutput::Transcription(output))
         }
         Command::Serve(serve_args) => {
-            run_serve(serve_args, &loaded.config, config_arg, make_engine, None)?;
-            Ok(CommandOutput::None)
+            match run_serve(serve_args, &loaded.config, config_arg, make_engine, None)? {
+                Served::Stopped => Ok(CommandOutput::None),
+                Served::Retired => Err(Error::new(ErrorCode::EngineFailed, RETIRED)),
+            }
         }
         Command::CheckConfig(_) => Ok(CommandOutput::CheckConfig(match loaded.source {
             ConfigSource::File(path) => Some(path),
             ConfigSource::NoFile => None,
         })),
         Command::Models { command } => run_models_command(command, &loaded.config),
-        Command::DebugBackends => debug_backends().map(CommandOutput::DebugBackends),
+        Command::Backends(backends_args) => {
+            let mode = backends_args.backend.unwrap_or(loaded.config.backend);
+            backends(mode).map(CommandOutput::Backends)
+        }
     }
 }
 
-fn debug_backends() -> Result<serde_json::Value, Error> {
+fn backends(mode: BackendMode) -> Result<serde_json::Value, Error> {
     #[cfg(feature = "engine")]
     {
-        crate::engine::cpp::backend_report().map_err(crate::EngineError::to_error)
+        crate::engine::cpp::backends_report(mode)
     }
     #[cfg(not(feature = "engine"))]
     {
+        let _ = mode;
         Err(Error::engine_not_available())
+    }
+}
+
+/// How a `serve` run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Served {
+    /// Stopped on request (signal, or the managed lifeline).
+    Stopped,
+    /// Retired itself after a native engine failure on a GPU.
+    Retired,
+}
+
+/// Why a standalone `serve` on a GPU exited after an engine failure.
+const RETIRED: &str = "the GPU engine failed during a transcription; the server stopped so it \
+     can be restarted. Use backend: cpu (or --backend cpu) if this repeats.";
+
+/// The retirement token for an engine on a GPU: a native failure there
+/// retires the process instead of trusting the device again.
+fn retire_token(compute: Option<&Compute>) -> Option<CancellationToken> {
+    compute
+        .is_some_and(|compute| compute.backend.is_gpu())
+        .then(CancellationToken::new)
+}
+
+async fn retired(retire: Option<CancellationToken>) {
+    match retire {
+        Some(retire) => retire.cancelled().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -635,7 +683,7 @@ fn catalog_of<'a>(config: &'a Config, model_id: &str) -> Option<&'a str> {
 /// stdout (see [`crate::managed`]); human messages go to stderr.
 fn run_managed<F>(args: Args, make_engine: F) -> ExitCode
 where
-    F: FnOnce(&Path, i32) -> Result<Box<dyn Engine>, Error>,
+    F: FnOnce(EngineRequest<'_>) -> Result<Box<dyn Engine>, Error>,
 {
     let Command::Serve(serve_args) = &args.command else {
         unreachable!("only serve has a managed mode");
@@ -670,9 +718,14 @@ where
         )
     });
     match result {
-        Ok(()) => {
+        Ok(Served::Stopped) => {
             lifecycle.announce_stopped();
             ExitCode::SUCCESS
+        }
+        Ok(Served::Retired) => {
+            eprintln!("{RETIRED}");
+            lifecycle.announce_stopped();
+            ExitCode::from(1)
         }
         Err(error) => {
             eprintln!("{error}");
@@ -688,11 +741,12 @@ fn run_serve<F>(
     config_arg: Option<&Path>,
     make_engine: F,
     lifecycle: Option<&Arc<Lifecycle>>,
-) -> Result<(), Error>
+) -> Result<Served, Error>
 where
-    F: FnOnce(&Path, i32) -> Result<Box<dyn Engine>, Error>,
+    F: FnOnce(EngineRequest<'_>) -> Result<Box<dyn Engine>, Error>,
 {
     let threads = normalize_threads(config.threads)?;
+    let backend = serve_args.backend.unwrap_or(config.backend);
     let (served_model_id, model_path) =
         resolve_model_id(config, serve_args.model.as_deref(), None)?;
     if lifecycle.is_some() {
@@ -714,17 +768,30 @@ where
     })?;
 
     let start = Instant::now();
-    let engine = make_engine(&model_path, threads)?;
+    let engine = make_engine(EngineRequest {
+        model_path: &model_path,
+        threads,
+        backend,
+    })?;
     let load_ms = start.elapsed().as_millis();
-    match engine.backend_label() {
-        Some(label) => {
-            eprintln!("loaded model `{served_model_id}` in {load_ms} ms (backend: {label})")
-        }
+    let compute = engine.compute();
+    match &compute {
+        // The snapshot as JSON: exactly what `file --json` and managed
+        // `ready` report.
+        Some(compute) => eprintln!(
+            "loaded model `{served_model_id}` in {load_ms} ms; compute: {}",
+            compute.to_value()
+        ),
         None => eprintln!("loaded model `{served_model_id}` in {load_ms} ms"),
     }
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| Error::internal(format!("{e}")))?;
     if let Some(lifecycle) = lifecycle {
+        // Every managed `ready` carries a snapshot; a native engine always
+        // has one.
+        let compute = compute.ok_or_else(|| {
+            Error::internal("the engine reported no compute device; managed mode needs one")
+        })?;
         let model_load_ms = u64::try_from(load_ms).unwrap_or(u64::MAX);
         return rt.block_on(serve_managed(
             port,
@@ -732,37 +799,60 @@ where
             served_model_id,
             config.language.clone(),
             model_load_ms,
+            compute,
             lifecycle,
         ));
     }
+    let retire = retire_token(compute.as_ref());
     rt.block_on(async {
-        let handle = crate::server::serve(
-            port,
+        let bind_error = |e: io::Error| Error::internal(format!("failed to bind: {e}"));
+        let listener = crate::server::bind(port).await.map_err(bind_error)?;
+        let shutdown = {
+            let retire = retire.clone();
+            async move {
+                tokio::select! {
+                    () = crate::server::shutdown_signal() => {}
+                    () = retired(retire) => {}
+                }
+            }
+        };
+        let handle = crate::server::serve_on(
+            listener,
             Arc::from(engine),
             served_model_id,
             config.language.clone(),
-            crate::server::shutdown_signal(),
+            None,
+            retire.clone(),
+            shutdown,
         )
-        .await
-        .map_err(|e| Error::internal(format!("failed to bind: {e}")))?;
+        .map_err(bind_error)?;
         let _ = handle.await;
-        Ok(())
+        Ok(served(retire.as_ref()))
     })
 }
 
-/// Serve in managed mode until the lifeline or a signal stops it. `ready` is
-/// announced only after the model is loaded and the listener is bound, and
-/// never once a stop was requested.
+fn served(retire: Option<&CancellationToken>) -> Served {
+    if retire.is_some_and(CancellationToken::is_cancelled) {
+        Served::Retired
+    } else {
+        Served::Stopped
+    }
+}
+
+/// Serve in managed mode until the lifeline, a signal or a retirement stops
+/// it. `ready` is announced only after the model is loaded and the listener
+/// is bound, and never once a stop was requested.
 async fn serve_managed(
     port: u16,
     engine: Arc<dyn Engine>,
     served_model_id: String,
     default_language: Option<String>,
     model_load_ms: u64,
+    compute: Compute,
     lifecycle: &Arc<Lifecycle>,
-) -> Result<(), Error> {
+) -> Result<Served, Error> {
     if lifecycle.is_stopping() {
-        return Ok(());
+        return Ok(Served::Stopped);
     }
     // Installed before `ready`, so an owner's signal is never missed.
     let signal = crate::server::registered_shutdown_signal()
@@ -771,11 +861,14 @@ async fn serve_managed(
     let listener = crate::server::bind(port).await.map_err(bind_error)?;
     let bound_port = listener.local_addr().map_err(bind_error)?.port();
 
+    let retire = retire_token(Some(&compute));
     let lifeline = Arc::clone(lifecycle);
+    let retirement = retire.clone();
     let shutdown = async move {
         tokio::select! {
             () = lifeline.cancelled() => {}
             () = signal => lifeline.request_stop(StopReason::Signal),
+            () = retired(retirement) => lifeline.request_stop(StopReason::EngineFailed),
         }
     };
     let handle = crate::server::serve_on(
@@ -785,13 +878,15 @@ async fn serve_managed(
         default_language,
         Some(crate::server::Managed {
             instance_id: lifecycle.instance_id().to_string(),
+            compute: compute.clone(),
         }),
+        retire.clone(),
         shutdown,
     )
     .map_err(bind_error)?;
-    lifecycle.announce_ready(bound_port, &served_model_id, model_load_ms);
+    lifecycle.announce_ready(bound_port, &served_model_id, model_load_ms, &compute);
     let _ = handle.await;
-    Ok(())
+    Ok(served(retire.as_ref()))
 }
 
 fn load_config(args: &Args) -> Result<LoadedConfig, Error> {
@@ -805,10 +900,11 @@ fn run_file<F>(
     make_engine: F,
 ) -> Result<SuccessOutput, Error>
 where
-    F: FnOnce(&Path, i32) -> Result<Box<dyn Engine>, Error>,
+    F: FnOnce(EngineRequest<'_>) -> Result<Box<dyn Engine>, Error>,
 {
     let language = normalize_language(file_args.language.or_else(|| config.language.clone()))?;
     let threads = normalize_threads(file_args.threads.or(config.threads))?;
+    let backend = file_args.backend.unwrap_or(config.backend);
 
     let (model_id, model_path) = resolve_model_id(
         config,
@@ -833,7 +929,11 @@ where
     }
 
     let start = Instant::now();
-    let engine = make_engine(&model_path, threads)?;
+    let engine = make_engine(EngineRequest {
+        model_path: &model_path,
+        threads,
+        backend,
+    })?;
     let model_load_ms = start.elapsed().as_millis() as u64;
 
     let start = Instant::now();
@@ -855,7 +955,7 @@ where
         audio_seconds,
         model_load_ms,
         transcription_ms,
-        backend: engine.backend_label(),
+        compute: engine.compute(),
     })
 }
 
@@ -1055,6 +1155,55 @@ pub fn print_error(
     }
 }
 
+fn print_backends(
+    report: &serde_json::Value,
+    json: bool,
+    stdout: &mut dyn Write,
+) -> io::Result<()> {
+    if json {
+        let envelope = Envelope {
+            schema_version: 1,
+            ok: true,
+            result: Some(report.clone()),
+            error: None,
+        };
+        return writeln!(stdout, "{}", serde_json::to_string(&envelope).unwrap());
+    }
+    let text = |key: &str| match &report[key] {
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Null => "-".to_string(),
+        other => other.to_string(),
+    };
+    for key in [
+        "requested",
+        "gpu_build",
+        "bundle",
+        "cpu_variant",
+        "gpu_module",
+        "gpu_devices",
+        "fallback_reason",
+    ] {
+        writeln!(stdout, "{key}: {}", text(key))?;
+    }
+    let allowed: Vec<&str> = report["allowed_backends"]
+        .as_array()
+        .map(|list| list.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    writeln!(stdout, "allowed_backends: {}", allowed.join(", "))?;
+    writeln!(stdout, "devices:")?;
+    for device in report["devices"].as_array().into_iter().flatten() {
+        writeln!(
+            stdout,
+            "  {} ({}, {}): {}",
+            device["name"].as_str().unwrap_or_default(),
+            device["kind"].as_str().unwrap_or_default(),
+            device["type"].as_str().unwrap_or_default(),
+            device["description"].as_str().unwrap_or_default(),
+        )?;
+    }
+    Ok(())
+}
+
 fn print_check_config(file: Option<&Path>, json: bool, stdout: &mut dyn Write) -> io::Result<()> {
     if json {
         let envelope = Envelope {
@@ -1222,6 +1371,7 @@ pub fn exit_code(error: &Error) -> ExitCode {
         ErrorCode::EngineNotAvailable
         | ErrorCode::EngineFailed
         | ErrorCode::ModelLoadFailed
+        | ErrorCode::GpuUnavailable
         | ErrorCode::ChecksumMismatch
         | ErrorCode::DownloadFailed
         | ErrorCode::Cancelled
@@ -1241,7 +1391,7 @@ fn json_flag(args: &Args) -> bool {
             ModelsCommand::Download(args) => args.json,
             ModelsCommand::Verify(args) => args.json,
         },
-        Command::DebugBackends => true,
+        Command::Backends(args) => args.json,
     }
 }
 
@@ -1268,7 +1418,7 @@ mod tests {
             audio_seconds: 1.0,
             model_load_ms: 0,
             transcription_ms: 0,
-            backend: None,
+            compute: None,
         }
     }
 
@@ -1313,6 +1463,124 @@ mod tests {
             shell_quote(r"C:\Users\my name\transcribe.yml"),
             r#""C:\Users\my name\transcribe.yml""#
         );
+    }
+
+    /// Runs `args` through the real command dispatch with a fake engine
+    /// that records the backend it was asked for.
+    fn requested_backend(config: &str, args: &[&str]) -> (Result<(), Error>, Option<BackendMode>) {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("transcribe.yml");
+        std::fs::write(
+            &config_path,
+            format!("schema_version: 1\n{config}models:\n  - id: tiny\n    path: model.gguf\n"),
+        )
+        .unwrap();
+        std::fs::write(temp.path().join("model.gguf"), b"not a model").unwrap();
+        let audio = temp.path().join("audio.wav");
+        std::fs::write(&audio, wav_bytes()).unwrap();
+        let mut argv: Vec<OsString> = vec![
+            "pumice-transcribe".into(),
+            "--config".into(),
+            config_path.into(),
+        ];
+        for arg in args {
+            argv.push(if *arg == "AUDIO" {
+                audio.clone().into_os_string()
+            } else {
+                (*arg).into()
+            });
+        }
+        let parsed = Args::try_parse_from(&argv).unwrap();
+        let seen = std::cell::Cell::new(None);
+        let result = run_command(parsed, |request: EngineRequest<'_>| {
+            seen.set(Some(request.backend));
+            // Stop before serving: only the request matters here.
+            Err(Error::model_load_failed())
+        });
+        (result.map(|_| ()), seen.get())
+    }
+
+    fn wav_bytes() -> Vec<u8> {
+        let mut buf = io::Cursor::new(Vec::new());
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::new(&mut buf, spec).unwrap();
+        for _ in 0..1600 {
+            writer.write_sample(0i16).unwrap();
+        }
+        writer.finalize().unwrap();
+        buf.into_inner()
+    }
+
+    #[test]
+    fn the_backend_flag_overrides_the_config_which_overrides_cpu() {
+        let file = ["file", "AUDIO", "--model", "tiny"];
+        let serve = ["serve", "--model", "tiny", "--port", "0"];
+        for command in [&file[..], &serve[..]] {
+            let with = |flag: Option<&'static str>| -> Vec<&'static str> {
+                let mut args = command.to_vec();
+                if let Some(flag) = flag {
+                    args.extend(["--backend", flag]);
+                }
+                args
+            };
+            assert_eq!(requested_backend("", &with(None)).1, Some(BackendMode::Cpu));
+            assert_eq!(
+                requested_backend("backend: auto\n", &with(None)).1,
+                Some(BackendMode::Auto)
+            );
+            assert_eq!(
+                requested_backend("backend: auto\n", &with(Some("gpu"))).1,
+                Some(BackendMode::Gpu)
+            );
+            assert_eq!(
+                requested_backend("backend: gpu\n", &with(Some("cpu"))).1,
+                Some(BackendMode::Cpu)
+            );
+            let (result, _) = requested_backend("", &with(Some("auto")));
+            assert_eq!(result.unwrap_err().code, ErrorCode::ModelLoadFailed);
+        }
+    }
+
+    #[test]
+    fn backend_flags_accept_only_the_three_modes() {
+        for command in [
+            &["file", "a.wav", "--backend"][..],
+            &["serve", "--backend"],
+            &["backends", "--backend"],
+        ] {
+            for good in ["cpu", "auto", "gpu"] {
+                let mut argv = vec!["pumice-transcribe"];
+                argv.extend(command);
+                argv.push(good);
+                assert!(Args::try_parse_from(&argv).is_ok(), "{argv:?}");
+            }
+            for bad in ["vulkan", "GPU", ""] {
+                let mut argv = vec!["pumice-transcribe"];
+                argv.extend(command);
+                argv.push(bad);
+                assert!(Args::try_parse_from(&argv).is_err(), "{argv:?}");
+            }
+        }
+        // The P14.1 diagnostic is gone.
+        assert!(Args::try_parse_from(["pumice-transcribe", "debug-backends"]).is_err());
+    }
+
+    #[test]
+    fn retirement_needs_a_gpu_snapshot() {
+        use crate::compute::ComputeBackend;
+        let snapshot = |backend| Compute::new(BackendMode::Auto, backend, "D", "", None, None);
+        assert!(retire_token(None).is_none());
+        assert!(retire_token(Some(&snapshot(ComputeBackend::Cpu))).is_none());
+        let token = retire_token(Some(&snapshot(ComputeBackend::Vulkan))).unwrap();
+        assert_eq!(served(Some(&token)), Served::Stopped);
+        token.cancel();
+        assert_eq!(served(Some(&token)), Served::Retired);
+        assert_eq!(served(None), Served::Stopped);
     }
 
     #[test]

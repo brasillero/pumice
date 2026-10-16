@@ -1,4 +1,6 @@
+use crate::compute::{BackendMode, Compute};
 use crate::{EngineError, Transcript, TranscriptionOptions};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -22,6 +24,15 @@ impl CancelToken {
     }
 }
 
+/// What the CLI asks an engine loader for.
+#[derive(Debug, Clone, Copy)]
+pub struct EngineRequest<'a> {
+    pub model_path: &'a Path,
+    pub threads: i32,
+    /// From `--backend`, else `backend:` in transcribe.yml, else `cpu`.
+    pub backend: BackendMode,
+}
+
 pub trait Engine: Send + Sync {
     fn transcribe(
         &self,
@@ -30,10 +41,10 @@ pub trait Engine: Send + Sync {
         cancel: &CancelToken,
     ) -> Result<Transcript, EngineError>;
 
-    /// Short label for the compute backend in use, e.g. `CPU [haswell]`, when
-    /// the engine can know it. Used for status output only; never contains
-    /// dictated text.
-    fn backend_label(&self) -> Option<String> {
+    /// The compute snapshot taken when the model loaded (see
+    /// [`crate::compute`]), when the engine can know it. Fixed text plus
+    /// bounded hardware names only; never dictated text.
+    fn compute(&self) -> Option<Compute> {
         None
     }
 }
@@ -42,6 +53,7 @@ pub trait Engine: Send + Sync {
 pub struct FakeEngine {
     text: String,
     language: Option<String>,
+    compute: Option<Compute>,
 }
 
 impl FakeEngine {
@@ -49,7 +61,14 @@ impl FakeEngine {
         Self {
             text: text.into(),
             language: language.map(Into::into),
+            compute: None,
         }
+    }
+
+    /// Reports `compute` as its snapshot.
+    pub fn with_compute(mut self, compute: Compute) -> Self {
+        self.compute = Some(compute);
+        self
     }
 }
 
@@ -65,52 +84,106 @@ impl Engine for FakeEngine {
             language: self.language.clone(),
         })
     }
+
+    fn compute(&self) -> Option<Compute> {
+        self.compute.clone()
+    }
 }
 
 #[cfg(feature = "engine")]
 pub mod cpp {
     use super::*;
+    use crate::Error;
+    use crate::compute::{self, GpuAvailability, LoadRequest};
     use ::transcribe_cpp::{
         Backend, CancelToken as CppCancelToken, Model, ModelOptions, RunExtension, RunOptions,
         SessionOptions, WhisperRunOptions,
     };
-    use std::path::Path;
+
+    /// The backend a `gpu` request loads with: the bundle's GPU module.
+    const GPU_BACKEND: Backend = Backend::Vulkan;
 
     pub struct TranscribeCppEngine {
         model: Model,
         threads: i32,
-        backend_label: Option<String>,
+        compute: Compute,
     }
 
     impl TranscribeCppEngine {
-        pub fn new(model_path: &Path, threads: i32) -> Result<Self, EngineError> {
+        /// Registers the backends `request.backend` allows, loads the model
+        /// as the policy in [`crate::compute`] says and takes the compute
+        /// snapshot from the device the model actually loaded on. A failed
+        /// load is never retried on another backend (p14.1-windows-vulkan/D4).
+        pub fn new(request: EngineRequest<'_>) -> Result<Self, Error> {
+            let mode = request.backend;
             // Native logs can contain dictated text; disable them before loading.
             transcribe_cpp::disable_logging();
-            #[cfg(pumice_dynamic_backends)]
-            dynamic_backends::init_from_exe_dir().map_err(|error| {
-                eprintln!("cpu-variants: {error}");
-                EngineError::Failed
-            })?;
+            let gpu = init_backends(mode)?;
+            let load = compute::load_request(mode, gpu)?;
+            let backend = match load {
+                LoadRequest::Cpu => Backend::Cpu,
+                LoadRequest::Auto => Backend::Auto,
+                LoadRequest::Gpu => GPU_BACKEND,
+            };
             let model = Model::load_with(
-                model_path,
+                request.model_path,
                 &ModelOptions {
-                    backend: Backend::Cpu,
+                    backend,
                     ..Default::default()
                 },
             )
-            .map_err(|_| EngineError::ModelLoadFailed)?;
-            let backend_label = backend_label(&model);
+            .map_err(|error| {
+                compute::load_failed(
+                    mode,
+                    load,
+                    matches!(error, transcribe_cpp::Error::Backend(_)),
+                )
+            })?;
+            let device = model.device().map_err(|_| {
+                Error::new(
+                    crate::ErrorCode::ModelLoadFailed,
+                    "the engine did not report the device the model loaded on",
+                )
+            })?;
+            let compute = Compute::from_loaded(
+                mode,
+                gpu,
+                &device.kind,
+                &device.name,
+                &device.description,
+                loaded_cpu_variant().as_deref(),
+            )?;
             Ok(Self {
                 model,
-                threads,
-                backend_label,
+                threads: request.threads,
+                compute,
             })
         }
     }
 
+    /// Registers the compute backends `mode` allows and reports what the GPU
+    /// side found. Builds without runtime modules have the CPU compiled in
+    /// and no GPU.
+    fn init_backends(mode: BackendMode) -> Result<GpuAvailability, Error> {
+        #[cfg(pumice_dynamic_backends)]
+        {
+            dynamic_backends::init_from_exe_dir(mode.wants_gpu())
+                .map(|selection| selection.gpu_availability())
+                .map_err(|error| {
+                    eprintln!("cpu-variants: {error}");
+                    Error::engine_failed()
+                })
+        }
+        #[cfg(not(pumice_dynamic_backends))]
+        {
+            let _ = mode;
+            Ok(GpuAvailability::NotBuilt)
+        }
+    }
+
     impl Engine for TranscribeCppEngine {
-        fn backend_label(&self) -> Option<String> {
-            self.backend_label.clone()
+        fn compute(&self) -> Option<Compute> {
+            Some(self.compute.clone())
         }
 
         fn transcribe(
@@ -185,59 +258,34 @@ pub mod cpp {
         }
     }
 
-    /// Human-readable backend/device label for status output, e.g.
-    /// `CPU (Intel ...) [haswell]`. Fixed text plus hardware names only.
-    fn backend_label(model: &Model) -> Option<String> {
-        let label = match model.device() {
-            Ok(device) => {
-                if device.description.is_empty() {
-                    device.name
-                } else {
-                    format!("{} ({})", device.name, device.description)
-                }
-            }
-            Err(_) => model.backend(),
-        };
+    /// The loaded ggml CPU module's variant name, e.g. `haswell`; `None` in
+    /// builds without runtime CPU modules.
+    fn loaded_cpu_variant() -> Option<String> {
         #[cfg(target_os = "linux")]
         if let Some(variant) = selected_cpu_variant() {
-            return Some(format!("{label} [{variant}]"));
+            return Some(variant);
         }
         // No /proc/self/maps here: report the module startup initialized
         // from. Its directory holds that one CPU module only, and
         // initialization fails unless it registered.
         #[cfg(all(pumice_dynamic_backends, windows))]
         if let Some(selection) = dynamic_backends::selection() {
-            return Some(format!("{label} [{}]", selection.variant));
+            return Some(selection.variant.to_string());
         }
-        Some(label)
+        None
     }
 
-    /// Temporary diagnostic behind the hidden `debug-backends` command
-    /// (P14.1): initializes the compute backends exactly as a model load
-    /// does, without a model, and lists what registered. The `compute`
-    /// report planned for P14.2 replaces it. Fixed field names plus
+    /// `pumice-transcribe backends`: registers the compute backends exactly
+    /// as a model load in `mode` does, without a model, and lists what the
+    /// bundle ships and what registered. Fixed field names plus bounded
     /// hardware names only.
-    pub fn backend_report() -> Result<serde_json::Value, EngineError> {
+    pub fn backends_report(mode: BackendMode) -> Result<serde_json::Value, Error> {
         transcribe_cpp::disable_logging();
+        let gpu = init_backends(mode)?;
         #[cfg(pumice_dynamic_backends)]
-        let selection = dynamic_backends::init_from_exe_dir().map_err(|error| {
-            eprintln!("cpu-variants: {error}");
-            EngineError::Failed
-        })?;
-        #[cfg(pumice_dynamic_backends)]
-        let (cpu_variant, bundle, gpu_dir, vulkan_devices) = (
-            Some(selection.variant),
-            Some(selection.bundle.as_str()),
-            Some(selection.gpu.as_str()),
-            selection.vulkan_devices,
-        );
+        let bundle = dynamic_backends::selection().map(|selection| selection.bundle.as_str());
         #[cfg(not(pumice_dynamic_backends))]
-        let (cpu_variant, bundle, gpu_dir, vulkan_devices): (
-            Option<&str>,
-            Option<&str>,
-            Option<&str>,
-            Option<usize>,
-        ) = (None, None, None, None);
+        let bundle: Option<&str> = None;
 
         let allowed = transcribe_cpp::allowed_backends();
         let allowed_backends: Vec<&str> = [
@@ -256,20 +304,26 @@ pub mod cpp {
             .into_iter()
             .map(|device| {
                 serde_json::json!({
-                    "name": device.name,
-                    "description": device.description,
-                    "kind": device.kind,
+                    "name": compute::sanitize(&device.name, compute::MAX_LABEL_BYTES),
+                    "description": compute::sanitize(
+                        &device.description,
+                        compute::MAX_DESCRIPTION_BYTES,
+                    ),
+                    "kind": compute::sanitize(&device.kind, compute::MAX_LABEL_BYTES),
                     "type": format!("{:?}", device.device_type).to_lowercase(),
                 })
             })
             .collect();
         Ok(serde_json::json!({
-            "cpu_variant": cpu_variant,
+            "requested": mode,
+            "gpu_build": cfg!(pumice_vulkan).then_some("vulkan"),
             "bundle": bundle,
-            "gpu_dir": gpu_dir,
-            "vulkan_devices": vulkan_devices,
+            "cpu_variant": loaded_cpu_variant(),
+            "gpu_module": gpu.module_state(),
+            "gpu_devices": gpu.gpu_devices(),
             "allowed_backends": allowed_backends,
             "devices": devices,
+            "fallback_reason": compute::planned_fallback(mode, gpu),
         }))
     }
 
@@ -379,11 +433,12 @@ pub mod cpp {
     /// With the `vulkan` build (x86-64 Windows, experimental) the optional
     /// GPU module sits alone in `<exe dir>/gpu/vulkan/` and is scanned after
     /// the CPU module, with the same backend mask (D2 of
-    /// p14.1-windows-vulkan). The backend policy that decides when to scan it
-    /// comes in P14.2; until then it is scanned whenever it is staged.
+    /// p14.1-windows-vulkan). It is scanned only when the backend mode allows
+    /// a GPU (`auto`, `gpu`); in `cpu` mode it is neither checked nor loaded.
     #[cfg(pumice_dynamic_backends)]
     mod dynamic_backends {
         use crate::bundle::{BundleError, Expected, Manifest};
+        use crate::compute::GpuAvailability;
         use ::transcribe_cpp::BackendMask;
         use std::fmt;
         use std::path::{Path, PathBuf};
@@ -844,35 +899,18 @@ pub mod cpp {
                 .map(|(name, _)| (*name, exe_dir.join("cpu").join(name)))
         }
 
-        /// Temporary switch (P14.1 only, for CI): `1` keeps the staged GPU
-        /// module unscanned, so one bundle can be checked with and without
-        /// it. It can only narrow what loads. P14.2 replaces it with the
-        /// `backend: cpu|auto|gpu` setting.
-        const SKIP_GPU_ENV: &str = "PUMICE_TRANSCRIBE_SKIP_GPU_DIR";
-
         /// What startup did with the optional GPU module directory.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub enum GpuDir {
             /// This build has no GPU module (`cpu-variants` without
             /// `vulkan`, or a target without one).
             NotBuilt,
+            /// `cpu` mode: not looked at, not checked, not loaded.
+            NotRequested,
             /// No `gpu/vulkan/` module is staged next to the executable.
             Absent,
-            /// Staged, but kept out by the temporary skip switch.
-            Skipped,
             /// Scanned with the process's backend mask.
             Scanned,
-        }
-
-        impl GpuDir {
-            pub fn as_str(self) -> &'static str {
-                match self {
-                    GpuDir::NotBuilt => "not_built",
-                    GpuDir::Absent => "absent",
-                    GpuDir::Skipped => "skipped",
-                    GpuDir::Scanned => "scanned",
-                }
-            }
         }
 
         /// The staged Vulkan module: `<exe dir>/gpu/vulkan/ggml-vulkan.dll`
@@ -890,17 +928,18 @@ pub mod cpp {
         /// `bundle.json` and the status lines name it.
         const GPU_DIR: &str = "gpu/vulkan";
 
-        /// The GPU module directory to scan, or why none is scanned.
-        fn plan_gpu_dir(exe_dir: &Path, built: bool, skip: bool) -> Result<PathBuf, GpuDir> {
+        /// The GPU module directory to scan, or why none is scanned. In
+        /// `cpu` mode (`wanted` false) the directory is not even looked at.
+        fn plan_gpu_dir(exe_dir: &Path, built: bool, wanted: bool) -> Result<PathBuf, GpuDir> {
             if !built {
                 return Err(GpuDir::NotBuilt);
+            }
+            if !wanted {
+                return Err(GpuDir::NotRequested);
             }
             let module = gpu_module_file(exe_dir);
             if !module.is_file() {
                 return Err(GpuDir::Absent);
-            }
-            if skip {
-                return Err(GpuDir::Skipped);
             }
             Ok(exe_dir.join("gpu").join("vulkan"))
         }
@@ -948,24 +987,36 @@ pub mod cpp {
             pub bundle: BundleCheck,
             pub gpu: GpuDir,
             /// Vulkan devices registered after scanning the GPU module;
-            /// `None` when it was not scanned. `Some(0)` is the CPU
-            /// fallback: the module could not load (no Vulkan loader) or
-            /// found no usable device.
+            /// `None` when it was not scanned. `Some(0)`: the module could
+            /// not load (no Vulkan loader) or found no usable device.
             pub vulkan_devices: Option<usize>,
+        }
+
+        impl Selection {
+            /// What the backend policy needs to know about the GPU.
+            pub fn gpu_availability(&self) -> GpuAvailability {
+                match self.gpu {
+                    GpuDir::NotBuilt => GpuAvailability::NotBuilt,
+                    GpuDir::NotRequested => GpuAvailability::NotRequested,
+                    GpuDir::Absent => GpuAvailability::ModuleAbsent,
+                    GpuDir::Scanned => GpuAvailability::Devices(self.vulkan_devices.unwrap_or(0)),
+                }
+            }
         }
 
         static SELECTION: OnceLock<Selection> = OnceLock::new();
 
         /// The selection of the last successful initialization, if any.
-        #[cfg_attr(not(windows), allow(dead_code))]
         pub fn selection() -> Option<Selection> {
             SELECTION.get().copied()
         }
 
         /// Initialize backends, returning a fixed-text reason on failure.
-        /// Runs once per process: later calls return the first success
-        /// (ggml could not load anything new anyway, and the files are not
-        /// hashed twice).
+        /// `scan_gpu`: the backend mode allows a GPU, so the staged GPU
+        /// module (if any) is checked and scanned. Runs once per process:
+        /// later calls return the first success (ggml fixes the mask at the
+        /// first registration and could not load anything new anyway, and
+        /// the files are not hashed twice).
         ///
         /// With a `bundle.json`, everything is checked before the first
         /// registration: the core libraries, the selected CPU module's
@@ -973,7 +1024,7 @@ pub mod cpp {
         /// directory. A present module that does not match is an
         /// installation error, not a fallback; only an absent GPU module, or
         /// one that loads and finds no device, leaves the process on CPU.
-        pub fn init_from_exe_dir() -> Result<Selection, InitError> {
+        pub fn init_from_exe_dir(scan_gpu: bool) -> Result<Selection, InitError> {
             if let Some(selection) = SELECTION.get() {
                 return Ok(*selection);
             }
@@ -996,8 +1047,7 @@ pub mod cpp {
                     exe_dir: exe_dir.clone(),
                     variant: chosen,
                 })?;
-            let skip_gpu = std::env::var_os(SKIP_GPU_ENV).is_some_and(|value| value == "1");
-            let gpu_plan = plan_gpu_dir(&exe_dir, cfg!(pumice_vulkan), skip_gpu);
+            let gpu_plan = plan_gpu_dir(&exe_dir, cfg!(pumice_vulkan), scan_gpu);
             let bundle = match &manifest {
                 Some(manifest) => {
                     let started = Instant::now();
@@ -1067,9 +1117,9 @@ pub mod cpp {
                     }
                     (GpuDir::Scanned, Some(vulkan_devices))
                 }
-                Err(GpuDir::Skipped) => {
-                    eprintln!("cpu-variants: {GPU_DIR} not scanned ({SKIP_GPU_ENV}=1)");
-                    (GpuDir::Skipped, None)
+                Err(GpuDir::NotRequested) => {
+                    eprintln!("cpu-variants: {GPU_DIR} not scanned (backend cpu)");
+                    (GpuDir::NotRequested, None)
                 }
                 Err(GpuDir::Absent) => {
                     eprintln!("cpu-variants: no GPU module staged; CPU only");
@@ -1556,25 +1606,74 @@ pub mod cpp {
             }
 
             #[test]
-            fn gpu_dir_is_scanned_only_when_built_and_staged() {
+            fn gpu_dir_is_scanned_only_when_built_wanted_and_staged() {
                 let temp = tempfile::tempdir().unwrap();
                 assert_eq!(
-                    plan_gpu_dir(temp.path(), false, false),
+                    plan_gpu_dir(temp.path(), false, true),
                     Err(GpuDir::NotBuilt)
                 );
-                assert_eq!(plan_gpu_dir(temp.path(), true, false), Err(GpuDir::Absent));
+                assert_eq!(plan_gpu_dir(temp.path(), true, true), Err(GpuDir::Absent));
                 // An empty gpu/vulkan/ directory does not count either.
                 std::fs::create_dir_all(temp.path().join("gpu").join("vulkan")).unwrap();
-                assert_eq!(plan_gpu_dir(temp.path(), true, false), Err(GpuDir::Absent));
+                assert_eq!(plan_gpu_dir(temp.path(), true, true), Err(GpuDir::Absent));
                 stage_gpu_module(temp.path());
                 assert_eq!(
-                    plan_gpu_dir(temp.path(), true, false),
+                    plan_gpu_dir(temp.path(), true, true),
                     Ok(temp.path().join("gpu").join("vulkan"))
                 );
-                assert_eq!(plan_gpu_dir(temp.path(), true, true), Err(GpuDir::Skipped));
+                // backend cpu: a staged module is never planned for a scan.
                 assert_eq!(
-                    plan_gpu_dir(temp.path(), false, false),
+                    plan_gpu_dir(temp.path(), true, false),
+                    Err(GpuDir::NotRequested)
+                );
+                assert_eq!(
+                    plan_gpu_dir(temp.path(), false, true),
                     Err(GpuDir::NotBuilt)
+                );
+            }
+
+            #[cfg(unix)]
+            #[test]
+            fn cpu_mode_never_looks_at_the_gpu_dir() {
+                use std::os::unix::fs::PermissionsExt;
+                // An unreadable gpu/ directory: looking inside would fail,
+                // so a cpu-mode plan proves it never looks.
+                let temp = tempfile::tempdir().unwrap();
+                stage_gpu_module(temp.path());
+                let gpu = temp.path().join("gpu");
+                std::fs::set_permissions(&gpu, std::fs::Permissions::from_mode(0o000)).unwrap();
+                let planned = plan_gpu_dir(temp.path(), true, false);
+                std::fs::set_permissions(&gpu, std::fs::Permissions::from_mode(0o755)).unwrap();
+                assert_eq!(planned, Err(GpuDir::NotRequested));
+            }
+
+            #[test]
+            fn selections_map_to_the_policy_availability() {
+                let selection = |gpu, vulkan_devices| Selection {
+                    variant: "x64",
+                    bundle: BundleCheck::Absent,
+                    gpu,
+                    vulkan_devices,
+                };
+                assert_eq!(
+                    selection(GpuDir::NotBuilt, None).gpu_availability(),
+                    GpuAvailability::NotBuilt
+                );
+                assert_eq!(
+                    selection(GpuDir::NotRequested, None).gpu_availability(),
+                    GpuAvailability::NotRequested
+                );
+                assert_eq!(
+                    selection(GpuDir::Absent, None).gpu_availability(),
+                    GpuAvailability::ModuleAbsent
+                );
+                assert_eq!(
+                    selection(GpuDir::Scanned, Some(0)).gpu_availability(),
+                    GpuAvailability::Devices(0)
+                );
+                assert_eq!(
+                    selection(GpuDir::Scanned, Some(2)).gpu_availability(),
+                    GpuAvailability::Devices(2)
                 );
             }
 

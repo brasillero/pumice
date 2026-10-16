@@ -13,6 +13,7 @@ pub enum ErrorCode {
     EngineFailed,
     ModelLoadFailed,
     ModelNotFound,
+    GpuUnavailable,
     ChecksumMismatch,
     DownloadFailed,
     Cancelled,
@@ -32,6 +33,7 @@ impl ErrorCode {
             Self::EngineFailed => "engine_failed",
             Self::ModelLoadFailed => "model_load_failed",
             Self::ModelNotFound => "model_not_found",
+            Self::GpuUnavailable => "gpu_unavailable",
             Self::ChecksumMismatch => "checksum_mismatch",
             Self::DownloadFailed => "download_failed",
             Self::Cancelled => "cancelled",
@@ -153,6 +155,12 @@ impl Error {
             ErrorCode::ModelNotFound,
             format!("model file not found: {}", path.display()),
         )
+    }
+
+    /// `backend: gpu` cannot get a GPU (see [`crate::compute`]); `message`
+    /// is one of that module's fixed texts.
+    pub fn gpu_unavailable(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::GpuUnavailable, message)
     }
 
     pub fn checksum_mismatch(message: impl Into<String>) -> Self {

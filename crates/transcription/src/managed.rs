@@ -1,14 +1,19 @@
-//! Managed mode for `pumice-transcribe serve --managed` (internal protocol v1),
+//! Managed mode for `pumice-transcribe serve --managed` (internal protocol v2),
 //! used when `pumice serve` owns this process as a warm child.
 //!
 //! - stdout carries only the lifecycle records below, one JSON object per line
 //!   and at most [`MAX_RECORD_BYTES`] each: `ready` (or `error` if startup
 //!   fails), then `stopping` and `stopped`. Human logs stay on stderr.
+//! - `ready` carries the [`Compute`] snapshot of the loaded model (v2).
+//! - A native engine failure on a GPU retires the instance: `stopping` with
+//!   reason `engine_failed`, then `stopped`, and exit status 1, so its owner
+//!   restarts it (p14.1-windows-vulkan/D4).
 //! - stdin is the owner's lifeline: end of file (or a read error) requests a
 //!   graceful shutdown. Bytes sent on stdin are discarded.
 //! - Once a shutdown is requested, a watchdog ends the process after
 //!   [`SHUTDOWN_GRACE`] even if a native run ignores cancellation.
 
+use crate::compute::Compute;
 use crate::{Error, ErrorCode};
 use std::io::{self, Read, Write};
 use std::sync::{Arc, Mutex, Once};
@@ -16,7 +21,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tokio_util::sync::WaitForCancellationFuture;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const CAPABILITIES: [&str; 3] = [
     "openai_transcriptions",
     "detailed_transcriptions",
@@ -25,8 +30,9 @@ pub const CAPABILITIES: [&str; 3] = [
 pub const MAX_RECORD_BYTES: usize = 4096;
 pub const MAX_INSTANCE_ID_BYTES: usize = 64;
 /// Longest model id a managed instance serves. Model ids are plain ASCII (see
-/// the config rules), so with this bound a `ready` record always fits in
-/// [`MAX_RECORD_BYTES`] and carries the id unchanged.
+/// the config rules), so with this bound and the compute snapshot's bounded
+/// strings a `ready` record always fits in [`MAX_RECORD_BYTES`] and carries
+/// the id unchanged.
 pub const MAX_MODEL_ID_BYTES: usize = 512;
 /// From a shutdown request to the forced exit.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_millis(2000);
@@ -73,6 +79,8 @@ pub fn validate_model_id(id: &str) -> Result<(), Error> {
 pub enum StopReason {
     StdinClosed,
     Signal,
+    /// A native engine failure on a GPU: the instance retires itself.
+    EngineFailed,
 }
 
 impl StopReason {
@@ -80,6 +88,7 @@ impl StopReason {
         match self {
             Self::StdinClosed => "stdin_closed",
             Self::Signal => "signal",
+            Self::EngineFailed => "engine_failed",
         }
     }
 }
@@ -184,13 +193,19 @@ impl Lifecycle {
 
     /// Announce readiness, unless a shutdown was already requested. Returns
     /// whether the record was written.
-    pub fn announce_ready(&self, port: u16, model: &str, model_load_ms: u64) -> bool {
+    pub fn announce_ready(
+        &self,
+        port: u16,
+        model: &str,
+        model_load_ms: u64,
+        compute: &Compute,
+    ) -> bool {
         let mut output = self.lock();
         if output.phase != Phase::Starting {
             return false;
         }
         output.phase = Phase::Ready;
-        let record = ready_record(&self.instance_id, port, model, model_load_ms);
+        let record = ready_record(&self.instance_id, port, model, model_load_ms, compute);
         write_line(&mut output.out, record);
         true
     }
@@ -251,7 +266,13 @@ fn base_record(event: &str, instance_id: Option<&str>) -> Record {
     }
 }
 
-fn ready_record(instance_id: &str, port: u16, model: &str, model_load_ms: u64) -> Record {
+fn ready_record(
+    instance_id: &str,
+    port: u16,
+    model: &str,
+    model_load_ms: u64,
+    compute: &Compute,
+) -> Record {
     base_record("ready", Some(instance_id))
         .with("protocol_version", PROTOCOL_VERSION)
         .with("version", env!("CARGO_PKG_VERSION"))
@@ -260,6 +281,7 @@ fn ready_record(instance_id: &str, port: u16, model: &str, model_load_ms: u64) -
         .with("model", model)
         .with("capabilities", CAPABILITIES.to_vec())
         .with("model_load_ms", model_load_ms)
+        .with("compute", compute.to_value())
 }
 
 fn error_record(instance_id: Option<&str>, code: ErrorCode, message: &str) -> Record {
@@ -309,6 +331,9 @@ fn hard_exit(code: i32) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compute::{
+        BackendMode, ComputeBackend, FallbackReason, MAX_DESCRIPTION_BYTES, MAX_LABEL_BYTES,
+    };
 
     #[derive(Clone, Default)]
     struct Shared(Arc<Mutex<Vec<u8>>>);
@@ -337,6 +362,35 @@ mod tests {
         }
     }
 
+    fn cpu_compute() -> Compute {
+        Compute::new(
+            BackendMode::Cpu,
+            ComputeBackend::Cpu,
+            "CPU",
+            "Test CPU",
+            Some("haswell"),
+            None,
+        )
+    }
+
+    /// The largest snapshot: every string at its bound, made of characters
+    /// JSON escapes to two bytes.
+    fn worst_case_compute() -> Compute {
+        let label = "\"".repeat(MAX_LABEL_BYTES);
+        let description = "\\".repeat(MAX_DESCRIPTION_BYTES);
+        let compute = Compute::new(
+            BackendMode::Auto,
+            ComputeBackend::Cpu,
+            &label,
+            &description,
+            Some(&label),
+            Some(FallbackReason::GpuModuleAbsent),
+        );
+        assert_eq!(compute.device.name.len(), MAX_LABEL_BYTES);
+        assert_eq!(compute.device.description.len(), MAX_DESCRIPTION_BYTES);
+        compute
+    }
+
     #[test]
     fn instance_ids_are_bounded_and_safe() {
         for good in ["a", "gen-1", "0f8a.b_c-D", &"x".repeat(64)] {
@@ -359,13 +413,13 @@ mod tests {
     fn ready_record_has_the_protocol_shape() {
         let out = Shared::default();
         let lifecycle = Lifecycle::new("gen-1", Box::new(out.clone()));
-        assert!(lifecycle.announce_ready(49152, "turbo", 362));
+        assert!(lifecycle.announce_ready(49152, "turbo", 362, &cpu_compute()));
         let records = out.records();
         assert_eq!(records.len(), 1);
         assert_eq!(
             records[0].to_string(),
             format!(
-                r#"{{"schema_version":1,"event":"ready","module":"transcription","instance_id":"gen-1","protocol_version":1,"version":"{}","host":"127.0.0.1","port":49152,"model":"turbo","capabilities":["openai_transcriptions","detailed_transcriptions","managed_shutdown"],"model_load_ms":362}}"#,
+                r#"{{"schema_version":1,"event":"ready","module":"transcription","instance_id":"gen-1","protocol_version":2,"version":"{}","host":"127.0.0.1","port":49152,"model":"turbo","capabilities":["openai_transcriptions","detailed_transcriptions","managed_shutdown"],"model_load_ms":362,"compute":{{"requested":"cpu","backend":"cpu","device":{{"name":"CPU","description":"Test CPU"}},"cpu_variant":"haswell","fallback_reason":null}}}}"#,
                 env!("CARGO_PKG_VERSION")
             )
         );
@@ -382,11 +436,23 @@ mod tests {
         let out = Shared::default();
         let id = "i".repeat(MAX_INSTANCE_ID_BYTES);
         let lifecycle = Lifecycle::new(&id, Box::new(out.clone()));
-        assert!(lifecycle.announce_ready(u16::MAX, &longest, u64::MAX));
+        let compute = worst_case_compute();
+        assert!(lifecycle.announce_ready(u16::MAX, &longest, u64::MAX, &compute));
+        let line = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
+        assert!(line.len() < MAX_RECORD_BYTES, "{} bytes", line.len());
         let records = out.records();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0]["model"], longest.as_str());
         assert_eq!(records[0]["instance_id"], id.as_str());
+        assert_eq!(records[0]["compute"], compute.to_value());
+    }
+
+    #[test]
+    fn engine_failed_is_a_stop_reason() {
+        assert_eq!(StopReason::EngineFailed.as_str(), "engine_failed");
+        let record = base_record("stopping", Some(&"i".repeat(MAX_INSTANCE_ID_BYTES)))
+            .with("reason", StopReason::EngineFailed.as_str());
+        assert!(record.to_line().len() < MAX_RECORD_BYTES);
     }
 
     #[test]
@@ -399,7 +465,7 @@ mod tests {
             let mut output = lifecycle.lock();
             output.phase = Phase::Stopping;
         }
-        assert!(!lifecycle.announce_ready(1, "turbo", 0));
+        assert!(!lifecycle.announce_ready(1, "turbo", 0, &cpu_compute()));
         lifecycle.announce_stopped();
         lifecycle.announce_stopped();
         lifecycle.announce_error(&Error::internal("late"));

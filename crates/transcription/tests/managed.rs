@@ -7,6 +7,8 @@
 //! print its own lines on stdout, which the child must never do.
 
 use pumice_transcription::cli::run_with_engine_factory;
+use pumice_transcription::compute::{Compute, ComputeBackend};
+use pumice_transcription::engine::EngineRequest;
 use pumice_transcription::{
     CancelToken, Engine, EngineError, Error, Transcript, TranscriptionOptions,
 };
@@ -22,9 +24,11 @@ use std::time::{Duration, Instant};
 
 const CHILD_ENV: &str = "PUMICE_MANAGED_TEST_CHILD";
 /// `ok`, `stall` (ignores cancellation forever) or `cooperative` (runs until
-/// cancelled), `fail-load`, or `no-threads` (on Linux, forbids new threads
-/// before loading).
+/// cancelled), `fail` (every run is a native engine failure), `fail-load`,
+/// or `no-threads` (on Linux, forbids new threads before loading).
 const ENGINE_ENV: &str = "PUMICE_TEST_ENGINE";
+/// `vulkan`: the fake engine reports a GPU snapshot; otherwise a CPU one.
+const COMPUTE_ENV: &str = "PUMICE_TEST_COMPUTE";
 const LOAD_MS_ENV: &str = "PUMICE_TEST_LOAD_MS";
 /// Created by the fake engine when a transcription starts.
 const STARTED_FILE_ENV: &str = "PUMICE_TEST_STARTED_FILE";
@@ -45,9 +49,14 @@ const PROMPT: Duration = Duration::from_secs(10);
 struct ChildEngine {
     mode: String,
     started_file: Option<PathBuf>,
+    compute: Compute,
 }
 
 impl Engine for ChildEngine {
+    fn compute(&self) -> Option<Compute> {
+        Some(self.compute.clone())
+    }
+
     fn transcribe(
         &self,
         _pcm: &[f32],
@@ -67,6 +76,7 @@ impl Engine for ChildEngine {
                 }
                 Err(EngineError::Cancelled)
             }
+            "fail" => Err(EngineError::Failed),
             _ => Ok(Transcript {
                 text: "fake words".to_string(),
                 language: Some("en".to_string()),
@@ -83,7 +93,8 @@ fn child_main() -> ExitCode {
         .unwrap_or(0);
     let started_file = std::env::var_os(STARTED_FILE_ENV).map(PathBuf::from);
     let loading_file = std::env::var_os(LOADING_FILE_ENV).map(PathBuf::from);
-    run_with_engine_factory(std::env::args_os(), move |_path, _threads| {
+    let gpu = std::env::var(COMPUTE_ENV).is_ok_and(|value| value == "vulkan");
+    run_with_engine_factory(std::env::args_os(), move |request: EngineRequest<'_>| {
         #[cfg(target_os = "linux")]
         if mode == "no-threads" {
             let none = libc::rlimit {
@@ -100,7 +111,30 @@ fn child_main() -> ExitCode {
         if mode == "fail-load" {
             return Err(Error::model_load_failed());
         }
-        Ok(Box::new(ChildEngine { mode, started_file }) as Box<dyn Engine>)
+        let compute = if gpu {
+            Compute::new(
+                request.backend,
+                ComputeBackend::Vulkan,
+                "Vulkan0",
+                "Fake GPU",
+                Some("x64"),
+                None,
+            )
+        } else {
+            Compute::new(
+                request.backend,
+                ComputeBackend::Cpu,
+                "CPU",
+                "Fake CPU",
+                None,
+                None,
+            )
+        };
+        Ok(Box::new(ChildEngine {
+            mode,
+            started_file,
+            compute,
+        }) as Box<dyn Engine>)
     })
 }
 
@@ -135,6 +169,22 @@ fn main() -> ExitCode {
         (
             "eof_during_a_cooperative_inference_drains_and_exits_cleanly",
             eof_during_a_cooperative_inference_drains_and_exits_cleanly,
+        ),
+        (
+            "a_gpu_engine_failure_retires_a_managed_child",
+            a_gpu_engine_failure_retires_a_managed_child,
+        ),
+        (
+            "a_gpu_engine_failure_retires_a_standalone_server",
+            a_gpu_engine_failure_retires_a_standalone_server,
+        ),
+        (
+            "a_cpu_engine_failure_keeps_serving",
+            a_cpu_engine_failure_keeps_serving,
+        ),
+        (
+            "cancellation_on_a_gpu_does_not_retire",
+            cancellation_on_a_gpu_does_not_retire,
         ),
         (
             "invalid_instance_id_is_refused_without_echo",
@@ -233,10 +283,21 @@ struct Spawned {
 }
 
 fn spawn(setup: &Setup, engine: &str, load_ms: u64, extra: &[&str]) -> Spawned {
+    spawn_with_compute(setup, engine, "cpu", load_ms, extra)
+}
+
+fn spawn_with_compute(
+    setup: &Setup,
+    engine: &str,
+    compute: &str,
+    load_ms: u64,
+    extra: &[&str],
+) -> Spawned {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
         .env(CHILD_ENV, "1")
         .env(ENGINE_ENV, engine)
+        .env(COMPUTE_ENV, compute)
         .env(LOAD_MS_ENV, load_ms.to_string())
         .env(STARTED_FILE_ENV, &setup.started_file)
         .env(LOADING_FILE_ENV, &setup.loading_file)
@@ -478,10 +539,21 @@ fn ready_follows_load_and_bind_and_stdin_eof_stops_cleanly() {
             "model",
             "capabilities",
             "model_load_ms",
+            "compute",
         ]
     );
     assert_eq!(ready["instance_id"], INSTANCE);
-    assert_eq!(ready["protocol_version"], 1);
+    assert_eq!(ready["protocol_version"], 2);
+    assert_eq!(
+        ready["compute"],
+        serde_json::json!({
+            "requested": "cpu",
+            "backend": "cpu",
+            "device": {"name": "CPU", "description": "Fake CPU"},
+            "cpu_variant": null,
+            "fallback_reason": null,
+        })
+    );
     assert_eq!(ready["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(ready["host"], "127.0.0.1");
     assert_eq!(ready["model"], MODEL);
@@ -500,6 +572,8 @@ fn ready_follows_load_and_bind_and_stdin_eof_stops_cleanly() {
     assert_eq!(status, 200, "{body}");
     let body: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(body["instance_id"], INSTANCE);
+    assert_eq!(body["protocol_version"], 2);
+    assert_eq!(body["compute"], ready["compute"]);
     assert_eq!(body["state"], "ready");
 
     let (status, body) = http(
@@ -643,6 +717,127 @@ fn eof_during_a_cooperative_inference_drains_and_exits_cleanly() {
     );
 }
 
+fn a_gpu_engine_failure_retires_a_managed_child() {
+    let setup = setup(true);
+    let mut args = managed_args().to_vec();
+    args.extend(["--backend", "auto"]);
+    let mut child = spawn_with_compute(&setup, "fail", "vulkan", 0, &args);
+    let ready = child.next_record();
+    let port = ready_port(&ready);
+    assert_eq!(ready["compute"]["requested"], "auto");
+    assert_eq!(ready["compute"]["backend"], "vulkan");
+
+    // The failing request is answered with the usual error, never retried.
+    let (status, body) = http(
+        port,
+        "POST",
+        "/pumice/v1/transcriptions",
+        &transcription_body(),
+    );
+    assert_eq!(status, 500, "{body}");
+    assert!(body.contains(r#""code":"transcription_failed""#), "{body}");
+
+    let status = child.wait(PROMPT);
+    assert_eq!(status.code(), Some(1), "stderr: {}", child.stderr());
+    let records = child.all_records();
+    assert_eq!(events(&records), ["ready", "stopping", "stopped"]);
+    assert_eq!(records[1]["reason"], "engine_failed");
+    assert!(child.stderr().contains("the GPU engine failed"));
+}
+
+fn a_gpu_engine_failure_retires_a_standalone_server() {
+    let setup = setup(true);
+    let mut child = spawn_with_compute(&setup, "fail", "vulkan", 0, &["--backend", "gpu"]);
+    let port = listening_port(&child);
+    assert!(
+        child
+            .stderr()
+            .contains(r#"compute: {"requested":"gpu","backend":"vulkan""#),
+        "stderr: {}",
+        child.stderr()
+    );
+    let (status, body) = http(
+        port,
+        "POST",
+        "/v1/audio/transcriptions",
+        &transcription_body(),
+    );
+    assert_eq!(status, 500, "{body}");
+    let status = child.wait(PROMPT);
+    assert_eq!(status.code(), Some(1), "stderr: {}", child.stderr());
+    assert!(
+        child
+            .stderr()
+            .contains("the GPU engine failed during a transcription")
+    );
+    let lines = child.stdout.take().unwrap().join().unwrap();
+    assert!(lines.is_empty(), "{lines:?}");
+}
+
+fn a_cpu_engine_failure_keeps_serving() {
+    let setup = setup(true);
+    let mut child = spawn(&setup, "fail", 0, &managed_args());
+    let port = ready_port(&child.next_record());
+    for _ in 0..2 {
+        let (status, _) = http(
+            port,
+            "POST",
+            "/pumice/v1/transcriptions",
+            &transcription_body(),
+        );
+        assert_eq!(status, 500);
+    }
+    let (status, _) = http(port, "GET", "/ready", b"");
+    assert_eq!(status, 200);
+    child.close_stdin();
+    assert_eq!(child.wait(PROMPT).code(), Some(0));
+    let records = child.all_records();
+    assert_eq!(events(&records), ["ready", "stopping", "stopped"]);
+    assert_eq!(records[1]["reason"], "stdin_closed");
+}
+
+/// A run cancelled by the owner's shutdown on a GPU is not an engine
+/// failure: the stop keeps its own reason and a clean exit.
+fn cancellation_on_a_gpu_does_not_retire() {
+    let setup = setup(true);
+    let mut child = spawn_with_compute(&setup, "cooperative", "vulkan", 0, &managed_args());
+    let port = ready_port(&child.next_record());
+    let client = thread::spawn(move || {
+        http(
+            port,
+            "POST",
+            "/pumice/v1/transcriptions",
+            &transcription_body(),
+        )
+    });
+    child.wait_for_started(&setup);
+    child.close_stdin();
+    let (status, _) = client.join().unwrap();
+    assert_eq!(status, 503);
+    assert_eq!(
+        child.wait(PROMPT).code(),
+        Some(0),
+        "stderr: {}",
+        child.stderr()
+    );
+    let records = child.all_records();
+    assert_eq!(events(&records), ["ready", "stopping", "stopped"]);
+    assert_eq!(records[1]["reason"], "stdin_closed");
+}
+
+/// The port from a standalone server's startup line on stderr.
+fn listening_port(child: &Spawned) -> u16 {
+    let started = Instant::now();
+    loop {
+        let stderr = child.stderr();
+        if let Some(rest) = stderr.split("listening on http://127.0.0.1:").nth(1) {
+            return rest.split('/').next().unwrap().parse::<u16>().unwrap();
+        }
+        assert!(started.elapsed() < PROMPT, "no listening line: {stderr}");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn invalid_instance_id_is_refused_without_echo() {
     let setup = setup(true);
     for id in ["bad id", "quote\"brace}", &"x".repeat(65), ""] {
@@ -704,15 +899,7 @@ fn a_model_id_too_long_to_announce_is_refused_before_loading() {
 fn normal_mode_ignores_stdin_and_keeps_stdout_empty() {
     let setup = setup(true);
     let mut child = spawn(&setup, "ok", 0, &[]);
-    let started = Instant::now();
-    let port = loop {
-        let stderr = child.stderr();
-        if let Some(rest) = stderr.split("listening on http://127.0.0.1:").nth(1) {
-            break rest.split('/').next().unwrap().parse::<u16>().unwrap();
-        }
-        assert!(started.elapsed() < PROMPT, "no listening line: {stderr}");
-        thread::sleep(Duration::from_millis(10));
-    };
+    let port = listening_port(&child);
 
     child.close_stdin();
     thread::sleep(Duration::from_millis(300));

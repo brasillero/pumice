@@ -21,6 +21,8 @@ struct TestEngine {
     delay: Duration,
     gated: bool,
     panic: bool,
+    /// Returned instead of a transcript.
+    error: Option<EngineError>,
     started: Notify,
     release: AtomicBool,
     saw_cancel: AtomicBool,
@@ -40,6 +42,13 @@ impl TestEngine {
         Arc::new(Self {
             text: text.to_string(),
             gated: true,
+            ..Default::default()
+        })
+    }
+
+    fn failing(error: EngineError) -> Arc<Self> {
+        Arc::new(Self {
+            error: Some(error),
             ..Default::default()
         })
     }
@@ -76,6 +85,9 @@ impl Engine for TestEngine {
         if self.panic {
             panic!("test engine panic");
         }
+        if let Some(error) = self.error {
+            return Err(error);
+        }
         std::thread::sleep(self.delay);
         if self.gated {
             while !self.release.load(Ordering::SeqCst) {
@@ -103,6 +115,11 @@ fn state_with(engine: Arc<TestEngine>, limits: Limits) -> ServerState {
 
 fn state(engine: Arc<TestEngine>) -> ServerState {
     state_with(engine, Limits::default())
+}
+
+/// [`state`], for tests that shadow that name.
+fn state_fresh(engine: Arc<TestEngine>) -> ServerState {
+    state(engine)
 }
 
 fn wav(seconds: f64) -> Vec<u8> {
@@ -863,8 +880,25 @@ fn a_run_that_finishes_after_cancellation_is_discarded() {
 const PORT: u16 = 40123;
 const HOST: &str = "127.0.0.1:40123";
 
+fn test_compute() -> Compute {
+    Compute::new(
+        crate::compute::BackendMode::Auto,
+        crate::compute::ComputeBackend::Vulkan,
+        "Vulkan0",
+        "Test GPU",
+        Some("haswell"),
+        None,
+    )
+}
+
 fn managed(state: ServerState) -> ServerState {
-    state.managed("gen-1".to_string(), PORT)
+    state.managed(
+        Managed {
+            instance_id: "gen-1".to_string(),
+            compute: test_compute(),
+        },
+        PORT,
+    )
 }
 
 fn with_host(mut request: Request) -> Request {
@@ -990,7 +1024,7 @@ async fn ready_reports_the_instance_until_shutdown() {
     assert_eq!(
         String::from_utf8(body_bytes(response).await).unwrap(),
         format!(
-            r#"{{"schema_version":1,"module":"transcription","instance_id":"gen-1","protocol_version":1,"version":"{}","model":"turbo","capabilities":["openai_transcriptions","detailed_transcriptions","managed_shutdown"],"state":"ready"}}"#,
+            r#"{{"schema_version":1,"module":"transcription","instance_id":"gen-1","protocol_version":2,"version":"{}","model":"turbo","capabilities":["openai_transcriptions","detailed_transcriptions","managed_shutdown"],"compute":{{"requested":"auto","backend":"vulkan","device":{{"name":"Vulkan0","description":"Test GPU"}},"cpu_variant":"haswell","fallback_reason":null}},"state":"ready"}}"#,
             env!("CARGO_PKG_VERSION")
         )
     );
@@ -1007,6 +1041,78 @@ async fn ready_reports_the_instance_until_shutdown() {
     assert_eq!(error["type"], "server_error");
     engine.release();
     first.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_gpu_engine_failure_answers_then_withdraws_readiness_and_retires() {
+    for detailed in [false, true] {
+        let retire = CancellationToken::new();
+        let state = managed(state(TestEngine::failing(EngineError::Failed)))
+            .retire_on_engine_failure(Some(retire.clone()));
+        let request = if detailed {
+            post_detailed(basic_body(&wav(1.0)))
+        } else {
+            post(basic_body(&wav(1.0)))
+        };
+        let response = send(&state, request).await;
+        let failure = error(response, StatusCode::INTERNAL_SERVER_ERROR).await;
+        assert_eq!(failure["message"], "The transcription failed.");
+        assert!(retire.is_cancelled(), "detailed: {detailed}");
+        let response = send(&state, with_host(get("/ready"))).await;
+        managed_error(response, StatusCode::SERVICE_UNAVAILABLE, "shutting_down").await;
+        // Nothing more is admitted on the poisoned device.
+        let response = send(&state, post(basic_body(&wav(1.0)))).await;
+        error(response, StatusCode::SERVICE_UNAVAILABLE).await;
+    }
+}
+
+#[tokio::test]
+async fn cancellation_input_errors_and_cpu_engines_do_not_retire() {
+    // A cancelled run (the engine saw cancellation) on a GPU.
+    let retire = CancellationToken::new();
+    let state = managed(state(TestEngine::failing(EngineError::Cancelled)))
+        .retire_on_engine_failure(Some(retire.clone()));
+    let _ = send(&state, post(basic_body(&wav(1.0)))).await;
+    assert!(!retire.is_cancelled());
+    assert!(!state.shutdown.is_cancelled());
+
+    // Undecodable audio never reaches the engine.
+    let state = managed(state_fresh(TestEngine::failing(EngineError::Failed)))
+        .retire_on_engine_failure(Some(retire.clone()));
+    let response = send(
+        &state,
+        post(multipart(&[
+            Part::File("file", b"not audio"),
+            Part::Text("model", MODEL),
+        ])),
+    )
+    .await;
+    error(response, StatusCode::BAD_REQUEST).await;
+    assert!(!retire.is_cancelled());
+
+    // A deadline: the request times out, the late failure is discarded.
+    let engine = TestEngine::gated("x");
+    let state = state_with(
+        Arc::clone(&engine),
+        Limits {
+            upload_deadline: Duration::from_secs(5),
+            total_deadline: Duration::from_millis(200),
+        },
+    )
+    .retire_on_engine_failure(Some(retire.clone()));
+    let response = send(&state, post(basic_body(&wav(1.0)))).await;
+    error(response, StatusCode::GATEWAY_TIMEOUT).await;
+    engine.release();
+    wait_until(|| state.admission.available_permits() == 1).await;
+    assert!(!retire.is_cancelled());
+
+    // A CPU engine (no retire token) keeps serving after a failure.
+    let state = managed(state_fresh(TestEngine::failing(EngineError::Failed)));
+    let response = send(&state, post(basic_body(&wav(1.0)))).await;
+    error(response, StatusCode::INTERNAL_SERVER_ERROR).await;
+    assert!(!state.shutdown.is_cancelled());
+    let response = send(&state, with_host(get("/ready"))).await;
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -1374,6 +1480,7 @@ async fn serve_waits_for_an_active_worker_before_returning() {
         MODEL.to_string(),
         None,
         None,
+        None,
         async {
             let _ = rx.await;
         },
@@ -1413,6 +1520,7 @@ async fn serve_on_refuses_a_non_loopback_listener() {
         listener,
         TestEngine::returning("x"),
         MODEL.to_string(),
+        None,
         None,
         None,
         std::future::pending(),

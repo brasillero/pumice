@@ -13,6 +13,8 @@ pub(crate) struct RawConfig {
     pub default_model: Option<Spanned<String>>,
     pub language: Option<Spanned<String>>,
     pub threads: Option<Spanned<usize>>,
+    /// `cpu`, `auto` or `gpu` (see `crate::compute`).
+    pub backend: Option<Spanned<String>>,
     pub server: Option<Spanned<RawServerConfig>>,
     /// Override for the per-user models directory used by `catalog:` entries.
     pub models_dir: Option<Spanned<PathBuf>>,

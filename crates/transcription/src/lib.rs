@@ -2,6 +2,7 @@ pub mod audio;
 mod bundle;
 pub mod catalog;
 pub mod cli;
+pub mod compute;
 pub mod config;
 pub mod download;
 pub mod engine;

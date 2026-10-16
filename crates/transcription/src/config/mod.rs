@@ -10,6 +10,8 @@ mod raw;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use crate::compute::BackendMode;
+
 pub use error::ConfigError;
 
 use raw::RawConfig;
@@ -26,6 +28,8 @@ pub struct Config {
     pub language: Option<String>,
     /// Optional default thread count (1–32).
     pub threads: Option<usize>,
+    /// Compute backend mode; `cpu` unless set (p14.1-windows-vulkan/D3).
+    pub backend: BackendMode,
     /// Optional default server port.
     pub server_port: Option<u16>,
     /// Override for the per-user models directory used by `catalog:` model
@@ -163,6 +167,13 @@ fn validate(
         ));
     }
 
+    let backend = match &raw.backend {
+        Some(span) => BackendMode::parse(&span.value).ok_or_else(|| {
+            ConfigError::at(span.referenced, "backend must be one of cpu, auto, gpu")
+        })?,
+        None => BackendMode::default(),
+    };
+
     let server_port = raw
         .server
         .as_ref()
@@ -290,6 +301,7 @@ fn validate(
         default_model,
         language,
         threads: raw.threads.map(|s| s.value),
+        backend,
         server_port,
         models_dir,
         models,
@@ -598,6 +610,40 @@ models:
         let loaded = load(Some(&path)).unwrap();
         assert!(loaded.config.models.is_empty());
         assert!(loaded.config.default_model.is_none());
+    }
+
+    #[test]
+    fn backend_defaults_to_cpu_and_accepts_each_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_config(&tmp, "schema_version: 1\n");
+        assert_eq!(load(Some(&path)).unwrap().config.backend, BackendMode::Cpu);
+        for (text, mode) in [
+            ("cpu", BackendMode::Cpu),
+            ("auto", BackendMode::Auto),
+            ("gpu", BackendMode::Gpu),
+        ] {
+            let path = write_config(&tmp, &format!("schema_version: 1\nbackend: {text}\n"));
+            assert_eq!(load(Some(&path)).unwrap().config.backend, mode);
+        }
+    }
+
+    #[test]
+    fn invalid_backend_reports_its_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        for bad in ["vulkan", "GPU", "\"\"", "1"] {
+            let path = write_config(&tmp, &format!("schema_version: 1\nbackend: {bad}\n"));
+            let err = load(Some(&path)).unwrap_err();
+            assert_eq!(
+                err.message(),
+                "backend must be one of cpu, auto, gpu",
+                "{bad}"
+            );
+            assert_eq!(err.line(), Some(2), "{bad}");
+            assert_eq!(err.column(), Some(10), "{bad}");
+        }
+        let path = write_config(&tmp, "schema_version: 1\nbackend: [gpu]\n");
+        let err = load(Some(&path)).unwrap_err();
+        assert_eq!(err.line(), Some(2));
     }
 
     #[test]

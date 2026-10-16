@@ -7,8 +7,15 @@
 //! log line is built from fixed text: nothing the client sent (model names,
 //! field names, prompts, file names) and nothing the engine produced is ever
 //! echoed or logged.
+//!
+//! When the caller passes a `retire` token (the engine runs on a GPU), a
+//! native engine failure answers its request with the usual
+//! `transcription_failed`, then withdraws readiness at once and cancels the
+//! token so the caller stops the process (p14.1-windows-vulkan/D4).
+//! Cancellation and input errors never do.
 
 use crate::audio::MAX_FILE_BYTES;
+use crate::compute::Compute;
 use crate::engine::{CancelToken, Engine};
 use crate::managed::{CAPABILITIES, PROTOCOL_VERSION};
 use crate::service::transcribe_pcm_from_reader;
@@ -70,12 +77,15 @@ struct ServerState {
     shutdown: CancellationToken,
     request_ids: Arc<AtomicU64>,
     managed: Option<Arc<ManagedState>>,
+    /// Cancelled after a native engine failure; see the module docs.
+    retire: Option<CancellationToken>,
 }
 
 struct ManagedState {
     instance_id: String,
     /// The only accepted `Host`: `127.0.0.1:<bound port>`.
     host: String,
+    compute: Compute,
 }
 
 impl ServerState {
@@ -95,15 +105,35 @@ impl ServerState {
             shutdown,
             request_ids: Arc::new(AtomicU64::new(1)),
             managed: None,
+            retire: None,
         }
     }
 
-    fn managed(mut self, instance_id: String, port: u16) -> Self {
+    fn managed(mut self, managed: Managed, port: u16) -> Self {
         self.managed = Some(Arc::new(ManagedState {
-            instance_id,
+            instance_id: managed.instance_id,
             host: format!("{}:{port}", Ipv4Addr::LOCALHOST),
+            compute: managed.compute,
         }));
         self
+    }
+
+    fn retire_on_engine_failure(mut self, retire: Option<CancellationToken>) -> Self {
+        self.retire = retire;
+        self
+    }
+
+    /// A native engine failure: with a `retire` token, stop accepting work
+    /// (`/ready` answers 503 from now on) and ask the owner to stop.
+    fn engine_failed(&self) {
+        if let Some(retire) = &self.retire {
+            eprintln!(
+                "the GPU engine failed; withdrawing readiness and stopping so the process can \
+                 be restarted"
+            );
+            self.shutdown.cancel();
+            retire.cancel();
+        }
     }
 }
 
@@ -111,6 +141,8 @@ impl ServerState {
 pub struct Managed {
     /// Already validated by [`crate::managed::validate_instance_id`].
     pub instance_id: String,
+    /// The loaded model's compute snapshot, served by `/ready`.
+    pub compute: Compute,
 }
 
 /// Start the HTTP server on `127.0.0.1:port` and serve until `shutdown_signal`
@@ -130,6 +162,7 @@ pub async fn serve(
         served_model_id,
         default_language,
         None,
+        None,
         shutdown_signal,
     )
 }
@@ -139,14 +172,17 @@ pub async fn bind(port: u16) -> io::Result<TcpListener> {
     TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)).await
 }
 
-/// [`serve`] on a listener from [`bind`], optionally in managed mode. Must be
-/// called inside a Tokio runtime.
+/// [`serve`] on a listener from [`bind`], optionally in managed mode. With
+/// `retire`, a native engine failure cancels it after readiness is withdrawn;
+/// the caller's `shutdown_signal` should then fire. Must be called inside a
+/// Tokio runtime.
 pub fn serve_on(
     listener: TcpListener,
     engine: Arc<dyn Engine>,
     served_model_id: String,
     default_language: Option<String>,
     managed: Option<Managed>,
+    retire: Option<CancellationToken>,
     shutdown_signal: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<tokio::task::JoinHandle<()>> {
     let local_addr = listener.local_addr()?;
@@ -167,8 +203,9 @@ pub fn serve_on(
         shutdown.clone(),
     );
     if let Some(managed) = managed {
-        state = state.managed(managed.instance_id, local_addr.port());
+        state = state.managed(managed, local_addr.port());
     }
+    state = state.retire_on_engine_failure(retire);
     let admission = Arc::clone(&state.admission);
     let app = router(state);
 
@@ -457,6 +494,7 @@ fn map_error(code: ErrorCode) -> ApiError {
         ErrorCode::InvalidArguments
         | ErrorCode::InvalidConfig
         | ErrorCode::ModelNotFound
+        | ErrorCode::GpuUnavailable
         | ErrorCode::EngineNotAvailable
         | ErrorCode::EngineFailed
         | ErrorCode::ModelLoadFailed
@@ -754,7 +792,12 @@ async fn transcribe(
                 audio_seconds: result.audio_seconds,
                 inference: result.inference,
             }),
-            Ok(Err(error)) => Err(map_error(error.code)),
+            Ok(Err(error)) => {
+                if error.code == ErrorCode::EngineFailed {
+                    state.engine_failed();
+                }
+                Err(map_error(error.code))
+            }
             // The worker panicked; its permit was released while unwinding.
             Err(_) => Err(TRANSCRIPTION_FAILED),
         },
@@ -1015,6 +1058,7 @@ async fn ready(State(state): State<ServerState>, request: Request) -> Response {
             "version": env!("CARGO_PKG_VERSION"),
             "model": &*state.served_model_id,
             "capabilities": CAPABILITIES,
+            "compute": managed.compute.to_value(),
             "state": "ready",
         }),
     )
