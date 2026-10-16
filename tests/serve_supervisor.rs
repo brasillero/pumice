@@ -423,8 +423,10 @@ async fn restarts_are_bounded_per_episode_then_failed() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_fatal_error_during_recovery_stops_it_at_once() {
+    // The first child exits once its readiness handshake has been answered,
+    // never before it, so the recovery always starts from a ready child.
     let stub = stub(json!([
-        {"exit_after_ready_ms": 20},
+        {"exit_after_ready_checks": 1},
         {"ready_overrides": {"version": "9.9.9"}}
     ]));
     let supervisor = start(&stub, fast()).await;
