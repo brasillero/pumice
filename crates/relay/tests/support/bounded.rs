@@ -17,7 +17,7 @@ use std::cell::RefCell;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::process::{Child, ExitStatus, Output};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::time::{Duration, Instant};
 
 // --- Stage breadcrumbs ---------------------------------------------------------
@@ -54,9 +54,26 @@ fn left(deadline: Instant) -> Option<Duration> {
     (!left.is_zero()).then_some(left)
 }
 
+/// How long a failure report may spend taking output that already arrived,
+/// and how much of it, so a child that keeps writing cannot stall it.
+const REPORT_TIME: Duration = Duration::from_millis(100);
+const REPORT_BYTES: usize = 1 << 20;
+
+/// How much output one wait takes before it looks at it again.
+const PULL_BYTES: usize = 1 << 20;
+
+/// How much output a pipe keeps; its reader thread drops the rest, so a
+/// child that never stops writing cannot exhaust memory.
+const PIPE_BYTES: usize = 64 << 20;
+
+/// A deadline passed.
+#[derive(Debug)]
+pub struct TimedOut;
+
 // --- Child processes -----------------------------------------------------------
 
-/// One output pipe, read to its end by its own thread.
+/// One output pipe, read to its end by its own thread, which keeps its
+/// first [`PIPE_BYTES`].
 struct Pipe {
     chunks: Option<Receiver<Vec<u8>>>,
     bytes: Vec<u8>,
@@ -70,11 +87,14 @@ impl Pipe {
             let (sender, chunks) = mpsc::channel();
             std::thread::spawn(move || {
                 let mut buffer = [0u8; 8192];
+                let mut kept = 0;
                 loop {
                     match source.read(&mut buffer) {
                         Ok(0) => break,
                         Ok(n) => {
-                            if sender.send(buffer[..n].to_vec()).is_err() {
+                            let n = n.min(PIPE_BYTES - kept);
+                            kept += n;
+                            if n > 0 && sender.send(buffer[..n].to_vec()).is_err() {
                                 break;
                             }
                         }
@@ -96,26 +116,44 @@ impl Pipe {
         self.chunks.is_none()
     }
 
-    /// Takes what already arrived, without waiting.
-    fn take_ready(&mut self) {
-        if let Some(chunks) = &self.chunks {
-            while let Ok(chunk) = chunks.try_recv() {
-                self.bytes.extend_from_slice(&chunk);
+    /// Takes what already arrived, without waiting: until `deadline` and at
+    /// most about `limit` bytes, so a writer that never stops cannot keep
+    /// it going.
+    fn take_ready(&mut self, deadline: Instant, limit: usize) {
+        let Some(chunks) = &self.chunks else {
+            return;
+        };
+        let start = self.bytes.len();
+        let mut ended = false;
+        while self.bytes.len() - start < limit && Instant::now() < deadline {
+            match chunks.try_recv() {
+                Ok(chunk) => self.bytes.extend_from_slice(&chunk),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    ended = true;
+                    break;
+                }
             }
+        }
+        if ended {
+            self.chunks = None;
         }
     }
 
     /// Takes what arrived, waiting until `deadline` for more. False only
-    /// when the deadline passed with the pipe still open.
+    /// when the deadline passed with the pipe still open; nothing is taken
+    /// past it.
     fn pull(&mut self, deadline: Instant) -> bool {
         let Some(chunks) = &self.chunks else {
             return true;
         };
-        let wait = left(deadline).unwrap_or_default();
+        let Some(wait) = left(deadline) else {
+            return false;
+        };
         match chunks.recv_timeout(wait) {
             Ok(chunk) => {
                 self.bytes.extend_from_slice(&chunk);
-                self.take_ready();
+                self.take_ready(deadline, PULL_BYTES);
                 true
             }
             Err(RecvTimeoutError::Disconnected) => {
@@ -127,17 +165,24 @@ impl Pipe {
     }
 
     /// The next line without its newline; `Ok(None)` at the end of the
-    /// pipe, `Err(())` past the deadline.
-    fn line(&mut self, deadline: Instant) -> Result<Option<String>, ()> {
+    /// pipe.
+    fn line(&mut self, deadline: Instant) -> Result<Option<String>, TimedOut> {
+        // Each byte is searched once, however long the line grows.
+        let mut searched = self.consumed;
         loop {
             let rest = &self.bytes[self.consumed..];
-            if let Some(end) = rest.iter().position(|&byte| byte == b'\n') {
+            if let Some(end) = self.bytes[searched..]
+                .iter()
+                .position(|&byte| byte == b'\n')
+            {
+                let end = searched - self.consumed + end;
                 let line = String::from_utf8_lossy(&rest[..end])
                     .trim_end_matches('\r')
                     .to_owned();
                 self.consumed += end + 1;
                 return Ok(Some(line));
             }
+            searched = self.bytes.len();
             if self.at_eof() {
                 if rest.is_empty() {
                     return Ok(None);
@@ -147,7 +192,7 @@ impl Pipe {
                 return Ok(Some(line));
             }
             if !self.pull(deadline) {
-                return Err(());
+                return Err(TimedOut);
             }
         }
     }
@@ -201,7 +246,8 @@ impl OwnedChild {
     }
 
     fn report(&mut self) -> String {
-        self.stderr.take_ready();
+        self.stderr
+            .take_ready(Instant::now() + REPORT_TIME, REPORT_BYTES);
         let bytes = &self.stderr.bytes;
         let tail = &bytes[bytes.len().saturating_sub(4096)..];
         let mut report = format!(
@@ -236,14 +282,21 @@ impl OwnedChild {
     pub fn stdout_line(&mut self, deadline: Instant) -> Option<String> {
         step("read a stdout line");
         let line = self.stdout.line(deadline);
-        line.unwrap_or_else(|()| self.fail("no stdout line in time"))
+        line.unwrap_or_else(|TimedOut| self.fail("no stdout line in time"))
     }
 
     /// The next stderr line before `deadline`; `None` once stderr ended.
     pub fn stderr_line(&mut self, deadline: Instant) -> Option<String> {
         step("read a stderr line");
         let line = self.stderr.line(deadline);
-        line.unwrap_or_else(|()| self.fail("no stderr line in time"))
+        line.unwrap_or_else(|TimedOut| self.fail("no stderr line in time"))
+    }
+
+    /// Like [`OwnedChild::stderr_line`], but returns a timeout instead of
+    /// failing the test.
+    pub fn try_stderr_line(&mut self, deadline: Instant) -> Result<Option<String>, TimedOut> {
+        step("read a stderr line");
+        self.stderr.line(deadline)
     }
 
     /// Waits for the exit until `deadline`, polling.
@@ -269,11 +322,13 @@ impl OwnedChild {
         step("collect the output");
         let stdout_ended = self.stdout.drain(deadline);
         // Past the deadline, still take what stderr has, to report both.
-        let stderr_ended = self.stderr.drain(if stdout_ended {
-            deadline
+        let stderr_ended = if stdout_ended {
+            self.stderr.drain(deadline)
         } else {
-            Instant::now()
-        });
+            self.stderr
+                .take_ready(Instant::now() + REPORT_TIME, REPORT_BYTES);
+            self.stderr.at_eof()
+        };
         if !(stdout_ended && stderr_ended) {
             let open = match (stdout_ended, stderr_ended) {
                 (false, false) => "stdout and stderr",
@@ -283,6 +338,14 @@ impl OwnedChild {
             self.fail(&format!(
                 "{open} stayed open past the deadline after the exit ({:?})",
                 self.status
+            ));
+        }
+        let full = [("stdout", &self.stdout), ("stderr", &self.stderr)]
+            .into_iter()
+            .find(|(_, pipe)| pipe.bytes.len() >= PIPE_BYTES);
+        if let Some((name, _)) = full {
+            self.fail(&format!(
+                "{name} passed {PIPE_BYTES} bytes, the rest was dropped"
             ));
         }
         Output {
@@ -301,22 +364,24 @@ impl OwnedChild {
 
     /// Kills the child (if it still runs) and reaps it, bounded.
     pub fn kill(&mut self) {
-        if self.status.is_some() {
-            return;
-        }
-        let _ = self.child.kill();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
-            match self.child.try_wait() {
-                Ok(Some(status)) => {
-                    self.status = Some(status);
-                    return;
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(5)),
-                Err(_) => return,
-            }
+        if self.status.is_none() {
+            self.status = kill_and_reap(&mut self.child);
         }
     }
+}
+
+/// Kills `child` (if it still runs) and reaps it, waiting at most 10 s.
+fn kill_and_reap(child: &mut Child) -> Option<ExitStatus> {
+    let _ = child.kill();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 impl Drop for OwnedChild {
@@ -329,28 +394,40 @@ impl Drop for OwnedChild {
     }
 }
 
-/// Whether process `pid` still exists, for failure reports only (`kill -0`
-/// on Unix, `tasklist` on Windows): "alive", "gone" or "unknown".
+/// Whether process `pid` still exists, for failure reports only:
+/// "alive", "gone" or "unknown". Unix asks the kernel (`kill(pid, 0)`);
+/// Windows runs `tasklist`, bounded.
 pub fn process_state(pid: u64) -> &'static str {
     #[cfg(unix)]
-    let probe = std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success());
+    {
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return "unknown";
+        };
+        // SAFETY: signal 0 only checks that the process exists.
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            return "alive";
+        }
+        match io::Error::last_os_error().raw_os_error() {
+            Some(libc::ESRCH) => "gone",
+            // It exists but belongs to someone else.
+            Some(libc::EPERM) => "alive",
+            _ => "unknown",
+        }
+    }
     #[cfg(windows)]
-    let probe = std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map(|output| String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\"")));
+    {
+        let mut tasklist = std::process::Command::new("tasklist");
+        tasklist.args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"]);
+        match diagnostic_output(&mut tasklist, Duration::from_secs(10)) {
+            Some(text) if text.contains(&format!("\"{pid}\"")) => "alive",
+            Some(_) => "gone",
+            None => "unknown",
+        }
+    }
     #[cfg(not(any(unix, windows)))]
-    let probe: io::Result<bool> = Err(io::ErrorKind::Unsupported.into());
-    match probe {
-        Ok(true) => "alive",
-        Ok(false) => "gone",
-        Err(_) => "unknown",
+    {
+        let _ = pid;
+        "unknown"
     }
 }
 
@@ -365,17 +442,10 @@ fn windows_children(pid: u32) -> String {
          ForEach-Object {{ $_.WaitReason }}; \
          \"$($_.ProcessId) $($_.Name) [$($w -join ',')]\" }}"
     );
-    let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        let output = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .stdin(std::process::Stdio::null())
-            .output();
-        let _ = sender.send(output);
-    });
-    match receiver.recv_timeout(Duration::from_secs(30)) {
-        Ok(Ok(output)) => {
-            let text = String::from_utf8_lossy(&output.stdout);
+    let mut powershell = std::process::Command::new("powershell");
+    powershell.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    match diagnostic_output(&mut powershell, Duration::from_secs(30)) {
+        Some(text) => {
             let lines: Vec<&str> = text
                 .lines()
                 .map(str::trim)
@@ -387,8 +457,38 @@ fn windows_children(pid: u32) -> String {
                 lines.join("; ")
             }
         }
-        _ => "unknown".to_owned(),
+        None => "unknown".to_owned(),
     }
+}
+
+/// Runs a diagnostic command for its stdout, within `within`. Past it the
+/// command is killed and reaped (bounded too) and the answer is `None`, so
+/// a stuck diagnostic neither stalls a failure report nor outlives it.
+#[cfg(windows)]
+fn diagnostic_output(command: &mut std::process::Command, within: Duration) -> Option<String> {
+    use std::process::Stdio;
+    let deadline = Instant::now() + within;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = Pipe::new(child.stdout.take());
+    let ended = stdout.drain(deadline);
+    let exited = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            _ => {
+                kill_and_reap(&mut child);
+                break false;
+            }
+        }
+    };
+    (ended && exited).then(|| String::from_utf8_lossy(&stdout.bytes).into_owned())
 }
 
 // --- Loopback HTTP ---------------------------------------------------------------
@@ -400,12 +500,28 @@ pub fn connect(port: u16, deadline: Instant) -> io::Result<TcpStream> {
     TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), wait)
 }
 
-/// Writes all of `bytes` before `deadline`.
+/// Writes all of `bytes` before `deadline`. Each write waits only for what
+/// is left of it, so a reader that keeps taking a little cannot stretch it.
 pub fn send(stream: &mut TcpStream, bytes: &[u8], deadline: Instant) -> io::Result<()> {
     step("write the request");
-    let wait = left(deadline).ok_or(io::ErrorKind::TimedOut)?;
-    stream.set_write_timeout(Some(wait))?;
-    stream.write_all(bytes)
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let wait = left(deadline).ok_or(io::ErrorKind::TimedOut)?;
+        stream.set_write_timeout(Some(wait))?;
+        match stream.write(rest) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(n) => rest = &rest[n..],
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 /// Why a framed response could not be read.
