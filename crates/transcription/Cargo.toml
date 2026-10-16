@@ -29,9 +29,10 @@ engine = ["dep:transcribe-cpp", "opus"]
 # The default `engine` build stays a single static portable binary.
 cpu-variants = ["engine", "transcribe-cpp/dynamic-backends"]
 # Experimental (P14): `cpu-variants` plus one loadable ggml Vulkan module,
-# scanned from `gpu/vulkan/` next to the executable. Only x86-64 Windows gets
-# the native Vulkan build (the target-scoped dependency below); elsewhere the
-# feature builds plain `cpu-variants`.
+# scanned from `gpu/vulkan/` next to the executable. Only x86-64 Windows and
+# x86-64 Linux with glibc get the native Vulkan build (the target-scoped
+# dependency below); elsewhere, musl included, the feature builds plain
+# `cpu-variants`.
 vulkan = ["cpu-variants", "dep:transcribe-cpp-sys"]
 
 [dependencies]
@@ -59,9 +60,10 @@ url = "2"
 webm-iterable = { version = "=0.7.1", default-features = false, optional = true }
 
 # The pinned engine's native crate, named only so the `vulkan` feature can
-# turn on its Vulkan build for this target alone (`transcribe-cpp/vulkan` does
-# nothing but forward to it). Cargo unifies it with the engine's own copy.
-[target.'cfg(all(windows, target_arch = "x86_64"))'.dependencies]
+# turn on its Vulkan build for these targets alone (`transcribe-cpp/vulkan`
+# does nothing but forward to it). Cargo unifies it with the engine's own
+# copy. Keep this condition in step with `vulkan_target` in build.rs.
+[target.'cfg(all(target_arch = "x86_64", any(windows, all(target_os = "linux", target_env = "gnu"))))'.dependencies]
 transcribe-cpp-sys = { version = "=0.3.1", optional = true, default-features = false, features = ["vulkan"] }
 
 [dev-dependencies]

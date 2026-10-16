@@ -510,11 +510,12 @@ pub mod cpp {
     /// written at runtime, so a read-only install directory works. The plain
     /// `x64` module is the portable floor when nothing better is safe.
     ///
-    /// With the `vulkan` build (x86-64 Windows, experimental) the optional
-    /// GPU module sits alone in `<exe dir>/gpu/vulkan/` and is scanned after
-    /// the CPU module, with the same backend mask (D2 of
-    /// p14.1-windows-vulkan). It is scanned only when the backend mode allows
-    /// a GPU (`auto`, `gpu`); in `cpu` mode it is neither checked nor loaded.
+    /// With the `vulkan` build (x86-64 Windows and x86-64 Linux with glibc,
+    /// experimental) the optional GPU module sits alone in
+    /// `<exe dir>/gpu/vulkan/` and is scanned after the CPU module, with the
+    /// same backend mask (D2 of p14.1-windows-vulkan). It is scanned only
+    /// when the backend mode allows a GPU (`auto`, `gpu`); in `cpu` mode it
+    /// is neither checked nor loaded.
     #[cfg(pumice_dynamic_backends)]
     mod dynamic_backends {
         use crate::bundle::{BundleError, Expected, Manifest};
@@ -858,9 +859,11 @@ pub mod cpp {
             false
         }
 
-        /// The rebuild hint for this target's staging script.
+        /// The rebuild hint for this build's staging script.
         const STAGER_HINT: &str = if cfg!(windows) {
             "rebuild the bundle with crates/transcription/scripts/build-windows-vulkan.ps1"
+        } else if cfg!(pumice_vulkan) {
+            "rebuild the bundle with crates/transcription/scripts/build-linux-vulkan.sh"
         } else {
             "rebuild the staged folder with crates/transcription/scripts/build-cpu-variants.sh"
         };
@@ -994,7 +997,7 @@ pub mod cpp {
         }
 
         /// The staged Vulkan module: `<exe dir>/gpu/vulkan/ggml-vulkan.dll`
-        /// (`libggml-vulkan.so` on Linux, for the later Linux bundle).
+        /// on Windows, `<exe dir>/gpu/vulkan/libggml-vulkan.so` on Linux.
         fn gpu_module_file(exe_dir: &Path) -> PathBuf {
             let file = if cfg!(windows) {
                 "ggml-vulkan.dll"
@@ -1037,10 +1040,12 @@ pub mod cpp {
             }
         }
 
-        /// Whether this target's bundles must carry a `bundle.json`. Only
-        /// the Windows stager writes one so far; the Linux stage is checked
-        /// only when it has one.
-        const MANIFEST_REQUIRED: bool = cfg!(windows);
+        /// Whether this build's bundles must carry a `bundle.json`: every
+        /// Windows bundle and every build with a GPU module, whose stagers
+        /// always write one. The plain Linux `cpu-variants` stage has none
+        /// (`build-cpu-variants.sh` writes no manifest), so there it is
+        /// checked only when present and existing staged folders keep working.
+        const MANIFEST_REQUIRED: bool = cfg!(windows) || cfg!(pumice_vulkan);
 
         /// What startup checked against `bundle.json`.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
