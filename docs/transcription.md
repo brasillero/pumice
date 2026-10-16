@@ -346,7 +346,7 @@ and reports what the virtual machine's Metal device does; it cannot measure
 real Metal.
 
 Build it yourself (an Apple Silicon Mac with the Xcode command line tools,
-CMake, `jq` and bash 4 or newer, for example from Homebrew; build time only):
+CMake and `jq`; build time only):
 
 ```bash
 crates/transcription/scripts/build-macos-metal.sh

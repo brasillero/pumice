@@ -1142,15 +1142,19 @@ jobs:
       - name: Write the test helpers
         run: |
           cat > "$RUNNER_TEMP/metal-checks.sh" <<'SH'
+          # The runner's bash is macOS's 3.2 (no $EPOCHREALTIME).
+          now_ms() {
+            perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'
+          }
           # backends LABEL MODE [EXE]: runs `backends --backend MODE --json`,
           # shows its stderr and checks what every successful run must report.
           backends() {
             local label="$1" mode="$2" exe="${3:-$STAGE/pumice-transcribe}"
             local out="$RUNNER_TEMP/backends-$label.json" err="$RUNNER_TEMP/backends-$label.err"
-            local code=0 started="$EPOCHREALTIME"
+            local code=0 started
+            started="$(now_ms)"
             "$exe" backends --backend "$mode" --json > "$out" 2> "$err" || code=$?
-            local ms
-            ms="$(awk -v a="$started" -v b="$EPOCHREALTIME" 'BEGIN { printf "%d", (b - a) * 1000 }')"
+            local ms=$(( $(now_ms) - started ))
             sed "s/^/  [$label] /" "$err"
             echo "  [$label] $(cat "$out") (${ms} ms)"
             echo "$ms" > "$RUNNER_TEMP/backends-$label.ms"

@@ -55,15 +55,12 @@
 # copy or the OS.
 #
 # Build-time needs: Xcode command line tools (Apple clang, the macOS SDK,
-# otool, install_name_tool, codesign), CMake, jq and bash 4 or newer (CI:
-# GitHub's macOS image). End users need macOS 11 or newer on Apple Silicon.
+# otool, install_name_tool, codesign), CMake and jq (CI: GitHub's macOS
+# image). It runs on macOS's own bash 3.2: no mapfile, and every possibly
+# empty array is expanded as ${a[@]+"${a[@]}"}. End users need macOS 11 or
+# newer on Apple Silicon.
 set -euo pipefail
 shopt -s nullglob
-
-if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
-    echo "error: $0 needs bash 4 or newer (this is bash $BASH_VERSION)" >&2
-    exit 1
-fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../../.." && pwd)"
@@ -89,6 +86,16 @@ contains() {
         [ "$item" = "$needle" ] && return 0
     done
     return 1
+}
+
+# read_lines NAME: reads stdin into the array NAME, one element per line
+# (bash 3.2 has no mapfile).
+read_lines() {
+    local read_lines_line
+    eval "$1=()"
+    while IFS= read -r read_lines_line; do
+        eval "$1+=(\"\$read_lines_line\")"
+    done
 }
 
 # macho_info FILE
@@ -386,7 +393,7 @@ for module in "$cpu_module" "$gpu_module"; do
 done
 
 # Staged layout and sizes.
-mapfile -t files < <(cd "$stage_dir" && find . -type f | sed 's|^\./||' | LC_ALL=C sort)
+read_lines files < <(cd "$stage_dir" && find . -type f | sed 's|^\./||' | LC_ALL=C sort)
 total=0
 echo "staged $stage_dir:"
 for rel in "${files[@]}"; do
@@ -449,32 +456,36 @@ echo "wrote bundle.json: pumice-transcribe $product_version ($triple), transcrib
     "$engine_version, ${#files[@]} files"
 
 # Mach-O audit with otool against the rules above.
-failures=()
+failures=""
 echo "Mach-O audit (otool -l, lipo, codesign):"
 for rel in "${files[@]}"; do
     path="$stage_dir/$rel"
     info="$(macho_info "$path")"
-    mapfile -t deps < <(sed -n 's/^dep //p' <<< "$info")
-    mapfile -t rpaths < <(sed -n 's/^rpath //p' <<< "$info")
-    mapfile -t minos < <(sed -n 's/^minos //p' <<< "$info")
+    read_lines deps < <(sed -n 's/^dep //p' <<< "$info")
+    read_lines rpaths < <(sed -n 's/^rpath //p' <<< "$info")
+    read_lines minos < <(sed -n 's/^minos //p' <<< "$info")
     id="$(sed -n 's/^id //p' <<< "$info")"
     sdk="$(sed -n 's/^sdk //p' <<< "$info" | xargs)"
     archs="$(lipo -archs "$path")"
     signature="$(codesign -dv "$path" 2>&1 | sed -n 's/^CodeDirectory .*flags=0x[0-9a-f]*(\([^)]*\)).*/\1/p')"
-    echo "  $rel: arch $archs; minos ${minos[*]:-none}, sdk ${sdk:-none}; rpath [${rpaths[*]:-}];" \
-        "signature [${signature:-none}]"
-    printf '    %s\n' "${deps[@]}"
-    mapfile -t -O "${#failures[@]}" failures < <(
+    echo "  $rel: arch $archs; minos ${minos[*]+"${minos[*]}"}, sdk ${sdk:-none};" \
+        "rpath [${rpaths[*]+"${rpaths[*]}"}]; signature [${signature:-none}]"
+    for dep in ${deps[@]+"${deps[@]}"}; do
+        echo "    $dep"
+    done
+    while IFS= read -r failure; do
+        failures="$failures$failure"$'\n'
+    done < <(
         [ "$archs" = arm64 ] || echo "$rel has architectures [$archs]; expected [arm64]"
-        dep_failures "$rel" "${deps[@]}"
-        rpath_failures "$rel" "${rpaths[@]}"
+        dep_failures "$rel" ${deps[@]+"${deps[@]}"}
+        rpath_failures "$rel" ${rpaths[@]+"${rpaths[@]}"}
         id_failures "$rel" "$id"
-        minos_failures "$rel" "${minos[@]}"
+        minos_failures "$rel" ${minos[@]+"${minos[@]}"}
         codesign --verify --strict "$path" 2> /dev/null || echo "$rel has no valid code signature"
     )
 done
-if [ "${#failures[@]}" -gt 0 ]; then
-    printf 'error: %s\n' "${failures[@]}" >&2
+if [ -n "$failures" ]; then
+    printf '%s' "$failures" | sed 's/^/error: /' >&2
     echo "error: Mach-O audit failed" >&2
     exit 1
 fi
@@ -495,24 +506,24 @@ if ! (cd /tmp && DYLD_PRINT_LIBRARIES=1 "$moved/pumice-transcribe" backends --ba
     exit 1
 fi
 jq -c .result "$target_dir/relocation-backends.json" | sed 's/^/  backends: /'
-mapfile -t images < <(sed -n 's/^dyld\[[0-9]*\]: //p' "$loaded" | sort -u)
+read_lines images < <(sed -n 's/^dyld\[[0-9]*\]: //p' "$loaded" | sort -u)
 echo "images dyld loaded (relocated, backend auto): ${#images[@]}"
-outside=()
-for image in "${images[@]}"; do
+outside=""
+for image in ${images[@]+"${images[@]}"}; do
     case "$image" in
         "$moved"/*) echo "  bundle: ${image#"$moved"/}" ;;
         /usr/lib/* | /System/*) ;;
-        *) outside+=("$image") ;;
+        *) outside="$outside  $image"$'\n' ;;
     esac
 done
 for rel in "${core_libs[@]}" "$cpu_module" "$gpu_module"; do
-    if ! contains "$moved/$rel" "${images[@]}"; then
+    if ! contains "$moved/$rel" ${images[@]+"${images[@]}"}; then
         echo "error: $rel was not loaded from the relocated bundle" >&2
         exit 1
     fi
 done
-if [ "${#outside[@]}" -gt 0 ]; then
-    printf 'error: loaded from outside the bundle and the OS: %s\n' "${outside[@]}" >&2
+if [ -n "$outside" ]; then
+    printf 'error: loaded from outside the bundle and the OS:\n%s' "$outside" >&2
     exit 1
 fi
 rm -rf "$moved"
