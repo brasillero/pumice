@@ -1,11 +1,11 @@
 ---
 title: Windows: a child spawned during a hard kill must not pin the caller's pipes
-state: In progress
+state: Done
 ticket: —
 branch: fix-windows-spawn-race
 mr: —
 start: 2026-10-16
-end: —
+end: 2026-10-16
 ---
 
-Fixes `chore-cleanup-test-bounds#1` per `chore-cleanup-test-bounds/D4`. On Windows, process-wrap creates a child suspended, assigns it to the Job Object and then resumes it; a hard kill of the parent in between leaves the child suspended outside any job, holding every inheritable handle, including the parent's own stdout and stderr, so whoever reads them waits forever (two Windows CI hangs). This PR makes the process's standard handles non-inheritable at startup on Windows, so such an orphan can no longer pin the caller's pipes, and drafts an upstream report for the owner. Implementation by a Claude Opus 5.5 subagent, review by Codex, final review by the orchestrator.
+Fixed `chore-cleanup-test-bounds#1` per `chore-cleanup-test-bounds/D4`. On Windows, `pumice` and `pumice-relay` now clear `HANDLE_FLAG_INHERIT` on their standard handles first thing in `main` (`pumice_relay::process::make_std_handles_non_inheritable`), so a child orphaned in process-wrap's suspend–assign–resume window can no longer pin the caller's stdout/stderr. `Stdio::inherit()` still works for `pumice transcribe` because std duplicates the handle as inheritable for the child; sockets, log and temp files and the parent ends of child pipes were already non-inheritable. A Windows test kills `pumice` while its child lives and requires the pipes to reach end of file; with the fix disabled it failed on CI (run 38881909906), with it all platforms pass (run 38882661354). The orphan itself can still remain until reboot; only process-wrap can remove it, and a draft upstream report is in `reports/2026-10-16-process-wrap-upstream-report.md` for the owner to file. Implemented by a Claude Opus 5.5 subagent; one Codex review round (approve with two P3: report wording, fixed by the orchestrator, and a test cleanup race, #1); final review by the orchestrator.
