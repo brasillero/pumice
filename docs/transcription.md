@@ -55,9 +55,9 @@ Windows notes.
 
 ## Faster CPU builds (runtime CPU variants)
 
-Linux x86-64 only, opt-in. The default build above is a single static binary
-with a portable x86-64 baseline; on modern CPUs it leaves a lot of transcription
-speed unused. The `cpu-variants` Cargo feature instead links the engine as
+Linux x86-64, opt-in (x86-64 Windows: see the Vulkan preview below). The
+default build above is a single static binary with a portable x86-64 baseline;
+on modern CPUs it leaves a lot of transcription speed unused. The `cpu-variants` Cargo feature instead links the engine as
 shared libraries plus one ggml CPU module per x86 ISA tier (14 modules from
 baseline `x64` up to `sapphirerapids`). At startup the binary picks the
 fastest module the running CPU **and OS** can actually execute, using Rust's
@@ -93,12 +93,54 @@ script uses its own `CARGO_TARGET_DIR` and overrides the conservative
 `TRANSCRIBE_CMAKE_ARGS` from `.cargo/config.toml`, so nothing in the portable
 build changes. (The one visible addition to ordinary `engine` builds from
 this work is the `backend` field in `file --json` and the startup backend
-line; the binary stays a single static portable executable.) Windows and
-macOS builds are unchanged (the feature is off by default and its runtime
-wiring is Linux x86-64-only; other architectures have no module mapping).
+line; the binary stays a single static portable executable.) macOS builds
+are unchanged (the feature is off by default; other architectures have no
+module mapping). On x86-64 Windows the same mechanism loads
+`cpu/<variant>/ggml-cpu-<variant>.dll` from the nine variants an MSVC build
+produces; it is only built as part of the Vulkan preview below.
 
 Measurements for both builds on server-1 and the details of the mechanism are
 in [`docs/research/P7-cpu-variants.md`](../docs/research/P7-cpu-variants.md).
+
+## Windows Vulkan preview (experimental)
+
+**Not a release.** A preview of GPU transcription on Windows x64, for checking
+on real hardware. CI builds it in the `Transcription engine` workflow and
+uploads it as the short-lived artifact
+`pumice-transcribe-windows-x64-vulkan-preview`; no release ships it.
+
+The artifact is one folder; keep it together:
+
+```text
+pumice-transcribe.exe
+transcribe.dll, ggml.dll, ggml-base.dll   engine core, beside the exe
+cpu/<variant>/ggml-cpu-<variant>.dll      runtime CPU variants (9)
+gpu/vulkan/ggml-vulkan.dll                optional Vulkan module
+```
+
+Prerequisites: a GPU driver with Vulkan support (it provides `vulkan-1.dll`).
+Nothing else: no Vulkan SDK, Visual C++ runtime, Rust or build tools. CI
+checks that every file uses the static C runtime and that only
+`gpu/vulkan/ggml-vulkan.dll` imports Vulkan, so the CPU path also starts on a
+machine without a Vulkan driver.
+
+At startup the CPU variant is chosen as described above, then `gpu/vulkan/` is
+scanned with the backend mask fixed to CPU and Vulkan (plugins named by
+`GGML_BACKEND_PATH` are never loaded). In this preview the model still runs on
+the CPU: choosing the GPU (`backend: cpu|auto|gpu`) and reporting the device
+in use come in the next step, together with the full checking procedure. For
+CI only, `PUMICE_TRANSCRIBE_SKIP_GPU_DIR=1` keeps `gpu/vulkan/` unscanned, and
+the hidden `pumice-transcribe debug-backends` command prints what registered
+without loading a model; both are temporary and go away with the backend
+setting.
+
+Build it yourself (Windows, Visual Studio 2022 C++ tools and the Vulkan SDK
+1.4.350.0 at build time only):
+
+```powershell
+pwsh crates/transcription/scripts/build-windows-vulkan.ps1
+# result: target\windows-vulkan\stage\
+```
 
 ## Getting models
 
