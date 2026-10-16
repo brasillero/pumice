@@ -138,8 +138,11 @@ if (-not $TargetDir) {
     $TargetDir = Join-Path $repoRoot 'target\windows-vulkan'
 }
 $triple = 'x86_64-pc-windows-msvc'
-$stageDir = Join-Path $TargetDir 'stage'
 New-Item -ItemType Directory -Force -Path $TargetDir | Out-Null
+# Absolute from here on: staged files are named by cutting this prefix off
+# their full paths, and cargo resolves a relative CARGO_TARGET_DIR elsewhere.
+$TargetDir = (Resolve-Path -LiteralPath $TargetDir).Path
+$stageDir = Join-Path $TargetDir 'stage'
 
 # The MSVC variant set (engine.rs MSVC_BUILT): ggml's x86 table minus the
 # entries it skips under MSVC. A different set means the engine changed and
