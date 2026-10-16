@@ -1,0 +1,12 @@
+# P14.3 design (Codex, 2026-10-16, read-only at 781cad1) — condensed
+
+- Published 0.2.0: @brasillero/pumice (launcher, Node>=22, exact-version optionalDependencies) + pumice-{win32-x64,linux-x64,darwin-arm64,darwin-x64}; natives hold only bin/pumice, LICENSE; ~1.6–2 MB tarballs; no libc field; no provenance attestations. Owner publishes by hand (pnpm, browser 2FA), natives first then front.
+- Launcher scripts/npm/bin/pumice.js resolves native pkg by platform/arch, spawns bin/pumice. Packer scripts/package_npm.py (generates manifests, extracts one exe). release.yml = preview only (PR/manual), contents: read, loopback npm registry fixture (scripts/npm_registry_fixture.py drops `libc` field).
+- `pumice` finds `pumice-transcribe` only as a sibling of its canonicalized exe (src/dispatch.rs:160,222) → put the whole transcription stage into each native package's `bin/` next to `pumice`; no Rust change needed.
+- Proposal: win32-x64 full (9 CPU variants + Vulkan); linux-x64 full GNU bundle with libc:["glibc"] (glibc>=2.35); darwin-arm64 = P14.4 bundle; darwin-x64 CPU-only (needs a CPU payload lane, not wired today); musl = new -musl pkg or core-only (owner); linux arm64 deferred. Omit pumice-relay. GPU modules included by default (one package per platform).
+- Sizes (run 38958050330): Windows 21.9 MB zipped / 63.2 MB unpacked (Vulkan DLL 42.9 MB); Linux 24.2 MB / 69.8 MB (Vulkan .so 43.3 MB). Budget 50 MB compressed / 150 MB unpacked per package. npmjs hard limit UNVERIFIED.
+- npm drops symlinks — Linux stage already ships regular files under SONAME names. Keep 0755/0644, verify exec bits after install. macOS quarantine for npm installs UNVERIFIED; no auto xattr stripping.
+- Notices: add transcription/native deps (transcribe-cpp MIT, opus BSD-3, symphonia MPL-2.0); full inventory needed.
+- CI: build all bundles at the same SHA as the core (reusable jobs), no "latest artifact" assembly; npm pack + global install into temp prefix via loopback registry on each OS; smoke `pumice --version`, `pumice transcribe --version`, `backends --json` cpu|auto; npx; missing optional dep; size report. No publishing in CI; trusted publishing/OIDC is a later owner-approved option.
+- PR split: A packer/payload contract (250–400 lines); B libc manifests + launcher (150–250); C release assembly + install smoke (250–400); D remaining CPU targets (macOS Intel, musl); E release prep.
+- Gates: Windows real-GPU check (p14.2#1), no-loader VM (p14.1#2), real-Metal (p14.4#1).
