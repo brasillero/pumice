@@ -87,9 +87,45 @@ jobs:
           assert data.get("ok") is True, data
           assert data["result"]["language"] == "pt", data
           assert data["result"]["text"], data
-          print(sys.argv[2] + " smoke ok")
+          compute = data["result"]["compute"]
+          assert compute["requested"] == "cpu" and compute["backend"] == "cpu", data
+          assert compute["cpu_variant"] is None and compute["fallback_reason"] is None, data
+          assert compute["device"]["name"], data
+          print(sys.argv[2] + " smoke ok: " + json.dumps(compute))
           PY
           done
+
+      - name: Backend policy without a GPU build (static engine)
+        run: |
+          bin="target/release/pumice-transcribe"
+          model="$MODEL_DIR/whisper-tiny-Q8_0.gguf"
+          audio=crates/transcription/tests/fixtures/sample-pt.wav
+          "$bin" file "$audio" --model-file "$model" --backend auto --json > "$RUNNER_TEMP/auto.json"
+          set +e
+          "$bin" file "$audio" --model-file "$model" --backend gpu --json > "$RUNNER_TEMP/gpu.json"
+          code=$?
+          set -e
+          test "$code" -eq 1
+          "$bin" backends --backend auto --json > "$RUNNER_TEMP/backends.json"
+          python3 - "$RUNNER_TEMP" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          tmp = pathlib.Path(sys.argv[1])
+          auto = json.loads((tmp / "auto.json").read_text())
+          assert auto["ok"] is True, auto
+          compute = auto["result"]["compute"]
+          assert compute["requested"] == "auto" and compute["backend"] == "cpu", auto
+          assert compute["fallback_reason"] == "gpu_not_built", auto
+          gpu = json.loads((tmp / "gpu.json").read_text())
+          assert gpu["ok"] is False and gpu["error"]["code"] == "gpu_unavailable", gpu
+          assert "backend: cpu" in gpu["error"]["message"], gpu
+          backends = json.loads((tmp / "backends.json").read_text())["result"]
+          assert backends["gpu_module"] == "not_built", backends
+          assert backends["fallback_reason"] == "gpu_not_built", backends
+          print("backend policy ok")
+          PY
 
   transcription-cpu-variants:
     name: Transcription runtime CPU variants (Linux)
@@ -162,9 +198,24 @@ jobs:
           assert data.get("ok") is True, data
           assert data["result"]["language"] == "pt", data
           assert data["result"]["text"], data
-          assert data["result"]["backend"].startswith("CPU"), data
-          print("smoke ok")
+          compute = data["result"]["compute"]
+          assert compute["requested"] == "cpu" and compute["backend"] == "cpu", data
+          assert compute["cpu_variant"], data
+          assert compute["fallback_reason"] is None, data
+          print("smoke ok: " + json.dumps(compute))
           PY
+          # No GPU module in the Linux build: auto runs on the CPU and says
+          # why; gpu refuses with the fixed error.
+          "$bin" file crates/transcription/tests/fixtures/sample-pt.wav \
+            --model-file "$MODEL_DIR/whisper-tiny-Q8_0.gguf" --backend auto --json > "$out_file"
+          python3 -c 'import json,sys; c=json.load(open(sys.argv[1]))["result"]["compute"]; assert c["backend"]=="cpu" and c["fallback_reason"]=="gpu_not_built", c; print("auto ok")' "$out_file"
+          set +e
+          "$bin" file crates/transcription/tests/fixtures/sample-pt.wav \
+            --model-file "$MODEL_DIR/whisper-tiny-Q8_0.gguf" --backend gpu --json > "$out_file"
+          code=$?
+          set -e
+          test "$code" -eq 1
+          python3 -c 'import json,sys; e=json.load(open(sys.argv[1]))["error"]; assert e["code"]=="gpu_unavailable", e; print("gpu refused ok")' "$out_file"
           chmod -R u+w target/cpu-variants/stage
 
   transcription-windows-vulkan:
@@ -295,21 +346,23 @@ jobs:
           $lines | Add-Content -Path $env:GITHUB_STEP_SUMMARY
           $lines | ForEach-Object { Write-Host $_ }
 
-      - name: Backend registration without a model (GPU dir excluded and included)
+      - name: Backend registration without a model (backend cpu, auto and gpu)
         run: |
           # Runs from another cwd, so nothing resolves from the checkout.
           Set-Location $env:RUNNER_TEMP
           $exe = Join-Path $env:STAGE 'pumice-transcribe.exe'
-          function Invoke-Backends([string]$label) {
+          function Invoke-Backends([string]$label, [string]$mode) {
             # Native stderr (the loader's status lines) is expected output.
             $ErrorActionPreference = 'Continue'
-            $out = & $exe debug-backends 2>&1
+            $out = & $exe backends --backend $mode --json 2>&1
             $code = $LASTEXITCODE
             $ErrorActionPreference = 'Stop'
             $out | ForEach-Object { Write-Host "  [$label] $_" }
             if ($code -ne 0) { throw "$label exited with $code" }
             $json = ($out | Where-Object { "$_".StartsWith('{') } | Select-Object -Last 1)
             $report = ("$json" | ConvertFrom-Json).result
+            if ($report.requested -ne $mode) { throw "${label}: requested=$($report.requested)" }
+            if ($report.gpu_build -ne 'vulkan') { throw "${label}: gpu_build=$($report.gpu_build)" }
             $cpu = @($report.devices | Where-Object { $_.kind -eq 'cpu' })
             if ($cpu.Count -ne 1) { throw "$label registered $($cpu.Count) CPU devices" }
             if (-not $report.cpu_variant) { throw "$label reported no CPU variant" }
@@ -317,28 +370,37 @@ jobs:
             return $report
           }
 
-          $env:PUMICE_TRANSCRIBE_SKIP_GPU_DIR = '1'
-          $excluded = Invoke-Backends 'excluded'
-          Remove-Item Env:PUMICE_TRANSCRIBE_SKIP_GPU_DIR
-          if ($excluded.gpu_dir -ne 'skipped') { throw "excluded: gpu_dir=$($excluded.gpu_dir)" }
-          if ($null -ne $excluded.vulkan_devices) { throw "excluded: vulkan_devices=$($excluded.vulkan_devices)" }
-          if (($excluded.allowed_backends -join ',') -ne 'cpu') { throw "excluded: mask $($excluded.allowed_backends -join ',')" }
-          if (@($excluded.devices | Where-Object { $_.kind -ne 'cpu' }).Count -ne 0) { throw 'excluded: non-CPU device registered' }
+          # backend cpu: the GPU module is not even looked at.
+          $cpuMode = Invoke-Backends 'cpu' 'cpu'
+          if ($cpuMode.gpu_module -ne 'not_requested') { throw "cpu: gpu_module=$($cpuMode.gpu_module)" }
+          if ($cpuMode.gpu_devices -ne 0) { throw "cpu: gpu_devices=$($cpuMode.gpu_devices)" }
+          if (($cpuMode.allowed_backends -join ',') -ne 'cpu') { throw "cpu: mask $($cpuMode.allowed_backends -join ',')" }
+          if (@($cpuMode.devices | Where-Object { $_.kind -ne 'cpu' }).Count -ne 0) { throw 'cpu: non-CPU device registered' }
+          if ($null -ne $cpuMode.fallback_reason) { throw "cpu: fallback_reason=$($cpuMode.fallback_reason)" }
 
-          $included = Invoke-Backends 'included'
-          if ($included.gpu_dir -ne 'scanned') { throw "included: gpu_dir=$($included.gpu_dir)" }
-          if (($included.allowed_backends -join ',') -ne 'cpu,vulkan') { throw "included: mask $($included.allowed_backends -join ',')" }
-          if ($included.cpu_variant -ne $excluded.cpu_variant) { throw 'CPU variant differs between runs' }
-          $vulkan = @($included.devices | Where-Object { $_.kind -eq 'vulkan' }).Count
-          if ($included.vulkan_devices -ne $vulkan) { throw "included: vulkan_devices=$($included.vulkan_devices), devices list $vulkan" }
-          Write-Host "included: $vulkan Vulkan device(s) on this runner"
+          # backend auto: scanned with the CPU|VULKAN mask. The hosted
+          # runner has no GPU, so auto plans the CPU with a reason.
+          $auto = Invoke-Backends 'auto' 'auto'
+          if ($auto.gpu_module -ne 'scanned') { throw "auto: gpu_module=$($auto.gpu_module)" }
+          if (($auto.allowed_backends -join ',') -ne 'cpu,vulkan') { throw "auto: mask $($auto.allowed_backends -join ',')" }
+          if ($auto.cpu_variant -ne $cpuMode.cpu_variant) { throw 'CPU variant differs between modes' }
+          $vulkan = @($auto.devices | Where-Object { $_.kind -eq 'vulkan' }).Count
+          if ($auto.gpu_devices -ne $vulkan) { throw "auto: gpu_devices=$($auto.gpu_devices), devices list $vulkan" }
+          if ($vulkan -ne 0) { throw "auto: $vulkan Vulkan device(s) on a runner without a GPU" }
+          if ($auto.fallback_reason -ne 'gpu_unavailable') { throw "auto: fallback_reason=$($auto.fallback_reason)" }
+
+          # backend gpu registers the same way; the model load is what refuses.
+          $gpu = Invoke-Backends 'gpu' 'gpu'
+          if ($gpu.gpu_module -ne 'scanned' -or $gpu.gpu_devices -ne 0) { throw "gpu: gpu_module=$($gpu.gpu_module) gpu_devices=$($gpu.gpu_devices)" }
+          if ($null -ne $gpu.fallback_reason) { throw "gpu: fallback_reason=$($gpu.fallback_reason)" }
 
           # GGML_BACKEND_PATH plugins stay out: the mask has no OTHER bit. A
           # second, different CPU module would register a second CPU device.
           $plugin = Get-ChildItem -Path (Join-Path $env:STAGE 'cpu') -Recurse -Filter 'ggml-cpu-*.dll' |
-            Where-Object { $_.Directory.Name -ne $included.cpu_variant } | Select-Object -First 1
+            Where-Object { $_.Directory.Name -ne $auto.cpu_variant } | Select-Object -First 1
           $env:GGML_BACKEND_PATH = $plugin.FullName
-          $null = Invoke-Backends 'external-plugin'
+          $null = Invoke-Backends 'external-plugin-cpu' 'cpu'
+          $null = Invoke-Backends 'external-plugin-auto' 'auto'
           Remove-Item Env:GGML_BACKEND_PATH
 
           # Informational: the same run without the Vulkan SDK on PATH, which
@@ -348,17 +410,17 @@ jobs:
           Write-Host "System32\vulkan-1.dll present: $system"
           $savedPath = $env:PATH
           $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -and $_ -notlike "$env:VULKAN_SDK*" -and $_ -notlike '*VULKAN_SDK*' }) -join ';'
-          $noSdk = Invoke-Backends 'no-sdk-path'
+          $noSdk = Invoke-Backends 'no-sdk-path' 'auto'
           $env:PATH = $savedPath
-          Write-Host "no-sdk-path: $(@($noSdk.devices | Where-Object { $_.kind -eq 'vulkan' }).Count) Vulkan device(s)"
+          Write-Host "no-sdk-path: $($noSdk.gpu_devices) Vulkan device(s)"
 
           # A relocated bundle under a path with spaces and non-ASCII
           # characters loads the same way.
           $moved = Join-Path $env:RUNNER_TEMP 'pumice bundle ç'
           Copy-Item -Recurse -Path $env:STAGE -Destination $moved
           $exe = Join-Path $moved 'pumice-transcribe.exe'
-          $relocated = Invoke-Backends 'relocated'
-          if ($relocated.gpu_dir -ne 'scanned') { throw "relocated: gpu_dir=$($relocated.gpu_dir)" }
+          $relocated = Invoke-Backends 'relocated' 'auto'
+          if ($relocated.gpu_module -ne 'scanned') { throw "relocated: gpu_module=$($relocated.gpu_module)" }
           Remove-Item -Recurse -Force -Path $moved
 
       - name: Bundle manifest checks (damaged, unlisted, missing)
@@ -368,12 +430,12 @@ jobs:
           # a CPU fallback; only an absent GPU module falls back.
           Set-Location $env:RUNNER_TEMP
           $copy = Join-Path $env:RUNNER_TEMP 'pumice bundle check'
-          function Invoke-Case([string]$label, [scriptblock]$damage, [string]$expect) {
+          function Invoke-Case([string]$label, [scriptblock]$damage, [string]$expect, [string]$mode = 'auto') {
             if (Test-Path $copy) { Remove-Item -Recurse -Force -Path $copy }
             Copy-Item -Recurse -Path $env:STAGE -Destination $copy
             & $damage
             $ErrorActionPreference = 'Continue'
-            $out = & (Join-Path $copy 'pumice-transcribe.exe') debug-backends 2>&1
+            $out = & (Join-Path $copy 'pumice-transcribe.exe') backends --backend $mode --json 2>&1
             $code = $LASTEXITCODE
             $ErrorActionPreference = 'Stop'
             $out | ForEach-Object { Write-Host "  [$label] $_" }
@@ -420,21 +482,27 @@ jobs:
           $null = Invoke-Case 'missing-manifest' {
             Remove-Item -Path (Join-Path $copy 'bundle.json')
           } 'bundle.json is missing'
-          # The skip switch never loads the GPU module, so it is not checked.
-          $env:PUMICE_TRANSCRIBE_SKIP_GPU_DIR = '1'
-          $skipped = Invoke-Case 'corrupt-gpu-module-skipped' {
+          # backend gpu checks the GPU module exactly like auto.
+          $null = Invoke-Case 'corrupt-gpu-module-gpu-mode' {
             $path = & $vulkanDll
             $bytes = [System.IO.File]::ReadAllBytes($path)
             $bytes[0] = $bytes[0] -bxor 0xff
             [System.IO.File]::WriteAllBytes($path, $bytes)
-          } $null
-          Remove-Item Env:PUMICE_TRANSCRIBE_SKIP_GPU_DIR
-          if ($skipped.gpu_dir -ne 'skipped') { throw "corrupt-gpu-module-skipped: gpu_dir=$($skipped.gpu_dir)" }
-          # Without the optional GPU module: CPU, still verified.
+          } 'gpu/vulkan/ggml-vulkan.dll does not match its SHA-256' 'gpu'
+          # backend cpu never loads the GPU module, so it is not checked.
+          $cpuMode = Invoke-Case 'corrupt-gpu-module-cpu-mode' {
+            $path = & $vulkanDll
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            $bytes[0] = $bytes[0] -bxor 0xff
+            [System.IO.File]::WriteAllBytes($path, $bytes)
+          } $null 'cpu'
+          if ($cpuMode.gpu_module -ne 'not_requested') { throw "corrupt-gpu-module-cpu-mode: gpu_module=$($cpuMode.gpu_module)" }
+          # Without the optional GPU module: auto plans the CPU, still verified.
           $absent = Invoke-Case 'absent-gpu-module' {
             Remove-Item -Recurse -Force -Path (Join-Path $copy 'gpu')
           } $null
-          if ($absent.gpu_dir -ne 'absent' -or $absent.bundle -ne 'verified') { throw "absent-gpu-module: gpu_dir=$($absent.gpu_dir) bundle=$($absent.bundle)" }
+          if ($absent.gpu_module -ne 'absent' -or $absent.bundle -ne 'verified') { throw "absent-gpu-module: gpu_module=$($absent.gpu_module) bundle=$($absent.bundle)" }
+          if ($absent.fallback_reason -ne 'gpu_module_absent') { throw "absent-gpu-module: fallback_reason=$($absent.fallback_reason)" }
           Remove-Item -Recurse -Force -Path $copy
 
       - name: Cache Whisper tiny Q8_0 model
@@ -454,30 +522,49 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 -Path $model).Hash.ToLowerInvariant()
           if ($hash -ne $env:MODEL_SHA256) { throw "model SHA-256 mismatch: got $hash" }
 
-      - name: Smoke test the staged bundle on CPU with tiny model
+      - name: Smoke test the staged bundle with tiny model (backend cpu, auto, gpu)
         run: |
           Set-Location $env:RUNNER_TEMP
           $exe = Join-Path $env:STAGE 'pumice-transcribe.exe'
           $model = Join-Path $env:MODEL_DIR 'whisper-tiny-Q8_0.gguf'
           $fixtures = Join-Path $env:GITHUB_WORKSPACE 'crates\transcription\tests\fixtures'
+          # The hosted runner has no GPU: auto runs on the CPU and says why.
           $runs = @(
-            @{ fixture = 'sample-pt.wav'; skip = $false },
-            @{ fixture = 'chrome-mediarecorder.webm'; skip = $false },
-            @{ fixture = 'sample-pt.wav'; skip = $true }
+            @{ fixture = 'sample-pt.wav'; mode = 'auto'; reason = 'gpu_unavailable' },
+            @{ fixture = 'chrome-mediarecorder.webm'; mode = 'auto'; reason = 'gpu_unavailable' },
+            @{ fixture = 'sample-pt.wav'; mode = 'cpu'; reason = $null }
           )
+          $summary = @('### Compute snapshots (hosted runner, no GPU)', '')
           foreach ($run in $runs) {
-            if ($run.skip) { $env:PUMICE_TRANSCRIBE_SKIP_GPU_DIR = '1' }
-            $out = & $exe file (Join-Path $fixtures $run.fixture) --model-file $model --json
+            $out = & $exe file (Join-Path $fixtures $run.fixture) --model-file $model --backend $run.mode --json
             $code = $LASTEXITCODE
-            Remove-Item Env:PUMICE_TRANSCRIBE_SKIP_GPU_DIR -ErrorAction SilentlyContinue
-            if ($code -ne 0) { throw "$($run.fixture) exited with $code" }
+            if ($code -ne 0) { throw "$($run.fixture) ($($run.mode)) exited with $code" }
             $data = $out | ConvertFrom-Json
             if ($data.schema_version -ne 1 -or -not $data.ok) { throw "bad envelope: $out" }
             if ($data.result.language -ne 'pt') { throw "language: $out" }
             if (-not $data.result.text) { throw "empty text: $out" }
-            if ($data.result.backend -notmatch '^CPU.*\[[a-z0-9]+\]$') { throw "backend: $out" }
-            Write-Host "$($run.fixture) (gpu dir skipped: $($run.skip)) smoke ok: backend $($data.result.backend), $($data.result.transcription_ms) ms"
+            $compute = $data.result.compute
+            if ($compute.requested -ne $run.mode -or $compute.backend -ne 'cpu') { throw "compute: $out" }
+            if ($compute.fallback_reason -ne $run.reason) { throw "fallback_reason: $out" }
+            if ($compute.cpu_variant -notmatch '^[a-z0-9]+$') { throw "cpu_variant: $out" }
+            if (-not $compute.device.name -or $compute.device.description -ne $compute.device.description.Trim()) { throw "device: $out" }
+            $json = $compute | ConvertTo-Json -Compress -Depth 4
+            $summary += "- ``$($run.mode)`` $($run.fixture): ``$json``"
+            Write-Host "$($run.fixture) (backend $($run.mode)) smoke ok: $json, $($data.result.transcription_ms) ms"
           }
+          # backend gpu never falls back: the fixed error, before any audio
+          # is transcribed.
+          $ErrorActionPreference = 'Continue'
+          $out = & $exe file (Join-Path $fixtures 'sample-pt.wav') --model-file $model --backend gpu --json 2>$null
+          $code = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          if ($code -ne 1) { throw "backend gpu exited with $code" }
+          $data = $out | ConvertFrom-Json
+          if ($data.ok -or $data.error.code -ne 'gpu_unavailable') { throw "backend gpu: $out" }
+          if (-not $data.error.message.Contains('backend: cpu')) { throw "backend gpu guidance: $out" }
+          $summary += "- ``gpu``: ``$($data.error.code)``: $($data.error.message)"
+          Write-Host "backend gpu refused: $($data.error.message)"
+          $summary | Add-Content -Path $env:GITHUB_STEP_SUMMARY
 
       - name: Upload the preview bundle
         uses: actions/upload-artifact@v5
