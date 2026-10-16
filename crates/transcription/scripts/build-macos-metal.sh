@@ -29,9 +29,10 @@
 # The engine installs them with LC_RPATH @loader_path; staged one or two
 # directories down, that is rewritten to @loader_path/../.., so they resolve
 # @rpath/libggml-base.0.dylib from the bundle root and never from their own
-# directory. install_name_tool invalidates the linker's ad-hoc signature, so
-# the edited modules are re-signed ad hoc (`codesign -s -`); Apple Silicon
-# runs no unsigned code. No Developer ID signature, no notarization.
+# directory. Apple Silicon runs no unsigned code: install_name_tool re-signs
+# a linker-signed file it edits (Xcode 16.4 does), and the stager re-signs
+# ad hoc (`codesign -s -`) only when the signature no longer verifies. No
+# Developer ID signature, no notarization.
 #
 # The Metal shaders are embedded as source (GGML_METAL_EMBED_LIBRARY, set by
 # the transcribe-cpp `metal` feature) and compiled by the OS Metal framework
@@ -506,7 +507,8 @@ if ! (cd /tmp && DYLD_PRINT_LIBRARIES=1 "$moved/pumice-transcribe" backends --ba
     exit 1
 fi
 jq -c .result "$target_dir/relocation-backends.json" | sed 's/^/  backends: /'
-read_lines images < <(sed -n 's/^dyld\[[0-9]*\]: //p' "$loaded" | sort -u)
+# dyld4 prints `dyld[PID]: <UUID> PATH` per image (older dyld: no UUID).
+read_lines images < <(sed -n 's/^dyld\[[0-9]*\]: \(<[^>]*> \)\{0,1\}//p' "$loaded" | sort -u)
 echo "images dyld loaded (relocated, backend auto): ${#images[@]}"
 outside=""
 for image in ${images[@]+"${images[@]}"}; do
@@ -518,7 +520,8 @@ for image in ${images[@]+"${images[@]}"}; do
 done
 for rel in "${core_libs[@]}" "$cpu_module" "$gpu_module"; do
     if ! contains "$moved/$rel" ${images[@]+"${images[@]}"}; then
-        echo "error: $rel was not loaded from the relocated bundle" >&2
+        echo "error: $rel was not loaded from the relocated bundle; dyld reported, for example:" >&2
+        grep -F "$(basename "$rel")" "$loaded" | head -n 5 >&2 || true
         exit 1
     fi
 done

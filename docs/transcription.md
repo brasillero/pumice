@@ -298,8 +298,8 @@ folder from a path with spaces and non-ASCII characters, without any `DYLD_*`
 variable, may load images only from that folder and the OS.
 
 **Signing and quarantine.** The files carry ad-hoc signatures only (the
-linker's, and `codesign -s -` for the two modules the stager edits), with no
-Developer ID and no notarization. macOS marks files from a browser download
+linker's; `install_name_tool` re-signs the two modules whose rpath the stager
+edits), with no Developer ID and no notarization. macOS marks files from a browser download
 with the `com.apple.quarantine` attribute, and Gatekeeper refuses to run
 quarantined code that is not notarized. Remove the attribute from the whole
 extracted folder once, after checking `SHA256SUMS`:
@@ -354,8 +354,8 @@ crates/transcription/scripts/build-macos-metal.sh
 ```
 
 The script builds with `MACOSX_DEPLOYMENT_TARGET=11.0`, rewrites the
-modules' rpath, re-signs them ad hoc and audits every staged file with
-`otool`, `lipo` and `codesign`; `--self-test` checks the audit rules alone,
+modules' rpath (re-signing them ad hoc if the edit left no valid signature)
+and audits every staged file with `otool`, `lipo` and `codesign`; `--self-test` checks the audit rules alone,
 on any OS.
 
 ## Compute backend (`cpu`, `auto`, `gpu`)
