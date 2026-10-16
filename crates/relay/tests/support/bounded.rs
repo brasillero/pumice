@@ -299,6 +299,17 @@ impl OwnedChild {
         self.stderr.line(deadline)
     }
 
+    /// Whether the child has exited yet, without waiting.
+    pub fn exited(&mut self) -> bool {
+        if self.status.is_none() {
+            match self.child.try_wait() {
+                Ok(status) => self.status = status,
+                Err(error) => self.fail(&format!("could not poll the exit: {error}")),
+            }
+        }
+        self.status.is_some()
+    }
+
     /// Waits for the exit until `deadline`, polling.
     pub fn wait_until(&mut self, deadline: Instant) -> ExitStatus {
         step("wait for the exit");
@@ -500,29 +511,34 @@ pub fn connect(port: u16, deadline: Instant) -> io::Result<TcpStream> {
     TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), wait)
 }
 
-/// How much one write in [`send`] offers. macOS and Windows keep a single
-/// large write going for as long as the reader makes progress, whatever
-/// the write timeout; small writes return to the deadline check.
+/// How much one write in [`send`] offers, so a write never hands the
+/// system more than a small buffer at a time.
 const SEND_BYTES: usize = 64 * 1024;
 
-/// Writes all of `bytes` before `deadline`. Each write waits only for what
-/// is left of it, so a reader that keeps taking a little cannot stretch it.
+/// Writes all of `bytes` before `deadline`. The socket is non-blocking for
+/// the send, so no write waits at all: a blocking write's timeout restarts
+/// whenever the reader takes a little (macOS), which could stretch one
+/// write past the deadline. A full buffer is retried every millisecond
+/// until it frees or the deadline passes. The socket blocks again after.
 pub fn send(stream: &mut TcpStream, bytes: &[u8], deadline: Instant) -> io::Result<()> {
     step("write the request");
+    stream.set_nonblocking(true)?;
+    let sent = send_nonblocking(stream, bytes, deadline);
+    let restored = stream.set_nonblocking(false);
+    sent.and(restored)
+}
+
+fn send_nonblocking(stream: &mut TcpStream, bytes: &[u8], deadline: Instant) -> io::Result<()> {
     let mut rest = bytes;
     while !rest.is_empty() {
         let wait = left(deadline).ok_or(io::ErrorKind::TimedOut)?;
-        stream.set_write_timeout(Some(wait))?;
         match stream.write(&rest[..rest.len().min(SEND_BYTES)]) {
             Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
             Ok(n) => rest = &rest[n..],
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock
-                        | io::ErrorKind::TimedOut
-                        | io::ErrorKind::Interrupted
-                ) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(wait.min(Duration::from_millis(1)));
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error),
         }
     }
