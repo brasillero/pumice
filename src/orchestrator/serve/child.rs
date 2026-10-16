@@ -160,6 +160,7 @@ impl Compute {
                             | "gpu_integrated_only"
                             | "gpu_unverified"
                             | "gpu_software_only"
+                            | "gpu_auto_disabled"
                     )
             }
         };
@@ -1037,6 +1038,7 @@ mod tests {
             edited(&|v| v["fallback_reason"] = "gpu_integrated_only".into()),
             edited(&|v| v["fallback_reason"] = "gpu_unverified".into()),
             edited(&|v| v["fallback_reason"] = "gpu_software_only".into()),
+            edited(&|v| v["fallback_reason"] = "gpu_auto_disabled".into()),
             edited(&|v| v["device"]["name"] = "n".repeat(128).into()),
             edited(&|v| v["device"]["description"] = "é".repeat(128).into()),
             serde_json::json!({"requested": "cpu", "backend": "cpu",

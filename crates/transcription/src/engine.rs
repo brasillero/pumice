@@ -94,7 +94,7 @@ impl Engine for FakeEngine {
 pub mod cpp {
     use super::*;
     use crate::Error;
-    use crate::compute::{self, GpuAvailability, GpuClass, LoadRequest};
+    use crate::compute::{self, GpuAvailability, GpuClass, LoadRequest, Registration};
     use ::transcribe_cpp::{
         Backend, CancelToken as CppCancelToken, Model, ModelOptions, RunExtension, RunOptions,
         SessionOptions, WhisperRunOptions,
@@ -135,7 +135,7 @@ pub mod cpp {
         /// load is never retried on another backend (p14.1-windows-vulkan/D4).
         pub fn new(request: EngineRequest<'_>) -> Result<Self, Error> {
             let mode = request.backend;
-            let gpu = init_backends(mode)?;
+            let gpu = init_backends(mode, Registration::Inference)?;
             let load = compute::load_request(mode, gpu)?;
             let options = match load {
                 LoadRequest::Cpu => ModelOptions {
@@ -215,16 +215,20 @@ pub mod cpp {
         format!("{:?}", device.device_type).to_lowercase()
     }
 
-    /// Registers the compute backends `mode` allows and reports what the GPU
-    /// side found. Builds without runtime modules have the CPU compiled in
-    /// and no GPU. Must run before any other engine call: it disables native
-    /// logging first (logs can contain dictated text), and on Windows the
-    /// bundle check must come before the first call loads the delay-loaded
-    /// engine DLLs (build.rs).
-    fn init_backends(mode: BackendMode) -> Result<GpuAvailability, Error> {
+    /// Registers the compute backends `mode` allows for `registration` and
+    /// reports what the GPU side found. Builds without runtime modules have
+    /// the CPU compiled in and no GPU. Must run before any other engine call:
+    /// it disables native logging first (logs can contain dictated text), and
+    /// on Windows the bundle check must come before the first call loads the
+    /// delay-loaded engine DLLs (build.rs).
+    fn init_backends(
+        mode: BackendMode,
+        registration: Registration,
+    ) -> Result<GpuAvailability, Error> {
         #[cfg(pumice_dynamic_backends)]
         {
-            dynamic_backends::init_from_exe_dir(mode.wants_gpu())
+            let scan = compute::gpu_scan(mode, registration, compute::AUTO_USES_GPU_MODULE);
+            dynamic_backends::init_from_exe_dir(scan)
                 .map(|selection| selection.gpu_availability())
                 .map_err(|error| {
                     eprintln!("cpu-variants: {error}");
@@ -233,7 +237,7 @@ pub mod cpp {
         }
         #[cfg(not(pumice_dynamic_backends))]
         {
-            let _ = mode;
+            let _ = (mode, registration);
             transcribe_cpp::disable_logging();
             Ok(GpuAvailability::NotBuilt)
         }
@@ -413,12 +417,27 @@ pub mod cpp {
         None
     }
 
-    /// `pumice-transcribe backends`: registers the compute backends exactly
-    /// as a model load in `mode` does, without a model, and lists what the
-    /// bundle ships and what registered. Fixed field names plus bounded
-    /// hardware names only.
+    /// `pumice-transcribe backends`: registers the compute backends as a
+    /// model load in `mode` does, without a model, and lists what the bundle
+    /// ships and what registered. The one difference is `auto` on a build
+    /// whose `auto` inference does not use its GPU module (Apple Silicon,
+    /// p14.4-macos-metal/D2): the diagnostic still scans the module, and
+    /// `auto_uses_gpu_module` and `fallback_reason` say what inference does.
+    /// Fixed field names plus bounded hardware names only.
     pub fn backends_report(mode: BackendMode) -> Result<serde_json::Value, Error> {
-        let gpu = init_backends(mode)?;
+        let gpu = init_backends(mode, Registration::Diagnostic)?;
+        let inference = compute::inference_availability(
+            mode,
+            Registration::Diagnostic,
+            gpu,
+            compute::AUTO_USES_GPU_MODULE,
+        );
+        if inference == GpuAvailability::AutoDisabled {
+            eprintln!(
+                "backends: backend auto does not use {GPU_KIND} for inference \
+                 (p14.4-macos-metal/D2); this diagnostic scanned it anyway"
+            );
+        }
         #[cfg(pumice_dynamic_backends)]
         let bundle = dynamic_backends::selection().map(|selection| selection.bundle.as_str());
         #[cfg(not(pumice_dynamic_backends))]
@@ -463,13 +482,14 @@ pub mod cpp {
         Ok(serde_json::json!({
             "requested": mode,
             "gpu_build": GPU_BUILD,
+            "auto_uses_gpu_module": GPU_BUILD.map(|_| compute::AUTO_USES_GPU_MODULE),
             "bundle": bundle,
             "cpu_variant": loaded_cpu_variant(),
             "gpu_module": gpu.module_state(),
             "gpu_devices": gpu.gpu_devices(),
             "allowed_backends": allowed_backends,
             "devices": devices,
-            "fallback_reason": compute::planned_fallback(mode, gpu),
+            "fallback_reason": compute::planned_fallback(mode, inference),
         }))
     }
 
@@ -588,11 +608,14 @@ pub mod cpp {
     /// ggml builds one portable arm64 CPU module there, `libggml-cpu.so`
     /// without a variant suffix or score function, staged as
     /// `<exe dir>/cpu/arm64/`. Its GPU module, `gpu/metal/libggml-metal.so`,
-    /// is scanned the same way with the CPU|METAL mask.
+    /// is scanned the same way with the CPU|METAL mask, but only for `gpu`
+    /// and the `backends` diagnostic: inference with `auto` neither checks
+    /// nor loads it and registers with the CPU-only mask
+    /// (p14.4-macos-metal/D2).
     #[cfg(pumice_dynamic_backends)]
     mod dynamic_backends {
         use crate::bundle::{BundleError, Expected, Manifest};
-        use crate::compute::{GpuAvailability, GpuDevices};
+        use crate::compute::{GpuAvailability, GpuDevices, GpuScan};
         use ::transcribe_cpp::BackendMask;
         use std::fmt;
         use std::path::{Path, PathBuf};
@@ -1105,6 +1128,9 @@ pub mod cpp {
             NotBuilt,
             /// `cpu` mode: not looked at, not checked, not loaded.
             NotRequested,
+            /// `auto` inference on a build whose `auto` does not use its GPU
+            /// module: not looked at, not checked, not loaded.
+            AutoDisabled,
             /// No GPU module is staged next to the executable.
             Absent,
             /// Scanned with the process's backend mask.
@@ -1145,14 +1171,16 @@ pub mod cpp {
             exe_dir.join("gpu").join(GPU_NAME).join(file)
         }
 
-        /// The GPU module directory to scan, or why none is scanned. In
-        /// `cpu` mode (`wanted` false) the directory is not even looked at.
-        fn plan_gpu_dir(exe_dir: &Path, built: bool, wanted: bool) -> Result<PathBuf, GpuDir> {
+        /// The GPU module directory to scan, or why none is scanned. Unless
+        /// `scan` is [`GpuScan::Scan`] the directory is not even looked at.
+        fn plan_gpu_dir(exe_dir: &Path, built: bool, scan: GpuScan) -> Result<PathBuf, GpuDir> {
             if !built {
                 return Err(GpuDir::NotBuilt);
             }
-            if !wanted {
-                return Err(GpuDir::NotRequested);
+            match scan {
+                GpuScan::NotRequested => return Err(GpuDir::NotRequested),
+                GpuScan::AutoDisabled => return Err(GpuDir::AutoDisabled),
+                GpuScan::Scan => {}
             }
             let module = gpu_module_file(exe_dir);
             if !module.is_file() {
@@ -1220,6 +1248,7 @@ pub mod cpp {
                 match self.gpu {
                     GpuDir::NotBuilt => GpuAvailability::NotBuilt,
                     GpuDir::NotRequested => GpuAvailability::NotRequested,
+                    GpuDir::AutoDisabled => GpuAvailability::AutoDisabled,
                     GpuDir::Absent => GpuAvailability::ModuleAbsent,
                     GpuDir::Scanned => {
                         GpuAvailability::Devices(self.gpu_devices.unwrap_or_default())
@@ -1274,11 +1303,11 @@ pub mod cpp {
         }
 
         /// Initialize backends, returning a fixed-text reason on failure.
-        /// `scan_gpu`: the backend mode allows a GPU, so the staged GPU
-        /// module (if any) is checked and scanned. Runs once per process:
+        /// `scan`: whether the staged GPU module (if any) is checked and
+        /// scanned ([`crate::compute::gpu_scan`]). Runs once per process:
         /// later calls return the first success (ggml fixes the mask at the
         /// first registration and could not load anything new anyway, and
-        /// the files are not hashed twice).
+        /// the files are not hashed twice), so the mask is never widened.
         ///
         /// With a `bundle.json`, everything is checked before the first
         /// registration: the core libraries, the selected CPU module's
@@ -1286,7 +1315,7 @@ pub mod cpp {
         /// directory. A present module that does not match is an
         /// installation error, not a fallback; only an absent GPU module, or
         /// one that loads and finds no device, leaves the process on CPU.
-        pub fn init_from_exe_dir(scan_gpu: bool) -> Result<Selection, InitError> {
+        pub fn init_from_exe_dir(scan: GpuScan) -> Result<Selection, InitError> {
             if let Some(selection) = SELECTION.get() {
                 return Ok(*selection);
             }
@@ -1312,7 +1341,7 @@ pub mod cpp {
                 exe_dir: exe_dir.clone(),
                 variant: chosen,
             })?;
-            let gpu_plan = plan_gpu_dir(&exe_dir, GPU_BUILT, scan_gpu);
+            let gpu_plan = plan_gpu_dir(&exe_dir, GPU_BUILT, scan);
             let bundle = match &manifest {
                 Some(manifest) => {
                     let started = Instant::now();
@@ -1397,6 +1426,13 @@ pub mod cpp {
                 Err(GpuDir::NotRequested) => {
                     eprintln!("cpu-variants: {GPU_DIR} not scanned (backend cpu)");
                     (GpuDir::NotRequested, None)
+                }
+                Err(GpuDir::AutoDisabled) => {
+                    eprintln!(
+                        "cpu-variants: {GPU_DIR} not scanned (backend auto does not use \
+                         {GPU_LABEL}; backend gpu does); CPU only"
+                    );
+                    (GpuDir::AutoDisabled, None)
                 }
                 Err(GpuDir::Absent) => {
                     eprintln!("cpu-variants: no GPU module staged; CPU only");
@@ -1892,43 +1928,55 @@ pub mod cpp {
             #[test]
             fn gpu_dir_is_scanned_only_when_built_wanted_and_staged() {
                 let temp = tempfile::tempdir().unwrap();
+                use GpuScan::*;
                 assert_eq!(
-                    plan_gpu_dir(temp.path(), false, true),
+                    plan_gpu_dir(temp.path(), false, Scan),
                     Err(GpuDir::NotBuilt)
                 );
-                assert_eq!(plan_gpu_dir(temp.path(), true, true), Err(GpuDir::Absent));
+                assert_eq!(plan_gpu_dir(temp.path(), true, Scan), Err(GpuDir::Absent));
                 // An empty gpu/<backend>/ directory does not count either.
                 std::fs::create_dir_all(temp.path().join("gpu").join(GPU_NAME)).unwrap();
-                assert_eq!(plan_gpu_dir(temp.path(), true, true), Err(GpuDir::Absent));
+                assert_eq!(plan_gpu_dir(temp.path(), true, Scan), Err(GpuDir::Absent));
                 stage_gpu_module(temp.path());
                 assert_eq!(
-                    plan_gpu_dir(temp.path(), true, true),
+                    plan_gpu_dir(temp.path(), true, Scan),
                     Ok(temp.path().join("gpu").join(GPU_NAME))
                 );
-                // backend cpu: a staged module is never planned for a scan.
+                // backend cpu, and auto where it does not use the module: a
+                // staged module is never planned for a scan.
                 assert_eq!(
-                    plan_gpu_dir(temp.path(), true, false),
+                    plan_gpu_dir(temp.path(), true, NotRequested),
                     Err(GpuDir::NotRequested)
                 );
                 assert_eq!(
-                    plan_gpu_dir(temp.path(), false, true),
+                    plan_gpu_dir(temp.path(), true, AutoDisabled),
+                    Err(GpuDir::AutoDisabled)
+                );
+                assert_eq!(
+                    plan_gpu_dir(temp.path(), false, Scan),
+                    Err(GpuDir::NotBuilt)
+                );
+                assert_eq!(
+                    plan_gpu_dir(temp.path(), false, AutoDisabled),
                     Err(GpuDir::NotBuilt)
                 );
             }
 
             #[cfg(unix)]
             #[test]
-            fn cpu_mode_never_looks_at_the_gpu_dir() {
+            fn cpu_mode_and_disabled_auto_never_look_at_the_gpu_dir() {
                 use std::os::unix::fs::PermissionsExt;
                 // An unreadable gpu/ directory: looking inside would fail,
-                // so a cpu-mode plan proves it never looks.
+                // so these plans prove they never look.
                 let temp = tempfile::tempdir().unwrap();
                 stage_gpu_module(temp.path());
                 let gpu = temp.path().join("gpu");
                 std::fs::set_permissions(&gpu, std::fs::Permissions::from_mode(0o000)).unwrap();
-                let planned = plan_gpu_dir(temp.path(), true, false);
+                let cpu = plan_gpu_dir(temp.path(), true, GpuScan::NotRequested);
+                let auto = plan_gpu_dir(temp.path(), true, GpuScan::AutoDisabled);
                 std::fs::set_permissions(&gpu, std::fs::Permissions::from_mode(0o755)).unwrap();
-                assert_eq!(planned, Err(GpuDir::NotRequested));
+                assert_eq!(cpu, Err(GpuDir::NotRequested));
+                assert_eq!(auto, Err(GpuDir::AutoDisabled));
             }
 
             #[test]
@@ -1946,6 +1994,10 @@ pub mod cpp {
                 assert_eq!(
                     selection(GpuDir::NotRequested, None).gpu_availability(),
                     GpuAvailability::NotRequested
+                );
+                assert_eq!(
+                    selection(GpuDir::AutoDisabled, None).gpu_availability(),
+                    GpuAvailability::AutoDisabled
                 );
                 assert_eq!(
                     selection(GpuDir::Absent, None).gpu_availability(),

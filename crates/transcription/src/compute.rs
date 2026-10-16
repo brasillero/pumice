@@ -19,8 +19,11 @@
 //! (p14.5-linux-vulkan/D2).
 //!
 //! ggml-metal reports its device as `gpu` with no PCI bus id, so on Apple
-//! Silicon the Metal GPU is `unverified` and `auto` stays on the CPU with
-//! `gpu_unverified` (p14.4-macos-metal/D1); `gpu` uses it.
+//! Silicon the Metal GPU is `unverified` and `auto` could never pick it
+//! (p14.4-macos-metal/D1). Inference with `auto` therefore never registers the
+//! Metal module there: it loads with the CPU-only mask and reports
+//! `gpu_auto_disabled` (p14.4-macos-metal/D2); `gpu` uses Metal, and the
+//! `backends` diagnostic still scans it ([`Registration`]).
 //!
 //! After the model loads, one immutable [`Compute`] snapshot is built from the
 //! device the engine actually loaded it on — not from the request — and every
@@ -78,6 +81,44 @@ impl BackendMode {
     }
 }
 
+/// Whether inference with `auto` may use this build's GPU module. Not on
+/// Apple Silicon: there `auto` stays on the CPU until a real Mac shows Metal
+/// is faster (p14.4-macos-metal/D1), so it never registers Metal (D2).
+pub const AUTO_USES_GPU_MODULE: bool = !cfg!(pumice_metal);
+
+/// Why the compute backends are registered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Registration {
+    /// To load a model and transcribe.
+    Inference,
+    /// `pumice-transcribe backends`: to list what the bundle can register.
+    /// Nothing is loaded or transcribed, so `auto` scans the GPU module even
+    /// where inference with `auto` does not use it.
+    Diagnostic,
+}
+
+/// What registration does with the build's GPU module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuScan {
+    /// `cpu` mode: not looked at.
+    NotRequested,
+    /// `auto` inference on a build whose `auto` does not use the GPU module
+    /// ([`AUTO_USES_GPU_MODULE`]): not looked at, not loaded.
+    AutoDisabled,
+    /// Checked and scanned when staged.
+    Scan,
+}
+
+/// What registering for `registration` in `mode` does with the GPU module.
+/// `auto_uses_gpu`: [`AUTO_USES_GPU_MODULE`], injected for tests.
+pub fn gpu_scan(mode: BackendMode, registration: Registration, auto_uses_gpu: bool) -> GpuScan {
+    match (mode, registration) {
+        (BackendMode::Cpu, _) => GpuScan::NotRequested,
+        (BackendMode::Auto, Registration::Inference) if !auto_uses_gpu => GpuScan::AutoDisabled,
+        _ => GpuScan::Scan,
+    }
+}
+
 /// What backend registration found for the GPU, before the model loads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuAvailability {
@@ -86,6 +127,9 @@ pub enum GpuAvailability {
     NotBuilt,
     /// `cpu` mode: the GPU module was not looked at.
     NotRequested,
+    /// `auto` inference on a build whose `auto` does not use the GPU module
+    /// ([`GpuScan::AutoDisabled`]): the GPU module was not looked at.
+    AutoDisabled,
     /// The build supports a GPU module, but none is staged next to the
     /// executable.
     ModuleAbsent,
@@ -220,6 +264,7 @@ impl GpuAvailability {
         match self {
             Self::NotBuilt => "not_built",
             Self::NotRequested => "not_requested",
+            Self::AutoDisabled => "auto_disabled",
             Self::ModuleAbsent => "absent",
             Self::Devices(_) => "scanned",
         }
@@ -267,6 +312,10 @@ pub enum FallbackReason {
     /// The only GPU devices are software rasterizers, which are no faster
     /// than the CPU they run on.
     GpuSoftwareOnly,
+    /// This build's `auto` does not use its GPU module, which was therefore
+    /// not loaded (Apple Silicon, p14.4-macos-metal/D2). `backend: gpu` uses
+    /// it.
+    GpuAutoDisabled,
 }
 
 impl FallbackReason {
@@ -278,6 +327,7 @@ impl FallbackReason {
             Self::GpuIntegratedOnly => "gpu_integrated_only",
             Self::GpuUnverified => "gpu_unverified",
             Self::GpuSoftwareOnly => "gpu_software_only",
+            Self::GpuAutoDisabled => "gpu_auto_disabled",
         }
     }
 
@@ -285,6 +335,7 @@ impl FallbackReason {
         match gpu {
             GpuAvailability::NotBuilt => Self::GpuNotBuilt,
             GpuAvailability::ModuleAbsent => Self::GpuModuleAbsent,
+            GpuAvailability::AutoDisabled => Self::GpuAutoDisabled,
             GpuAvailability::Devices(devices) if devices.discrete == 0 => {
                 if devices.integrated > 0 {
                     Self::GpuIntegratedOnly
@@ -494,10 +545,29 @@ pub fn load_request(mode: BackendMode, gpu: GpuAvailability) -> Result<LoadReque
     }
 }
 
+/// What inference registration would find, given what a registration for
+/// `registration` found: the same, except that a [`Registration::Diagnostic`]
+/// scan of a GPU module `auto` inference never loads stands for
+/// [`GpuAvailability::AutoDisabled`].
+pub fn inference_availability(
+    mode: BackendMode,
+    registration: Registration,
+    gpu: GpuAvailability,
+    auto_uses_gpu: bool,
+) -> GpuAvailability {
+    match (
+        registration,
+        gpu_scan(mode, Registration::Inference, auto_uses_gpu),
+    ) {
+        (Registration::Diagnostic, GpuScan::AutoDisabled) => GpuAvailability::AutoDisabled,
+        _ => gpu,
+    }
+}
+
 /// Why `auto` will run on the CPU before anything loads, when registration
-/// already decides it (no GPU built, staged or registered, or no discrete
-/// one). A discrete GPU can still fail to initialize at load, which is a
-/// load error; only the loaded snapshot is certain.
+/// already decides it (no GPU built, staged or registered, no discrete one,
+/// or none that `auto` uses). A discrete GPU can still fail to initialize at
+/// load, which is a load error; only the loaded snapshot is certain.
 pub fn planned_fallback(mode: BackendMode, gpu: GpuAvailability) -> Option<FallbackReason> {
     match load_request(mode, gpu) {
         Ok(LoadRequest::Cpu) if mode == BackendMode::Auto => {
@@ -959,6 +1029,7 @@ mod tests {
             (devices(0, 1, 0, 0), "gpu_integrated_only"),
             (devices(0, 0, 2, 0), "gpu_unverified"),
             (devices(0, 0, 0, 2), "gpu_software_only"),
+            (GpuAvailability::AutoDisabled, "gpu_auto_disabled"),
         ] {
             let compute =
                 Compute::from_loaded(BackendMode::Auto, gpu, "cpu", "CPU", "x", None).unwrap();
@@ -975,6 +1046,105 @@ mod tests {
         .unwrap();
         assert_eq!(cpu.fallback_reason, None);
         assert_eq!(cpu.to_value()["cpu_variant"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn only_auto_inference_skips_a_gpu_module_auto_does_not_use() {
+        use Registration::*;
+        for auto_uses_gpu in [true, false] {
+            for registration in [Inference, Diagnostic] {
+                assert_eq!(
+                    gpu_scan(BackendMode::Cpu, registration, auto_uses_gpu),
+                    GpuScan::NotRequested
+                );
+                assert_eq!(
+                    gpu_scan(BackendMode::Gpu, registration, auto_uses_gpu),
+                    GpuScan::Scan
+                );
+            }
+            assert_eq!(
+                gpu_scan(BackendMode::Auto, Diagnostic, auto_uses_gpu),
+                GpuScan::Scan
+            );
+        }
+        // Linux and Windows: `auto` inference scans its module as before.
+        assert_eq!(gpu_scan(BackendMode::Auto, Inference, true), GpuScan::Scan);
+        // Apple Silicon (p14.4-macos-metal/D2): never registered.
+        assert_eq!(
+            gpu_scan(BackendMode::Auto, Inference, false),
+            GpuScan::AutoDisabled
+        );
+        assert_eq!(AUTO_USES_GPU_MODULE, !cfg!(pumice_metal));
+    }
+
+    #[test]
+    fn auto_without_its_gpu_module_runs_on_the_cpu_and_says_why() {
+        let gpu = GpuAvailability::AutoDisabled;
+        assert_eq!(gpu.module_state(), "auto_disabled");
+        assert_eq!(gpu.gpu_devices(), 0);
+        assert_eq!(
+            load_request(BackendMode::Auto, gpu).unwrap(),
+            LoadRequest::Cpu
+        );
+        assert_eq!(
+            planned_fallback(BackendMode::Auto, gpu),
+            Some(FallbackReason::GpuAutoDisabled)
+        );
+        let compute = Compute::from_loaded(
+            BackendMode::Auto,
+            gpu,
+            "cpu",
+            "CPU",
+            "Apple M1 (Virtual)",
+            Some("arm64"),
+        )
+        .unwrap();
+        assert_eq!(
+            compute.to_value().to_string(),
+            r#"{"requested":"auto","backend":"cpu","device":{"name":"CPU","description":"Apple M1 (Virtual)"},"cpu_variant":"arm64","fallback_reason":"gpu_auto_disabled"}"#
+        );
+        assert_eq!(
+            compute.label(),
+            "cpu: CPU (Apple M1 (Virtual)) [arm64], requested auto, fallback: gpu_auto_disabled"
+        );
+        // Never reached (only `auto` registers this way), but never a GPU.
+        let error = load_request(BackendMode::Gpu, gpu).unwrap_err();
+        assert_eq!(error.code, ErrorCode::GpuUnavailable);
+    }
+
+    #[test]
+    fn the_diagnostic_reports_what_auto_inference_would_use() {
+        use Registration::*;
+        let metal = devices(0, 0, 1, 0);
+        // The diagnostic scanned Metal; inference would not have.
+        let planned = |registration, gpu, auto_uses_gpu| {
+            let gpu = inference_availability(BackendMode::Auto, registration, gpu, auto_uses_gpu);
+            planned_fallback(BackendMode::Auto, gpu)
+        };
+        assert_eq!(
+            planned(Diagnostic, metal, false),
+            Some(FallbackReason::GpuAutoDisabled)
+        );
+        assert_eq!(
+            planned(Diagnostic, GpuAvailability::ModuleAbsent, false),
+            Some(FallbackReason::GpuAutoDisabled)
+        );
+        assert_eq!(
+            planned(Diagnostic, metal, true),
+            Some(FallbackReason::GpuUnverified)
+        );
+        assert_eq!(planned(Diagnostic, devices(1, 0, 0, 0), true), None);
+        assert_eq!(
+            planned(Inference, GpuAvailability::AutoDisabled, false),
+            Some(FallbackReason::GpuAutoDisabled)
+        );
+        // `cpu` and `gpu` keep what registration found.
+        for mode in [BackendMode::Cpu, BackendMode::Gpu] {
+            assert_eq!(
+                inference_availability(mode, Diagnostic, metal, false),
+                metal
+            );
+        }
     }
 
     #[test]
