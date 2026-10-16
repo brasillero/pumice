@@ -1073,6 +1073,11 @@ jobs:
     # Apple Silicon (arm64), pinned to one image generation.
     runs-on: macos-15
     timeout-minutes: 90
+    # An explicit bash runs with -o pipefail, so a failing check piped into
+    # tee fails its step.
+    defaults:
+      run:
+        shell: bash
     env:
       # Must match build-macos-metal.sh, so clippy and the tests reuse the
       # bundle's native build instead of configuring a second one.
@@ -1163,6 +1168,7 @@ jobs:
               return 1
             fi
             expect "$label" "r['requested'] == '$mode'" "r['gpu_build'] == 'metal'" \
+              "r['auto_uses_gpu_module'] is False" \
               "sum(d['kind'] == 'cpu' for d in r['devices']) == 1" "r['cpu_variant'] == 'arm64'" \
               "r['bundle'] == 'verified'" \
               "r['gpu_devices'] == sum(d['kind'] == 'metal' for d in r['devices'])" \
@@ -1208,14 +1214,17 @@ jobs:
             "r['allowed_backends'] == ['cpu']" "all(d['kind'] == 'cpu' for d in r['devices'])" \
             "r['fallback_reason'] is None"
 
-          # backend auto: scanned with the CPU|METAL mask. The VM registers
-          # one Metal device ("Apple Paravirtual device"); a Metal GPU has no
-          # PCI bus id, so it is `unverified` and auto plans the CPU
-          # (p14.4-macos-metal/D1). The first scan from a new location
-          # compiles the embedded shaders (tens of seconds on this VM).
+          # backend auto, as a diagnostic: scanned with the CPU|METAL mask
+          # (inference with auto never is, p14.4-macos-metal/D2). The VM
+          # registers one Metal device ("Apple Paravirtual device"); a Metal
+          # GPU has no PCI bus id, so it is `unverified`, and the reason
+          # names what auto inference does instead. The first scan from a
+          # new location compiles the embedded shaders (tens of seconds on
+          # this VM).
           backends auto auto
+          grep -qF 'backend auto does not use metal for inference' "$RUNNER_TEMP/backends-auto.err"
           expect auto "r['gpu_module'] == 'scanned'" "r['allowed_backends'] == ['cpu', 'metal']" \
-            "r['gpu_devices'] == 1" "r['fallback_reason'] == 'gpu_unverified'" \
+            "r['gpu_devices'] == 1" "r['fallback_reason'] == 'gpu_auto_disabled'" \
             "all(d['gpu_class'] == 'unverified' and d['type'] == 'gpu' for d in r['devices'] if d['kind'] == 'metal')"
           metal_devices="$(jq -r .result.gpu_devices backends-auto.json)"
           echo "metal_devices=$metal_devices" >> "$GITHUB_ENV"
@@ -1230,7 +1239,7 @@ jobs:
             echo
             echo "- GPU (system_profiler): $(grep -E 'Chipset Model|Metal' "$RUNNER_TEMP/displays.txt" | xargs)"
             echo "- \`backends --backend auto\`: \`$(jq -c '{gpu_devices: .result.gpu_devices, devices: [.result.devices[] | select(.kind == "metal")], fallback_reason: .result.fallback_reason}' backends-auto.json)\`"
-            echo "- registration time: cpu $(cat backends-cpu.ms) ms, auto (scans and initializes Metal) $(cat backends-auto.ms) ms"
+            echo "- registration time: cpu $(cat backends-cpu.ms) ms, auto diagnostic (scans and initializes Metal) $(cat backends-auto.ms) ms"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
           # GGML_BACKEND_PATH plugins stay out: the mask has no OTHER bit. A
@@ -1338,10 +1347,11 @@ jobs:
           # Without the CPU module nothing can run.
           CATEGORY='modules missing' check_case missing-cpu-module cpu 'libggml-cpu.so' \
             rm "$copy/cpu/arm64/libggml-cpu.so"
-          # Without the optional GPU module: auto plans the CPU, still verified.
+          # Without the optional GPU module: still verified, and auto
+          # inference would not have used it anyway (D2).
           check_case absent-gpu-module auto '' rm -r "$copy/gpu"
           jq -e '.result.gpu_module == "absent" and .result.bundle == "verified"
-            and .result.fallback_reason == "gpu_module_absent"' case.json > /dev/null
+            and .result.fallback_reason == "gpu_auto_disabled"' case.json > /dev/null
           rm -rf "$copy"
 
       - name: Cache Whisper tiny Q8_0 model
@@ -1373,7 +1383,8 @@ jobs:
           bin="$moved/pumice-transcribe"
           model="$MODEL_DIR/whisper-tiny-Q8_0.gguf"
           fixtures="$GITHUB_WORKSPACE/crates/transcription/tests/fixtures"
-          auto_reason=gpu_unverified
+          # auto never registers Metal here (p14.4-macos-metal/D2).
+          auto_reason=gpu_auto_disabled
           echo '### Compute snapshots (hosted runner)' >> "$GITHUB_STEP_SUMMARY"
           for run in sample-pt.wav:cpu: sample-pt.wav:auto:$auto_reason \
             chrome-mediarecorder.webm:auto:$auto_reason; do
@@ -1427,6 +1438,266 @@ jobs:
           PY
           rm -rf "$moved"
 
+      # The orchestrator, for the managed check below: built for the runner,
+      # no native code.
+      - name: Build pumice (orchestrator)
+        run: cargo build --release -p pumice --bin pumice --locked
+
+      - name: backend auto never loads Metal (fresh folder, corrupted module; file, managed serve, pumice serve)
+        timeout-minutes: 10
+        run: |
+          . "$RUNNER_TEMP/metal-checks.sh"
+          cd "$RUNNER_TEMP"
+          # A new folder (no shader cache for it) whose Metal module is
+          # random bytes of the listed size: a check of gpu/metal/ would be
+          # an installation error and a load would fail, so success on the
+          # CPU proves auto inference neither checked nor loaded it
+          # (p14.4-macos-metal/D2). Registering Metal from a new folder took
+          # tens of seconds here before D2.
+          d2="$RUNNER_TEMP/pumice auto d2 $(date +%s)"
+          rm -rf "$d2"
+          cp -R "$STAGE" "$d2"
+          gpu="$d2/gpu/metal/libggml-metal.so"
+          head -c "$(stat -f %z "$gpu")" /dev/urandom > "$gpu.random"
+          mv "$gpu.random" "$gpu"
+          cp "$CARGO_TARGET_DIR/release/pumice" "$d2/pumice"
+          model="$MODEL_DIR/whisper-tiny-Q8_0.gguf"
+          wav="$GITHUB_WORKSPACE/crates/transcription/tests/fixtures/sample-pt.wav"
+
+          # file: auto first, in the fresh folder, then cpu for comparison.
+          for mode in auto cpu; do
+            started="$(now_ms)"
+            with_alarm 300 "$d2/pumice-transcribe" file "$wav" --model-file "$model" --backend "$mode" --json \
+              > "d2-$mode.json" 2> "d2-$mode.err"
+            echo "$(( $(now_ms) - started ))" > "d2-$mode.ms"
+            sed "s/^/  [d2 $mode] /" "d2-$mode.err"
+          done
+          grep -qF 'gpu/metal not scanned (backend auto does not use Metal; backend gpu does)' d2-auto.err
+          if grep -qE 'scanned gpu/metal:|does not match' d2-auto.err; then
+            echo "::error::backend auto looked at the Metal module"
+            exit 1
+          fi
+          python3 - d2-auto.json d2-cpu.json "$(cat d2-auto.ms)" "$(cat d2-cpu.ms)" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          import sys
+
+          auto, cpu = (json.load(open(p))["result"] for p in sys.argv[1:3])
+          auto_ms, cpu_ms = int(sys.argv[3]), int(sys.argv[4])
+          compute = auto["compute"]
+          assert compute["requested"] == "auto" and compute["backend"] == "cpu", auto
+          assert compute["fallback_reason"] == "gpu_auto_disabled", auto
+          assert compute["cpu_variant"] == "arm64", auto
+          assert auto["text"] == cpu["text"], "auto and cpu ran the same CPU module"
+          # CPU-fast: no Metal shader compilation (tens of seconds here).
+          assert auto_ms < cpu_ms + 10000, (auto_ms, cpu_ms)
+          print("### backend auto without Metal (D2)")
+          print()
+          print(f"- fresh folder, corrupted Metal module, `file --backend auto`: `{json.dumps(compute)}`,"
+                f" {auto_ms} ms wall (model load {auto['model_load_ms']} ms); `--backend cpu`: {cpu_ms} ms wall")
+          PY
+
+          # serve --managed with backend: auto from its configuration: the
+          # `ready` record and the child's own /ready carry the snapshot.
+          mkdir -p d2-cfg
+          {
+            echo 'schema_version: 1'
+            echo 'default_model: tiny'
+            echo 'backend: auto'
+            echo 'models:'
+            echo '  - id: tiny'
+            echo "    path: '$model'"
+          } > d2-cfg/transcribe.yml
+          printf 'providers:\n  - id: claude\n    enabled: false\n' > d2-cfg/relay.yml
+          {
+            echo 'schema_version: 1'
+            echo 'modules:'
+            echo '  transcription:'
+            echo '    config: ./transcribe.yml'
+            echo '  relay:'
+            echo '    location: in_process'
+            echo '    config: ./relay.yml'
+            echo 'flows:'
+            echo '  - id: raw'
+            echo '    enabled: true'
+            echo '    transcription_model: tiny'
+            echo '    formatter: null'
+            echo '    relay_route: passthrough'
+            echo 'serve:'
+            echo '  enabled: true'
+            echo '  port: 0'
+            echo '  transcription_model: tiny'
+          } > d2-cfg/orchestrator.yml
+          with_alarm 120 python3 - "$d2" "$RUNNER_TEMP/d2-cfg" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          import signal
+          import subprocess
+          import sys
+          import time
+          import urllib.request
+
+          bundle, cfg = sys.argv[1:]
+
+          def get(port, path):
+              with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=10) as response:
+                  return response.status, json.load(response)
+
+          def check(compute, where):
+              assert compute["requested"] == "auto" and compute["backend"] == "cpu", (where, compute)
+              assert compute["fallback_reason"] == "gpu_auto_disabled", (where, compute)
+
+          started = time.monotonic()
+          child = subprocess.Popen(
+              [f"{bundle}/pumice-transcribe", "--config", f"{cfg}/transcribe.yml", "serve",
+               "--managed", "--instance-id", "ci-d2-1", "--port", "0"],
+              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=open("d2-managed.err", "w"), text=True)
+          ready = json.loads(child.stdout.readline())
+          ready_ms = int((time.monotonic() - started) * 1000)
+          assert ready["event"] == "ready" and ready["instance_id"] == "ci-d2-1", ready
+          check(ready["compute"], "ready record")
+          status, body = get(ready["port"], "/ready")
+          assert status == 200 and body["compute"] == ready["compute"], body
+          child.stdin.close()
+          records = [json.loads(line)["event"] for line in child.stdout]
+          assert child.wait(timeout=10) == 0 and records[-1] == "stopped", records
+          print(f"- `serve --managed`, `backend: auto`: ready in {ready_ms} ms wall"
+                f" (model load {ready['model_load_ms']} ms), `/ready` compute `{json.dumps(body['compute'])}`")
+
+          # pumice serve owns the same child; its readiness check validates
+          # the snapshot, and its status reports it.
+          started = time.monotonic()
+          service = subprocess.Popen(
+              [f"{bundle}/pumice", "serve", "--config", f"{cfg}/orchestrator.yml", "--port", "0", "--json"],
+              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=open("d2-serve.err", "w"), text=True)
+          port = None
+          for line in service.stdout:
+              event = json.loads(line)
+              assert event["event"] != "error", event
+              if event["event"] == "ready":
+                  port = event["port"]
+                  break
+          assert port, "pumice serve exited before it was ready"
+          ready_ms = int((time.monotonic() - started) * 1000)
+          status, ready = get(port, "/ready")
+          assert status == 200, ready
+          status, body = get(port, "/pumice/v1/status")
+          transcription = body["transcription"]
+          assert status == 200 and transcription["state"] == "ready", body
+          check(transcription["compute"], "pumice status")
+          service.send_signal(signal.SIGTERM)
+          assert service.wait(timeout=10) == 128 + signal.SIGTERM
+          print(f"- `pumice serve`: ready in {ready_ms} ms wall, status compute"
+                f" `{json.dumps(transcription['compute'])}`")
+          PY
+          sed 's/^/  [managed] /' d2-managed.err
+          sed 's/^/  [pumice serve] /' d2-serve.err | tail -n 20
+          rm -rf "$d2"
+
+      # Informational (p14.4-macos-metal#1): the hosted VM's paravirtual
+      # Metal device produced degenerate text above. Rerun it without flash
+      # attention to see whether that path is involved. Only the
+      # backend == metal / no-fallback assertions can fail this step; the
+      # text is recorded, never compared.
+      - name: 'Metal diagnostics: backend gpu without flash attention (text recorded only)'
+        timeout-minutes: 20
+        run: |
+          . "$RUNNER_TEMP/metal-checks.sh"
+          cd "$RUNNER_TEMP"
+          bin="$STAGE/pumice-transcribe"
+          model="$MODEL_DIR/whisper-tiny-Q8_0.gguf"
+          wav="$GITHUB_WORKSPACE/crates/transcription/tests/fixtures/sample-pt.wav"
+          code=0
+          env -u TRANSCRIBE_FORCE_FLASH TRANSCRIBE_NO_FLASH=1 \
+            perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 900 \
+            "$bin" file "$wav" --model-file "$model" --backend gpu --json > noflash.json 2> noflash.err || code=$?
+          sed 's/^/  [gpu no-flash] /' noflash.err | tail -n 40
+          echo "  [gpu no-flash] exit $code: $(cat noflash.json)"
+          cpu_text="$("$bin" file "$wav" --model-file "$model" --backend cpu --json | jq -r .result.text)"
+          python3 - noflash.json "$code" "$cpu_text" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          import sys
+
+          path, code, cpu_text = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+          data = json.loads(open(path).read())
+          assert data["ok"] is True and code == 0, (code, data)
+          compute = data["result"]["compute"]
+          assert compute["requested"] == "gpu" and compute["backend"] == "metal", data
+          assert compute["fallback_reason"] is None, data
+          text = data["result"]["text"]
+          same = "same text as the CPU" if text == cpu_text else "text differs from the CPU"
+          print(f"- `gpu` with `TRANSCRIBE_NO_FLASH=1`: ran on Metal, {data['result']['transcription_ms']} ms,"
+                f" {same}: `{text[:120]!r}`")
+          PY
+
+      # Informational (p14.4-macos-metal#1): ggml's own op tests on the
+      # VM's Metal device against the CPU, built as an ordinary native
+      # build from the transcribe.cpp revision the transcribe-cpp-sys 0.3.1
+      # crate was packaged from (its .cargo_vcs_info.json); the crate does
+      # not ship ggml's tests. Failures and unsupported ops are recorded,
+      # never fatal (llama.cpp's hosted Apple CI excludes model tests on
+      # this paravirtual device, ggml-org/llama.cpp#8617).
+      - name: 'Metal diagnostics: ggml test-backend-ops on MTL0 (recorded only)'
+        continue-on-error: true
+        timeout-minutes: 25
+        env:
+          TRANSCRIBE_CPP_REV: 3f32fbcc7bb3246851a0234263438bc3c0fa1cac
+        run: |
+          . "$RUNNER_TEMP/metal-checks.sh"
+          src="$RUNNER_TEMP/transcribe.cpp"
+          rm -rf "$src"
+          git init -q "$src"
+          git -C "$src" fetch -q --depth 1 https://github.com/handy-computer/transcribe.cpp "$TRANSCRIBE_CPP_REV"
+          git -C "$src" checkout -q FETCH_HEAD
+          # Same Metal setup as the bundle: shaders embedded as source.
+          cmake -S "$src/ggml" -B "$RUNNER_TEMP/ggml-build" -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON -DGGML_BLAS=OFF -DGGML_NATIVE=OFF \
+            -DGGML_BUILD_TESTS=ON -DGGML_BUILD_EXAMPLES=OFF > "$RUNNER_TEMP/ggml-configure.log"
+          cmake --build "$RUNNER_TEMP/ggml-build" --target test-backend-ops -j "$(sysctl -n hw.ncpu)" \
+            > "$RUNNER_TEMP/ggml-build.log"
+          tbo="$RUNNER_TEMP/ggml-build/bin/test-backend-ops"
+          cd "$RUNNER_TEMP"
+          # The ops whisper's graphs use, each bounded on its own (`-o` is a
+          # regex on the op name, so MUL_MAT also runs MUL_MAT_ID); exit 142
+          # is the alarm.
+          : > tbo.log
+          for op in MUL_MAT FLASH_ATTN_EXT SOFT_MAX ADD MUL NORM GELU CONV_TRANSPOSE_1D IM2COL GET_ROWS CPY CONT SCALE; do
+            echo "=== $op" >> tbo.log
+            code=0
+            with_alarm 60 "$tbo" test -b MTL0 -o "$op" >> tbo.log 2>&1 || code=$?
+            echo "=== $op exit $code" >> tbo.log
+          done
+          grep -E '^=== ' tbo.log
+          python3 - tbo.log <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import re
+          import sys
+
+          # Results are colored: drop the escapes before matching.
+          log = re.sub(r"\x1b\[[0-9;]*m", "", open(sys.argv[1], errors="replace").read())
+          print("### ggml test-backend-ops, MTL0 vs CPU (hosted VM, informational)")
+          print()
+          caps = sorted({line.strip() for line in log.splitlines()
+                         if re.search(r"ggml_metal.*(simdgroup|has |GPU name|GPU family|use |bfloat|residency)", line)})
+          print("Device capabilities reported by ggml-metal:")
+          print()
+          for line in caps[:30]:
+              print(f"    {line}")
+          print()
+          print("| op | exit | passed | failed | not supported |")
+          print("| --- | ---: | ---: | ---: | ---: |")
+          for block in re.findall(r"^=== (\S+)\n(.*?)^=== \1 exit (\d+)", log, re.S | re.M):
+              op, body, code = block
+              ok = len(re.findall(r"\): OK$", body, re.M))
+              fail = len(re.findall(r"\): FAIL$", body, re.M))
+              unsupported = len(re.findall(r"\): not supported \[", body))
+              print(f"| {op} | {code} | {ok} | {fail} | {unsupported} |")
+          failed = [line.strip() for line in log.splitlines() if re.search(r"\): FAIL$", line)]
+          if failed:
+              print()
+              print(f"First failing cases ({len(failed)} total):")
+              print()
+              for line in failed[:15]:
+                  print(f"    {line[:200]}")
+          PY
+
       - name: Quarantined copy (Gatekeeper) and the documented fix
         run: |
           . "$RUNNER_TEMP/metal-checks.sh"
@@ -1455,7 +1726,7 @@ jobs:
             echo "- quarantined copy, \`backends --backend auto\`: exit $code$(jq -e .ok q.json > /dev/null 2>&1 && echo ', ran' || echo ', did not run')"
           } | tee -a "$GITHUB_STEP_SUMMARY"
           xattr -dr com.apple.quarantine "$q"
-          if xattr -lr "$q" | grep -q com.apple.quarantine; then exit 1; fi
+          if xattr -lr "$q" | grep com.apple.quarantine > /dev/null; then exit 1; fi
           backends dequarantined auto "$q/pumice-transcribe"
           rm -rf "$q"
 
