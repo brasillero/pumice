@@ -180,7 +180,11 @@ pub mod cpp {
             .into_iter()
             .filter(|device| device.kind == "vulkan")
             .map(|device| {
-                let class = GpuClass::of(&device_type(&device), device.device_id.as_deref());
+                let class = GpuClass::of(
+                    &device_type(&device),
+                    device.device_id.as_deref(),
+                    &device.description,
+                );
                 (device, class)
             })
             .collect()
@@ -418,8 +422,13 @@ pub mod cpp {
             .into_iter()
             .map(|device| {
                 let device_type = device_type(&device);
-                let gpu_class = (device.kind == "vulkan")
-                    .then(|| GpuClass::of(&device_type, device.device_id.as_deref()));
+                let gpu_class = (device.kind == "vulkan").then(|| {
+                    GpuClass::of(
+                        &device_type,
+                        device.device_id.as_deref(),
+                        &device.description,
+                    )
+                });
                 serde_json::json!({
                     "name": compute::sanitize(&device.name, compute::MAX_LABEL_BYTES),
                     "description": compute::sanitize(
@@ -1297,10 +1306,11 @@ pub mod cpp {
                     } else {
                         eprintln!(
                             "cpu-variants: scanned {GPU_DIR}: {} Vulkan device(s) registered \
-                             ({} discrete, {} integrated, {} software)",
+                             ({} discrete, {} integrated, {} unverified, {} software)",
                             vulkan_devices.total(),
                             vulkan_devices.discrete,
                             vulkan_devices.integrated,
+                            vulkan_devices.unverified,
                             vulkan_devices.software
                         );
                     }
@@ -1866,6 +1876,7 @@ pub mod cpp {
                 let found = GpuDevices {
                     discrete: 1,
                     integrated: 1,
+                    unverified: 1,
                     software: 0,
                 };
                 assert_eq!(

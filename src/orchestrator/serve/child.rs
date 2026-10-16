@@ -158,6 +158,7 @@ impl Compute {
                             | "gpu_module_absent"
                             | "gpu_unavailable"
                             | "gpu_integrated_only"
+                            | "gpu_unverified"
                             | "gpu_software_only"
                     )
             }
@@ -1034,6 +1035,7 @@ mod tests {
             edited(&|v| v["fallback_reason"] = "gpu_not_built".into()),
             edited(&|v| v["fallback_reason"] = "gpu_module_absent".into()),
             edited(&|v| v["fallback_reason"] = "gpu_integrated_only".into()),
+            edited(&|v| v["fallback_reason"] = "gpu_unverified".into()),
             edited(&|v| v["fallback_reason"] = "gpu_software_only".into()),
             edited(&|v| v["device"]["name"] = "n".repeat(128).into()),
             edited(&|v| v["device"]["description"] = "é".repeat(128).into()),

@@ -1,20 +1,22 @@
 //! The compute backend policy and the reported compute snapshot
-//! (p14.1-windows-vulkan/D3–D5, narrowed by p14.5-linux-vulkan/D1).
+//! (p14.1-windows-vulkan/D3–D5, narrowed by p14.5-linux-vulkan/D1–D3).
 //!
 //! `backend: cpu|auto|gpu` (`--backend` on `file`, `serve` and `backends`)
 //! chooses what the model load may use:
 //! - `cpu` never scans or loads a GPU module;
 //! - `auto` uses a discrete GPU when the bundle's GPU module registers one,
-//!   loading on that device explicitly; with only integrated or software
-//!   GPUs, or none, it runs on the CPU with a [`FallbackReason`];
+//!   loading on that device explicitly; with only integrated, unverified or
+//!   software GPUs, or none, it runs on the CPU with a [`FallbackReason`];
 //! - `gpu` requires a GPU device of any class, uses the engine's choice
 //!   (discrete before integrated) and never falls back.
 //!
 //! The engine's device-type axis cannot tell a discrete GPU from a software
-//! one: ggml-vulkan reports every Vulkan device that is not integrated as
-//! `gpu`, including a CPU-type device such as Mesa's lavapipe forced in with
-//! `GGML_VK_VISIBLE_DEVICES`. [`GpuClass::of`] therefore also requires a PCI
-//! bus id, which hardware GPU drivers report and software rasterizers do not.
+//! or virtual one: ggml-vulkan reports every Vulkan device that is not
+//! integrated as `gpu`, including a CPU-type device such as Mesa's lavapipe
+//! forced in with `GGML_VK_VISIBLE_DEVICES`. [`GpuClass::of`] therefore only
+//! calls a `gpu` device discrete when it also reports a PCI bus id and its
+//! description names no known software or virtual Vulkan implementation
+//! (p14.5-linux-vulkan/D2).
 //!
 //! After the model loads, one immutable [`Compute`] snapshot is built from the
 //! device the engine actually loaded it on — not from the request — and every
@@ -93,24 +95,71 @@ pub enum GpuAvailability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GpuClass {
-    /// A dedicated GPU: the only class `auto` loads on.
+    /// Dedicated GPU hardware: the only class `auto` loads on.
     Discrete,
     /// A GPU sharing system memory with the CPU; `backend: gpu` only.
     Integrated,
-    /// Anything else the GPU module registered: a software rasterizer, a
-    /// virtual GPU or a device without a PCI bus id; `backend: gpu` only.
+    /// A `gpu` device Pumice cannot prove is discrete hardware: no PCI bus
+    /// id, or a virtual or layered implementation that may run on anything
+    /// (Venus, Dozen); `backend: gpu` only.
+    Unverified,
+    /// A known software rasterizer, or a device of another engine type;
+    /// `backend: gpu` only.
     Software,
 }
 
+/// Lowercase substrings of the Vulkan `deviceName` (ggml-vulkan reports it
+/// as the device description, ggml-vulkan.cpp `ggml_vk_get_device_description`)
+/// of software rasterizers, which run on the CPU:
+/// - Mesa llvmpipe, and lavapipe, which reports llvmpipe's screen name:
+///   `llvmpipe (LLVM <version>, <n> bits)` (mesa
+///   src/gallium/drivers/llvmpipe/lp_screen.c,
+///   src/gallium/frontends/lavapipe/lvp_device.c);
+/// - Google SwiftShader: `SwiftShader Device (<backend>)` (swiftshader
+///   src/Vulkan/VkConfig.hpp `SWIFTSHADER_DEVICE_NAME`,
+///   src/Vulkan/VkPhysicalDevice.cpp);
+/// - Microsoft's WARP adapter, `Microsoft Basic Render Driver`, as Dozen
+///   wraps it: `Microsoft Direct3D12 (Microsoft Basic Render Driver)`.
+///
+/// `lavapipe` is not in any name today; it is kept in case a build or
+/// `force_vk_devicename` uses it.
+const SOFTWARE_DEVICE_NAMES: &[&str] = &[
+    "llvmpipe",
+    "lavapipe",
+    "swiftshader",
+    "microsoft basic render",
+];
+
+/// Lowercase substrings of the `deviceName` of virtual or layered Vulkan
+/// implementations, which may report PCI information while running on
+/// anything from a real GPU to a software rasterizer:
+/// - Mesa Venus (Vulkan over virtio-gpu): `Virtio-GPU Venus (<host
+///   device>)` (mesa src/virtio/vulkan/vn_physical_device.c);
+/// - Mesa Dozen (Vulkan over Direct3D 12): `Microsoft Direct3D12
+///   (<adapter>)` (mesa src/microsoft/vulkan/dzn_device.c).
+///
+/// `virgl` (virtio-gpu's OpenGL renderer) and `dozen` are not in any Vulkan
+/// name today; they are kept as cheap guards for the same stacks.
+const VIRTUAL_DEVICE_NAMES: &[&str] =
+    &["venus", "virtio", "virgl", "dozen", "microsoft direct3d12"];
+
 impl GpuClass {
     /// From the engine's device type (`gpu`, `igpu`, `cpu`, `accel`,
-    /// `unknown`, as `backends --json` reports it) and the PCI bus id the
-    /// device reports, if any. Only a `gpu` with a PCI bus id is discrete.
-    pub fn of(device_type: &str, pci_bus_id: Option<&str>) -> Self {
+    /// `unknown`, as `backends --json` reports it), the PCI bus id the
+    /// device reports, if any, and its description (p14.5-linux-vulkan/D2).
+    /// Only a `gpu` with a PCI bus id whose description names no software or
+    /// virtual implementation is discrete. A software rasterizer is named
+    /// before a virtual layer, so Venus or Dozen over llvmpipe or WARP is
+    /// `software`.
+    pub fn of(device_type: &str, pci_bus_id: Option<&str>, description: &str) -> Self {
         let on_pci = pci_bus_id.is_some_and(|id| !id.trim().is_empty());
+        let description = description.to_lowercase();
+        let names = |list: &[&str]| list.iter().any(|name| description.contains(name));
         match device_type {
             "igpu" => Self::Integrated,
-            "gpu" if on_pci => Self::Discrete,
+            "gpu" if names(SOFTWARE_DEVICE_NAMES) => Self::Software,
+            "gpu" if on_pci && !names(VIRTUAL_DEVICE_NAMES) => Self::Discrete,
+            "gpu" => Self::Unverified,
             _ => Self::Software,
         }
     }
@@ -119,6 +168,7 @@ impl GpuClass {
         match self {
             Self::Discrete => "discrete",
             Self::Integrated => "integrated",
+            Self::Unverified => "unverified",
             Self::Software => "software",
         }
     }
@@ -129,6 +179,7 @@ impl GpuClass {
 pub struct GpuDevices {
     pub discrete: usize,
     pub integrated: usize,
+    pub unverified: usize,
     pub software: usize,
 }
 
@@ -139,6 +190,7 @@ impl GpuDevices {
             match class {
                 GpuClass::Discrete => devices.discrete += 1,
                 GpuClass::Integrated => devices.integrated += 1,
+                GpuClass::Unverified => devices.unverified += 1,
                 GpuClass::Software => devices.software += 1,
             }
         }
@@ -146,7 +198,7 @@ impl GpuDevices {
     }
 
     pub const fn total(self) -> usize {
-        self.discrete + self.integrated + self.software
+        self.discrete + self.integrated + self.unverified + self.software
     }
 }
 
@@ -200,12 +252,16 @@ pub enum FallbackReason {
     GpuModuleAbsent,
     /// The GPU module registered no device, or no GPU device initialized.
     GpuUnavailable,
-    /// No discrete GPU, but an integrated one (and maybe software ones);
+    /// No discrete GPU, but an integrated one (and maybe others);
     /// `auto` skips integrated GPUs, which are usually slower than the CPU
     /// for this work. `backend: gpu` uses them.
     GpuIntegratedOnly,
-    /// The only GPU devices are software or virtual ones, which are no
-    /// faster than the CPU they run on.
+    /// No discrete or integrated GPU, but a `gpu` device that could not be
+    /// verified as discrete hardware (and maybe software ones). `backend:
+    /// gpu` uses it.
+    GpuUnverified,
+    /// The only GPU devices are software rasterizers, which are no faster
+    /// than the CPU they run on.
     GpuSoftwareOnly,
 }
 
@@ -216,6 +272,7 @@ impl FallbackReason {
             Self::GpuModuleAbsent => "gpu_module_absent",
             Self::GpuUnavailable => "gpu_unavailable",
             Self::GpuIntegratedOnly => "gpu_integrated_only",
+            Self::GpuUnverified => "gpu_unverified",
             Self::GpuSoftwareOnly => "gpu_software_only",
         }
     }
@@ -227,6 +284,8 @@ impl FallbackReason {
             GpuAvailability::Devices(devices) if devices.discrete == 0 => {
                 if devices.integrated > 0 {
                     Self::GpuIntegratedOnly
+                } else if devices.unverified > 0 {
+                    Self::GpuUnverified
                 } else if devices.software > 0 {
                     Self::GpuSoftwareOnly
                 } else {
@@ -438,6 +497,17 @@ pub fn planned_fallback(mode: BackendMode, gpu: GpuAvailability) -> Option<Fallb
 
 /// The error for a failed model load. `backend_error`: the engine reported
 /// that it could not satisfy the requested backend (no device initialized).
+///
+/// `auto` never falls back here, even when its discrete device failed to
+/// initialize (p14.5-linux-vulkan/D3 allows the fallback only when the
+/// engine can tell that case apart, and transcribe-cpp 0.3.1 cannot): the
+/// exact-device init failure is `TRANSCRIBE_ERR_BACKEND`
+/// (transcribe-cpp-sys src/transcribe-load-common.cpp,
+/// `init_backends_explicit_device`), but so is any exception after the
+/// weights were allocated, such as ggml-vulkan's `vk::SystemError` from a
+/// staging-buffer allocation while uploading them (`api_guard_status` in
+/// src/transcribe.cpp, `ggml_vk_create_buffer_check` in
+/// ggml-vulkan-buffers.cpp), and there is no device-init call to run first.
 pub fn load_failed(mode: BackendMode, request: LoadRequest, backend_error: bool) -> Error {
     match request {
         LoadRequest::Gpu if backend_error => Error::gpu_unavailable(GPU_NO_DEVICE),
@@ -468,10 +538,16 @@ pub fn sanitize(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    fn devices(discrete: usize, integrated: usize, software: usize) -> GpuAvailability {
+    fn devices(
+        discrete: usize,
+        integrated: usize,
+        unverified: usize,
+        software: usize,
+    ) -> GpuAvailability {
         GpuAvailability::Devices(GpuDevices {
             discrete,
             integrated,
+            unverified,
             software,
         })
     }
@@ -479,45 +555,138 @@ mod tests {
     const NONE: GpuAvailability = GpuAvailability::Devices(GpuDevices {
         discrete: 0,
         integrated: 0,
+        unverified: 0,
         software: 0,
     });
 
+    const PCI: Option<&str> = Some("0000:01:00.0");
+
     #[test]
-    fn only_a_gpu_type_device_on_pci_is_discrete() {
+    fn only_a_gpu_type_device_on_pci_with_a_hardware_name_is_discrete() {
+        use GpuClass::*;
         assert_eq!(
-            GpuClass::of("gpu", Some("0000:01:00.0")),
-            GpuClass::Discrete
+            GpuClass::of("gpu", PCI, "NVIDIA GeForce RTX 4070"),
+            Discrete
         );
         assert_eq!(
-            GpuClass::of("igpu", Some("0000:00:02.0")),
-            GpuClass::Integrated
+            GpuClass::of("gpu", PCI, "AMD Radeon RX 7800 XT (RADV NAVI32)"),
+            Discrete
         );
-        assert_eq!(GpuClass::of("igpu", None), GpuClass::Integrated);
+        assert_eq!(
+            GpuClass::of(
+                "igpu",
+                Some("0000:00:02.0"),
+                "Intel(R) UHD Graphics 770 (ADL-S GT1)"
+            ),
+            Integrated
+        );
+        assert_eq!(GpuClass::of("igpu", None, "x"), Integrated);
+        // Venus reports the host's PCI information, but may run on a
+        // software renderer: never discrete.
+        assert_eq!(
+            GpuClass::of("gpu", PCI, "Virtio-GPU Venus (NVIDIA GeForce RTX 4070)"),
+            Unverified
+        );
+        assert_eq!(
+            GpuClass::of("gpu", PCI, "Microsoft Direct3D12 (NVIDIA GeForce RTX 4070)"),
+            Unverified
+        );
+        // A real-looking card without VK_EXT_pci_bus_info.
+        assert_eq!(
+            GpuClass::of("gpu", None, "NVIDIA GeForce RTX 4070"),
+            Unverified
+        );
+        assert_eq!(
+            GpuClass::of("gpu", Some(" "), "NVIDIA GeForce RTX 4070"),
+            Unverified
+        );
         // lavapipe forced in through GGML_VK_VISIBLE_DEVICES: ggml reports
-        // it as `gpu`, but it has no PCI bus id.
-        assert_eq!(GpuClass::of("gpu", None), GpuClass::Software);
-        assert_eq!(GpuClass::of("gpu", Some(" ")), GpuClass::Software);
+        // it as `gpu`; its name says it is a software rasterizer, with or
+        // without PCI information, and also behind a virtual layer.
+        for description in [
+            "llvmpipe (LLVM 15.0.7, 256 bits)",
+            "SwiftShader Device (Subzero)",
+            "Microsoft Direct3D12 (Microsoft Basic Render Driver)",
+            "Virtio-GPU Venus (llvmpipe (LLVM 19.1.1, 256 bits))",
+        ] {
+            assert_eq!(
+                GpuClass::of("gpu", None, description),
+                Software,
+                "{description}"
+            );
+            assert_eq!(
+                GpuClass::of("gpu", PCI, description),
+                Software,
+                "{description}"
+            );
+        }
         for other in ["cpu", "accel", "unknown", ""] {
             assert_eq!(
-                GpuClass::of(other, Some("0000:01:00.0")),
-                GpuClass::Software
+                GpuClass::of(other, PCI, "NVIDIA GeForce RTX 4070"),
+                Software
             );
         }
         assert_eq!(
-            GpuDevices::count(&[
-                GpuClass::Integrated,
-                GpuClass::Discrete,
-                GpuClass::Software,
-                GpuClass::Discrete,
-            ]),
+            GpuDevices::count(&[Integrated, Discrete, Software, Unverified, Discrete]),
             GpuDevices {
                 discrete: 2,
                 integrated: 1,
+                unverified: 1,
                 software: 1,
             }
         );
         assert_eq!(GpuAvailability::Devices(GpuDevices::count(&[])), NONE);
-        assert_eq!(devices(1, 2, 3).gpu_devices(), 6);
+        assert_eq!(devices(1, 2, 3, 4).gpu_devices(), 10);
+    }
+
+    #[test]
+    fn auto_decides_from_the_classified_devices() {
+        let scan = |devices: &[(&str, Option<&str>, &str)]| {
+            let classes: Vec<_> = devices
+                .iter()
+                .map(|(kind, pci, description)| GpuClass::of(kind, *pci, description))
+                .collect();
+            let gpu = GpuAvailability::Devices(GpuDevices::count(&classes));
+            (
+                auto_device(&classes),
+                load_request(BackendMode::Auto, gpu).unwrap(),
+                planned_fallback(BackendMode::Auto, gpu),
+            )
+        };
+        let venus = ("gpu", PCI, "Virtio-GPU Venus (Intel(R) Arc(tm) A770)");
+        let rtx = ("gpu", PCI, "NVIDIA GeForce RTX 4070");
+        let uhd = ("igpu", Some("0000:00:02.0"), "Intel(R) UHD Graphics 770");
+        let lavapipe = ("gpu", None, "llvmpipe (LLVM 15.0.7, 256 bits)");
+        assert_eq!(
+            scan(&[venus]),
+            (None, LoadRequest::Cpu, Some(FallbackReason::GpuUnverified))
+        );
+        assert_eq!(
+            scan(&[lavapipe, venus]),
+            (None, LoadRequest::Cpu, Some(FallbackReason::GpuUnverified))
+        );
+        assert_eq!(
+            scan(&[venus, uhd]),
+            (
+                None,
+                LoadRequest::Cpu,
+                Some(FallbackReason::GpuIntegratedOnly)
+            )
+        );
+        assert_eq!(
+            scan(&[lavapipe]),
+            (
+                None,
+                LoadRequest::Cpu,
+                Some(FallbackReason::GpuSoftwareOnly)
+            )
+        );
+        assert_eq!(scan(&[rtx]), (Some(0), LoadRequest::Discrete, None));
+        // The real card wins wherever it registered.
+        assert_eq!(
+            scan(&[venus, uhd, lavapipe, rtx]),
+            (Some(3), LoadRequest::Discrete, None)
+        );
     }
 
     #[test]
@@ -530,8 +699,9 @@ mod tests {
             auto_device(&[Software, Integrated, Discrete, Discrete]),
             Some(2)
         );
+        assert_eq!(auto_device(&[Unverified, Discrete]), Some(1));
         assert_eq!(auto_device(&[Integrated]), None);
-        assert_eq!(auto_device(&[Software, Integrated]), None);
+        assert_eq!(auto_device(&[Software, Integrated, Unverified]), None);
         assert_eq!(auto_device(&[]), None);
     }
 
@@ -555,7 +725,7 @@ mod tests {
             GpuAvailability::NotRequested,
             GpuAvailability::ModuleAbsent,
             NONE,
-            devices(1, 1, 0),
+            devices(1, 1, 0, 0),
         ] {
             assert_eq!(
                 load_request(BackendMode::Cpu, gpu).unwrap(),
@@ -566,7 +736,11 @@ mod tests {
 
     #[test]
     fn auto_loads_on_a_gpu_only_when_a_discrete_one_registered() {
-        for gpu in [devices(1, 0, 0), devices(1, 1, 0), devices(2, 1, 1)] {
+        for gpu in [
+            devices(1, 0, 0, 0),
+            devices(1, 1, 0, 0),
+            devices(2, 1, 0, 1),
+        ] {
             assert_eq!(
                 load_request(BackendMode::Auto, gpu).unwrap(),
                 LoadRequest::Discrete,
@@ -577,9 +751,11 @@ mod tests {
             GpuAvailability::NotBuilt,
             GpuAvailability::ModuleAbsent,
             NONE,
-            devices(0, 1, 0),
-            devices(0, 0, 1),
-            devices(0, 2, 1),
+            devices(0, 1, 0, 0),
+            devices(0, 0, 0, 1),
+            devices(0, 2, 0, 1),
+            devices(0, 0, 1, 0),
+            devices(0, 1, 2, 1),
         ] {
             assert_eq!(
                 load_request(BackendMode::Auto, gpu).unwrap(),
@@ -592,7 +768,12 @@ mod tests {
     #[test]
     fn gpu_mode_uses_any_gpu_and_never_falls_back() {
         // Integrated-only and software-only machines still get their GPU.
-        for gpu in [devices(1, 0, 0), devices(0, 1, 0), devices(0, 0, 1)] {
+        for gpu in [
+            devices(1, 0, 0, 0),
+            devices(0, 1, 0, 0),
+            devices(0, 0, 1, 0),
+            devices(0, 0, 0, 1),
+        ] {
             assert_eq!(
                 load_request(BackendMode::Gpu, gpu).unwrap(),
                 LoadRequest::Gpu,
@@ -623,20 +804,37 @@ mod tests {
             Some(FallbackReason::GpuUnavailable)
         );
         assert_eq!(
-            planned_fallback(BackendMode::Auto, devices(0, 1, 0)),
+            planned_fallback(BackendMode::Auto, devices(0, 1, 0, 0)),
             Some(FallbackReason::GpuIntegratedOnly)
         );
         // An integrated GPU names the reason even next to a software one.
         assert_eq!(
-            planned_fallback(BackendMode::Auto, devices(0, 1, 1)),
+            planned_fallback(BackendMode::Auto, devices(0, 1, 0, 1)),
+            Some(FallbackReason::GpuIntegratedOnly)
+        );
+        // Unverified (Venus, a card without a PCI bus id), next to software
+        // ones too; an integrated GPU still names the reason first.
+        assert_eq!(
+            planned_fallback(BackendMode::Auto, devices(0, 0, 1, 0)),
+            Some(FallbackReason::GpuUnverified)
+        );
+        assert_eq!(
+            planned_fallback(BackendMode::Auto, devices(0, 0, 1, 1)),
+            Some(FallbackReason::GpuUnverified)
+        );
+        assert_eq!(
+            planned_fallback(BackendMode::Auto, devices(0, 1, 1, 0)),
             Some(FallbackReason::GpuIntegratedOnly)
         );
         // Software only, e.g. lavapipe forced in with GGML_VK_VISIBLE_DEVICES.
         assert_eq!(
-            planned_fallback(BackendMode::Auto, devices(0, 0, 1)),
+            planned_fallback(BackendMode::Auto, devices(0, 0, 0, 1)),
             Some(FallbackReason::GpuSoftwareOnly)
         );
-        assert_eq!(planned_fallback(BackendMode::Auto, devices(1, 1, 0)), None);
+        assert_eq!(
+            planned_fallback(BackendMode::Auto, devices(1, 1, 0, 0)),
+            None
+        );
         assert_eq!(
             planned_fallback(BackendMode::Cpu, GpuAvailability::NotRequested),
             None
@@ -668,7 +866,7 @@ mod tests {
     fn the_snapshot_reports_the_loaded_device_not_the_request() {
         let compute = Compute::from_loaded(
             BackendMode::Auto,
-            devices(1, 1, 0),
+            devices(1, 1, 0, 0),
             "vulkan",
             "Vulkan1",
             "NVIDIA GeForce RTX 4070",
@@ -682,7 +880,7 @@ mod tests {
         // `gpu` on an integrated-only machine reports the integrated GPU.
         let compute = Compute::from_loaded(
             BackendMode::Gpu,
-            devices(0, 1, 0),
+            devices(0, 1, 0, 0),
             "vulkan",
             "Vulkan0",
             "Intel(R) UHD Graphics 770 (ADL-S GT1)",
@@ -695,7 +893,7 @@ mod tests {
         // `auto` did not plan for.
         let compute = Compute::from_loaded(
             BackendMode::Auto,
-            devices(1, 0, 0),
+            devices(1, 0, 0, 0),
             "cpu",
             "CPU",
             "Intel(R) Core(TM) i5-14500T   ",
@@ -716,8 +914,9 @@ mod tests {
             (GpuAvailability::NotBuilt, "gpu_not_built"),
             (GpuAvailability::ModuleAbsent, "gpu_module_absent"),
             (NONE, "gpu_unavailable"),
-            (devices(0, 1, 0), "gpu_integrated_only"),
-            (devices(0, 0, 2), "gpu_software_only"),
+            (devices(0, 1, 0, 0), "gpu_integrated_only"),
+            (devices(0, 0, 2, 0), "gpu_unverified"),
+            (devices(0, 0, 0, 2), "gpu_software_only"),
         ] {
             let compute =
                 Compute::from_loaded(BackendMode::Auto, gpu, "cpu", "CPU", "x", None).unwrap();
@@ -738,9 +937,15 @@ mod tests {
 
     #[test]
     fn a_gpu_request_that_landed_on_the_cpu_is_an_error() {
-        let error =
-            Compute::from_loaded(BackendMode::Gpu, devices(1, 0, 0), "cpu", "CPU", "x", None)
-                .unwrap_err();
+        let error = Compute::from_loaded(
+            BackendMode::Gpu,
+            devices(1, 0, 0, 0),
+            "cpu",
+            "CPU",
+            "x",
+            None,
+        )
+        .unwrap_err();
         assert_eq!(error.code, ErrorCode::GpuUnavailable);
         let error = Compute::from_loaded(
             BackendMode::Cpu,
@@ -754,7 +959,7 @@ mod tests {
         assert_eq!(error.code, ErrorCode::Internal);
         let error = Compute::from_loaded(
             BackendMode::Auto,
-            devices(1, 0, 0),
+            devices(1, 0, 0, 0),
             "cuda",
             "CUDA0",
             "x",
