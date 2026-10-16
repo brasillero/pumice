@@ -7,6 +7,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -14,9 +15,11 @@ use tempfile::TempDir;
 use tokio::time::Instant;
 
 use pumice::orchestrator::serve::child::{ChildSpec, code};
+use pumice::orchestrator::serve::http::{self, Frontend, ServiceState};
 use pumice::orchestrator::serve::output::Reporter;
 use pumice::orchestrator::serve::supervisor::{
-    self, ChildSnapshot, ChildState, Supervisor, SupervisorConfig, SupervisorHandle, Timings,
+    self, Checkpoint, Checkpoints, ChildSnapshot, ChildState, Supervisor, SupervisorConfig,
+    SupervisorHandle, Timings,
 };
 
 /// Every wait in these tests is bounded by this.
@@ -76,6 +79,7 @@ impl Stub {
             },
             startup_timeout: Duration::from_secs(5),
             timings,
+            checkpoints: Checkpoints::default(),
         }
     }
 
@@ -464,6 +468,144 @@ async fn the_recycle_hook_replaces_the_ready_generation_only() {
     assert_eq!(stub.spawns().len(), 2);
     shutdown(supervisor).await;
     stub.assert_all_reaped();
+}
+
+/// What a frontend answered while a generation was being retired.
+#[derive(Debug)]
+struct Retiring {
+    generation: u64,
+    snapshot: ChildSnapshot,
+    ready_status: u16,
+    flows_ready: serde_json::Value,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    child_alive: bool,
+}
+
+fn answer(frontend: &Frontend, path: &str) -> (u16, Value) {
+    let mut headers = hyper::HeaderMap::new();
+    headers.insert(hyper::header::HOST, "127.0.0.1:41234".parse().unwrap());
+    let response = http::respond(
+        frontend,
+        &hyper::Method::GET,
+        &path.parse().unwrap(),
+        &headers,
+    );
+    let status = response.status().as_u16();
+    let body = futures_bytes(response.into_body());
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
+fn futures_bytes(body: http_body_util::Full<bytes::Bytes>) -> bytes::Bytes {
+    use http_body_util::BodyExt;
+    futures_now(body.collect()).unwrap().to_bytes()
+}
+
+/// Polls a future that is ready at once (a `Full` body).
+fn futures_now<F: std::future::Future>(future: F) -> F::Output {
+    let waker = std::task::Waker::noop();
+    let mut context = std::task::Context::from_waker(waker);
+    let mut future = std::pin::pin!(future);
+    match future.as_mut().poll(&mut context) {
+        std::task::Poll::Ready(output) => output,
+        std::task::Poll::Pending => panic!("a full body is ready at once"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retiring_generation_is_never_offered_as_ready() {
+    // A recycled generation is retired while still alive; a crashed one
+    // after its exit. Either way, from the moment it is retired, the
+    // snapshot, `/ready` and the flows no longer offer it.
+    for recycle in [true, false] {
+        let stub = stub(if recycle {
+            json!([{}])
+        } else {
+            json!([{"exit_after_ready_ms": 20}, {}])
+        });
+        let seen: Arc<Mutex<Vec<Retiring>>> = Arc::default();
+        let slot: Arc<OnceLock<(Frontend, SupervisorHandle, PathBuf)>> = Arc::default();
+        let mut config = stub.config(fast());
+        {
+            let seen = Arc::clone(&seen);
+            let slot = Arc::clone(&slot);
+            config.checkpoints = Checkpoints::new(move |point| {
+                let Checkpoint::Retiring(generation) = point else {
+                    return;
+                };
+                let (frontend, handle, log) = slot.get().expect("set before any retirement");
+                let pid = fs::read_to_string(log)
+                    .unwrap_or_default()
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .filter(|entry| entry["event"] == "spawn")
+                    .nth(generation as usize - 1)
+                    .and_then(|entry| entry["pid"].as_u64());
+                #[cfg(unix)]
+                // SAFETY: signal 0 only checks for existence.
+                let child_alive =
+                    pid.is_some_and(|pid| unsafe { libc::kill(pid as libc::pid_t, 0) } == 0);
+                #[cfg(not(unix))]
+                let child_alive = pid.is_some();
+                let (ready_status, _) = answer(frontend, "/ready");
+                let (_, flows) = answer(frontend, "/pumice/v1/flows");
+                seen.lock().unwrap().push(Retiring {
+                    generation,
+                    snapshot: handle.snapshot(),
+                    ready_status,
+                    flows_ready: flows["flows"][0]["ready"].clone(),
+                    child_alive,
+                });
+            });
+        }
+        let mut supervisor = supervisor::spawn(config, Reporter::silent());
+        let handle = supervisor.handle();
+        let frontend = Frontend::new(
+            41234,
+            handle.clone(),
+            "turbo".to_owned(),
+            vec![http::FlowInfo {
+                id: "raw".to_owned(),
+                transcription_model: "turbo".to_owned(),
+                formatter: None,
+                relay_route: "passthrough".to_owned(),
+            }],
+        );
+        frontend.set_state(ServiceState::Running);
+        assert!(
+            slot.set((frontend, handle.clone(), stub.log.clone()))
+                .is_ok()
+        );
+        tokio::time::timeout(WAIT, supervisor.initial())
+            .await
+            .expect("initial result in time")
+            .expect("the first child becomes ready");
+        if recycle {
+            assert!(handle.recycle(1));
+        }
+        wait_for(&handle, "generation 2", |s| {
+            s.state == ChildState::Ready && s.generation == 2
+        })
+        .await;
+        let seen = std::mem::take(&mut *seen.lock().unwrap());
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        let retiring = &seen[0];
+        assert_eq!(retiring.generation, 1);
+        assert_eq!(
+            retiring.snapshot.state,
+            ChildState::Restarting,
+            "{retiring:?}"
+        );
+        assert_eq!(retiring.snapshot.port, None);
+        assert_eq!(retiring.snapshot.model_load_ms, None);
+        assert_eq!(retiring.ready_status, 503, "{retiring:?}");
+        assert_eq!(retiring.flows_ready, json!(false));
+        #[cfg(unix)]
+        if recycle {
+            assert!(retiring.child_alive, "retired before it was killed");
+        }
+        shutdown(supervisor).await;
+        stub.assert_all_reaped();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

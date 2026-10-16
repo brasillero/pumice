@@ -82,6 +82,48 @@ pub struct SupervisorConfig {
     pub spec: ChildSpec,
     pub startup_timeout: Duration,
     pub timings: Timings,
+    #[doc(hidden)]
+    pub checkpoints: Checkpoints,
+}
+
+/// Fixed points in the supervisor's task, as [`Checkpoints`] sees them.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Checkpoint {
+    /// This ready generation is about to be watched.
+    Watching(u64),
+    /// This generation is no longer offered as ready and is about to be
+    /// killed and reaped.
+    Retiring(u64),
+}
+
+/// Test seam, never set by `pumice serve` itself: a callback the
+/// supervisor's own task runs at each [`Checkpoint`], so in-process tests
+/// can read the published snapshot mid-transition or inject a panic.
+#[doc(hidden)]
+#[derive(Clone, Default)]
+pub struct Checkpoints(Option<Arc<dyn Fn(Checkpoint) + Send + Sync>>);
+
+impl Checkpoints {
+    pub fn new(hook: impl Fn(Checkpoint) + Send + Sync + 'static) -> Checkpoints {
+        Checkpoints(Some(Arc::new(hook)))
+    }
+
+    fn reach(&self, point: Checkpoint) {
+        if let Some(hook) = &self.0 {
+            hook(point);
+        }
+    }
+}
+
+impl std::fmt::Debug for Checkpoints {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "Checkpoints(set)"
+        } else {
+            "Checkpoints(none)"
+        })
+    }
 }
 
 /// The child's state as status reports it.
@@ -329,12 +371,18 @@ impl Owner {
             Started::Stopped { cleaned } => return cleaned,
         };
         loop {
+            self.config
+                .checkpoints
+                .reach(Checkpoint::Watching(current.generation));
             let end = self.watch(&mut current, &mut commands, &mut stop).await;
             let failure = match end {
                 End::Stop => return self.stop_generation(current).await,
                 End::Recycle => {
                     self.reporter.child_recycled(current.generation);
-                    if !self.retire(current, code::RECYCLED).await {
+                    if !self
+                        .retire(current, code::RECYCLED, ChildState::Restarting)
+                        .await
+                    {
                         return self.wait_for_stop(&mut stop).await;
                     }
                     match self.start(&stop).await {
@@ -358,7 +406,12 @@ impl Owner {
                         failure.code,
                         failure.child_code,
                     );
-                    if !self.retire(current, failure.code).await {
+                    let next = if failure.fatal {
+                        ChildState::Failed
+                    } else {
+                        ChildState::Restarting
+                    };
+                    if !self.retire(current, failure.code, next).await {
                         return self.wait_for_stop(&mut stop).await;
                     }
                     if failure.fatal {
@@ -468,7 +521,12 @@ impl Owner {
             Err(Some(failure)) => {
                 self.reporter
                     .child_failed(generation, failure.code, failure.child_code);
-                let cleaned = self.retire(spawned, failure.code).await;
+                let state = if restarting {
+                    ChildState::Restarting
+                } else {
+                    ChildState::Starting
+                };
+                let cleaned = self.retire(spawned, failure.code, state).await;
                 Started::Failed { failure, cleaned }
             }
         }
@@ -545,13 +603,27 @@ impl Owner {
         }
     }
 
-    /// Kills and reaps a generation that is being replaced. False when it
-    /// could not be reaped: it stays owned and the state becomes `failed`.
-    async fn retire(&mut self, generation: Generation, why: &'static str) -> bool {
+    /// Kills and reaps a generation that is being replaced. First `state`
+    /// (never `ready`) is published and the usable-child metadata cleared
+    /// in one update, so nothing offers the generation while it dies. False
+    /// when it could not be reaped: it stays owned and the state becomes
+    /// `failed`.
+    async fn retire(
+        &mut self,
+        generation: Generation,
+        why: &'static str,
+        state: ChildState,
+    ) -> bool {
         self.update(|snapshot| {
+            snapshot.state = state;
+            snapshot.next_retry_delay_ms = None;
             snapshot.port = None;
+            snapshot.model_load_ms = None;
             snapshot.last_failure = Some(why);
         });
+        self.config
+            .checkpoints
+            .reach(Checkpoint::Retiring(generation.generation));
         match generation
             .kill_and_reap(self.config.timings.reap_limit)
             .await

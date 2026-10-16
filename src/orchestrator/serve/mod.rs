@@ -159,6 +159,7 @@ async fn serve(params: &ServeParams, reporter: &Reporter, signals: cancel::Cance
             },
             startup_timeout: settings.startup_timeout,
             timings: Timings::default(),
+            checkpoints: Default::default(),
         },
         reporter.clone(),
     );
