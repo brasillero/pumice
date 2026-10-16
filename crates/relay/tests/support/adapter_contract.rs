@@ -11,8 +11,8 @@
 //! protocol fixtures (success, not-logged-in, invalid output, tool activity),
 //! the scenario keys that make the fake CLI capture the system prompt, and
 //! the assertions for its own restricted argv. The generic cases own
-//! transport, workspace, timeout, privacy and fallback expectations, so they
-//! never vary per adapter. Tests never call a real AI CLI.
+//! transport, workspace, timeout, privacy and terminal-failure expectations,
+//! so they never vary per adapter. Tests never call a real AI CLI.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -550,12 +550,13 @@ pub async fn privacy<A: ContractAdapter>() {
 }
 
 /// No fallback (owner decision 2026-10-07): with this adapter selected and
-/// failing, the original text comes back raw and a scripted double is never
-/// invoked; the double's failure never reaches this adapter either.
+/// failing, the outcome fails with the original text kept and a scripted
+/// double is never invoked; the double's failure never reaches this adapter
+/// either.
 pub async fn failure_is_terminal<A: ContractAdapter>() {
     use pumice_relay::pipeline::RawReason;
 
-    // Selected and failing: raw text, the double never runs.
+    // Selected and failing: a failed outcome, the double never runs.
     let (stdout, exit_code) = A::not_logged_in("contract-suite");
     let fake = FakeCli::new(json!({"stdout": stdout, "exit_code": exit_code}));
     let backup = TestProvider::new("backup", vec![Step::Ready("unused".to_owned())]);

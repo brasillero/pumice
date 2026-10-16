@@ -35,7 +35,8 @@ use tokio::net::TcpStream;
 /// `{binary}` is replaced by the fake's path.
 const CLAUDE_AT_FAKE: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n  - id: codex\n    enabled: false\n";
 
-/// The recorded Handy transcript, for raw-fallback assertions.
+/// The recorded Handy transcript: what passthrough returns, and what logs
+/// and error bodies must never contain.
 const FIXTURE_TRANSCRIPT: &str = "Reunião com a equipe às nove horas, não esquecer de enviar o relatório para o João e revisar o orçamento.";
 
 /// Captured metadata lines, one per completion request.

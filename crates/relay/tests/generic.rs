@@ -22,7 +22,7 @@
 //! | tool_activity            | `tool_calls_and_function_call_rejected`                |
 //! | privacy                  | `errors_are_text_free`                                 |
 //! | cleanup (sockets/tasks)  | `cancellation_drops_the_socket`                        |
-//! | no fallback              | `failure_returns_raw_text_and_never_runs_another_`     |
+//! | no fallback              | `failure_keeps_the_dictation_and_never_runs_another_`  |
 //! |                          | `provider`                                             |
 //! | disabled behavior        | `nothing_is_enabled_without_an_entry` (zero connections)|
 //! | config protection        | `config_validation_*`, `recursion_*`                   |
@@ -874,21 +874,21 @@ async fn wait_until(mut condition: impl FnMut() -> bool) {
 }
 
 // ---------------------------------------------------------------------------
-// No fallback: a failure returns the original text, never another provider
+// No fallback: a failed outcome keeps the dictation, never another provider
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn failure_returns_raw_text_and_never_runs_another_provider() {
-    // Selected generic fails (connection refused): raw text, the double
-    // never runs.
+async fn failure_keeps_the_dictation_and_never_runs_another_provider() {
+    // Selected generic fails (connection refused): a failed outcome that
+    // keeps the dictation; the double never runs.
     let dead = FakeHttp::spawn(Behavior::Stall).await;
     let dead_addr = dead.addr();
     drop(dead);
     let generic_endpoint = parse_endpoint(&format!("http://{dead_addr}/v1")).expect("parses");
     let backup = TestProvider::new("backup", vec![Step::Ready("Olá de novo.".to_owned())]);
-    let config = chain_config(vec![
-        ("generic", generic_settings(&generic_endpoint)),
-        ("backup", generic_settings(&generic_endpoint)),
+    let config = pipeline_config(vec![
+        ("generic", generic_settings()),
+        ("backup", generic_settings()),
     ]);
     let providers: Vec<Arc<dyn Provider>> = vec![
         build_provider(&generic_endpoint, CALL_TIMEOUT),
@@ -916,9 +916,9 @@ async fn failure_returns_raw_text_and_never_runs_another_provider() {
     )))
     .await;
     let alpha = TestProvider::new("alpha", vec![Step::Fail(ProviderError::NotLoggedIn)]);
-    let config = chain_config(vec![
-        ("alpha", generic_settings(&server.endpoint())),
-        ("generic", generic_settings(&server.endpoint())),
+    let config = pipeline_config(vec![
+        ("alpha", generic_settings()),
+        ("generic", generic_settings()),
     ]);
     let providers: Vec<Arc<dyn Provider>> = vec![
         alpha.clone(),
@@ -945,14 +945,14 @@ async fn failure_returns_raw_text_and_never_runs_another_provider() {
 
 /// Pipeline-level settings for a generic provider built directly with
 /// [`GenericProvider::new`]; the endpoint lives in the provider itself.
-fn generic_settings(_endpoint: &LoopbackEndpoint) -> pumice_relay::providers::ProviderSettings {
+fn generic_settings() -> pumice_relay::providers::ProviderSettings {
     let mut settings = (DESCRIPTOR.defaults)();
     settings.enabled = true;
     settings.model = MODEL.to_owned();
     settings
 }
 
-fn chain_config(entries: Vec<(&str, pumice_relay::providers::ProviderSettings)>) -> Config {
+fn pipeline_config(entries: Vec<(&str, pumice_relay::providers::ProviderSettings)>) -> Config {
     Config {
         port: 7567,
         total_timeout: Duration::from_secs(30),
