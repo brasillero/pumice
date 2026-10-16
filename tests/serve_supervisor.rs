@@ -3,7 +3,8 @@
 //! scenario-driven `pumice-test-transcribe` acting as a managed child. No
 //! real transcription module or model is involved. Timings are shortened
 //! where a test would otherwise wait for the documented policy; the binary
-//! tests (`pumice_serve.rs`) run the defaults.
+//! tests (`pumice_serve.rs`) run the defaults. The last tests run the whole
+//! service (`serve::run`) to inject panics through its test seams.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,15 +13,20 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Instant;
 
+use pumice_relay::process::CleanupScope;
+
+use pumice::orchestrator::cancel::{self, CancelHandle, CancelReason};
 use pumice::orchestrator::serve::child::{ChildSpec, code};
-use pumice::orchestrator::serve::http::{self, Frontend, ServiceState};
-use pumice::orchestrator::serve::output::Reporter;
+use pumice::orchestrator::serve::http::{self, Frontend, RequestHook, ServiceState};
+use pumice::orchestrator::serve::output::{Outputs, PanicHook, Reporter};
 use pumice::orchestrator::serve::supervisor::{
     self, Checkpoint, Checkpoints, ChildSnapshot, ChildState, Supervisor, SupervisorConfig,
     SupervisorHandle, Timings,
 };
+use pumice::orchestrator::serve::{self, Service};
 
 /// Every wait in these tests is bounded by this.
 const WAIT: Duration = Duration::from_secs(10);
@@ -79,6 +85,7 @@ impl Stub {
             },
             startup_timeout: Duration::from_secs(5),
             timings,
+            scope: Arc::new(CleanupScope::new()),
             checkpoints: Checkpoints::default(),
         }
     }
@@ -660,4 +667,170 @@ async fn a_shutdown_during_startup_stops_the_child() {
     assert!(started.elapsed() < Duration::from_secs(2));
     assert_eq!(stub.log("eof").len(), 1);
     stub.assert_all_reaped();
+}
+
+/// The whole service (`serve::run`) on `127.0.0.1:0` with the stub as its
+/// child; the returned handle fires its "signal".
+async fn start_service(
+    config: SupervisorConfig,
+    request_hook: Option<RequestHook>,
+) -> (tokio::task::JoinHandle<u8>, u16, CancelHandle) {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind 127.0.0.1:0");
+    let port = listener.local_addr().unwrap().port();
+    let (signal, signals) = cancel::context();
+    let service = Service {
+        listener,
+        scope: Arc::clone(&config.scope),
+        supervisor: config,
+        model: "turbo".to_owned(),
+        flows: Vec::new(),
+        request_hook,
+    };
+    let task = tokio::spawn(async move { serve::run(service, &Reporter::silent(), signals).await });
+    (task, port, signal)
+}
+
+/// One `GET` over a real socket: the status code, or `None` when the
+/// connection closed without an answer.
+async fn get_status(port: u16, path: &str) -> Option<u16> {
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .ok()?;
+    let request =
+        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.ok()?;
+    let mut answer = Vec::new();
+    let _ = tokio::time::timeout(WAIT, stream.read_to_end(&mut answer)).await;
+    let answer = String::from_utf8_lossy(&answer);
+    answer.strip_prefix("HTTP/1.1 ")?.get(..3)?.parse().ok()
+}
+
+async fn wait_ready(port: u16) {
+    let deadline = Instant::now() + WAIT;
+    while get_status(port, "/ready").await != Some(200) {
+        assert!(Instant::now() < deadline, "the service never became ready");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_supervisor_panic_stops_the_service_with_exit_1() {
+    let stub = stub(json!([{}]));
+    let mut config = stub.config(fast());
+    config.checkpoints = Checkpoints::new(|point| {
+        if point == Checkpoint::Watching(1) {
+            panic!("S3NT1NEL injected supervisor panic");
+        }
+    });
+    let scope = Arc::clone(&config.scope);
+    let (task, _port, _signal) = start_service(config, None).await;
+    let exit = tokio::time::timeout(WAIT, task)
+        .await
+        .expect("the service stops on its own")
+        .expect("the service task itself does not panic");
+    assert_eq!(exit, 1);
+    // The panic dropped the ready generation: its tree was killed, handed
+    // to the scope and reaped by the service's bounded drain.
+    assert!(scope.is_empty(), "nothing left unreaped");
+    assert_eq!(stub.spawns().len(), 1);
+    stub.assert_all_reaped();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_handler_panic_stops_the_service_with_exit_1() {
+    let stub = stub(json!([{}]));
+    let config = stub.config(fast());
+    let hook: RequestHook = Arc::new(|path: &str| {
+        if path == "/pumice/v1/status" {
+            panic!("S3NT1NEL injected handler panic");
+        }
+    });
+    let (task, port, _signal) = start_service(config, Some(hook)).await;
+    wait_ready(port).await;
+    let started = Instant::now();
+    assert_eq!(
+        get_status(port, "/pumice/v1/status").await,
+        None,
+        "no answer"
+    );
+    let exit = tokio::time::timeout(WAIT, task)
+        .await
+        .expect("the service stops on its own")
+        .expect("the service task itself does not panic");
+    assert_eq!(exit, 1);
+    assert!(started.elapsed() < Duration::from_secs(5), "D9 budget");
+    // The same bounded teardown as a signal: admission is gone and the
+    // child was stopped cooperatively, then reaped.
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_err()
+    );
+    assert_eq!(stub.log("eof").len(), 1, "the child saw its stdin close");
+    stub.assert_all_reaped();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_signal_still_ends_the_service_with_its_own_code() {
+    let stub = stub(json!([{}]));
+    let (task, port, signal) = start_service(stub.config(fast()), None).await;
+    wait_ready(port).await;
+    signal.cancel(CancelReason::Terminate);
+    let exit = tokio::time::timeout(WAIT, task).await.unwrap().unwrap();
+    assert_eq!(exit, 143);
+    stub.assert_all_reaped();
+}
+
+/// Set in the re-executed copy of this test binary.
+const PANIC_HOOK_ENV: &str = "PUMICE_TEST_PANIC_HOOK";
+
+#[test]
+fn the_panic_hook_reports_the_location_never_the_payload() {
+    if let Some(mode) = std::env::var_os(PANIC_HOOK_ENV) {
+        // The re-executed copy: panic on another thread under the hook.
+        let outputs = Outputs::start(mode == "json");
+        let hook = PanicHook::install(outputs.reporter());
+        let joined = std::thread::spawn(|| panic!("S3NT1NEL request text")).join();
+        assert!(joined.is_err());
+        drop(hook);
+        outputs.finish();
+        return;
+    }
+    for mode in ["plain", "json"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "the_panic_hook_reports_the_location_never_the_payload",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(PANIC_HOOK_ENV, mode)
+            .output()
+            .expect("re-run this test");
+        assert!(output.status.success(), "{mode}: {output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stdout.contains("S3NT1NEL") && !stderr.contains("S3NT1NEL"),
+            "{mode}: {stderr}"
+        );
+        if mode == "plain" {
+            assert!(
+                stderr.contains(
+                    "pumice serve: internal error: a task panicked at tests/serve_supervisor.rs:"
+                ),
+                "{stderr}"
+            );
+        } else {
+            let event = stderr
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .find(|event| event["event"] == "panicked")
+                .unwrap_or_else(|| panic!("no panicked event: {stderr}"));
+            assert_eq!(event["code"], "internal");
+            assert_eq!(event["module"], "orchestrator");
+        }
+    }
 }

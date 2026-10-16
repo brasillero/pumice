@@ -88,6 +88,12 @@ pub struct FlowInfo {
     pub relay_route: String,
 }
 
+/// Test seam, never set by `pumice serve` itself: called with the path of
+/// every request that passed the guard, before it is routed, so in-process
+/// tests can inject a panic into a request handler.
+#[doc(hidden)]
+pub type RequestHook = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// What the routes read.
 pub struct Frontend {
     port: u16,
@@ -95,6 +101,7 @@ pub struct Frontend {
     supervisor: SupervisorHandle,
     model: String,
     flows: Vec<FlowInfo>,
+    request_hook: Option<RequestHook>,
 }
 
 impl Frontend {
@@ -110,7 +117,13 @@ impl Frontend {
             supervisor,
             model,
             flows,
+            request_hook: None,
         }
+    }
+
+    #[doc(hidden)]
+    pub fn set_request_hook(&mut self, hook: RequestHook) {
+        self.request_hook = Some(hook);
     }
 
     pub fn set_state(&self, state: ServiceState) {
@@ -141,16 +154,32 @@ impl Frontend {
     }
 }
 
+/// A request handler panicked: a core failure (p13.1-flow-seam/D9).
+#[derive(Debug, PartialEq, Eq)]
+pub struct HandlerPanicked;
+
 /// Serves `listener` until `stop` fires, then stops accepting and drops
-/// every open connection. Never panics on client behavior.
-pub async fn serve(listener: TcpListener, frontend: Arc<Frontend>, mut stop: CancelGuard) {
+/// every open connection. Never panics on client behavior; when a
+/// connection's task panics anyway, it stops the same way at once and
+/// returns [`HandlerPanicked`] for the service to shut down.
+pub async fn serve(
+    listener: TcpListener,
+    frontend: Arc<Frontend>,
+    mut stop: CancelGuard,
+) -> Result<(), HandlerPanicked> {
     let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let mut connections = JoinSet::new();
+    let mut result = Ok(());
     loop {
         tokio::select! {
             biased;
             _ = cancel::cancelled(&mut stop) => break,
-            Some(_) = connections.join_next(), if !connections.is_empty() => {}
+            Some(joined) = connections.join_next(), if !connections.is_empty() => {
+                if joined.is_err_and(|error| error.is_panic()) {
+                    result = Err(HandlerPanicked);
+                    break;
+                }
+            }
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
                     // Over the cap the connection is closed at once: no
@@ -172,6 +201,7 @@ pub async fn serve(listener: TcpListener, frontend: Arc<Frontend>, mut stop: Can
     drop(listener);
     connections.abort_all();
     while connections.join_next().await.is_some() {}
+    result
 }
 
 async fn serve_connection(stream: tokio::net::TcpStream, frontend: Arc<Frontend>) {
@@ -271,6 +301,9 @@ fn answer(
                 message,
             ),
         );
+    }
+    if let Some(hook) = &frontend.request_hook {
+        hook(uri.path());
     }
     let route = match uri.path() {
         "/health" => Route::Health,

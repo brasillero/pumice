@@ -8,9 +8,10 @@
 //!
 //! Every line goes through a bounded writer thread, so a stalled consumer
 //! never blocks requests or the shutdown. Nothing here carries content:
-//! only ports, generations, durations and fixed codes.
+//! only ports, generations, durations and fixed codes — panics included
+//! ([`PanicHook`]).
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -92,6 +93,7 @@ pub mod event {
     pub const TRANSCRIPTION_UNAVAILABLE: &str = "transcription_unavailable";
     pub const STOPPING: &str = "stopping";
     pub const STOPPED: &str = "stopped";
+    pub const PANICKED: &str = "panicked";
 }
 
 impl Reporter {
@@ -134,6 +136,22 @@ impl Reporter {
         {
             writer.emit_generation(event, generation, elapsed_ms, code);
         }
+    }
+
+    /// From the panic hook: a fixed line with the panic's source location,
+    /// never its payload. Never waits: a busy event writer loses the event.
+    fn panicked(&self, location: Option<&std::panic::Location<'_>>) {
+        if let Some(events) = &self.events {
+            let mut writer = match events.try_lock() {
+                Ok(writer) => writer,
+                Err(TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(TryLockError::WouldBlock) => return,
+            };
+            if let Some(writer) = writer.as_mut() {
+                writer.emit_generation(event::PANICKED, None, None, Some("internal"));
+            }
+        }
+        self.plain(panic_line(location));
     }
 
     /// The frontend port is claimed; the child is starting.
@@ -239,5 +257,78 @@ impl Reporter {
         self.plain(format!(
             "pumice serve: transcription unavailable ({code}); restart pumice serve after fixing the cause"
         ));
+    }
+}
+
+/// The plain panic line: fixed text and the source location only. A
+/// panic's payload can quote request content (D9, design §9), so it is
+/// never written.
+fn panic_line(location: Option<&std::panic::Location<'_>>) -> String {
+    match location {
+        Some(location) => format!(
+            "pumice serve: internal error: a task panicked at {}:{}:{}",
+            location.file(),
+            location.line(),
+            location.column()
+        ),
+        None => "pumice serve: internal error: a task panicked".to_owned(),
+    }
+}
+
+/// Where the panic hook reports, while a [`PanicHook`] is alive.
+static PANIC_REPORTER: Mutex<Option<Reporter>> = Mutex::new(None);
+
+/// `pumice serve`'s process-wide panic hook (p13.1-flow-seam/D9): it
+/// replaces the default hook, which would print the payload, with
+/// [`panic_line`] and a metadata-only `panicked` event, and never blocks.
+/// Dropping the guard detaches the reporter (so the writers can finish);
+/// later panics are then reported nowhere.
+pub struct PanicHook(());
+
+impl PanicHook {
+    pub fn install(reporter: Reporter) -> PanicHook {
+        *PANIC_REPORTER
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(reporter);
+        std::panic::set_hook(Box::new(|info| {
+            let slot = match PANIC_REPORTER.try_lock() {
+                Ok(slot) => slot,
+                Err(TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(TryLockError::WouldBlock) => return,
+            };
+            if let Some(reporter) = slot.as_ref() {
+                reporter.panicked(info.location());
+            }
+        }));
+        PanicHook(())
+    }
+}
+
+impl Drop for PanicHook {
+    fn drop(&mut self) {
+        PANIC_REPORTER
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_panic_line_has_the_location_only() {
+        let location = std::panic::Location::caller();
+        let line = panic_line(Some(location));
+        assert!(
+            line.starts_with("pumice serve: internal error: a task panicked at "),
+            "{line}"
+        );
+        assert!(line.ends_with(&format!(":{}:{}", location.line(), location.column())));
+        assert_eq!(
+            panic_line(None),
+            "pumice serve: internal error: a task panicked"
+        );
     }
 }

@@ -149,7 +149,7 @@ impl ProcessTree {
     }
 
     /// True once [`finish`](ProcessTree::finish) reaped the direct child.
-    pub(crate) fn is_reaped(&self) -> bool {
+    pub fn is_reaped(&self) -> bool {
         self.reaped
     }
 
@@ -239,7 +239,9 @@ impl CleanupScope {
     }
 
     /// Kills `tree` now and keeps it for a later [`drain`](Self::drain).
-    pub(crate) fn kill_and_register(&self, mut tree: ProcessTree) {
+    /// Public for owners outside this crate (`pumice serve`'s transcription
+    /// child) whose tree can be dropped by a panic.
+    pub fn kill_and_register(&self, mut tree: ProcessTree) {
         tree.kill_now();
         self.pending
             .lock()

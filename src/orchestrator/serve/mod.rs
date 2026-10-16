@@ -15,7 +15,10 @@
 //!
 //! Shutdown (D9): Ctrl-C or SIGTERM stops admission, closes the child's
 //! stdin, waits a 2.5 s grace and kills and reaps what is left; exit 130 or
-//! 143, or 1 when cleanup could not be confirmed.
+//! 143, or 1 when cleanup could not be confirmed. A core failure — the
+//! supervisor's task or a request handler panicked — takes the same
+//! bounded path and exits 1; the panic itself is reported as metadata only
+//! (`output::PanicHook`).
 
 pub mod child;
 pub mod cli;
@@ -27,6 +30,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::net::TcpListener;
 use tokio::time::Instant;
 
 use pumice_relay::process::CleanupScope;
@@ -38,9 +42,11 @@ use crate::orchestrator::error::StageError;
 use crate::orchestrator::flow::{self, Runtime, set_reference_location};
 use crate::orchestrator::result::stage;
 use crate::orchestrator::serve::child::{ChildSpec, Failure, code};
-use crate::orchestrator::serve::http::{FlowInfo, Frontend, ServiceState};
+use crate::orchestrator::serve::http::{FlowInfo, Frontend, RequestHook, ServiceState};
 use crate::orchestrator::serve::output::Reporter;
-use crate::orchestrator::serve::supervisor::{StartupError, SupervisorConfig, Timings};
+use crate::orchestrator::serve::supervisor::{
+    Checkpoints, Event, StartupError, SupervisorConfig, Timings,
+};
 use crate::orchestrator::transcription::Transcribe;
 
 /// The `models list` preflight never takes longer than this.
@@ -49,7 +55,7 @@ const MODELS_LIST_CAP: Duration = Duration::from_secs(5);
 const SUPERVISOR_STOP_LIMIT: Duration = Duration::from_millis(3_750);
 /// The frontend task's own end, after it was told to stop.
 const FRONTEND_STOP_LIMIT: Duration = Duration::from_millis(100);
-/// The relay cleanup scope's drain at the end.
+/// The service's cleanup scope's drain at the end.
 const SCOPE_DRAIN_LIMIT: Duration = Duration::from_millis(250);
 
 /// Already parsed and validated arguments.
@@ -82,6 +88,24 @@ pub async fn execute(params: &ServeParams, reporter: &Reporter) -> u8 {
 enum Ending {
     Signal(CancelReason),
     StartupFailed(StartupError),
+    /// The supervisor's task or a request handler panicked.
+    CoreFailure,
+}
+
+/// What [`run`] serves once the startup checks passed and the frontend
+/// port is claimed.
+pub struct Service {
+    pub listener: TcpListener,
+    pub supervisor: SupervisorConfig,
+    /// The served transcription model.
+    pub model: String,
+    /// The enabled flows.
+    pub flows: Vec<FlowInfo>,
+    /// The service's cleanup scope, drained at the end; the supervisor's
+    /// configuration carries the same one.
+    pub scope: Arc<CleanupScope>,
+    #[doc(hidden)]
+    pub request_hook: Option<RequestHook>,
 }
 
 async fn serve(params: &ServeParams, reporter: &Reporter, signals: cancel::CancelGuard) -> u8 {
@@ -101,7 +125,9 @@ async fn serve(params: &ServeParams, reporter: &Reporter, signals: cancel::Cance
             return 2;
         }
     };
-    let runtime = match Runtime::build(&loaded, Arc::new(CleanupScope::new())) {
+    let scope = Arc::new(CleanupScope::new());
+    // Kept for the service's lifetime: P13.4 runs the flows on it.
+    let _runtime = match Runtime::build(&loaded, Arc::clone(&scope)) {
         Ok(runtime) => runtime,
         Err(error) => return report_stage_error(reporter, &error),
     };
@@ -141,28 +167,6 @@ async fn serve(params: &ServeParams, reporter: &Reporter, signals: cancel::Cance
             return 1;
         }
     };
-    let port = match listener.local_addr() {
-        Ok(address) => address.port(),
-        Err(_) => {
-            reporter.error("internal", None, "the frontend address is unknown");
-            return 1;
-        }
-    };
-    reporter.listening(port);
-
-    let mut supervisor = supervisor::spawn(
-        SupervisorConfig {
-            spec: ChildSpec {
-                binary,
-                config: transcribe_config,
-                model: settings.transcription_model.clone(),
-            },
-            startup_timeout: settings.startup_timeout,
-            timings: Timings::default(),
-            checkpoints: Default::default(),
-        },
-        reporter.clone(),
-    );
     let flows = loaded
         .config
         .flows
@@ -175,44 +179,95 @@ async fn serve(params: &ServeParams, reporter: &Reporter, signals: cancel::Cance
             relay_route: flow.relay_route.clone(),
         })
         .collect();
-    let frontend = Arc::new(Frontend::new(
-        port,
-        supervisor.handle(),
-        settings.transcription_model.clone(),
+    let service = Service {
+        listener,
+        supervisor: SupervisorConfig {
+            spec: ChildSpec {
+                binary,
+                config: transcribe_config,
+                model: settings.transcription_model.clone(),
+            },
+            startup_timeout: settings.startup_timeout,
+            timings: Timings::default(),
+            scope: Arc::clone(&scope),
+            checkpoints: Checkpoints::default(),
+        },
+        model: settings.transcription_model,
         flows,
-    ));
+        scope,
+        request_hook: None,
+    };
+    run(service, reporter, signals).await
+}
+
+/// Serves until a signal or a core failure, then tears everything down
+/// within the D9 budget and returns the exit code.
+pub async fn run(service: Service, reporter: &Reporter, mut signals: cancel::CancelGuard) -> u8 {
+    let Service {
+        listener,
+        supervisor,
+        model,
+        flows,
+        scope,
+        request_hook,
+    } = service;
+    let port = match listener.local_addr() {
+        Ok(address) => address.port(),
+        Err(_) => {
+            reporter.error("internal", None, "the frontend address is unknown");
+            return 1;
+        }
+    };
+    reporter.listening(port);
+
+    let mut supervisor = supervisor::spawn(supervisor, reporter.clone());
+    let mut frontend = Frontend::new(port, supervisor.handle(), model, flows);
+    if let Some(hook) = request_hook {
+        frontend.set_request_hook(hook);
+    }
+    let frontend = Arc::new(frontend);
     let (frontend_stop, frontend_guard) = cancel::context();
     let mut frontend_task =
         tokio::spawn(http::serve(listener, Arc::clone(&frontend), frontend_guard));
 
-    let mut signals = signals;
-    let ending = tokio::select! {
-        biased;
-        reason = cancel::cancelled(&mut signals) => Ending::Signal(reason),
-        initial = supervisor.initial() => match initial {
-            Ok(()) => {
-                frontend.set_state(ServiceState::Running);
-                reporter.ready(port);
-                Ending::Signal(cancel::cancelled(&mut signals).await)
+    // Until the signal, the supervisor's and the frontend's tasks are
+    // watched: either ending on its own is a core failure.
+    let mut frontend_ended = false;
+    let ending = loop {
+        tokio::select! {
+            biased;
+            reason = cancel::cancelled(&mut signals) => break Ending::Signal(reason),
+            _ = &mut frontend_task => {
+                frontend_ended = true;
+                break Ending::CoreFailure;
             }
-            Err(error) => Ending::StartupFailed(error),
-        },
+            event = supervisor.next() => match event {
+                Event::Ready => {
+                    frontend.set_state(ServiceState::Running);
+                    reporter.ready(port);
+                }
+                Event::StartupFailed(error) => break Ending::StartupFailed(error),
+                Event::Failed => break Ending::CoreFailure,
+            },
+        }
     };
 
-    // Teardown: admission first, then the child, then the relay scope.
+    // Teardown: admission first, then the child, then the cleanup scope
+    // (the relay's trees and any the supervisor dropped when it failed).
     frontend.set_state(ServiceState::Stopping);
     if matches!(ending, Ending::Signal(_)) {
         reporter.stopping();
     }
     frontend_stop.cancel(CancelReason::Shutdown);
     let child_cleaned = supervisor.shutdown(SUPERVISOR_STOP_LIMIT).await;
-    if tokio::time::timeout(FRONTEND_STOP_LIMIT, &mut frontend_task)
-        .await
-        .is_err()
+    if !frontend_ended
+        && tokio::time::timeout(FRONTEND_STOP_LIMIT, &mut frontend_task)
+            .await
+            .is_err()
     {
         frontend_task.abort();
     }
-    let scope_cleaned = runtime.scope().drain(SCOPE_DRAIN_LIMIT).await == 0;
+    let scope_cleaned = scope.drain(SCOPE_DRAIN_LIMIT).await == 0;
     let cleaned = child_cleaned && scope_cleaned;
 
     match ending {
@@ -231,6 +286,22 @@ async fn serve(params: &ServeParams, reporter: &Reporter, signals: cancel::Cance
         }
         Ending::StartupFailed(error) => {
             report_startup_failure(reporter, error.failure, error.cleanup_failed || !cleaned)
+        }
+        Ending::CoreFailure => {
+            if cleaned {
+                reporter.error(
+                    "internal",
+                    None,
+                    "an internal task of pumice serve failed; the service stopped",
+                );
+            } else {
+                reporter.error(
+                    code::CLEANUP_FAILED,
+                    Some("internal"),
+                    "an internal task of pumice serve failed and an owned process could not be confirmed stopped",
+                );
+            }
+            1
         }
     }
 }

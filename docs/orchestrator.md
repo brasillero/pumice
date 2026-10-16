@@ -228,6 +228,15 @@ the child's stdin, gives it 2.5 s to exit, then kills and reaps it; exit 130
 stopped. The whole stop stays within 5 s. Windows and macOS console teardown
 is checked manually.
 
+**Core failures.** A panic inside `pumice serve` itself (its supervisor or a
+request handler) is a core failure, not something it recovers from: the
+service takes the same bounded stop (admission first, then the child, then
+any killed process still to reap) and exits 1 with the error code
+`internal`. The panic is reported as a fixed line with its source location
+(`--json`: a `panicked` event with code `internal`), never its message,
+which could quote request content. A crash of the transcription child is
+not a core failure: it is restarted as above.
+
 ### Routes
 
 Every request must carry the `Host` `127.0.0.1:<port>` (no `localhost` or
@@ -293,7 +302,8 @@ line:
 one `{"event":"error","code":…,"message":…}` record (with `cause_code` when
 the transcription module reported its own error code). stderr then carries
 metadata-only events (`child_starting`, `child_ready`, `child_failed`,
-`child_restarting`, `transcription_unavailable`, `stopping`, …) with the
-child `generation` and fixed codes. Both streams are bounded and written by
-their own threads; a stalled reader loses events, never blocks the service.
+`child_restarting`, `transcription_unavailable`, `stopping`, `panicked`, …)
+with the child `generation` and fixed codes. Both streams are bounded and
+written by their own threads; a stalled reader loses events, never blocks
+the service.
 The child's own stderr is drained and discarded, never shown.

@@ -1,12 +1,13 @@
 //! The `pumice serve` command line (p13.1-flow-seam/D3, D7).
 
 use std::ffi::OsString;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use crate::orchestrator::config;
-use crate::orchestrator::serve::output::Outputs;
+use crate::orchestrator::serve::output::{Outputs, PanicHook};
 use crate::orchestrator::serve::{self, ServeParams};
 
 const USAGE: &str = "\
@@ -57,6 +58,8 @@ pub fn run(args: &[OsString]) -> ExitCode {
     };
     let outputs = Outputs::start(json);
     let reporter = outputs.reporter();
+    // Before anything can panic: metadata only, never the payload (D9).
+    let panic_hook = PanicHook::install(reporter.clone());
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -64,13 +67,24 @@ pub fn run(args: &[OsString]) -> ExitCode {
         Ok(runtime) => runtime,
         Err(_) => {
             reporter.error("internal", None, "cannot start the async runtime");
+            drop(panic_hook);
             drop(reporter);
             outputs.finish();
             return ExitCode::from(1);
         }
     };
-    let exit = runtime.block_on(serve::execute(&params, &reporter));
+    // Task panics are handled inside; this catches one in the service's
+    // own future. Its tasks are then dropped by the runtime's shutdown,
+    // which kills the child's tree.
+    let exit = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        runtime.block_on(serve::execute(&params, &reporter))
+    }))
+    .unwrap_or_else(|_| {
+        reporter.error("internal", None, "pumice serve failed internally");
+        1
+    });
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN);
+    drop(panic_hook);
     drop(reporter);
     outputs.finish();
     ExitCode::from(exit)

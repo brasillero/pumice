@@ -23,12 +23,16 @@
 //!   counting against the episode. Nothing is ever replayed.
 //! - Shutdown: stdin closed, a grace for the child to exit on its own, then
 //!   the tree is killed and reaped.
+//! - A panic in the task (a core failure, D9) drops what it owned: each
+//!   unreaped tree is killed and handed to the service's cleanup scope,
+//!   and [`Supervisor::failed`] tells the service, which stops.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use pumice_relay::process::CleanupScope;
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
@@ -76,12 +80,18 @@ impl Default for Timings {
     }
 }
 
+/// After an abort, the task's future is dropped within this.
+const ABORT_LIMIT: Duration = Duration::from_millis(100);
+
 /// What the supervisor runs.
 #[derive(Clone, Debug)]
 pub struct SupervisorConfig {
     pub spec: ChildSpec,
     pub startup_timeout: Duration,
     pub timings: Timings,
+    /// The service's cleanup scope: a generation dropped unreaped (the task
+    /// panicked or was aborted) is killed and left there for its drain.
+    pub scope: Arc<CleanupScope>,
     #[doc(hidden)]
     pub checkpoints: Checkpoints,
 }
@@ -236,6 +246,8 @@ pub struct Supervisor {
     initial: Option<oneshot::Receiver<Result<(), StartupError>>>,
     stop: CancelHandle,
     task: tokio::task::JoinHandle<bool>,
+    /// The task ended on its own (see [`Supervisor::failed`]).
+    ended: bool,
 }
 
 /// Starts the supervisor: it spawns generation 1 at once.
@@ -259,6 +271,7 @@ pub fn spawn(config: SupervisorConfig, reporter: Reporter) -> Supervisor {
         initial: Some(initial),
         stop,
         task,
+        ended: false,
     }
 }
 
@@ -268,37 +281,93 @@ impl Supervisor {
     }
 
     /// Resolves once the first generation is ready, or with why it failed.
-    /// Cancellation-safe; after it resolved once it stays pending.
+    /// Cancellation-safe; after it resolved once it stays pending, and so
+    /// does it when the task ended without reporting (it panicked:
+    /// [`Supervisor::failed`] resolves instead).
     pub async fn initial(&mut self) -> Result<(), StartupError> {
-        let Some(receiver) = self.initial.as_mut() else {
-            return std::future::pending().await;
-        };
-        let result = receiver.await;
-        self.initial = None;
-        match result {
-            Ok(result) => result,
-            // The task ended without reporting (it panicked).
-            Err(_) => Err(StartupError {
-                failure: Failure::fatal(code::SPAWN_FAILED),
-                cleanup_failed: true,
-            }),
+        initial_result(&mut self.initial).await
+    }
+
+    /// Resolves when the task ended before [`Supervisor::shutdown`] asked
+    /// it to: it panicked (a core failure, D9). Whatever it owned was killed
+    /// and left in the cleanup scope. Cancellation-safe.
+    pub async fn failed(&mut self) {
+        task_ended(&mut self.task, &mut self.ended).await;
+    }
+
+    /// [`Supervisor::initial`] and [`Supervisor::failed`] together, for a
+    /// service that waits on both.
+    pub async fn next(&mut self) -> Event {
+        let Supervisor {
+            initial,
+            task,
+            ended,
+            ..
+        } = self;
+        tokio::select! {
+            biased;
+            () = task_ended(task, ended) => Event::Failed,
+            result = initial_result(initial) => match result {
+                Ok(()) => Event::Ready,
+                Err(error) => Event::StartupFailed(error),
+            },
         }
     }
 
     /// Stops the child cooperatively (stdin closed, grace, then kill and
     /// reap) and ends the task within `limit`. Returns false when a child
     /// could not be confirmed reaped; the task is then aborted, which kills
-    /// whatever tree it still owned.
+    /// whatever tree it still owned and leaves it in the cleanup scope.
+    /// After [`Supervisor::failed`] there is nothing left to stop here: the
+    /// scope holds what the task owned.
     pub async fn shutdown(mut self, limit: Duration) -> bool {
         self.stop.cancel(CancelReason::Shutdown);
+        if self.ended {
+            return true;
+        }
         match tokio::time::timeout(limit, &mut self.task).await {
             Ok(Ok(cleaned)) => cleaned,
             Ok(Err(_)) => false,
             Err(_) => {
                 self.task.abort();
+                // The abort drops the task's future, handing its trees to
+                // the scope; that takes one more poll.
+                let _ = tokio::time::timeout(ABORT_LIMIT, &mut self.task).await;
                 false
             }
         }
+    }
+}
+
+/// What [`Supervisor::next`] observed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Event {
+    /// The first generation is ready.
+    Ready,
+    /// The first generation did not start.
+    StartupFailed(StartupError),
+    /// The task panicked.
+    Failed,
+}
+
+async fn initial_result(
+    initial: &mut Option<oneshot::Receiver<Result<(), StartupError>>>,
+) -> Result<(), StartupError> {
+    let Some(receiver) = initial.as_mut() else {
+        return std::future::pending().await;
+    };
+    let result = receiver.await;
+    *initial = None;
+    match result {
+        Ok(result) => result,
+        Err(_) => std::future::pending().await,
+    }
+}
+
+async fn task_ended(task: &mut tokio::task::JoinHandle<bool>, ended: &mut bool) {
+    if !*ended {
+        let _ = task.await;
+        *ended = true;
     }
 }
 
@@ -494,7 +563,8 @@ impl Owner {
         });
         self.reporter.child_starting(generation);
         let deadline = Instant::now() + self.config.startup_timeout;
-        let mut spawned = match Generation::spawn(&self.config.spec, generation) {
+        let mut spawned = match Generation::spawn(&self.config.spec, generation, &self.config.scope)
+        {
             Ok(spawned) => spawned,
             Err(failure) => {
                 self.reporter.child_failed(generation, failure.code, None);

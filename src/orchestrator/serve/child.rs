@@ -15,6 +15,7 @@ use std::ffi::OsString;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -26,7 +27,7 @@ use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use pumice_relay::process::ProcessTree;
+use pumice_relay::process::{CleanupScope, ProcessTree};
 
 use crate::orchestrator::cancel::{self, CancelGuard};
 
@@ -425,13 +426,38 @@ impl Drop for TaskGuard {
     }
 }
 
+/// A generation's process tree. Dropped unreaped — the supervisor's task
+/// panicked or was aborted — it is killed at once and handed to the
+/// service's [`CleanupScope`], whose bounded drain reaps it
+/// (p13.1-flow-seam/D9: a panic still releases what it owned).
+struct OwnedTree {
+    tree: Option<ProcessTree>,
+    scope: Arc<CleanupScope>,
+}
+
+impl OwnedTree {
+    fn get(&mut self) -> &mut ProcessTree {
+        self.tree.as_mut().expect("owned until dropped")
+    }
+}
+
+impl Drop for OwnedTree {
+    fn drop(&mut self) {
+        if let Some(tree) = self.tree.take()
+            && !tree.is_reaped()
+        {
+            self.scope.kill_and_register(tree);
+        }
+    }
+}
+
 /// A spawned generation, owned until reaped. Dropping it without
 /// [`Generation::kill_and_reap`] or [`Generation::stop`] still kills the
-/// whole tree (the [`ProcessTree`]'s kill-on-drop).
+/// whole tree and leaves it to the service's cleanup scope.
 pub struct Generation {
     pub generation: u64,
     pub instance_id: String,
-    tree: ProcessTree,
+    tree: OwnedTree,
     stdin: Option<ChildStdin>,
     lifecycle: mpsc::Receiver<Lifecycle>,
     lifecycle_done: bool,
@@ -461,8 +487,13 @@ pub enum Watched {
 }
 
 impl Generation {
-    /// Spawns `spec` for `generation` with a fresh instance id.
-    pub fn spawn(spec: &ChildSpec, generation: u64) -> Result<Generation, Failure> {
+    /// Spawns `spec` for `generation` with a fresh instance id; `scope`
+    /// takes the tree if the generation is ever dropped unreaped.
+    pub fn spawn(
+        spec: &ChildSpec,
+        generation: u64,
+        scope: &Arc<CleanupScope>,
+    ) -> Result<Generation, Failure> {
         let instance_id = instance_id(generation);
         let mut command = tokio::process::Command::new(&spec.binary);
         command
@@ -486,7 +517,10 @@ impl Generation {
         Ok(Generation {
             generation,
             instance_id,
-            tree,
+            tree: OwnedTree {
+                tree: Some(tree),
+                scope: Arc::clone(scope),
+            },
             stdin,
             lifecycle,
             lifecycle_done: false,
@@ -543,7 +577,7 @@ impl Generation {
                         self.lifecycle_done = true;
                     }
                 },
-                result = self.tree.exited(), if self.exited_at.is_none() => {
+                result = self.tree.get().exited(), if self.exited_at.is_none() => {
                     self.exited_at = Some(Instant::now());
                     if result.is_err() || self.lifecycle_done {
                         return Err(Some(Failure::transient(code::EXITED)));
@@ -602,7 +636,7 @@ impl Generation {
                 continue;
             }
             tokio::select! {
-                result = self.tree.exited() => {
+                result = self.tree.get().exited() => {
                     // An error polling the child is treated as its exit: the
                     // owner kills and reaps the tree next.
                     let _ = result;
@@ -625,7 +659,7 @@ impl Generation {
     /// killed) so the caller can retry instead of losing track of it.
     pub async fn kill_and_reap(mut self, limit: Duration) -> Result<(), Box<Generation>> {
         self.stdin = None;
-        match self.tree.finish(limit).await {
+        match self.tree.get().finish(limit).await {
             Some(_) => Ok(()),
             None => Err(Box::new(self)),
         }
@@ -641,7 +675,7 @@ impl Generation {
     ) -> Result<(), Box<Generation>> {
         self.stdin = None;
         if self.exited_at.is_none() {
-            let _ = tokio::time::timeout(grace, self.tree.exited()).await;
+            let _ = tokio::time::timeout(grace, self.tree.get().exited()).await;
         }
         self.kill_and_reap(reap_limit).await
     }
