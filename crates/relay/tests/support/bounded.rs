@@ -500,6 +500,11 @@ pub fn connect(port: u16, deadline: Instant) -> io::Result<TcpStream> {
     TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), wait)
 }
 
+/// How much one write in [`send`] offers. macOS and Windows keep a single
+/// large write going for as long as the reader makes progress, whatever
+/// the write timeout; small writes return to the deadline check.
+const SEND_BYTES: usize = 64 * 1024;
+
 /// Writes all of `bytes` before `deadline`. Each write waits only for what
 /// is left of it, so a reader that keeps taking a little cannot stretch it.
 pub fn send(stream: &mut TcpStream, bytes: &[u8], deadline: Instant) -> io::Result<()> {
@@ -508,7 +513,7 @@ pub fn send(stream: &mut TcpStream, bytes: &[u8], deadline: Instant) -> io::Resu
     while !rest.is_empty() {
         let wait = left(deadline).ok_or(io::ErrorKind::TimedOut)?;
         stream.set_write_timeout(Some(wait))?;
-        match stream.write(rest) {
+        match stream.write(&rest[..rest.len().min(SEND_BYTES)]) {
             Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
             Ok(n) => rest = &rest[n..],
             Err(error)
