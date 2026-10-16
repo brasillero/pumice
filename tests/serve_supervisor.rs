@@ -328,7 +328,12 @@ async fn a_crash_after_ready_restarts_after_backoff_with_a_new_generation() {
     timings.backoff[0] = Duration::from_millis(400);
     let supervisor = start(&stub, timings).await;
     let handle = supervisor.handle();
-    let restarting = wait_for(&handle, "restarting", |s| s.state == ChildState::Restarting).await;
+    // Retirement publishes `restarting` before recovery sets the retry delay,
+    // so wait for both.
+    let restarting = wait_for(&handle, "restarting with its retry delay", |s| {
+        s.state == ChildState::Restarting && s.next_retry_delay_ms.is_some()
+    })
+    .await;
     assert_eq!(restarting.restart_attempts, 1);
     assert_eq!(restarting.next_retry_delay_ms, Some(400));
     assert_eq!(restarting.last_failure, Some(code::EXITED));
