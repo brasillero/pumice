@@ -9,13 +9,10 @@
 //! only validates YAML.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 #[cfg(unix)]
 use std::time::{Duration, Instant};
-
-#[cfg(unix)]
-use std::path::Path;
 
 use tempfile::TempDir;
 
@@ -363,25 +360,37 @@ struct Install {
     dir: PathBuf,
 }
 
+/// Places an executable at `dest` as a hard link, never by copying: a copy
+/// is written by this process, and another test thread forking (spawning)
+/// while the file is still open for writing makes running it fail with
+/// "text file busy" (ETXTBSY) on Linux. Every `dest` is under Cargo's target
+/// directory (`CARGO_TARGET_TMPDIR`), on the same file system as the built
+/// binaries, so the link works there; copy is only the fallback for a file
+/// system without hard links.
+fn install_executable(src: &str, dest: &Path) {
+    if fs::hard_link(src, dest).is_err() {
+        fs::copy(src, dest).expect("copy executable");
+    }
+}
+
 impl Install {
-    /// Copies `pumice` alone: no transcription sibling installed.
+    /// Installs `pumice` alone: no transcription sibling installed.
     fn without_transcribe() -> Self {
-        let keep = TempDir::new().expect("temp install dir");
+        let keep = TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp install dir");
         let dir = keep.path().join("bin");
         fs::create_dir_all(&dir).expect("create install dir");
-        fs::copy(env!("CARGO_BIN_EXE_pumice"), dir.join("pumice")).expect("copy pumice");
+        install_executable(env!("CARGO_BIN_EXE_pumice"), &dir.join("pumice"));
         Install { _keep: keep, dir }
     }
 
-    /// Copies `pumice` together with the test stand-in as `pumice-transcribe`.
+    /// Installs `pumice` together with the test stand-in as
+    /// `pumice-transcribe`.
     fn with_transcribe() -> Self {
         let install = Self::without_transcribe();
-        let name = transcribe_name();
-        fs::copy(
+        install_executable(
             env!("CARGO_BIN_EXE_pumice-test-transcribe"),
-            install.dir.join(name),
-        )
-        .expect("copy pumice-transcribe stand-in");
+            &install.dir.join(transcribe_name()),
+        );
         install
     }
 
@@ -573,16 +582,14 @@ fn transcribe_neither_searches_path_nor_the_working_directory() {
     let cwd = install._keep.path().join("cwd-decoy");
     fs::create_dir_all(&path_dir).expect("create PATH decoy dir");
     fs::create_dir_all(&cwd).expect("create cwd decoy dir");
-    fs::copy(
+    install_executable(
         env!("CARGO_BIN_EXE_pumice-test-transcribe"),
-        path_dir.join(transcribe_name()),
-    )
-    .expect("copy PATH decoy");
-    fs::copy(
+        &path_dir.join(transcribe_name()),
+    );
+    install_executable(
         env!("CARGO_BIN_EXE_pumice-test-transcribe"),
-        cwd.join(transcribe_name()),
-    )
-    .expect("copy cwd decoy");
+        &cwd.join(transcribe_name()),
+    );
 
     let mut command = install.command(&["transcribe", "0"]);
     command.env("PATH", &path_dir).current_dir(&cwd);

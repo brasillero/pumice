@@ -1458,9 +1458,13 @@ impl Rig {
         let record = fake_dir.join("locked-cwds.txt");
         let reply = fake_dir.join("reply.txt");
         fs::write(&reply, stdout).unwrap();
-        let script = fake_dir.join("locking-claude");
+        // Written as a plain file and copied into place by `cp`, so the
+        // script's write descriptor only ever exists in that child: written
+        // here, a test thread forking meanwhile could make running it fail
+        // with "text file busy" (ETXTBSY).
+        let source = fake_dir.join("locking-claude.sh");
         fs::write(
-            &script,
+            &source,
             format!(
                 "#!/bin/sh\ncat >/dev/null\necho x >> '{count}'\npwd >> '{record}'\nmkdir -p locked/inner\nchmod 500 locked\ncat '{reply}'\nexit {exit_code}\n",
                 count = fake_dir.join("count.txt").display(),
@@ -1469,6 +1473,13 @@ impl Rig {
             ),
         )
         .unwrap();
+        let script = fake_dir.join("locking-claude");
+        let copied = std::process::Command::new("cp")
+            .arg(&source)
+            .arg(&script)
+            .status()
+            .expect("run cp");
+        assert!(copied.success(), "cp the locking script: {copied}");
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(
             self.cfg.join("relay.yml"),

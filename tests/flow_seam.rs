@@ -164,7 +164,9 @@ struct Rig {
 }
 
 fn rig(fake: Value) -> Rig {
-    let dir = TempDir::new().expect("temp dir");
+    // Under Cargo's target directory, so the hard link below stays on the
+    // built binary's file system.
+    let dir = TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp dir");
     let root = dir.path();
     let cli = root.join(format!("fake-claude{}", std::env::consts::EXE_SUFFIX));
     // Hard link preferred: copying while another test thread forks can
