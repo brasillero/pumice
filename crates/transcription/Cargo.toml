@@ -65,8 +65,8 @@ webm-iterable = { version = "=0.7.1", default-features = false, optional = true 
 transcribe-cpp-sys = { version = "=0.3.1", optional = true, default-features = false, features = ["vulkan"] }
 
 [target.'cfg(windows)'.dependencies]
-# SetDefaultDllDirectories at startup (src/main.rs). Already in the tree
-# through tokio and tempfile.
+# SetDefaultDllDirectories at startup (src/main.rs) and the core DLL
+# preload (src/engine.rs). Already in the tree through tokio and tempfile.
 windows-sys = { version = "0.61", features = ["Win32_System_LibraryLoader"] }
 
 [dev-dependencies]

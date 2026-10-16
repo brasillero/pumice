@@ -892,6 +892,14 @@ pub mod cpp {
             GpuModuleRejected {
                 module_dir: PathBuf,
             },
+            /// Windows could not load the core DLL from the bundle folder
+            /// (`code`: the Windows error, e.g. 126 when a DLL it imports is
+            /// missing there).
+            #[cfg_attr(not(windows), allow(dead_code))]
+            CoreUnloadable {
+                path: PathBuf,
+                code: i32,
+            },
         }
 
         impl fmt::Display for InitError {
@@ -932,6 +940,13 @@ pub mod cpp {
                         "ggml rejected the GPU module directory {} (GPU module rejected); \
                          {hint}",
                         module_dir.display()
+                    ),
+                    InitError::CoreUnloadable { path, code } => write!(
+                        f,
+                        "Windows could not load {} (Windows error {code}; core library \
+                         unloadable); a library it needs is missing from its folder or does \
+                         not match it; {hint}",
+                        path.display()
                     ),
                 }
             }
@@ -1085,6 +1100,44 @@ pub mod cpp {
             }
         }
 
+        /// The engine's core DLL, which the executable delay-loads (build.rs).
+        #[cfg(windows)]
+        const CORE_DLL: &str = "transcribe.dll";
+
+        /// Loads the core DLL by full path from the executable's directory,
+        /// its own imports (ggml.dll, ggml-base.dll) from that directory or
+        /// System32 only. Runs after the bundle check and before the first
+        /// engine call, so a core DLL that cannot load is a typed
+        /// installation error instead of the delay-load helper's exception
+        /// (0xC06D007E) on that call. The module stays loaded for the life
+        /// of the process and the delay-load helper binds to it.
+        ///
+        /// <https://learn.microsoft.com/windows/win32/api/libloaderapi/nf-libloaderapi-loadlibraryexw>
+        #[cfg(windows)]
+        fn preload_core(exe_dir: &Path) -> Result<(), InitError> {
+            use std::os::windows::ffi::OsStrExt;
+            use windows_sys::Win32::System::LibraryLoader::{
+                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+            };
+            let path = exe_dir.join(CORE_DLL);
+            let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+            // SAFETY: `wide` is a NUL-terminated path that outlives the
+            // call. The DLL is the one bundle.json lists; the handle is
+            // never freed.
+            let module = unsafe {
+                LoadLibraryExW(
+                    wide.as_ptr(),
+                    std::ptr::null_mut(),
+                    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
+                )
+            };
+            if module.is_null() {
+                let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                return Err(InitError::CoreUnloadable { path, code });
+            }
+            Ok(())
+        }
+
         static SELECTION: OnceLock<Selection> = OnceLock::new();
 
         /// The selection of the last successful initialization, if any.
@@ -1153,8 +1206,10 @@ pub mod cpp {
                 None => BundleCheck::Absent,
             };
             let mask = backend_mask(gpu_plan.is_ok());
-            // The first engine call: on Windows it loads the core DLLs, now
-            // that bundle.json has vouched for them.
+            #[cfg(windows)]
+            preload_core(&exe_dir)?;
+            // The first engine call: on Windows it binds the delay-loaded
+            // core DLL that preload_core loaded.
             ::transcribe_cpp::disable_logging();
             ::transcribe_cpp::init_backends_with(Some(&module_dir), mask).map_err(|_| {
                 InitError::NoUsableCpuModule {
@@ -1402,6 +1457,13 @@ pub mod cpp {
                             error: BundleError::Missing,
                         },
                         "bundle manifest mismatch",
+                    ),
+                    (
+                        InitError::CoreUnloadable {
+                            path: temp.path().join("transcribe.dll"),
+                            code: 126,
+                        },
+                        "Windows error 126; core library unloadable",
                     ),
                 ];
                 for (error, category) in cases {

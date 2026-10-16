@@ -15,10 +15,11 @@ fn main() -> ExitCode {
 
 /// Limits every later DLL lookup of this process to the executable's
 /// directory and System32: never the current directory, PATH or the Windows
-/// directory. It covers loads by name (the delay-loaded `transcribe.dll`,
-/// see build.rs), the dependencies of every DLL (core, CPU and Vulkan
-/// modules ggml loads by full path with a plain `LoadLibraryW`), and
-/// `vulkan-1.dll`, which therefore comes from System32 or not at all.
+/// directory. It covers loads by name, the dependencies of every DLL (the
+/// CPU and Vulkan modules ggml loads by full path with a plain
+/// `LoadLibraryW`), and `vulkan-1.dll`, which therefore comes from System32
+/// or not at all. The core `transcribe.dll` is loaded with its own,
+/// equally narrow flags after the bundle check (engine.rs, preload_core).
 /// KnownDLLs and API sets are resolved by the system before any search.
 /// Runs first in `main`, before anything can load a DLL; the setting cannot
 /// be undone and lasts for the life of the process. Available on every
