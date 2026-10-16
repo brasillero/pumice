@@ -13,11 +13,14 @@
 //! and 405 (with `Allow`).
 //!
 //! Bounds (design §7): at most [`MAX_CONNECTIONS`] connections (more are
-//! closed at once), one request per connection, request headers within
-//! [`HEADER_READ_TIMEOUT`] and [`MAX_HEADER_BYTES`], a whole connection
-//! within [`CONNECTION_LIMIT`], answers of at most [`MAX_RESPONSE_BYTES`].
-//! Handlers only read in-memory snapshots: they never wait for the child,
-//! the network, a CLI or a model.
+//! closed at once), one request per connection and request headers within
+//! [`HEADER_READ_TIMEOUT`] and [`MAX_HEADER_BYTES`]. Past the head, the
+//! route's [`RoutePolicy`] bounds the rest of the connection: the metadata
+//! routes (and every rejection) use [`METADATA`], a whole connection within
+//! 10 s and answers of at most 128 KiB; a long-running route (P13.4's
+//! dictation) brings its own policy instead. Metadata handlers only read
+//! in-memory snapshots: they never wait for the child, the network, a CLI
+//! or a model.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -31,8 +34,9 @@ use hyper::{Method, Request, Response, StatusCode, Uri};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 
 use crate::orchestrator::cancel::{self, CancelGuard};
 use crate::orchestrator::result::{MODULE, SCHEMA_VERSION};
@@ -43,8 +47,24 @@ pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// hyper's smallest read buffer, which also bounds the request head.
 pub const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_HEADERS: usize = 64;
-pub const CONNECTION_LIMIT: Duration = Duration::from_secs(10);
-pub const MAX_RESPONSE_BYTES: usize = 128 * 1024;
+
+/// What bounds a routed request's connection once its head is read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoutePolicy {
+    /// From the connection's arrival to its end: the request, its handling
+    /// and the answer.
+    pub connection_limit: Duration,
+    /// The largest answer body.
+    pub max_response_bytes: usize,
+}
+
+/// The metadata routes' policy (design §7), also used for every answer
+/// given before a route is chosen (guard rejections, 404, 405) and as the
+/// bound while the head is still being read.
+pub const METADATA: RoutePolicy = RoutePolicy {
+    connection_limit: Duration::from_secs(10),
+    max_response_bytes: 128 * 1024,
+};
 /// A failed `accept` (for example, out of file descriptors) is retried
 /// after this pause instead of spinning.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
@@ -155,13 +175,17 @@ pub async fn serve(listener: TcpListener, frontend: Arc<Frontend>, mut stop: Can
 }
 
 async fn serve_connection(stream: tokio::net::TcpStream, frontend: Arc<Frontend>) {
+    let arrival = Instant::now();
+    // The request's route publishes its policy as soon as it is chosen.
+    let (routed, policy) = watch::channel(None);
     let service = hyper::service::service_fn(move |request: Request<hyper::body::Incoming>| {
-        let response = respond(
+        let (policy, response) = answer(
             &frontend,
             request.method(),
             request.uri(),
             request.headers(),
         );
+        routed.send_replace(Some(policy));
         async move { Ok::<_, Infallible>(response) }
     });
     let mut builder = hyper::server::conn::http1::Builder::new();
@@ -172,7 +196,37 @@ async fn serve_connection(stream: tokio::net::TcpStream, frontend: Arc<Frontend>
         .max_headers(MAX_HEADERS)
         .keep_alive(false);
     let connection = builder.serve_connection(hyper_util::rt::TokioIo::new(stream), service);
-    let _ = tokio::time::timeout(CONNECTION_LIMIT, connection).await;
+    drive(connection, arrival, METADATA.connection_limit, policy).await;
+}
+
+/// Runs one connection until it ends or its deadline passes, both counted
+/// from `arrival`: `unrouted` until its request is routed (hyper already
+/// closes a connection whose head takes longer than the header-read
+/// bound), then the route's own [`RoutePolicy::connection_limit`].
+async fn drive(
+    connection: impl std::future::Future,
+    arrival: Instant,
+    unrouted: Duration,
+    mut routed: watch::Receiver<Option<RoutePolicy>>,
+) {
+    let mut connection = std::pin::pin!(connection);
+    let mut deadline = arrival + unrouted;
+    let mut routing = true;
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut connection => return,
+            changed = routed.changed(), if routing => match changed {
+                Ok(()) => {
+                    if let Some(policy) = *routed.borrow_and_update() {
+                        deadline = arrival + policy.connection_limit;
+                    }
+                }
+                Err(_) => routing = false,
+            },
+            () = tokio::time::sleep_until(deadline) => return,
+        }
+    }
 }
 
 /// The whole request handling: guard, route, answer. Synchronous: it reads
@@ -183,6 +237,16 @@ pub fn respond(
     uri: &Uri,
     headers: &HeaderMap,
 ) -> Response<Full<Bytes>> {
+    answer(frontend, method, uri, headers).1
+}
+
+/// [`respond`], with the policy that bounds the rest of the connection.
+fn answer(
+    frontend: &Frontend,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+) -> (RoutePolicy, Response<Full<Bytes>>) {
     if let Err(rejection) = check_origin(frontend.port, uri, headers) {
         let (code, message) = match rejection {
             Rejected::Host => (
@@ -198,11 +262,14 @@ pub fn respond(
                 "This service does not accept cross-site browser requests.",
             ),
         };
-        return error(
-            StatusCode::FORBIDDEN,
-            "invalid_request_error",
-            code,
-            message,
+        return (
+            METADATA,
+            error(
+                StatusCode::FORBIDDEN,
+                "invalid_request_error",
+                code,
+                message,
+            ),
         );
     }
     let route = match uri.path() {
@@ -211,11 +278,14 @@ pub fn respond(
         "/pumice/v1/status" => Route::Status,
         "/pumice/v1/flows" => Route::Flows,
         _ => {
-            return error(
-                StatusCode::NOT_FOUND,
-                "invalid_request_error",
-                "not_found",
-                "Unknown route.",
+            return (
+                METADATA,
+                error(
+                    StatusCode::NOT_FOUND,
+                    "invalid_request_error",
+                    "not_found",
+                    "Unknown route.",
+                ),
             );
         }
     };
@@ -229,9 +299,9 @@ pub fn respond(
         response
             .headers_mut()
             .insert(header::ALLOW, HeaderValue::from_static("GET"));
-        return response;
+        return (METADATA, response);
     }
-    match route {
+    let response = match route {
         Route::Health => json_response(
             StatusCode::OK,
             &json!({"status": "ok", "version": env!("CARGO_PKG_VERSION")}),
@@ -255,7 +325,8 @@ pub fn respond(
         },
         Route::Status => json_response(StatusCode::OK, &status(frontend)),
         Route::Flows => json_response(StatusCode::OK, &flows(frontend)),
-    }
+    };
+    (route.policy(), response)
 }
 
 enum Route {
@@ -263,6 +334,14 @@ enum Route {
     Ready,
     Status,
     Flows,
+}
+
+impl Route {
+    fn policy(&self) -> RoutePolicy {
+        match self {
+            Route::Health | Route::Ready | Route::Status | Route::Flows => METADATA,
+        }
+    }
 }
 
 fn not_ready_message(code: &str) -> &'static str {
@@ -400,7 +479,7 @@ fn error(
 
 fn json_response(status: StatusCode, body: &Value) -> Response<Full<Bytes>> {
     let (status, bytes) = match serde_json::to_vec(body) {
-        Ok(bytes) if bytes.len() <= MAX_RESPONSE_BYTES => (status, bytes),
+        Ok(bytes) if bytes.len() <= METADATA.max_response_bytes => (status, bytes),
         // Every answer is a bounded snapshot; this is a safeguard.
         _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -553,6 +632,70 @@ mod tests {
             &[HOST, ("origin", "http://127.0.0.1:41234")],
         );
         assert_eq!(status, StatusCode::OK, "its own origin is accepted");
+    }
+
+    #[test]
+    fn every_route_and_rejection_so_far_uses_the_metadata_policy() {
+        assert_eq!(METADATA.connection_limit, Duration::from_secs(10));
+        assert_eq!(METADATA.max_response_bytes, 128 * 1024);
+        let frontend = frontend(ChildState::Ready);
+        let host = HeaderMap::from_iter([(header::HOST, HeaderValue::from_static(HOST.1))]);
+        for (method, path, headers) in [
+            (Method::GET, "/health", host.clone()),
+            (Method::GET, "/ready", host.clone()),
+            (Method::GET, "/pumice/v1/status", host.clone()),
+            (Method::GET, "/pumice/v1/flows", host.clone()),
+            (Method::POST, "/health", host.clone()),
+            (Method::GET, "/nowhere", host.clone()),
+            (Method::GET, "/health", HeaderMap::new()),
+        ] {
+            let (policy, _) = answer(&frontend, &method, &path.parse().unwrap(), &headers);
+            assert_eq!(policy, METADATA, "{method} {path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_connection_is_bounded_by_its_route_from_its_arrival() {
+        let never = std::future::pending::<()>;
+        let unrouted = Duration::from_millis(50);
+
+        // Never routed: the unrouted bound.
+        let (_routed, policy) = watch::channel(None);
+        let arrival = Instant::now();
+        drive(never(), arrival, unrouted, policy).await;
+        let elapsed = arrival.elapsed();
+        assert!(
+            elapsed >= unrouted && elapsed < Duration::from_secs(2),
+            "{elapsed:?}"
+        );
+
+        // Routed: the route's own limit replaces it, longer or shorter,
+        // still counted from the arrival.
+        for limit in [Duration::from_millis(300), Duration::from_millis(20)] {
+            let (routed, policy) = watch::channel(None);
+            let arrival = Instant::now();
+            routed.send_replace(Some(RoutePolicy {
+                connection_limit: limit,
+                max_response_bytes: 1,
+            }));
+            drive(never(), arrival, unrouted, policy).await;
+            let elapsed = arrival.elapsed();
+            assert!(
+                elapsed >= limit && elapsed < Duration::from_secs(2),
+                "{elapsed:?}"
+            );
+            if limit > unrouted {
+                assert!(elapsed >= unrouted, "outlived the unrouted bound");
+            } else {
+                assert!(elapsed < unrouted, "{elapsed:?}");
+            }
+        }
+
+        // A connection that ends on its own ends the drive at once.
+        let (_routed, policy) = watch::channel(None);
+        let arrival = Instant::now();
+        drive(async {}, arrival, Duration::from_secs(30), policy).await;
+        assert!(arrival.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

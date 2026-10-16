@@ -271,8 +271,9 @@ child, a provider or a model.
   `unavailable` code (the same codes as `/ready`).
 
 Limits: at most 64 connections (more are closed at once), one request per
-connection, request headers within 5 s and 16 KiB, a connection within 10 s,
-answers of at most 128 KiB.
+connection, request headers within 5 s and 16 KiB. These metadata routes, and
+every rejection, also bound the whole connection to 10 s from its arrival and
+answers to 128 KiB; longer-running routes get their own deadlines.
 
 ### Output
 
