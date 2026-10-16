@@ -64,6 +64,11 @@ webm-iterable = { version = "=0.7.1", default-features = false, optional = true 
 [target.'cfg(all(windows, target_arch = "x86_64"))'.dependencies]
 transcribe-cpp-sys = { version = "=0.3.1", optional = true, default-features = false, features = ["vulkan"] }
 
+[target.'cfg(windows)'.dependencies]
+# SetDefaultDllDirectories at startup (src/main.rs) and the core DLL
+# preload (src/engine.rs). Already in the tree through tokio and tempfile.
+windows-sys = { version = "0.61", features = ["Win32_System_LibraryLoader"] }
+
 [dev-dependencies]
 hound = { workspace = true }
 tower = { version = "0.5", default-features = false, features = ["util"] }
