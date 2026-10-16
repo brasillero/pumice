@@ -116,6 +116,7 @@ pumice-transcribe.exe
 transcribe.dll, ggml.dll, ggml-base.dll   engine core, beside the exe
 cpu/<variant>/ggml-cpu-<variant>.dll      runtime CPU variants (9)
 gpu/vulkan/ggml-vulkan.dll                optional Vulkan module
+bundle.json                               manifest: every file's size and SHA-256
 ```
 
 Prerequisites: a GPU driver with Vulkan support (it provides `vulkan-1.dll`).
@@ -123,6 +124,15 @@ Nothing else: no Vulkan SDK, Visual C++ runtime, Rust or build tools. CI
 checks that every file uses the static C runtime and that only
 `gpu/vulkan/ggml-vulkan.dll` imports Vulkan, so the CPU path also starts on a
 machine without a Vulkan driver.
+
+Before loading any engine module, startup checks the core DLLs, the selected
+CPU module and the Vulkan module against `bundle.json` (sizes and SHA-256,
+about 25–100 ms for the 43 MB Vulkan module depending on the CPU). A missing
+manifest, a damaged or replaced file, or an unlisted file inside `cpu/<variant>/`
+or `gpu/vulkan/` stops startup with an installation error that names the
+file and `(bundle manifest mismatch)`; reinstall the whole folder. Deleting
+`gpu/` is allowed and gives a CPU-only install; a Vulkan module that loads but
+finds no device (or no Vulkan driver) also leaves transcription on the CPU.
 
 At startup the CPU variant is chosen as described above, then `gpu/vulkan/` is
 scanned with the backend mask fixed to CPU and Vulkan (plugins named by

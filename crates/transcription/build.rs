@@ -19,6 +19,11 @@
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(pumice_dynamic_backends)");
     println!("cargo::rustc-check-cfg=cfg(pumice_vulkan)");
+    // The target triple a bundle manifest must name (src/bundle.rs).
+    println!(
+        "cargo:rustc-env=PUMICE_BUILD_TARGET={}",
+        std::env::var("TARGET").unwrap_or_default()
+    );
 
     let cpu_variants = std::env::var_os("CARGO_FEATURE_CPU_VARIANTS").is_some();
     let vulkan = std::env::var_os("CARGO_FEATURE_VULKAN").is_some();

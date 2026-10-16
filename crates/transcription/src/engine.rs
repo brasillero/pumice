@@ -225,9 +225,19 @@ pub mod cpp {
             EngineError::Failed
         })?;
         #[cfg(pumice_dynamic_backends)]
-        let (cpu_variant, gpu_dir) = (Some(selection.variant), Some(selection.gpu.as_str()));
+        let (cpu_variant, bundle, gpu_dir, vulkan_devices) = (
+            Some(selection.variant),
+            Some(selection.bundle.as_str()),
+            Some(selection.gpu.as_str()),
+            selection.vulkan_devices,
+        );
         #[cfg(not(pumice_dynamic_backends))]
-        let (cpu_variant, gpu_dir): (Option<&str>, Option<&str>) = (None, None);
+        let (cpu_variant, bundle, gpu_dir, vulkan_devices): (
+            Option<&str>,
+            Option<&str>,
+            Option<&str>,
+            Option<usize>,
+        ) = (None, None, None, None);
 
         let allowed = transcribe_cpp::allowed_backends();
         let allowed_backends: Vec<&str> = [
@@ -255,7 +265,9 @@ pub mod cpp {
             .collect();
         Ok(serde_json::json!({
             "cpu_variant": cpu_variant,
+            "bundle": bundle,
             "gpu_dir": gpu_dir,
+            "vulkan_devices": vulkan_devices,
             "allowed_backends": allowed_backends,
             "devices": devices,
         }))
@@ -371,10 +383,12 @@ pub mod cpp {
     /// comes in P14.2; until then it is scanned whenever it is staged.
     #[cfg(pumice_dynamic_backends)]
     mod dynamic_backends {
+        use crate::bundle::{BundleError, Expected, Manifest};
         use ::transcribe_cpp::BackendMask;
         use std::fmt;
         use std::path::{Path, PathBuf};
         use std::sync::OnceLock;
+        use std::time::Instant;
 
         /// One x86 ISA feature a ggml CPU variant can require, mirroring the
         /// GGML_* compile definitions in ggml's pinned CMake variant table
@@ -719,10 +733,18 @@ pub mod cpp {
         /// Why backend initialization failed, in fixed text safe to show on
         /// stderr: paths and variant names only, never native error strings.
         /// Each variant names its category (modules missing / no usable CPU
-        /// module / GPU module rejected) and carries the same recovery hint.
+        /// module / GPU module rejected / bundle manifest mismatch) and
+        /// carries the same recovery hint.
         #[derive(Debug)]
         pub enum InitError {
             ExeDir,
+            /// The staged files do not match `bundle.json`, or a target that
+            /// requires it has none: an installation error, never a reason
+            /// to fall back.
+            Bundle {
+                exe_dir: PathBuf,
+                error: BundleError,
+            },
             ModulesMissing {
                 exe_dir: PathBuf,
                 variant: &'static str,
@@ -743,6 +765,13 @@ pub mod cpp {
                     InitError::ExeDir => {
                         write!(f, "cannot locate the executable directory; {hint}")
                     }
+                    InitError::Bundle { exe_dir, error } => write!(
+                        f,
+                        "the bundle at {} does not match its manifest: {error} (bundle manifest \
+                         mismatch); the installation is damaged or mixes files from different \
+                         builds; {hint}",
+                        exe_dir.display()
+                    ),
                     InitError::ModulesMissing { exe_dir, variant } => write!(
                         f,
                         "no staged ggml CPU module for {} or any lower \
@@ -857,6 +886,10 @@ pub mod cpp {
             exe_dir.join("gpu").join("vulkan").join(file)
         }
 
+        /// The GPU module directory, relative to the executable, as
+        /// `bundle.json` and the status lines name it.
+        const GPU_DIR: &str = "gpu/vulkan";
+
         /// The GPU module directory to scan, or why none is scanned.
         fn plan_gpu_dir(exe_dir: &Path, built: bool, skip: bool) -> Result<PathBuf, GpuDir> {
             if !built {
@@ -885,11 +918,40 @@ pub mod cpp {
             }
         }
 
+        /// Whether this target's bundles must carry a `bundle.json`. Only
+        /// the Windows stager writes one so far; the Linux stage is checked
+        /// only when it has one.
+        const MANIFEST_REQUIRED: bool = cfg!(windows);
+
+        /// What startup checked against `bundle.json`.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum BundleCheck {
+            /// No manifest, on a target that does not require one.
+            Absent,
+            /// Every library startup relies on matched it.
+            Verified,
+        }
+
+        impl BundleCheck {
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    BundleCheck::Absent => "absent",
+                    BundleCheck::Verified => "verified",
+                }
+            }
+        }
+
         /// What startup loaded.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub struct Selection {
             pub variant: &'static str,
+            pub bundle: BundleCheck,
             pub gpu: GpuDir,
+            /// Vulkan devices registered after scanning the GPU module;
+            /// `None` when it was not scanned. `Some(0)` is the CPU
+            /// fallback: the module could not load (no Vulkan loader) or
+            /// found no usable device.
+            pub vulkan_devices: Option<usize>,
         }
 
         static SELECTION: OnceLock<Selection> = OnceLock::new();
@@ -901,13 +963,33 @@ pub mod cpp {
         }
 
         /// Initialize backends, returning a fixed-text reason on failure.
-        /// Repeated calls load nothing new: ggml skips directories it already
-        /// scanned, and the mask and choice are the same.
+        /// Runs once per process: later calls return the first success
+        /// (ggml could not load anything new anyway, and the files are not
+        /// hashed twice).
+        ///
+        /// With a `bundle.json`, everything is checked before the first
+        /// registration: the core libraries, the selected CPU module's
+        /// directory and, when it will be scanned, the GPU module's
+        /// directory. A present module that does not match is an
+        /// installation error, not a fallback; only an absent GPU module, or
+        /// one that loads and finds no device, leaves the process on CPU.
         pub fn init_from_exe_dir() -> Result<Selection, InitError> {
+            if let Some(selection) = SELECTION.get() {
+                return Ok(*selection);
+            }
             let exe_dir = std::env::current_exe()
                 .ok()
                 .and_then(|path| path.parent().map(Path::to_path_buf))
                 .ok_or(InitError::ExeDir)?;
+            let bundle_error = |error| InitError::Bundle {
+                exe_dir: exe_dir.clone(),
+                error,
+            };
+            let manifest =
+                Manifest::load(&exe_dir, Expected::this_build()).map_err(bundle_error)?;
+            if manifest.is_none() && MANIFEST_REQUIRED {
+                return Err(bundle_error(BundleError::Missing));
+            }
             let chosen = choose_variant(TABLE, detect);
             let (variant, module_dir) = select_module_dir(&exe_dir, TABLE, chosen, detect)
                 .ok_or_else(|| InitError::ModulesMissing {
@@ -916,6 +998,29 @@ pub mod cpp {
                 })?;
             let skip_gpu = std::env::var_os(SKIP_GPU_ENV).is_some_and(|value| value == "1");
             let gpu_plan = plan_gpu_dir(&exe_dir, cfg!(pumice_vulkan), skip_gpu);
+            let bundle = match &manifest {
+                Some(manifest) => {
+                    let started = Instant::now();
+                    let mut verified = manifest.verify_core(&exe_dir).map_err(bundle_error)?;
+                    verified += manifest
+                        .verify_dir(&exe_dir, &format!("cpu/{variant}"))
+                        .map_err(bundle_error)?;
+                    if gpu_plan.is_ok() {
+                        verified += manifest
+                            .verify_dir(&exe_dir, GPU_DIR)
+                            .map_err(bundle_error)?;
+                    }
+                    eprintln!(
+                        "cpu-variants: {} verified: {} files, {} bytes in {} ms",
+                        crate::bundle::FILE_NAME,
+                        verified.files,
+                        verified.bytes,
+                        started.elapsed().as_millis()
+                    );
+                    BundleCheck::Verified
+                }
+                None => BundleCheck::Absent,
+            };
             let mask = backend_mask(gpu_plan.is_ok());
             ::transcribe_cpp::init_backends_with(Some(&module_dir), mask).map_err(|_| {
                 InitError::NoUsableCpuModule {
@@ -935,7 +1040,7 @@ pub mod cpp {
                     module_file_name(chosen)
                 );
             }
-            let gpu = match gpu_plan {
+            let (gpu, vulkan_devices) = match gpu_plan {
                 Ok(gpu_dir) => {
                     // The CPU device is already registered, so this only
                     // fails on a mask or path problem; a Vulkan module that
@@ -949,23 +1054,35 @@ pub mod cpp {
                         .iter()
                         .filter(|device| device.kind == "vulkan")
                         .count();
-                    eprintln!(
-                        "cpu-variants: scanned gpu/vulkan: {vulkan_devices} Vulkan device(s) \
-                         registered"
-                    );
-                    GpuDir::Scanned
+                    if vulkan_devices == 0 {
+                        eprintln!(
+                            "cpu-variants: scanned {GPU_DIR}: no Vulkan device registered (no \
+                             Vulkan driver or device, or the module could not load); CPU only"
+                        );
+                    } else {
+                        eprintln!(
+                            "cpu-variants: scanned {GPU_DIR}: {vulkan_devices} Vulkan device(s) \
+                             registered"
+                        );
+                    }
+                    (GpuDir::Scanned, Some(vulkan_devices))
                 }
                 Err(GpuDir::Skipped) => {
-                    eprintln!("cpu-variants: gpu/vulkan not scanned ({SKIP_GPU_ENV}=1)");
-                    GpuDir::Skipped
+                    eprintln!("cpu-variants: {GPU_DIR} not scanned ({SKIP_GPU_ENV}=1)");
+                    (GpuDir::Skipped, None)
                 }
                 Err(GpuDir::Absent) => {
                     eprintln!("cpu-variants: no GPU module staged; CPU only");
-                    GpuDir::Absent
+                    (GpuDir::Absent, None)
                 }
-                Err(state) => state,
+                Err(state) => (state, None),
             };
-            let selection = Selection { variant, gpu };
+            let selection = Selection {
+                variant,
+                bundle,
+                gpu,
+                vulkan_devices,
+            };
             let _ = SELECTION.set(selection);
             Ok(selection)
         }
@@ -1144,6 +1261,13 @@ pub mod cpp {
                             module_dir: temp.path().to_path_buf(),
                         },
                         "GPU module rejected",
+                    ),
+                    (
+                        InitError::Bundle {
+                            exe_dir: temp.path().to_path_buf(),
+                            error: BundleError::Missing,
+                        },
+                        "bundle manifest mismatch",
                     ),
                 ];
                 for (error, category) in cases {
