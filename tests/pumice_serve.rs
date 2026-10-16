@@ -698,7 +698,10 @@ fn a_descendant_holding_the_output_fails_the_collection_in_time() {
     .expect_err("the sleeper still holds stdout");
     assert!(started.elapsed() < Duration::from_secs(5));
     let message = failure.downcast_ref::<String>().expect("a message");
-    assert!(message.contains("stdout stayed open"), "{message}");
+    assert!(
+        message.contains("stdout and stderr stayed open"),
+        "{message}"
+    );
 }
 
 // Unix only: on Windows the Job Object kills the child together with
