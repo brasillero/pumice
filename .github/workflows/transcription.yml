@@ -716,7 +716,8 @@ jobs:
             expect "$label" "r['requested'] == '$mode'" "r['gpu_build'] == 'vulkan'" \
               "sum(d['kind'] == 'cpu' for d in r['devices']) == 1" "r['cpu_variant']" \
               "r['bundle'] == 'verified'" \
-              "r['gpu_devices'] == sum(d['kind'] == 'vulkan' for d in r['devices'])"
+              "r['gpu_devices'] == sum(d['kind'] == 'vulkan' for d in r['devices'])" \
+              "all((d['gpu_class'] is None) == (d['kind'] != 'vulkan') for d in r['devices'])"
           }
           # expect LABEL CONDITION...: Python conditions over the `backends`
           # result `r` of LABEL.
@@ -970,7 +971,7 @@ jobs:
           print("no Vulkan loader ok: " + json.dumps(compute))
           PY
 
-      - name: Software Vulkan device (Mesa lavapipe; backend gpu)
+      - name: Software Vulkan device (Mesa lavapipe; auto stays on the CPU, gpu uses it)
         timeout-minutes: 20
         run: |
           . "$RUNNER_TEMP/vulkan-checks.sh"
@@ -984,11 +985,30 @@ jobs:
           unset GGML_VK_VISIBLE_DEVICES
           backends lavapipe-excluded auto
           expect lavapipe-excluded "r['gpu_devices'] == 0" "r['fallback_reason'] == 'gpu_unavailable'"
-          # Forced for these processes only: the backend must then really be
-          # Vulkan on lavapipe; a run that used the CPU does not count.
+          # Forced for these processes only. ggml then reports lavapipe as a
+          # `gpu`, but it has no PCI bus id: auto must still stay on the CPU
+          # (p14.5-linux-vulkan/D1), while gpu must really run on Vulkan on
+          # lavapipe; a gpu run that used the CPU does not count.
           export GGML_VK_VISIBLE_DEVICES=0
           backends lavapipe auto
-          expect lavapipe "r['gpu_devices'] == 1" "r['fallback_reason'] is None"
+          expect lavapipe "r['gpu_devices'] == 1" "r['fallback_reason'] == 'gpu_software_only'" \
+            "[d['gpu_class'] for d in r['devices'] if d['kind'] == 'vulkan'] == ['software']"
+          backends lavapipe-gpu gpu
+          expect lavapipe-gpu "r['gpu_devices'] == 1" "r['fallback_reason'] is None"
+          timeout 900 "$STAGE/pumice-transcribe" file \
+            "$GITHUB_WORKSPACE/crates/transcription/tests/fixtures/sample-pt.wav" \
+            --model-file "$MODEL_DIR/whisper-tiny-Q8_0.gguf" --backend auto --json > lavapipe-auto.json
+          python3 - lavapipe-auto.json <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          import sys
+
+          data = json.load(open(sys.argv[1]))
+          assert data["ok"] is True and data["result"]["text"], data
+          compute = data["result"]["compute"]
+          assert compute["requested"] == "auto" and compute["backend"] == "cpu", data
+          assert compute["fallback_reason"] == "gpu_software_only", data
+          print(f"- lavapipe forced, `auto`: `{json.dumps(compute)}`")
+          PY
           timeout 900 "$STAGE/pumice-transcribe" file \
             "$GITHUB_WORKSPACE/crates/transcription/tests/fixtures/sample-pt.wav" \
             --model-file "$MODEL_DIR/whisper-tiny-Q8_0.gguf" --backend gpu --json > lavapipe.json
