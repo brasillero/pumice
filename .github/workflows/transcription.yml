@@ -228,6 +228,9 @@ jobs:
       - name: Preflight build tools
         run: |
           Write-Host "VULKAN_SDK=$env:VULKAN_SDK"
+          Get-ChildItem -Path $env:VULKAN_SDK -Recurse -File | ForEach-Object {
+            Write-Host ('  {0,12}  {1}' -f $_.Length, $_.FullName.Substring($env:VULKAN_SDK.Length))
+          }
           glslc --version
           if ($LASTEXITCODE -ne 0) { throw 'glslc is not usable' }
           foreach ($path in 'Include\vulkan\vulkan.h', 'Include\vulkan\vulkan.hpp', 'Lib\vulkan-1.lib') {
