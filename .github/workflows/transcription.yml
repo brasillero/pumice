@@ -215,22 +215,27 @@ jobs:
             throw "Vulkan SDK installer SHA-256 mismatch: got $hash"
           }
           Write-Host "Vulkan SDK installer verified: $hash ($((Get-Item $installer).Length) bytes)"
-          # The install action extracts an existing ./vulkan_sdk.exe instead of
-          # downloading its own, so it only ever unpacks this verified file.
-          Copy-Item -Path $installer -Destination (Join-Path $env:GITHUB_WORKSPACE 'vulkan_sdk.exe')
 
+      # LunarG's own unattended install of the verified installer, as the
+      # pinned engine's CI does. humbletim/install-vulkan-sdk (7z extraction)
+      # yields only Bin\ for this SDK: no headers, vulkan-1.lib or
+      # SPIRV-Headers.
       - name: Install Vulkan SDK (pinned)
-        uses: humbletim/install-vulkan-sdk@30ba978f977e81b72d091fc8888feb1fb26f9aff # v1.2
-        with:
-          version: ${{ env.VULKAN_SDK_VERSION }}
-          cache: false
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'vulkan-sdk\vulkan_sdk.exe'
+          $root = "C:\VulkanSDK\$env:VULKAN_SDK_VERSION"
+          $process = Start-Process -FilePath $installer -Wait -PassThru -NoNewWindow -ArgumentList @(
+            '--root', $root, '--accept-licenses', '--default-answer', '--confirm-command', 'install'
+          )
+          if ($process.ExitCode -ne 0) { throw "Vulkan SDK installer exited with $($process.ExitCode)" }
+          Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_SDK=$root"
+          Add-Content -Path $env:GITHUB_PATH -Value "$root\Bin"
 
       - name: Preflight build tools
         run: |
           Write-Host "VULKAN_SDK=$env:VULKAN_SDK"
-          Get-ChildItem -Path $env:VULKAN_SDK -Recurse -File | ForEach-Object {
-            Write-Host ('  {0,12}  {1}' -f $_.Length, $_.FullName.Substring($env:VULKAN_SDK.Length))
-          }
+          Get-ChildItem -Path $env:VULKAN_SDK -Directory | ForEach-Object { Write-Host "  $($_.Name)\" }
+          Write-Host "System32\vulkan-1.dll present: $(Test-Path (Join-Path $env:SystemRoot 'System32\vulkan-1.dll'))"
           glslc --version
           if ($LASTEXITCODE -ne 0) { throw 'glslc is not usable' }
           foreach ($path in 'Include\vulkan\vulkan.h', 'Include\vulkan\vulkan.hpp', 'Lib\vulkan-1.lib') {
