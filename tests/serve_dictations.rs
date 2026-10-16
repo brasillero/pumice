@@ -1253,6 +1253,18 @@ fn reset(stream: TcpStream) {
     drop(stream);
 }
 
+/// Ends only the write side (FIN) after a complete request and keeps
+/// reading: half-close is not supported (p13.4-dictations/D1), so the
+/// service treats the client as gone and ends the connection without an
+/// answer.
+fn half_close(mut stream: TcpStream) {
+    stream.shutdown(std::net::Shutdown::Write).unwrap();
+    assert!(
+        read_response(&mut stream).is_none(),
+        "no answer after a half-close"
+    );
+}
+
 /// How a test ends its side of a connection.
 type Close = fn(TcpStream);
 
@@ -1308,7 +1320,8 @@ fn a_client_gone_during_transcription_recycles_the_child() {
         json!([child(json!({"hang": true}))]),
     );
     let running = rig.start();
-    let mut closes: Vec<(&str, Close)> = vec![("close", drop::<TcpStream>)];
+    let mut closes: Vec<(&str, Close)> =
+        vec![("close", drop::<TcpStream>), ("half-close", half_close)];
     #[cfg(unix)]
     closes.push(("reset", reset));
     for (round, (how, close)) in closes.into_iter().enumerate() {
@@ -1342,7 +1355,10 @@ fn a_client_gone_during_the_provider_call_reaps_it_without_recycling() {
     let rig = rig(&flows(60_000, 10_000, 50_000), json!([{}]));
     rig.set_fake(json!({"stdout": claude_envelope(false, CLEANED), "sleep_ms": 60_000}));
     let running = rig.start();
-    for (round, close) in [drop::<TcpStream> as Close, reset].into_iter().enumerate() {
+    for (round, close) in [drop::<TcpStream> as Close, half_close, reset]
+        .into_iter()
+        .enumerate()
+    {
         let _ = fs::remove_file(rig.fake_dir().join("report.json"));
         let stream = dictate_and_hold(running.port, "clean");
         let deadline = Instant::now() + WAIT;

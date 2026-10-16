@@ -392,21 +392,28 @@ answer is at most 16 MiB: a final text that does not fit fails as
 No stage is retried and nothing falls back to another provider.
 
 **Cancellation.** A client that closes or resets its connection cancels its
-dictation at once, during the upload, the transcription or the provider
-call (the provider's process tree is killed and reaped). Do not half-close
-the connection while waiting for the answer: the end of input counts as the
-client going away. A transcription abandoned after it was sent to the child
-— by a disconnect, a deadline or a shutdown — leaves the child busy with
-work nobody waits for, so that child is killed, reaped and replaced (status:
-a new `generation`, `last_failure` `transcription_recycled`) before the next
-dictation is admitted; it is never asked to cancel and nothing is replayed.
-A cancellation during the formatter or the provider call leaves the child
-alone. After every dictation the killed provider processes are reaped; if
-that, or the recycle, cannot be confirmed within its bound, the dictation
-fails with `cleanup_failed` (never a success) and no further dictation is
-admitted (`admission: "stopped"`, `/ready` 503 `admission_stopped`) until
-`pumice serve` is restarted, so no paid call starts over processes that may
-still run.
+dictation at once with `cancelled`, `cause_code` `client_disconnected`,
+during the upload, the transcription or the provider call (the provider's
+process tree is killed and reaped; a provider call not started yet never
+starts). Half-close is not supported: the client must keep its connection
+open, including its write side, until the response arrives. A client that
+half-closes (`shutdown(SHUT_WR)`) after sending its request is treated as
+gone, like a reset — its dictation is cancelled and the connection closes
+without an answer — because the service cannot tell it apart from a client
+that closed or was killed. A transcription abandoned after it was sent to
+the child — by a disconnect, a deadline or a shutdown — leaves the child
+busy with work nobody waits for, so that child is killed, reaped and
+replaced (status: a new `generation`, `last_failure`
+`transcription_recycled`) before the next dictation is admitted; it is never
+asked to cancel and nothing is replayed. A cancellation during the formatter
+or the provider call leaves the child alone. After every dictation the
+killed provider processes are reaped and the provider's temporary directory
+is removed; if any of that, or the recycle (the old child confirmed reaped),
+cannot be confirmed within its bound, the dictation fails with
+`cleanup_failed` (never a success; after another failure that error stays
+the reported one) and no further dictation is admitted (`admission:
+"stopped"`, `/ready` 503 `admission_stopped`) until `pumice serve` is
+restarted, so no paid call starts over processes that may still run.
 
 ### Output
 

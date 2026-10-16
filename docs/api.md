@@ -73,5 +73,8 @@ curl --fail-with-body http://127.0.0.1:17570/pumice/v1/dictations \
 One dictation at a time: a second one gets 429 with `Retry-After: 1`
 before its body is read. A failure is a non-2xx answer with the same
 document, no `result`, and the raw transcript whenever transcription had
-finished, so read error bodies too. Statuses, error codes, limits,
-deadlines and cancellation: [orchestrator.md](orchestrator.md#dictations).
+finished, so read error bodies too. The client must keep its connection
+open, including its write side, until the response arrives: closing,
+resetting or half-closing it cancels the dictation (`client_disconnected`)
+and no answer is sent. Statuses, error codes, limits, deadlines and
+cancellation: [orchestrator.md](orchestrator.md#dictations).

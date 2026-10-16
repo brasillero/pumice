@@ -27,8 +27,10 @@
 //! A client that closes its connection while a dictation runs ends the
 //! connection (hyper notices the end of input while the answer is
 //! pending), which drops the handler and cancels the operation
-//! (`dictation`). A client must therefore not half-close its side while it
-//! waits for the answer. When the service stops, running dictations are
+//! (`dictation`, cause `client_disconnected`). A write-half-close counts
+//! the same (p13.4-dictations/D1): half-close support stays off, so a
+//! client must keep its connection open, write side included, until the
+//! answer arrives. When the service stops, running dictations are
 //! cancelled and their connections get a bounded drain to send their
 //! answers ([`DRAIN_LIMIT`]).
 
@@ -385,7 +387,11 @@ async fn serve_connection(stream: tokio::net::TcpStream, frontend: Arc<Frontend>
         .header_read_timeout(HEADER_READ_TIMEOUT)
         .max_buf_size(MAX_HEADER_BYTES)
         .max_headers(MAX_HEADERS)
-        .keep_alive(false);
+        .keep_alive(false)
+        // p13.4-dictations/D1: the end of a client's input while its
+        // answer is pending ends the connection and so cancels a running
+        // dictation, also after a deliberate write-half-close.
+        .half_close(false);
     let connection = builder.serve_connection(hyper_util::rt::TokioIo::new(stream), service);
     drive(connection, arrival, METADATA.connection_limit, policy).await;
 }
