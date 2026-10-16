@@ -3,7 +3,7 @@ title: P14.4: macOS Apple Silicon Metal transcription bundle
 state: Done
 ticket: —
 branch: p14.4-macos-metal
-mr: —
+mr: PR #119
 start: 2026-10-16
 end: 2026-10-16
 ---
