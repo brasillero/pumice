@@ -208,9 +208,13 @@ and formatter configurations and every enabled flow's references are checked;
 installed. The frontend then claims its port (before any child starts), and
 the child is started with `--port 0 --managed --instance-id <fresh id>` and
 the absolute transcription configuration. Its `ready` record must match the
-requested instance id, protocol version 1, pumice's exact version, the
-served model, the required capabilities and `127.0.0.1` with a nonzero port,
-and so must the child's own `GET /ready`. A failed initial startup is not
+requested instance id, protocol version 2, pumice's exact version, the
+served model, the required capabilities, `127.0.0.1` with a nonzero port and
+a well-formed compute snapshot (known values, bounded strings, consistent
+fallback reason), and so must the child's own `GET /ready`, whose snapshot
+must equal the announced one on every probe. The compute backend comes from
+`backend:` in the transcription configuration; `orchestrator.yml` has no
+backend setting. A failed initial startup is not
 retried: the child is killed and reaped and `pumice serve` exits 1 (2 when
 the transcription module reports a configuration error).
 
@@ -219,9 +223,12 @@ the transcription module reports a configuration error).
 transcription in progress still answers). After an exit, or three failed
 probes in a row, the child is killed, reaped and restarted after 0.5, 1 and
 2 s — at most three restarts per episode; 60 s continuously ready ends the
-episode. When the restarts are used up the transcription state stays
+episode. A child that retires itself after a GPU engine failure (`stopping`
+with reason `engine_failed`, then its exit) is restarted the same way. When
+the restarts are used up the transcription state stays
 `failed` until `pumice serve` is restarted. A protocol, version or
-configuration error goes to `failed` at once. A previous child is always
+configuration error goes to `failed` at once, and so does a restarted child
+reporting `gpu_unavailable` (`backend: gpu` without a usable GPU). A previous child is always
 reaped before the next one starts. Nothing is ever replayed.
 
 **Shutdown.** Ctrl-C or SIGTERM stops admission (the frontend closes) and
@@ -273,6 +280,9 @@ model or a running dictation.
    "service":{"state":"running","ready":true},
    "transcription":{"state":"ready","model":"turbo","generation":1,
      "restart_attempts":0,"next_retry_delay_ms":null,"model_load_ms":362,
+     "compute":{"requested":"auto","backend":"vulkan",
+       "device":{"name":"Vulkan0","description":"NVIDIA GeForce RTX 4070"},
+       "cpu_variant":"haswell","fallback_reason":null},
      "last_failure":null},
    "flows":{"enabled":2},
    "dictations":{"served":true,"admission":"busy","active":true,
@@ -281,6 +291,9 @@ model or a running dictation.
   `service.state` is `starting`, `running` or `stopping`;
   `transcription.state` is `starting`, `ready`, `restarting`, `failed` or
   `stopping`; `generation` counts the children started (1 is the first);
+  `compute` is the ready child's compute snapshot as it announced it
+  ([transcription.md](transcription.md#compute-backend-cpu-auto-gpu)), `null`
+  while no child is ready;
   `last_failure` is a fixed code such as `transcription_exited`,
   `transcription_probe_failed` or `transcription_recycled`.
   `dictations.admission` is `open`, `busy` (one is running; `stage` names
