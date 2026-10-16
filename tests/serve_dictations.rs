@@ -5,18 +5,22 @@
 //! `pumice-test-cli` behind the real Claude adapter. No real AI CLI,
 //! transcription engine or model is involved; every port is
 //! `127.0.0.1:0`. Waits poll observable state (status, the stub's log,
-//! the fake's report) with a bound instead of sleeping for an order.
+//! the fake's report) with a bound instead of sleeping for an order, and
+//! every connection, response, exit and output collection has a deadline
+//! (`support/bounded.rs`).
 
 #[path = "../crates/relay/tests/support/install.rs"]
 mod install;
 use install::install_executable;
 
+#[path = "support/bounded.rs"]
+mod bounded;
+use bounded::{OwnedChild, ReadError, last_stage, stage};
+
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -180,6 +184,7 @@ impl Rig {
     /// Unix tests check a PID.
     #[cfg(unix)]
     fn wait_provider_pid(&self) -> u32 {
+        stage("wait for the provider to start");
         let deadline = Instant::now() + WAIT;
         loop {
             if let Some(report) = self.fake_report() {
@@ -208,25 +213,10 @@ impl Rig {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = command.spawn().expect("start pumice serve");
-        let stdout = child.stdout.take().unwrap();
-        let stderr = child.stderr.take().unwrap();
-        let (sender, records) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                let _ = sender.send(line);
-            }
-        });
-        let stderr = std::thread::spawn(move || {
-            let mut text = String::new();
-            let _ = BufReader::new(stderr).read_to_string(&mut text);
-            text
-        });
+        stage("start pumice serve");
+        let child = command.spawn().expect("start pumice serve");
         let mut running = Running {
-            child,
-            records,
-            stderr: Some(stderr),
+            process: OwnedChild::new("pumice serve", child),
             port: 0,
         };
         let listening = running.record();
@@ -247,6 +237,7 @@ impl Rig {
 
     /// Waits until the stub logged `count` transcription requests.
     fn wait_transcriptions(&self, count: usize) {
+        stage(format!("wait for {count} transcription request(s)"));
         let deadline = Instant::now() + WAIT;
         while self.log_events("transcription").len() < count {
             assert!(Instant::now() < deadline, "no transcription request");
@@ -267,23 +258,23 @@ impl Rig {
     }
 }
 
+/// A running `pumice serve`; dropping it kills and reaps the process.
 struct Running {
-    child: Child,
-    records: mpsc::Receiver<String>,
-    stderr: Option<std::thread::JoinHandle<String>>,
+    process: OwnedChild,
     port: u16,
 }
 
 impl Running {
-    fn record(&self) -> Value {
+    fn record(&mut self) -> Value {
+        stage("wait for a lifecycle record");
         let line = self
-            .records
-            .recv_timeout(WAIT)
-            .expect("a lifecycle record in time");
+            .process
+            .stdout_line(WAIT)
+            .expect("a lifecycle record, not the end of stdout");
         serde_json::from_str(&line).unwrap_or_else(|_| panic!("not a JSON record: {line}"))
     }
 
-    fn wait_ready(&self) {
+    fn wait_ready(&mut self) {
         let ready = self.record();
         assert_eq!(ready["event"], "ready", "{ready}");
     }
@@ -318,45 +309,35 @@ impl Running {
 
     #[cfg(unix)]
     fn signal(&self, signal: libc::c_int) {
-        // SAFETY: plain kill(2) on the child this test owns.
+        // SAFETY: plain kill(2) on the child this test owns (not reaped
+        // before `finish`, so the PID is still its own).
         assert_eq!(
-            unsafe { libc::kill(self.child.id() as libc::pid_t, signal) },
+            unsafe { libc::kill(self.process.id() as libc::pid_t, signal) },
             0
         );
     }
 
+    /// Waits for the exit and the whole stderr, both within one [`WAIT`];
+    /// returns (exit code, time to the exit, stderr).
     fn finish(mut self) -> (Option<i32>, Duration, String) {
+        stage("finish pumice serve");
         let started = Instant::now();
         let deadline = started + WAIT;
-        let status = loop {
-            if let Some(status) = self.child.try_wait().unwrap() {
-                break status;
-            }
-            if Instant::now() > deadline {
-                let _ = self.child.kill();
-                panic!("pumice serve did not exit in time");
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        };
+        let status = self.process.wait_until(deadline);
         let elapsed = started.elapsed();
-        let stderr = self.stderr.take().unwrap().join().unwrap();
+        let output = self.process.collect_until(deadline);
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         (status.code(), elapsed, stderr)
     }
 
     #[cfg_attr(unix, allow(unused_mut))]
     fn stop(mut self) -> (Option<i32>, Duration, String) {
+        stage("stop pumice serve");
         #[cfg(unix)]
         self.signal(libc::SIGTERM);
         #[cfg(not(unix))]
-        let _ = self.child.kill();
+        self.process.kill();
         self.finish()
-    }
-}
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }
 
@@ -376,6 +357,7 @@ fn pid_alive(pid: u32) -> bool {
 
 #[cfg(unix)]
 fn wait_gone(pid: u32) {
+    stage(format!("wait for process {pid} to be gone"));
     let deadline = Instant::now() + WAIT;
     while pid_alive(pid) {
         assert!(Instant::now() < deadline, "process {pid} is still alive");
@@ -423,20 +405,36 @@ fn head(port: u16, method: &[u8], path: &str, headers: &[(&str, String)]) -> Vec
     head
 }
 
+/// The response on `stream` within [`WAIT`]; `None` when the connection
+/// ended without one. A response still incomplete at the deadline fails the
+/// test.
 fn read_response(stream: &mut TcpStream) -> Option<HttpResponse> {
-    stream.set_read_timeout(Some(WAIT)).ok()?;
-    let mut response = Vec::new();
-    let mut chunk = [0u8; 64 * 1024];
-    loop {
-        match stream.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => response.extend_from_slice(&chunk[..n]),
-            // A reset after a complete answer still leaves the answer.
-            Err(_) if !response.is_empty() => break,
-            Err(_) => return None,
+    read_response_until(stream, Instant::now() + WAIT)
+}
+
+fn read_response_until(stream: &mut TcpStream, deadline: Instant) -> Option<HttpResponse> {
+    match bounded::read_response(stream, deadline) {
+        Ok(response) => parse_response(&response),
+        Err(ReadError::NoAnswer) => None,
+        Err(ReadError::Timeout(got)) => {
+            panic!(
+                "no complete response in time: {got} (last stage: {})",
+                last_stage()
+            )
         }
     }
-    parse_response(&response)
+}
+
+/// A connection to the service, made within `deadline`.
+fn connect(port: u16, deadline: Instant) -> TcpStream {
+    bounded::connect(port, deadline)
+        .unwrap_or_else(|error| panic!("connect: {error} (last stage: {})", last_stage()))
+}
+
+/// Writes `bytes` within `deadline`; a failure fails the test.
+fn send(stream: &mut TcpStream, bytes: &[u8], deadline: Instant) {
+    bounded::send(stream, bytes, deadline)
+        .unwrap_or_else(|error| panic!("write: {error} (last stage: {})", last_stage()));
 }
 
 fn parse_response(response: &[u8]) -> Option<HttpResponse> {
@@ -460,13 +458,15 @@ fn request(
     headers: &[(&str, String)],
     body: &[u8],
 ) -> HttpResponse {
+    stage(format!("{} {path}", String::from_utf8_lossy(method)));
+    let deadline = Instant::now() + WAIT;
     let mut all = headers.to_vec();
     all.push(("Content-Length", body.len().to_string()));
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
-    stream.write_all(&head(port, method, path, &all)).unwrap();
+    let mut stream = connect(port, deadline);
+    send(&mut stream, &head(port, method, path, &all), deadline);
     // A refusal can come before the body is read: ignore a broken write.
-    let _ = stream.write_all(body);
-    read_response(&mut stream).expect("a complete JSON response")
+    let _ = bounded::send(&mut stream, body, deadline);
+    read_response_until(&mut stream, deadline).expect("a complete JSON response")
 }
 
 fn multipart_type() -> (&'static str, String) {
@@ -499,11 +499,13 @@ fn dictate_flow(port: u16, flow: &str) -> HttpResponse {
 /// Sends the head and the start of a large body, nothing more: an answer
 /// that arrives proves the body was not waited for.
 fn dictate_partially(port: u16) -> TcpStream {
+    stage("partial POST /pumice/v1/dictations");
+    let deadline = Instant::now() + WAIT;
     let body = form(&[
         ("file", Some("a.wav"), &[0u8; 100_000]),
         ("flow", None, b"clean"),
     ]);
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    let mut stream = connect(port, deadline);
     let mut bytes = head(
         port,
         b"POST",
@@ -511,7 +513,7 @@ fn dictate_partially(port: u16) -> TcpStream {
         &[multipart_type(), ("Content-Length", body.len().to_string())],
     );
     bytes.extend_from_slice(&body[..64]);
-    stream.write_all(&bytes).unwrap();
+    send(&mut stream, &bytes, deadline);
     stream
 }
 
@@ -1155,26 +1157,32 @@ fn invalid_uploads_get_fixed_errors_before_any_work() {
         assert!(header(&response.1, "allow").is_none());
     }
     // A wrong Host, written by hand: `head` always sends the right one.
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream
-        .write_all(
-            b"POST /pumice/v1/dictations HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
-        )
-        .unwrap();
-    let response = read_response(&mut stream).expect("an answer");
+    stage("POST with a wrong Host");
+    let deadline = Instant::now() + WAIT;
+    let mut stream = connect(port, deadline);
+    send(
+        &mut stream,
+        b"POST /pumice/v1/dictations HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+        deadline,
+    );
+    let response = read_response_until(&mut stream, deadline).expect("an answer");
     refused(&response, 403, "host_not_allowed");
 
     // A declared length over the limit is refused without the body.
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream
-        .write_all(&head(
+    stage("POST with an oversized Content-Length");
+    let deadline = Instant::now() + WAIT;
+    let mut stream = connect(port, deadline);
+    send(
+        &mut stream,
+        &head(
             port,
             b"POST",
             "/pumice/v1/dictations",
             &[multipart_type(), ("Content-Length", "26000001".to_owned())],
-        ))
-        .unwrap();
-    let response = read_response(&mut stream).expect("an early answer");
+        ),
+        deadline,
+    );
+    let response = read_response_until(&mut stream, deadline).expect("an early answer");
     assert_error(&response, 413, "body_too_large", "prepare");
 
     // A chunked body is counted as it arrives.
@@ -1211,9 +1219,12 @@ fn invalid_uploads_get_fixed_errors_before_any_work() {
 /// A chunked multipart upload of `total` file bytes; the server may refuse
 /// it before the end.
 fn chunked_upload(port: u16, total: usize) -> HttpResponse {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream
-        .write_all(&head(
+    stage("chunked POST /pumice/v1/dictations");
+    let deadline = Instant::now() + WAIT;
+    let mut stream = connect(port, deadline);
+    send(
+        &mut stream,
+        &head(
             port,
             b"POST",
             "/pumice/v1/dictations",
@@ -1221,14 +1232,14 @@ fn chunked_upload(port: u16, total: usize) -> HttpResponse {
                 multipart_type(),
                 ("Transfer-Encoding", "chunked".to_owned()),
             ],
-        ))
-        .unwrap();
+        ),
+        deadline,
+    );
     let mut send = |data: &[u8]| -> bool {
-        stream
-            .write_all(format!("{:x}\r\n", data.len()).as_bytes())
-            .and_then(|()| stream.write_all(data))
-            .and_then(|()| stream.write_all(b"\r\n"))
-            .is_ok()
+        let mut chunk = format!("{:x}\r\n", data.len()).into_bytes();
+        chunk.extend_from_slice(data);
+        chunk.extend_from_slice(b"\r\n");
+        bounded::send(&mut stream, &chunk, deadline).is_ok()
     };
     let opening = format!(
         "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"flow\"\r\n\r\nclean\r\n--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n\r\n"
@@ -1243,9 +1254,9 @@ fn chunked_upload(port: u16, total: usize) -> HttpResponse {
     }
     if ok {
         let _ = send(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
-        let _ = stream.write_all(b"0\r\n\r\n");
+        let _ = bounded::send(&mut stream, b"0\r\n\r\n", deadline);
     }
-    read_response(&mut stream).expect("an answer")
+    read_response_until(&mut stream, deadline).expect("an answer")
 }
 
 // --- Client disconnects over real sockets --------------------------------
@@ -1277,6 +1288,7 @@ fn reset(stream: TcpStream) {
 /// service treats the client as gone and ends the connection without an
 /// answer.
 fn half_close(mut stream: TcpStream) {
+    stage("half-close");
     stream.shutdown(std::net::Shutdown::Write).unwrap();
     assert!(
         read_response(&mut stream).is_none(),
@@ -1290,11 +1302,13 @@ type Close = fn(TcpStream);
 /// Sends a whole dictation, then leaves the connection open for the test
 /// to close or reset.
 fn dictate_and_hold(port: u16, flow: &str) -> TcpStream {
+    stage(format!("held POST /pumice/v1/dictations ({flow})"));
+    let deadline = Instant::now() + WAIT;
     let body = form(&[
         ("file", Some("a.wav"), AUDIO),
         ("flow", None, flow.as_bytes()),
     ]);
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let mut stream = connect(port, deadline);
     let mut bytes = head(
         port,
         b"POST",
@@ -1302,7 +1316,7 @@ fn dictate_and_hold(port: u16, flow: &str) -> TcpStream {
         &[multipart_type(), ("Content-Length", body.len().to_string())],
     );
     bytes.extend_from_slice(&body);
-    stream.write_all(&bytes).unwrap();
+    send(&mut stream, &bytes, deadline);
     stream
 }
 

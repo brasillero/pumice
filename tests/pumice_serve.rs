@@ -2,17 +2,20 @@
 //! the real binary, its frontend over real loopback sockets and its
 //! supervisor, with the scenario-driven `pumice-test-transcribe` installed
 //! as the sibling `pumice-transcribe`. Ports are always `127.0.0.1:0`; no
-//! real AI CLI, transcription module or model is involved.
+//! real AI CLI, transcription module or model is involved. Every
+//! connection, response, exit and output collection has a deadline
+//! (`support/bounded.rs`).
 
 #[path = "../crates/relay/tests/support/install.rs"]
 mod install;
 
+#[path = "support/bounded.rs"]
+mod bounded;
+use bounded::{OwnedChild, last_stage, stage};
+
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -132,30 +135,16 @@ impl Rig {
 
     /// Runs `pumice serve` to its end (for commands that fail at once).
     fn output(&self, extra: &[&str]) -> std::process::Output {
+        stage(format!("run pumice serve {extra:?} to its end"));
         let child = self.command(extra).spawn().expect("start pumice serve");
-        wait_output(child)
+        OwnedChild::new("pumice serve", child).finish(WAIT)
     }
 
     fn start(&self, extra: &[&str]) -> Running {
-        let mut child = self.command(extra).spawn().expect("start pumice serve");
-        let stdout = child.stdout.take().unwrap();
-        let stderr = child.stderr.take().unwrap();
-        let (sender, records) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                let _ = sender.send(line);
-            }
-        });
-        let stderr = std::thread::spawn(move || {
-            let mut text = String::new();
-            let _ = BufReader::new(stderr).read_to_string(&mut text);
-            text
-        });
+        stage(format!("start pumice serve {extra:?}"));
+        let child = self.command(extra).spawn().expect("start pumice serve");
         Running {
-            child,
-            records,
-            stderr: Some(stderr),
+            process: OwnedChild::new("pumice serve", child),
         }
     }
 
@@ -189,39 +178,24 @@ impl Rig {
     }
 }
 
-/// Waits for the process with a bounded deadline (killing it past that).
-fn wait_output(mut child: Child) -> std::process::Output {
-    let deadline = Instant::now() + WAIT;
-    loop {
-        if child.try_wait().unwrap().is_some() {
-            return child.wait_with_output().unwrap();
-        }
-        if Instant::now() > deadline {
-            let _ = child.kill();
-            panic!("pumice serve did not exit in time");
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
+/// A running `pumice serve`; dropping it kills and reaps the process.
 struct Running {
-    child: Child,
-    records: mpsc::Receiver<String>,
-    stderr: Option<std::thread::JoinHandle<String>>,
+    process: OwnedChild,
 }
 
 impl Running {
     /// The next stdout record, as JSON; every stdout line must be one.
-    fn record(&self) -> Value {
+    fn record(&mut self) -> Value {
+        stage("wait for a lifecycle record");
         let line = self
-            .records
-            .recv_timeout(WAIT)
-            .expect("a lifecycle record in time");
+            .process
+            .stdout_line(WAIT)
+            .expect("a lifecycle record, not the end of stdout");
         serde_json::from_str(&line).unwrap_or_else(|_| panic!("not a JSON record: {line}"))
     }
 
     /// Reads `listening` and returns the announced port.
-    fn port(&self) -> u16 {
+    fn port(&mut self) -> u16 {
         let listening = self.record();
         assert_eq!(listening["event"], "listening", "{listening}");
         assert_eq!(listening["host"], "127.0.0.1");
@@ -230,7 +204,7 @@ impl Running {
         port
     }
 
-    fn ready(&self, port: u16) {
+    fn ready(&mut self, port: u16) {
         let ready = self.record();
         assert_eq!(ready["event"], "ready", "{ready}");
         assert_eq!(ready["port"], port);
@@ -239,29 +213,24 @@ impl Running {
 
     #[cfg(unix)]
     fn signal(&self, signal: libc::c_int) {
-        // SAFETY: plain kill(2) on the child this test owns.
+        // SAFETY: plain kill(2) on the child this test owns (not reaped
+        // before `finish`, so the PID is still its own).
         assert_eq!(
-            unsafe { libc::kill(self.child.id() as libc::pid_t, signal) },
+            unsafe { libc::kill(self.process.id() as libc::pid_t, signal) },
             0
         );
     }
 
-    /// Waits for exit; returns (exit code, elapsed, stderr).
+    /// Waits for the exit and the whole stderr, both within one [`WAIT`];
+    /// returns (exit code, time to the exit, stderr).
     fn finish(mut self) -> (Option<i32>, Duration, String) {
+        stage("finish pumice serve");
         let started = Instant::now();
         let deadline = started + WAIT;
-        let status = loop {
-            if let Some(status) = self.child.try_wait().unwrap() {
-                break status;
-            }
-            if Instant::now() > deadline {
-                let _ = self.child.kill();
-                panic!("pumice serve did not exit in time");
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        };
+        let status = self.process.wait_until(deadline);
         let elapsed = started.elapsed();
-        let stderr = self.stderr.take().unwrap().join().unwrap();
+        let output = self.process.collect_until(deadline);
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         (status.code(), elapsed, stderr)
     }
 
@@ -269,45 +238,42 @@ impl Running {
     /// kill (the child then sees its stdin close).
     #[cfg_attr(unix, allow(unused_mut))]
     fn stop(mut self) -> (Option<i32>, Duration, String) {
+        stage("stop pumice serve");
         #[cfg(unix)]
         self.signal(libc::SIGTERM);
         #[cfg(not(unix))]
-        let _ = self.child.kill();
+        self.process.kill();
         self.finish()
-    }
-}
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
     }
 }
 
 type HttpResponse = (u16, Vec<(String, String)>, Value);
 
-/// One HTTP/1.1 request over a fresh connection; the server closes it.
-/// Returns (status, lowercase headers, JSON body).
+/// One HTTP/1.1 request over a fresh connection, connection, request and
+/// response within one [`WAIT`]. Returns (status, lowercase headers, JSON
+/// body).
 fn http(port: u16, method: &str, path: &str, headers: &[(&str, String)]) -> HttpResponse {
-    try_http(port, method, path, headers).expect("a complete JSON response")
+    try_http(port, method, path, headers)
+        .unwrap_or_else(|| panic!("no complete JSON response (last stage: {})", last_stage()))
 }
 
-/// [`http`], with `None` for a refused or cut-off connection.
+/// [`http`], with `None` for a refused, cut-off or late answer.
 fn try_http(
     port: u16,
     method: &str,
     path: &str,
     headers: &[(&str, String)],
 ) -> Option<HttpResponse> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
-    stream.set_read_timeout(Some(WAIT)).ok()?;
+    stage(format!("{method} {path}"));
+    let deadline = Instant::now() + WAIT;
+    let mut stream = bounded::connect(port, deadline).ok()?;
     let mut request = format!("{method} {path} HTTP/1.1\r\n");
     for (name, value) in headers {
         request.push_str(&format!("{name}: {value}\r\n"));
     }
     request.push_str("\r\n");
-    stream.write_all(request.as_bytes()).ok()?;
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response).ok()?;
+    bounded::send(&mut stream, request.as_bytes(), deadline).ok()?;
+    let response = bounded::read_response(&mut stream, deadline).ok()?;
     let text = String::from_utf8(response).ok()?;
     let (head, body) = text.split_once("\r\n\r\n")?;
     let mut lines = head.lines();
@@ -365,7 +331,7 @@ fn one_error_record(output: &std::process::Output) -> Value {
 #[test]
 fn serves_health_ready_status_and_flows_then_stops() {
     let rig = rig(SERVE, json!([{}]));
-    let running = rig.start(&["--json"]);
+    let mut running = rig.start(&["--json"]);
     let port = running.port();
     running.ready(port);
 
@@ -440,7 +406,7 @@ fn serves_health_ready_status_and_flows_then_stops() {
 #[test]
 fn the_host_origin_and_fetch_site_guard_runs_first_over_real_sockets() {
     let rig = rig(SERVE, json!([{}]));
-    let running = rig.start(&["--json"]);
+    let mut running = rig.start(&["--json"]);
     let port = running.port();
     running.ready(port);
 
@@ -502,7 +468,7 @@ fn the_host_origin_and_fetch_site_guard_runs_first_over_real_sockets() {
 #[test]
 fn status_answers_while_the_child_is_still_starting() {
     let rig = rig(SERVE, json!([{"never_ready": true}]));
-    let running = rig.start(&["--json"]);
+    let mut running = rig.start(&["--json"]);
     let port = running.port();
     for _ in 0..5 {
         let started = Instant::now();
@@ -536,7 +502,7 @@ fn status_answers_while_the_child_is_still_starting() {
 #[test]
 fn a_crash_after_ready_restarts_under_the_default_policy() {
     let rig = rig(SERVE, json!([{"exit_after_ready_ms": 100}, {}]));
-    let running = rig.start(&["--json"]);
+    let mut running = rig.start(&["--json"]);
     let port = running.port();
     running.ready(port);
     let restarted = wait_status(port, "generation 2", |body| {
@@ -557,7 +523,7 @@ fn a_crash_after_ready_restarts_under_the_default_policy() {
 #[test]
 fn a_handshake_mismatch_fails_the_startup_without_leftovers() {
     let rig = rig(SERVE, json!([{"ready_overrides": {"version": "9.9.9"}}]));
-    let running = rig.start(&["--json"]);
+    let mut running = rig.start(&["--json"]);
     let _port = running.port();
     let error = running.record();
     assert_eq!(error["event"], "error");
@@ -572,7 +538,7 @@ fn a_handshake_mismatch_fails_the_startup_without_leftovers() {
 #[test]
 fn a_startup_error_record_from_the_child_is_a_configuration_error() {
     let rig = rig(SERVE, json!([{"error_code": "invalid_config"}]));
-    let running = rig.start(&["--json"]);
+    let mut running = rig.start(&["--json"]);
     let _port = running.port();
     let error = running.record();
     assert_eq!(error["code"], "transcription_module_error");
@@ -656,6 +622,7 @@ fn plain_mode_announces_the_url_on_stderr() {
     let rig = rig(SERVE, json!([{}]));
     let running = rig.start(&[]);
     // Plain mode writes nothing on stdout; wait for the child instead.
+    stage("wait for the child to start");
     let deadline = Instant::now() + WAIT;
     while rig.spawns().is_empty() {
         assert!(Instant::now() < deadline, "the child never started");
@@ -674,6 +641,42 @@ fn plain_mode_announces_the_url_on_stderr() {
     rig.assert_children_gone();
 }
 
+/// The harness's own bound (chore-small-fixes#1): a descendant that keeps
+/// a pipe open after its parent exited fails the output collection at the
+/// deadline instead of hanging the test. Unix only: `sh` and kill(2).
+#[cfg(unix)]
+#[test]
+fn a_descendant_holding_the_output_fails_the_collection_in_time() {
+    /// Kills the descendant (started by this test) when the test ends.
+    struct Stop(libc::pid_t);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            // SAFETY: plain kill(2) on the sleeper this test started.
+            unsafe { libc::kill(self.0, libc::SIGKILL) };
+        }
+    }
+    let child = Command::new("sh")
+        .args(["-c", "sleep 30 & echo $!"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start sh");
+    let mut process = OwnedChild::new("sh", child);
+    let line = process.stdout_line(WAIT).expect("the sleeper's PID");
+    let _stop = Stop(line.parse().expect("a PID"));
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(500);
+    process.wait_until(deadline);
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        process.collect_until(deadline)
+    }))
+    .expect_err("the sleeper still holds stdout");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let message = failure.downcast_ref::<String>().expect("a message");
+    assert!(message.contains("stdout stayed open"), "{message}");
+}
+
 // Unix only: on Windows the Job Object kills the child together with
 // `pumice`, so the lifeline is not what ends it there.
 #[cfg(unix)]
@@ -686,8 +689,8 @@ fn an_abrupt_parent_death_closes_the_child_lifeline() {
     let mut running = rig.start(&["--json"]);
     let port = running.port();
     running.ready(port);
-    running.child.kill().expect("kill pumice serve");
-    let _ = running.child.wait();
+    stage("kill pumice serve outright");
+    running.process.kill();
     let deadline = Instant::now() + WAIT;
     while rig.log_events("eof").is_empty() {
         assert!(Instant::now() < deadline, "the child never saw stdin close");
@@ -711,7 +714,7 @@ mod signals {
     #[test]
     fn ctrl_c_exits_130_after_a_cooperative_stop() {
         let rig = rig(SERVE, json!([{}]));
-        let running = rig.start(&["--json"]);
+        let mut running = rig.start(&["--json"]);
         let port = running.port();
         running.ready(port);
         running.signal(libc::SIGINT);
@@ -734,7 +737,7 @@ mod signals {
     #[test]
     fn sigterm_kills_a_child_that_ignores_eof_within_five_seconds() {
         let rig = rig(SERVE, json!([{"ignore_eof": true}]));
-        let running = rig.start(&["--json"]);
+        let mut running = rig.start(&["--json"]);
         let port = running.port();
         running.ready(port);
         running.signal(libc::SIGTERM);
@@ -751,7 +754,7 @@ mod signals {
     #[test]
     fn a_signal_while_the_frontend_is_polled_stops_admission() {
         let rig = rig(SERVE, json!([{"exit_delay_ms": 1500}]));
-        let running = rig.start(&["--json"]);
+        let mut running = rig.start(&["--json"]);
         let port = running.port();
         running.ready(port);
         running.signal(libc::SIGTERM);
