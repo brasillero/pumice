@@ -21,7 +21,10 @@
 set -euo pipefail
 shopt -s nullglob
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/../../.." && pwd)"
+# shellcheck source=linux-stage-common.sh
+. "$script_dir/linux-stage-common.sh"
 profile=release
 if [ "${1:-}" = "--debug" ]; then
     profile=debug
@@ -37,28 +40,14 @@ export TRANSCRIBE_CMAKE_ARGS="-DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF
 echo "building pumice-transcribe (cpu-variants, $profile) in $target_dir"
 json_log="$target_dir/cargo-build.json"
 if [ "$profile" = release ]; then
-    timeout 1200 cargo build --release -p pumice-transcription --features cpu-variants \
-        --locked --message-format=json > "$json_log"
+    cargo_build_logged "$json_log" 1200 --release -p pumice-transcription \
+        --features cpu-variants --locked
 else
-    timeout 1200 cargo build -p pumice-transcription --features cpu-variants \
-        --locked --message-format=json > "$json_log"
+    cargo_build_logged "$json_log" 1200 -p pumice-transcription --features cpu-variants --locked
 fi
 
 bin="$target_dir/$profile/pumice-transcribe"
-# Stage ONLY the build-script output directory of this build: several cached
-# transcribe-cpp-sys-<hash>/out directories can coexist after toolchain or
-# dependency changes, and picking the wrong one pairs the fresh executable
-# with stale native libraries. The build-script-executed messages of the
-# build we just ran name the exact out_dir Cargo used.
-sys_out="$(jq -rs '
-    [.[] | select(.reason == "build-script-executed")
-          | select(.package_id | contains("transcribe-cpp-sys"))]
-    | last | .out_dir // empty
-' "$json_log")"
-if [ -z "$sys_out" ]; then
-    echo "error: no transcribe-cpp-sys build-script output in the current build" >&2
-    exit 1
-fi
+sys_out="$(transcribe_sys_out "$json_log")"
 echo "staging native libraries from $sys_out"
 
 # Validate the staged set before copying: the executable plus an incomplete
@@ -79,27 +68,7 @@ for lib in "$sys_out"/lib/libtranscribe.so* "$sys_out"/lib/libggml.so* \
     "$sys_out"/lib/libggml-base.so*; do
     cp -L "$lib" "$stage_dir/"
 done
-# One CPU module per variant directory: ggml's directory probe scores
-# whatever it finds, so each directory must hold exactly its own module and
-# nothing a lower-priority scan could pick instead.
-for lib in "$sys_out"/lib/libggml-cpu-*.so*; do
-    name="$(basename "$lib")"
-    variant="${name#libggml-cpu-}"
-    variant="${variant%%.so*}"
-    dir="$stage_dir/cpu/$variant"
-    mkdir -p "$dir"
-    cp -L "$lib" "$dir/libggml-cpu-$variant.so"
-done
-
-if [ ! -f "$stage_dir/cpu/x64/libggml-cpu-x64.so" ]; then
-    echo "error: x64 CPU module missing from the staged cpu/ directory" >&2
-    exit 1
-fi
-variant_count="$(find "$stage_dir/cpu" -mindepth 1 -maxdepth 1 -type d | wc -l)"
-if [ "$variant_count" -lt 2 ]; then
-    echo "error: expected several cpu/<variant>/ directories, found $variant_count" >&2
-    exit 1
-fi
+stage_cpu_modules "$sys_out" "$stage_dir"
 
 echo "staged $stage_dir:"
 find "$stage_dir" -mindepth 1 -maxdepth 2 | sort
