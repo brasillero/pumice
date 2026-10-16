@@ -21,7 +21,8 @@
 //!    stdout and stderr, so it keeps the caller's pipes open after this
 //!    process exits.
 //! 5. Write the report if `report_path` is set.
-//! 6. Sleep `sleep_ms`.
+//! 6. Wait until `wait_for_path` exists, if set (at most a minute, so the
+//!    fake never outlives a failed test for long), then sleep `sleep_ms`.
 //! 7. Write `stdout`, then `stdout_repeat_bytes` filler bytes, then `stderr`.
 //! 8. Exit with `exit_code` without waiting for the grandchild.
 //!
@@ -95,6 +96,10 @@ struct Scenario {
     /// Delay before writing any output.
     #[serde(default)]
     sleep_ms: Option<u64>,
+    /// A gate: before `sleep_ms`, wait until this file exists. Lets a test
+    /// hold the fake mid-run for exactly as long as it needs.
+    #[serde(default)]
+    wait_for_path: Option<PathBuf>,
     /// Spawn a grandchild that inherits stdout/stderr and sleeps this long.
     #[serde(default)]
     spawn_grandchild_sleep_ms: Option<u64>,
@@ -192,6 +197,13 @@ fn main() {
     if let Some(path) = &scenario.report_path {
         let report = build_report(&scenario, argv, stdin, grandchild_pid);
         write_report(path, &report);
+    }
+
+    if let Some(path) = &scenario.wait_for_path {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while !path.exists() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     if let Some(ms) = scenario.sleep_ms {

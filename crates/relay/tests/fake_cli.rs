@@ -238,6 +238,34 @@ fn sleeping_fake_can_be_killed() {
 }
 
 #[test]
+fn a_gated_fake_waits_for_its_release_file() {
+    let gate = TempDir::new().expect("temp dir");
+    let release = gate.path().join("release");
+    let fake = FakeCli::new(json!({
+        "wait_for_path": release,
+        "stdout": "released",
+    }));
+    let mut child = Command::new(fake.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !fake.report_path().exists() {
+        assert!(Instant::now() < deadline, "fake never wrote its report");
+        thread::sleep(Duration::from_millis(10));
+    }
+    // The report comes before the gate, which is still closed.
+    assert!(child.try_wait().unwrap().is_none(), "the fake waits");
+    let mut child = support::bounded::OwnedChild::new("fake CLI", child);
+    fs::write(&release, "").unwrap();
+    let output = child.finish(Duration::from_secs(10));
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"released");
+}
+
+#[test]
 fn grandchild_keeps_pipes_open_after_parent_exits() {
     const GRANDCHILD_MS: u64 = 800;
     let fake = FakeCli::new(json!({

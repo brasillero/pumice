@@ -313,9 +313,22 @@ fn response_completeness_follows_its_framing() {
 /// write side stays open while the response is read — half-closing first makes hyper drop the
 /// connection without answering.
 async fn raw_http(port: u16, request: Vec<u8>) -> RawResponse {
-    let stream = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+    // Connecting, writing and reading share one bound.
+    let exchange = async {
+        let stream = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+            .await
+            .expect("connect to server");
+        exchange(stream, request).await
+    };
+    let response = tokio::time::timeout(Duration::from_secs(30), exchange)
         .await
-        .expect("connect to server");
+        .expect("request timed out");
+    parse_http(&response)
+}
+
+/// Writes `request` and reads the response on `stream`, concurrently (see
+/// [`raw_http`]).
+async fn exchange(stream: TcpStream, request: Vec<u8>) -> Vec<u8> {
     let (mut reader, mut writer) = stream.into_split();
     let write = async move {
         let _ = writer.write_all(&request).await;
@@ -337,14 +350,8 @@ async fn raw_http(port: u16, request: Vec<u8>) -> RawResponse {
         }
         response
     };
-    let read = async {
-        let (response, _writer) = tokio::join!(read, write);
-        response
-    };
-    let response = tokio::time::timeout(Duration::from_secs(30), read)
-        .await
-        .expect("request timed out");
-    parse_http(&response)
+    let (response, _writer) = tokio::join!(read, write);
+    response
 }
 
 /// Builds a request with fixed framing: HTTP/1.1, loopback host,
@@ -752,7 +759,11 @@ async fn client_disconnect_writes_one_dropped_log_entry() {
         .expect("send request");
     // Wait until the CLI is running, then go away mid-request.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !server.fake.report_path().exists() && std::time::Instant::now() < deadline {
+    while !server.fake.report_path().exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fake CLI never started"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     drop(stream);
@@ -916,14 +927,27 @@ async fn landing_page_avoids_filter_trigger_words() {
     }
 }
 
+/// Waits (bounded) until the server's fake CLI wrote its report: the run
+/// has started and holds the pipeline's permit.
+async fn wait_for_fake_start(server: &TestServer) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !server.fake.report_path().exists() {
+        assert!(std::time::Instant::now() < deadline, "fake never started");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test]
 async fn health_answers_quickly_while_a_dictation_runs() {
     let result = "Reunião com a equipe às 9:00.";
-    // The fake sleeps two seconds, so the dictation below is still running
-    // (holding the pipeline's single permit) when /health is checked.
+    // The fake waits for a release file, so the dictation below is still
+    // running (holding the pipeline's single permit) when /health is
+    // checked, however slow the machine is.
+    let gate = TempDir::new().expect("temp dir");
+    let release = gate.path().join("release");
     let server = start_server(
         CLAUDE_AT_FAKE,
-        json!({"stdout": success_envelope(result), "exit_code": 0, "sleep_ms": 2000}),
+        json!({"stdout": success_envelope(result), "exit_code": 0, "wait_for_path": release}),
     )
     .await;
 
@@ -940,8 +964,7 @@ async fn health_answers_quickly_while_a_dictation_runs() {
         )
         .await
     });
-    // Give the request time to reach the pipeline and start the fake.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_for_fake_start(&server).await;
 
     let started = std::time::Instant::now();
     let response = raw_http(server.port, http_request("GET", "/health", &[], b"")).await;
@@ -949,14 +972,17 @@ async fn health_answers_quickly_while_a_dictation_runs() {
 
     assert_eq!(response.status, 200, "body: {}", response.body_text());
     assert_eq!(response.body_json()["status"], "ok");
+    // The gate is still closed: health answered while the dictation ran.
+    // The bound is generous; it only rules out waiting for the permit.
     assert!(
-        elapsed < Duration::from_millis(300),
+        elapsed < Duration::from_secs(5),
         "health took {elapsed:?} while a dictation was running"
     );
     assert!(
         !dictation.is_finished(),
         "the dictation must still be running when health answers"
     );
+    fs::write(&release, "").expect("release the fake");
 
     let dictation = dictation.await.expect("dictation task completes");
     assert_eq!(dictation.status, 200);
@@ -1884,14 +1910,18 @@ async fn inspect_stream_returns_the_body_in_sse_frames() {
 
 #[tokio::test]
 async fn inspect_is_not_blocked_by_a_busy_formatting_run() {
+    // The fake waits for a release file, so the first request holds the
+    // busy permit for the whole check.
+    let gate = TempDir::new().expect("temp dir");
+    let release = gate.path().join("release");
     let server = start_server(
         CLAUDE_AT_FAKE,
-        json!({"stdout": success_envelope("Olá."), "exit_code": 0, "sleep_ms": 2000}),
+        json!({"stdout": success_envelope("Olá."), "exit_code": 0, "wait_for_path": release}),
     )
     .await;
 
     let port = server.port;
-    let _busy = tokio::spawn(async move {
+    let busy = tokio::spawn(async move {
         raw_http(
             port,
             http_request(
@@ -1905,11 +1935,7 @@ async fn inspect_is_not_blocked_by_a_busy_formatting_run() {
     });
 
     // Wait until the first request has started the fake and holds the busy permit.
-    let started_by = std::time::Instant::now() + Duration::from_secs(5);
-    while !server.fake.report_path().exists() {
-        assert!(std::time::Instant::now() < started_by, "fake never started");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    wait_for_fake_start(&server).await;
 
     let raw_body = br#"{"model":"inspect","messages":[{"role":"user","content":"busy test"}]}"#;
     let started = std::time::Instant::now();
@@ -1926,10 +1952,17 @@ async fn inspect_is_not_blocked_by_a_busy_formatting_run() {
     let elapsed = started.elapsed();
 
     assert_eq!(response.status, 200, "body: {}", response.body_text());
+    // The gate is still closed: inspect answered past the busy permit. The
+    // bound is generous; it only rules out waiting for the permit.
     assert!(
-        elapsed < Duration::from_millis(500),
+        elapsed < Duration::from_secs(5),
         "inspect must bypass the busy guard, took {elapsed:?}"
     );
+    assert!(
+        !busy.is_finished(),
+        "the formatting run still holds the permit"
+    );
+    fs::write(&release, "").expect("release the fake");
     assert_eq!(
         response.body_json()["choices"][0]["message"]["content"]
             .as_str()
