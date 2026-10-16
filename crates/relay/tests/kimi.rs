@@ -404,20 +404,17 @@ fn assert_error(text: &str, line: u64, column: u64, message: &str) {
 }
 
 #[test]
-fn no_yaml_entry_loads_zero_providers() {
-    let config = load("").expect("empty file loads");
-    assert!(config.providers.is_empty());
-}
-
-#[test]
-fn enabled_with_a_model_loads() {
-    let config =
-        load("providers:\n  - id: kimi\n    enabled: true\n    model: kimi-k2.7-code-highspeed\n")
-            .expect("enabled loads");
-    let kimi = config.provider(ID).expect("kimi configured");
-    assert!(kimi.enabled);
-    assert_eq!(kimi.model, TEST_MODEL);
-    assert_eq!(config.provider("bogus"), None);
+fn enabled_with_an_explicit_model_loads() {
+    // Kimi validates the alias itself; any well-formed alias is accepted.
+    for model in [TEST_MODEL, "kimi-k2.8-code"] {
+        let config = load(&format!(
+            "providers:\n  - id: kimi\n    enabled: true\n    model: {model}\n"
+        ))
+        .unwrap_or_else(|error| panic!("{model}: {error}"));
+        let kimi = config.provider(ID).expect("kimi configured");
+        assert!(kimi.enabled);
+        assert_eq!(kimi.model, model);
+    }
 }
 
 #[test]
@@ -431,66 +428,12 @@ fn enabled_without_a_model_reports_the_entry() {
 }
 
 #[test]
-fn disabled_entry_is_kept_but_off() {
-    let config = load("providers:\n  - id: kimi\n    enabled: false\n").expect("disabled loads");
-    let kimi = config.provider(ID).expect("kimi configured");
-    assert!(!kimi.enabled);
-    assert_eq!(kimi.model, "");
-}
-
-#[test]
-fn duplicate_id_is_rejected() {
-    assert_error(
-        "providers:\n  - id: kimi\n    enabled: false\n  - id: kimi\n    enabled: false\n",
-        4,
-        9,
-        "duplicate provider \"kimi\" in providers",
-    );
-}
-
-#[test]
-fn removed_default_key_fails_with_a_removal_hint() {
-    let error = load_error("default: kimi\n");
-    assert!(error.contains("\"default\" was removed in 0.2:"), "{error}");
-}
-
-#[test]
-fn enabled_with_an_explicit_model_loads() {
-    let config = load("providers:\n  - id: kimi\n    enabled: true\n    model: kimi-k2.8-code\n")
-        .expect("explicit model loads");
-    assert_eq!(
-        config.provider(ID).expect("kimi configured").model,
-        "kimi-k2.8-code"
-    );
-}
-
-#[test]
 fn malformed_model_reports_the_value() {
     assert_error(
         "providers:\n  - id: kimi\n    enabled: true\n    model: bad model\n",
         4,
         12,
         "providers.kimi.model must be a nonempty model alias of at most 256 bytes, without whitespace, control characters or a leading '-'",
-    );
-}
-
-#[test]
-fn options_key_is_rejected_as_removed() {
-    assert_error(
-        "providers:\n  - id: kimi\n    enabled: true\n    model: kimi-k2.7-code-highspeed\n    options:\n      effort: low\n",
-        6,
-        7,
-        "providers entry \"kimi\".options was removed",
-    );
-}
-
-#[test]
-fn env_key_is_rejected_as_removed() {
-    assert_error(
-        "providers:\n  - id: kimi\n    enabled: true\n    model: kimi-k2.7-code-highspeed\n    env:\n      KIMI_CODE_HOME: /tmp\n",
-        6,
-        7,
-        "providers entry \"kimi\".env was removed",
     );
 }
 

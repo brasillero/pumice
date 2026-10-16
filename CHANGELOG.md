@@ -13,7 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- `cargo install --path .` (and `--path crates/relay`) installs only `pumice` (`pumice-relay`); the test helpers `pumice-test-cli` and `pumice-test-transcribe` are built only for the test suite.
+- `cargo install --path .` (and `--path crates/relay`) installs only `pumice` (`pumice-relay`); the test helpers `pumice-test-cli`, `pumice-root-test-cli` and `pumice-test-transcribe` are built only for the test suite.
 - `pumice relay serve|check-config|doctor --help` (and `-h`, also on `pumice-relay`) prints that command's help instead of a usage error.
 
 ## [0.2.0] — 2026-10-11

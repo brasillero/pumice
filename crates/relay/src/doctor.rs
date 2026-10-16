@@ -353,7 +353,9 @@ mod tests {
     #[test]
     fn render_reports_an_enabled_generic_as_a_local_endpoint() {
         let mut statuses = full_scan();
-        // Generic is archived; the rendering rule for endpoint providers stays.
+        // Generic is archived and not in the registry, so no configuration
+        // can enable it; this synthetic status only keeps the rendering rule
+        // for endpoint providers covered.
         statuses.push(status(
             "generic",
             true,

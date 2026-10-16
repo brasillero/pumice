@@ -1,7 +1,8 @@
 //! Tests for the formatting pipeline: provider selection, deadlines, the
-//! busy guard and the exact raw-text guarantee. There is no fallback: one
-//! provider runs per request, and every failure returns the dictation
-//! exactly as extracted. Everything runs through the portable fake CLI; no
+//! busy guard and failed outcomes that keep the dictation exactly as
+//! extracted. There is no fallback: one provider runs per request, and every
+//! failure is a failed (`Raw`) outcome, which the API answers with an HTTP
+//! error. Everything runs through the portable fake CLI; no
 //! real AI CLI is ever invoked.
 
 mod support;
@@ -77,7 +78,8 @@ fn success_scenario(result: &str) -> Value {
     json!({"stdout": success_envelope(result), "exit_code": 0})
 }
 
-/// Asserts a raw outcome carries the exact dictation and no provider.
+/// Asserts a failed (`Raw`) outcome keeps the exact dictation and names no
+/// provider.
 fn assert_raw(outcome: &FormatOutcome, reason: RawReason, text: &str) {
     assert_eq!(outcome.kind, OutcomeKind::Raw(reason), "kind mismatch");
     assert_eq!(outcome.text, text, "raw text mismatch");
@@ -179,7 +181,7 @@ async fn empty_transcript_still_reports_a_selection_problem() {
 }
 
 #[tokio::test]
-async fn no_model_returns_raw_text_and_runs_nothing() {
+async fn no_model_fails_and_runs_nothing() {
     let (pipeline, fake) = pipeline(CLAUDE_AT_FAKE, success_scenario("unused"));
     for model in [None, Some("")] {
         let outcome = pipeline
@@ -208,7 +210,7 @@ async fn model_selects_the_named_provider_regardless_of_list_order() {
 }
 
 #[tokio::test]
-async fn unknown_model_keeps_the_dictation_raw() {
+async fn unknown_model_fails_and_keeps_the_dictation() {
     let (pipeline, fake) = pipeline(CLAUDE_AT_FAKE, success_scenario("unused"));
     let outcome = pipeline
         .format(
@@ -221,8 +223,8 @@ async fn unknown_model_keeps_the_dictation_raw() {
 }
 
 #[tokio::test]
-async fn disabled_provider_keeps_the_dictation_raw() {
-    // claude is present but disabled: requesting it returns raw text.
+async fn disabled_provider_fails_and_keeps_the_dictation() {
+    // claude is present but disabled: requesting it is a failed outcome.
     let config = direct_config(
         Duration::from_secs(30),
         vec![("claude", test_settings(false))],
@@ -255,7 +257,7 @@ async fn removed_default_key_fails_the_config() {
 }
 
 #[tokio::test]
-async fn not_logged_in_keeps_the_dictation_raw() {
+async fn not_logged_in_fails_and_keeps_the_dictation() {
     let (pipeline, _fake) = pipeline(
         CLAUDE_AT_FAKE,
         json!({
@@ -274,7 +276,7 @@ async fn not_logged_in_keeps_the_dictation_raw() {
 }
 
 #[tokio::test]
-async fn missing_binary_keeps_the_dictation_raw() {
+async fn missing_binary_fails_and_keeps_the_dictation() {
     // An absolute path that cannot exist, on every OS.
     let dir = TempDir::new().expect("temp dir");
     let missing = dir.path().join("no-such-cli");
@@ -295,7 +297,7 @@ async fn missing_binary_keeps_the_dictation_raw() {
 }
 
 #[tokio::test]
-async fn malformed_output_keeps_the_dictation_raw() {
+async fn malformed_output_fails_and_keeps_the_dictation() {
     let (pipeline, _fake) = pipeline(
         CLAUDE_AT_FAKE,
         json!({"stdout": "not json at all", "exit_code": 0}),
@@ -592,7 +594,7 @@ async fn until_queued(progress: &RecordingProgress) {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_second_run_gets_raw_text_when_its_budget_runs_out_waiting() {
+async fn a_second_run_fails_when_its_budget_runs_out_waiting() {
     // The paused clock makes the deadlines exact: the first run holds the
     // only slot past the second request's budget, so the second waits in
     // line until its deadline and gets Busy.
@@ -819,9 +821,9 @@ async fn a_cancelled_queued_request_frees_its_place() {
 }
 
 #[tokio::test]
-async fn cleanup_failure_keeps_the_dictation_raw() {
-    // A reasoning-only result cleans down to nothing; the raw dictation is
-    // returned whole instead, and the reason says why.
+async fn cleanup_failure_fails_and_keeps_the_dictation() {
+    // A reasoning-only result cleans down to nothing; the outcome fails,
+    // keeps the dictation whole, and the reason says why.
     let (pipeline, _fake) = pipeline(
         CLAUDE_AT_FAKE,
         success_scenario("<think>just thinking</think>"),
@@ -840,7 +842,7 @@ async fn cleanup_failure_keeps_the_dictation_raw() {
 }
 
 #[tokio::test]
-async fn raw_fallback_preserves_the_dictation_exactly() {
+async fn failed_outcome_keeps_the_dictation_exactly() {
     let (pipeline, _fake) = pipeline(
         CLAUDE_AT_FAKE,
         json!({
@@ -862,7 +864,8 @@ async fn raw_fallback_preserves_the_dictation_exactly() {
 #[tokio::test]
 async fn failure_never_runs_a_second_provider() {
     // The owner's no-fallback rule: when the selected provider fails, the
-    // original text comes back and no other provider is tried.
+    // outcome fails with the original text kept and no other provider is
+    // tried.
     let fake = FakeCli::new(json!({
         "stdout": support::fixture("claude/not-logged-in.json"),
         "exit_code": 1,
@@ -918,7 +921,7 @@ async fn another_enabled_provider_never_runs_when_the_selected_succeeds() {
 
 #[tokio::test]
 async fn requested_provider_failure_never_runs_other_enabled_providers() {
-    // A request naming a provider that fails returns raw text; other
+    // A request naming a provider that fails is a failed outcome; other
     // enabled providers are never tried.
     let alpha = TestProvider::new("alpha", vec![Step::Fail(ProviderError::NotLoggedIn)]);
     let beta = TestProvider::new("beta", vec![Step::Ready("unused".to_owned())]);
@@ -979,10 +982,10 @@ async fn cleanup_failure_never_runs_other_enabled_providers() {
 }
 
 #[tokio::test]
-async fn selected_timeout_returns_raw_within_the_total_budget() {
+async fn selected_timeout_fails_within_the_total_budget() {
     // One-second provider timeout inside a five-second total budget: the
-    // timeout fires and the raw text returns quickly; the other enabled
-    // provider is never spawned.
+    // timeout fires and the failed outcome returns quickly; the other
+    // enabled provider is never spawned.
     let mut alpha_settings = test_settings(true);
     alpha_settings.timeout = Duration::from_secs(1);
     let alpha = TestProvider::new("alpha", vec![Step::Sleep(Duration::from_secs(10))]);

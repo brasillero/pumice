@@ -36,7 +36,8 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --locked --all-targets -- -D warnings
 
-      # Tests only ever run the fake CLI (`pumice-test-cli`); no real AI CLI
+      # Tests only ever run the fake CLI (`pumice-test-cli`, built as
+      # `pumice-root-test-cli` for the root package); no real AI CLI
       # is installed on the runners, so a test that reached one would fail.
       # About 4x the slowest recent step (~2.5 min on Windows).
       - name: cargo test

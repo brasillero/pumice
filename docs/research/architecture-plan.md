@@ -1,5 +1,7 @@
 # Pumice architecture plan — revision 2
 
+> **Status (2026-10-16):** historical proposal. Its command aliases, compatibility and migration proposals (old names and defaults kept working, config migration, fallback lookups) were superseded by owner decisions: `arch-modules/D12` (no backward compatibility), `p10-pumice-entry/D1` (bare `pumice` prints the overview) and `/D3` (the relay reads only `relay.yml`), `p12-pumice-run/D6` (`pumice run` takes `--config`) and `p13.1-flow-seam/D2` (the routes `pumice serve` exposes). The current commands are in the [README](../../README.md); the body below is unchanged.
+
 2026-10-12; inspected `arch-modules` HEAD `2755a2f52fb11f4c70841cc9483ad55227a3c71e`. This is a proposed implementation/migration plan, not a new decision log. D6–D10 override the contrary recommendations in round 1: `.task-decisions/tasks/arch-modules/decisions.md:79`, `:94`, `:109`, `:124`, `:139`. Retain the independent modules, pass-through relay, formatter injection and UI layering of D1–D4 (`:10`, `:25`, `:38`, `:53`).
 
 Evidence uses repository `file:line`; `S:` denotes `origin/s10.1-transcription` at `e64490246f00dfec9584b1681f6f18c6299c361d`. Round 1 is `docs/research/architecture-modules.md`. **UNVERIFIED:** every proposed command/schema/package and its platform behavior until implemented and tested. Reported spike results are not rerun results. The production unit/tunnel configuration is owner-provided and **UNVERIFIED**; no production connections, service operations or AI CLI calls are part of this plan.

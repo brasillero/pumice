@@ -1826,7 +1826,13 @@ mod tests {
         std::fs::write(&target, TEST_BYTES).unwrap();
         let dest = tmp.path().join("model.gguf");
         if std::os::windows::fs::symlink_file(&target, &dest).is_err() {
-            eprintln!("skipping: no privilege to create symlinks");
+            // Past libtest's output capture, so the skip shows in CI logs.
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "skipped symlinked_install_is_rejected_even_with_matching_target_bytes: \
+                 no privilege to create symlinks"
+            );
             return;
         }
         let spec = DownloadSpec {

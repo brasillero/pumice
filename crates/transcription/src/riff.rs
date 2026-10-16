@@ -18,7 +18,6 @@ const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: [u8; 16] = [
 
 /// Strictly validated information extracted from a RIFF/WAVE header.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub struct WavFormatInfo {
     pub format_tag: u16,
     pub channels: u16,
