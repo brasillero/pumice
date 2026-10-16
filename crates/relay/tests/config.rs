@@ -50,6 +50,16 @@ fn claude(config: &Config) -> &ProviderSettings {
     config.provider("claude").expect("claude is configured")
 }
 
+/// Every active provider ID with a model it accepts. The common entry rules
+/// below run over this table; provider-specific validation stays in each
+/// provider's own suite.
+const PROVIDERS: [(&str, &str); 4] = [
+    ("claude", "haiku"),
+    ("codex", "gpt-6.1-sol"),
+    ("kimi", "kimi-k2.7-code-highspeed"),
+    ("kiro", "claude-haiku-4.5"),
+];
+
 fn no_env(_: &str) -> Option<OsString> {
     None
 }
@@ -351,6 +361,31 @@ fn unknown_provider_is_rejected_at_its_id() {
 }
 
 #[test]
+fn enabled_entry_with_a_model_loads_for_every_provider() {
+    for (id, model) in PROVIDERS {
+        let config = load_text(&format!(
+            "providers:\n  - id: {id}\n    enabled: true\n    model: {model}\n"
+        ))
+        .unwrap_or_else(|error| panic!("{id}: {error}"));
+        let settings = config.provider(id).expect("provider configured");
+        assert!(settings.enabled, "{id}");
+        assert_eq!(settings.model, model, "{id}");
+        assert_eq!(config.provider("bogus"), None);
+    }
+}
+
+#[test]
+fn disabled_entry_is_kept_but_off_for_every_provider() {
+    for (id, _) in PROVIDERS {
+        let config = load_text(&format!("providers:\n  - id: {id}\n    enabled: false\n"))
+            .unwrap_or_else(|error| panic!("{id}: {error}"));
+        let settings = config.provider(id).expect("provider configured");
+        assert!(!settings.enabled, "{id}");
+        assert_eq!(settings.model, "", "{id}");
+    }
+}
+
+#[test]
 fn duplicate_provider_entries_are_rejected_at_the_second_id() {
     assert_error(
         "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n  - id: claude\n    enabled: false\n",
@@ -358,6 +393,16 @@ fn duplicate_provider_entries_are_rejected_at_the_second_id() {
         9,
         "duplicate provider \"claude\" in providers",
     );
+    for (id, _) in PROVIDERS {
+        assert_error(
+            &format!(
+                "providers:\n  - id: {id}\n    enabled: false\n  - id: {id}\n    enabled: false\n"
+            ),
+            4,
+            9,
+            &format!("duplicate provider \"{id}\" in providers"),
+        );
+    }
 }
 
 #[test]
@@ -937,32 +982,54 @@ fn empty_binary_is_rejected_at_the_value() {
 }
 
 #[test]
-fn model_starting_with_a_dash_is_rejected_at_the_value() {
-    for provider in ["claude", "codex", "kimi", "kiro"] {
-        let error = load_error(&format!(
-            "providers:\n  - id: {provider}\n    enabled: true\n    model: -haiku\n"
-        ));
-        assert!(error.contains(":4:"), "{error}");
-        assert!(
-            error.contains(&format!(
-                "providers entry \"{provider}\".model must not start with '-'"
-            )),
-            "{error}"
+fn enabled_without_a_model_is_rejected_at_the_id_for_every_provider() {
+    // Kimi checks this itself, with its own message (tests/kimi.rs).
+    for (id, _) in PROVIDERS.into_iter().filter(|(id, _)| *id != "kimi") {
+        assert_error(
+            &format!("providers:\n  - id: {id}\n    enabled: true\n"),
+            2,
+            9,
+            &format!("providers entry \"{id}\" is enabled but has no model; add \"model: <name>\""),
         );
     }
 }
 
 #[test]
-fn env_and_options_are_rejected_as_removed() {
-    for key in ["env", "options"] {
-        for value in ["\n      A: b\n", " null\n", " {}\n"] {
-            let error = load_error(&format!(
-                "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    {key}:{value}"
-            ));
-            assert!(
-                error.contains(&format!("providers entry \"codex\".{key} was removed")),
-                "{key}:{value:?}\n{error}"
+fn model_starting_with_a_dash_is_rejected_at_the_value() {
+    for (id, _) in PROVIDERS {
+        for model in ["-haiku", "-x"] {
+            assert_error(
+                &format!("providers:\n  - id: {id}\n    enabled: true\n    model: {model}\n"),
+                4,
+                12,
+                &format!("providers entry \"{id}\".model must not start with '-'"),
             );
+        }
+    }
+}
+
+#[test]
+fn env_and_options_are_rejected_as_removed() {
+    for (id, model) in PROVIDERS {
+        for key in ["env", "options"] {
+            // A block mapping is reported at its first key on the next line.
+            assert_error(
+                &format!(
+                    "providers:\n  - id: {id}\n    enabled: true\n    model: {model}\n    {key}:\n      A: b\n"
+                ),
+                6,
+                7,
+                &format!("providers entry \"{id}\".{key} was removed"),
+            );
+            for value in [" null\n", " {}\n"] {
+                let error = load_error(&format!(
+                    "providers:\n  - id: {id}\n    enabled: true\n    model: {model}\n    {key}:{value}"
+                ));
+                assert!(
+                    error.contains(&format!("providers entry \"{id}\".{key} was removed")),
+                    "{id} {key}:{value:?}\n{error}"
+                );
+            }
         }
     }
 }

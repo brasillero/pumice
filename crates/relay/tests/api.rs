@@ -1049,44 +1049,31 @@ async fn post_model(server_port: u16, model: &str) -> RawResponse {
 
 #[tokio::test]
 async fn models_follow_the_list_order() {
-    // codex is listed before claude: the model list follows the file.
-    let yaml = "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex}'\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{claude}'\n";
-    let server = start_dual_server(
-        yaml,
-        success_scenario("unused"),
-        codex_success_scenario("unused"),
-    )
-    .await;
-    let response = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
+    // The model list follows the file: both orders of the same two entries.
+    let codex_first = "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex}'\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{claude}'\n";
+    for (yaml, expected) in [
+        (BOTH_AT_FAKES, ["claude", "codex", "passthrough", "inspect"]),
+        (codex_first, ["codex", "claude", "passthrough", "inspect"]),
+    ] {
+        let server = start_dual_server(
+            yaml,
+            success_scenario("unused"),
+            codex_success_scenario("unused"),
+        )
+        .await;
+        let response = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
 
-    assert_eq!(response.status, 200);
-    assert_eq!(
-        listed_model_ids(&response.body_json()),
-        ["codex", "claude", "passthrough", "inspect"],
-        "the model list follows the providers list order"
-    );
-    assert!(
-        !server.claude.report_path().exists() && !server.codex.report_path().exists(),
-        "listing never invokes a CLI"
-    );
-}
-
-#[tokio::test]
-async fn models_list_the_enabled_providers_in_order() {
-    let server = start_dual_server(
-        BOTH_AT_FAKES,
-        success_scenario("unused"),
-        codex_success_scenario("unused"),
-    )
-    .await;
-    let response = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
-
-    assert_eq!(response.status, 200);
-    assert_eq!(
-        listed_model_ids(&response.body_json()),
-        ["claude", "codex", "passthrough", "inspect"],
-        "enabled providers in list order, then the built-ins"
-    );
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            listed_model_ids(&response.body_json()),
+            expected,
+            "enabled providers in list order, then the built-ins"
+        );
+        assert!(
+            !server.claude.report_path().exists() && !server.codex.report_path().exists(),
+            "listing never invokes a CLI"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1367,8 +1354,11 @@ async fn selecting_a_missing_provider_is_an_http_error_and_runs_no_other_provide
     );
 }
 
+/// A model-less request is refused as such before availability matters: the
+/// only enabled provider's binary is missing, yet the answer is the 400, not
+/// a "not installed" failure.
 #[tokio::test]
-async fn model_less_request_is_an_http_400_and_runs_nothing() {
+async fn model_less_request_is_an_http_400_even_when_the_provider_is_missing() {
     let server =
         start_missing_selected_server("  - id: codex\n    enabled: false\n", json!({})).await;
 
