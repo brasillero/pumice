@@ -52,6 +52,9 @@
 //! `{"event":"eof",…}` when its stdin closes. The n-th spawn follows
 //! `generations[n]` (the last entry repeats); see [`Managed`] for the knobs.
 //!
+//! It speaks managed protocol 2: `ready` and `/ready` carry a compute
+//! snapshot ([`COMPUTE`] unless `ready_overrides` replaces it).
+//!
 //! The managed child also answers `POST /pumice/v1/transcriptions` (the
 //! detailed route `pumice serve`'s dictations use) as its `transcription`
 //! script says, after appending `{"event":"transcription","pid":…,…}` with
@@ -68,6 +71,19 @@ const SCENARIO_SUFFIX: &str = ".scenario.json";
 const GRANDCHILD_FLAG: &str = "--pumice-stub-grandchild";
 /// Exit code when the scenario file cannot be read or parsed.
 const EXIT_BAD_SCENARIO: i32 = 98;
+/// The managed protocol this stub speaks.
+const PROTOCOL_VERSION: u32 = 2;
+
+/// The compute snapshot a healthy managed stub announces.
+fn compute() -> serde_json::Value {
+    serde_json::json!({
+        "requested": "cpu",
+        "backend": "cpu",
+        "device": {"name": "CPU", "description": "Stub CPU"},
+        "cpu_variant": null,
+        "fallback_reason": null,
+    })
+}
 
 fn main() {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -244,11 +260,12 @@ struct Managed {
     /// model, host, port, capabilities, …).
     #[serde(default)]
     ready_overrides: serde_json::Map<String, serde_json::Value>,
-    /// Raw lines written before `ready`.
+    /// Raw lines written before `ready`; `__INSTANCE_ID__` becomes the
+    /// instance id.
     #[serde(default)]
     stdout_before: Vec<String>,
     /// Raw lines written after `ready` (or, with `exit_after_ready_checks`,
-    /// just before that exit).
+    /// just before that exit); `__INSTANCE_ID__` becomes the instance id.
     #[serde(default)]
     stdout_after: Vec<String>,
     /// After answering this many `GET /ready` with 200, write
@@ -268,7 +285,8 @@ struct Managed {
     #[serde(default)]
     exit_after_ready_ms: Option<u64>,
     /// Answer this many `GET /ready` correctly, then fail them as
-    /// `ready_failure` says ("hang" (default), "503" or "wrong_instance").
+    /// `ready_failure` says ("hang" (default), "503", "wrong_instance" or
+    /// "wrong_compute").
     #[serde(default)]
     ready_ok_count: Option<u32>,
     #[serde(default)]
@@ -546,8 +564,9 @@ fn managed_mode(args: &[OsString], scenario: &ManagedScenario) -> ! {
             remaining -= take as u64;
         }
     }
+    let scripted = |line: &String| line.replace("__INSTANCE_ID__", &instance_id);
     for line in &behavior.stdout_before {
-        stdout_line(line);
+        stdout_line(&scripted(line));
     }
     if let Some(code) = &behavior.error_code {
         stdout_line(
@@ -585,13 +604,14 @@ fn managed_mode(args: &[OsString], scenario: &ManagedScenario) -> ! {
             "event": "ready",
             "module": "transcription",
             "instance_id": instance_id,
-            "protocol_version": 1,
+            "protocol_version": PROTOCOL_VERSION,
             "version": env!("CARGO_PKG_VERSION"),
             "host": "127.0.0.1",
             "port": port,
             "model": model,
             "capabilities": ["openai_transcriptions", "detailed_transcriptions", "managed_shutdown"],
             "model_load_ms": 7,
+            "compute": compute(),
         });
         for (key, value) in &behavior.ready_overrides {
             ready[key] = value.clone();
@@ -603,12 +623,12 @@ fn managed_mode(args: &[OsString], scenario: &ManagedScenario) -> ! {
             let _ = ready_checks.recv();
         }
         for line in &behavior.stdout_after {
-            stdout_line(line);
+            stdout_line(&scripted(line));
         }
         exit(0);
     }
     for line in &behavior.stdout_after {
-        stdout_line(line);
+        stdout_line(&scripted(line));
     }
     if let Some(ms) = behavior.crash_after_ready_ms {
         std::thread::sleep(std::time::Duration::from_millis(ms));
@@ -673,25 +693,39 @@ fn serve_ready(
             } else {
                 let n = answered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let ok = behavior.ready_ok_count.is_none_or(|limit| n < limit);
-                let identity = |id: &str| {
+                // `/ready` repeats what `ready` announced, overrides included.
+                let announced = behavior
+                    .ready_overrides
+                    .get("compute")
+                    .cloned()
+                    .unwrap_or_else(compute);
+                let identity = |id: &str, compute: serde_json::Value| {
                     serde_json::json!({
                         "schema_version": 1,
                         "module": "transcription",
                         "instance_id": id,
-                        "protocol_version": 1,
+                        "protocol_version": PROTOCOL_VERSION,
                         "version": env!("CARGO_PKG_VERSION"),
                         "model": model,
                         "capabilities": ["openai_transcriptions", "detailed_transcriptions", "managed_shutdown"],
+                        "compute": compute,
                         "state": "ready",
                     })
                 };
                 match (ok, behavior.ready_failure.as_deref()) {
-                    (true, _) => ("200 OK", identity(&instance_id)),
+                    (true, _) => ("200 OK", identity(&instance_id, announced)),
                     (false, Some("503")) => (
                         "503 Service Unavailable",
                         serde_json::json!({"error": {"code": "shutting_down"}}),
                     ),
-                    (false, Some("wrong_instance")) => ("200 OK", identity("someone-else")),
+                    (false, Some("wrong_instance")) => {
+                        ("200 OK", identity("someone-else", announced))
+                    }
+                    (false, Some("wrong_compute")) => {
+                        let mut other = announced;
+                        other["device"]["name"] = "Another".into();
+                        ("200 OK", identity(&instance_id, other))
+                    }
                     (false, _) => loop {
                         std::thread::sleep(std::time::Duration::from_secs(3600));
                     },

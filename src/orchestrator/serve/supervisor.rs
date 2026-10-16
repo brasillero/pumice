@@ -39,7 +39,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::orchestrator::cancel::{self, CancelGuard, CancelHandle, CancelReason};
 use crate::orchestrator::serve::child::{
-    self, ChildSpec, Failure, Generation, ProbeError, Watched, code,
+    self, ChildSpec, Compute, Failure, Generation, ProbeError, Watched, code,
 };
 use crate::orchestrator::serve::output::Reporter;
 
@@ -160,6 +160,8 @@ pub struct ChildSnapshot {
     pub next_retry_delay_ms: Option<u64>,
     /// The ready generation's model load time.
     pub model_load_ms: Option<u64>,
+    /// The ready generation's compute snapshot.
+    pub compute: Option<Compute>,
     /// The last failure's fixed code.
     pub last_failure: Option<&'static str>,
     pub port: Option<u16>,
@@ -175,6 +177,7 @@ impl ChildSnapshot {
             restart_attempts: 0,
             next_retry_delay_ms: None,
             model_load_ms: None,
+            compute: None,
             last_failure: None,
             port: None,
             retired: 0,
@@ -553,6 +556,7 @@ impl Owner {
                 snapshot.last_failure = Some(failure.code);
                 snapshot.port = None;
                 snapshot.model_load_ms = None;
+                snapshot.compute = None;
             });
             self.reporter
                 .child_restarting(attempts, backoff.len() as u32, delay);
@@ -593,6 +597,7 @@ impl Owner {
             };
             snapshot.port = None;
             snapshot.model_load_ms = None;
+            snapshot.compute = None;
         });
         self.reporter.child_starting(generation);
         let deadline = Instant::now() + self.config.startup_timeout;
@@ -613,6 +618,7 @@ impl Owner {
                     snapshot.state = ChildState::Ready;
                     snapshot.next_retry_delay_ms = None;
                     snapshot.model_load_ms = Some(info.model_load_ms);
+                    snapshot.compute = Some((*info.compute).clone());
                     snapshot.port = Some(info.port);
                 });
                 self.reporter.child_ready(generation, info.model_load_ms);
@@ -645,6 +651,7 @@ impl Owner {
     ) -> End {
         let timings = self.config.timings;
         let port = current.ready().map(|info| info.port).unwrap_or(0);
+        let compute = current.ready().map(|info| (*info.compute).clone());
         let instance_id = current.instance_id.clone();
         let model = self.config.spec.model.clone();
         let stable_at = Instant::now() + timings.stable_after;
@@ -692,9 +699,14 @@ impl Owner {
                 _ = ticker.tick(), if probe.is_none() => {
                     let instance_id = instance_id.clone();
                     let model = model.clone();
+                    let compute = compute.clone();
                     let deadline = Instant::now() + timings.probe_timeout;
                     probe = Some(Box::pin(async move {
-                        child::probe_ready(port, &instance_id, &model, deadline).await
+                        // A ready generation always announced a snapshot.
+                        let Some(compute) = compute else {
+                            return Err(ProbeError::Mismatch);
+                        };
+                        child::probe_ready(port, &instance_id, &model, &compute, deadline).await
                     }));
                 }
                 () = tokio::time::sleep_until(stable_at), if !stable => {
@@ -722,6 +734,7 @@ impl Owner {
             snapshot.next_retry_delay_ms = None;
             snapshot.port = None;
             snapshot.model_load_ms = None;
+            snapshot.compute = None;
             snapshot.last_failure = Some(why);
         });
         self.config
@@ -755,6 +768,7 @@ impl Owner {
             snapshot.next_retry_delay_ms = None;
             snapshot.port = None;
             snapshot.model_load_ms = None;
+            snapshot.compute = None;
             snapshot.last_failure = Some(why);
         });
     }
@@ -808,6 +822,19 @@ impl Owner {
 pub(crate) mod testing {
     use super::*;
 
+    pub fn compute() -> Compute {
+        Compute {
+            requested: "auto".to_owned(),
+            backend: "vulkan".to_owned(),
+            device: child::ComputeDevice {
+                name: "Vulkan0".to_owned(),
+                description: "Test GPU".to_owned(),
+            },
+            cpu_variant: Some("haswell".to_owned()),
+            fallback_reason: None,
+        }
+    }
+
     pub fn handle(state: ChildState, generation: u64) -> SupervisorHandle {
         let (commands, _) = mpsc::channel(1);
         let mut snapshot = ChildSnapshot::initial();
@@ -815,6 +842,7 @@ pub(crate) mod testing {
         snapshot.generation = generation;
         if state == ChildState::Ready {
             snapshot.model_load_ms = Some(12);
+            snapshot.compute = Some(testing::compute());
             snapshot.port = Some(5555);
         }
         SupervisorHandle {
