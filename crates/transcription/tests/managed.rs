@@ -502,7 +502,16 @@ fn http(port: u16, method: &str, path: &str, body: &[u8]) -> (u16, String) {
     stream.write_all(head.as_bytes()).unwrap();
     stream.write_all(body).unwrap();
     let mut response = Vec::new();
-    stream.read_to_end(&mut response).unwrap();
+    // A server that answers without reading the request body (a 404 for a
+    // POST) closes with that body unread, which resets the connection; on
+    // macOS the reset can reach this read after the response did. The bytes
+    // read before the error stay in `response`.
+    match stream.read_to_end(&mut response) {
+        Ok(_) => {}
+        Err(error)
+            if error.kind() == std::io::ErrorKind::ConnectionReset && !response.is_empty() => {}
+        Err(error) => panic!("reading the response: {error}"),
+    }
     let response = String::from_utf8(response).unwrap();
     let status = response[9..12].parse().unwrap();
     let body = response
