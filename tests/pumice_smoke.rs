@@ -12,14 +12,12 @@
 mod install;
 use install::install_executable;
 
-#[cfg(unix)]
 #[path = "../crates/relay/tests/support/bounded.rs"]
 mod bounded;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
@@ -587,6 +585,60 @@ fn wait_for_pid_file(path: &Path, timeout: Duration) -> i64 {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// chore-cleanup-test-bounds/D4: a child that outlives a hard-killed
+/// `pumice` (on Windows, one orphaned suspended outside its Job Object) must
+/// not keep the caller's pipes open. `pumice transcribe` spawns the stub
+/// outside any job, so it survives the kill; the stub closes the standard
+/// handles it was given, so the only way it could still hold the pipes is
+/// through `pumice`'s own stdout/stderr, inherited as extra handles. Before
+/// that, the stub's PID arrives through the inherited stdout: `pumice
+/// transcribe`'s stdio still passes through.
+#[cfg(windows)]
+#[test]
+fn a_child_outliving_a_killed_pumice_does_not_hold_its_pipes() {
+    /// Lets the stub exit however the test ends.
+    struct Release(PathBuf);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = fs::write(self.0.join("release"), b"");
+        }
+    }
+
+    let install = Install::with_transcribe();
+    let hold = install._keep.path().join("hold");
+    fs::create_dir_all(&hold).expect("create the hold dir");
+    let _release = Release(hold.clone());
+    let mut command = install.command(&["transcribe", "0"]);
+    command
+        .env("PUMICE_STUB_HOLD_DIR", &hold)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut pumice =
+        bounded::OwnedChild::new("pumice transcribe", command.spawn().expect("spawn pumice"));
+
+    bounded::stage("read the stub's pid through pumice's stdout");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let stub_pid: u64 = pumice
+        .stdout_line(deadline)
+        .and_then(|line| line.trim().parse().ok())
+        .expect("the stub's pid on stdout");
+    bounded::stage("wait until the stub closed its standard handles");
+    while !hold.join("ready").exists() {
+        assert!(Instant::now() < deadline, "the stub never got ready");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // TerminateProcess: no chance for `pumice` to clean anything up.
+    pumice.kill();
+    assert_eq!(
+        bounded::process_state(stub_pid),
+        "alive",
+        "the stub outlives pumice"
+    );
+    bounded::stage("read pumice's pipes to their end");
+    pumice.collect_until(Instant::now() + Duration::from_secs(10));
 }
 
 #[test]

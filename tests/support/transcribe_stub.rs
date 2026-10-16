@@ -8,7 +8,11 @@
 //! `i32` through `process::exit` so Windows tests can exercise exit statuses
 //! above 255. Unix only, when PUMICE_STUB_PID_FILE is set, the stub writes
 //! its own PID there and waits forever, so a test can prove the dispatcher
-//! exec'd it and deliver a signal directly.
+//! exec'd it and deliver a signal directly. Windows only, when
+//! PUMICE_STUB_HOLD_DIR is set, the stub prints its PID through the stdout it
+//! was given, closes its standard handles, creates `ready` in that directory
+//! and stays alive until `release` appears there (at most 60 s): whatever
+//! still holds the caller's pipes then was inherited from `pumice` itself.
 //!
 //! **Scenario mode** (a `<exe>.scenario.json` file next to the executable,
 //! found through `std::env::current_exe()`, so parallel tests never share
@@ -105,6 +109,11 @@ fn dispatcher_mode(args: Vec<OsString>) -> ! {
         }
     }
 
+    #[cfg(windows)]
+    if let Some(dir) = std::env::var_os("PUMICE_STUB_HOLD_DIR") {
+        hold_without_stdio(Path::new(&dir));
+    }
+
     let mut stdout = std::io::stdout().lock();
     for arg in args {
         write_arg(&mut stdout, &arg);
@@ -112,6 +121,37 @@ fn dispatcher_mode(args: Vec<OsString>) -> ! {
     }
     drop(stdout);
     exit(code);
+}
+
+/// Windows dispatcher hold (see the module docs): stays alive with none of
+/// the standard handles it was given.
+#[cfg(windows)]
+fn hold_without_stdio(dir: &Path) -> ! {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{}", std::process::id()).expect("write the stub pid");
+    stdout.flush().expect("flush the stub pid");
+    drop(stdout);
+    for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: closes the stub's own standard handles; nothing in this
+        // process uses them afterwards (it only touches files and exits).
+        unsafe {
+            let handle = GetStdHandle(id);
+            if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                CloseHandle(handle);
+            }
+        }
+    }
+    std::fs::write(dir.join("ready"), b"").expect("write the ready file");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !dir.join("release").exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    exit(0);
 }
 
 /// Writes the argument exactly as it arrived, byte for byte where the
