@@ -1,22 +1,29 @@
 name: Release preview
 
-# Builds portable release archives for all supported targets, stages and
-# packs the five npm packages (front + four native) from those archives, and
-# smoke-tests installing the generated tarballs through a loopback registry
-# on every host. This workflow never publishes anything: previews validate
-# the packaging on pull requests and manual dispatch only. The owner cuts
-# real releases from these artifacts by hand (see
+# Builds portable release archives for all supported targets and, at the
+# same commit, the Windows x64 Vulkan, Linux x64 Vulkan and macOS arm64
+# Metal transcription bundles (the build actions in .github/actions/, shared
+# with the transcription workflow). Stages and packs the five npm packages
+# from those archives and bundles with generated third-party notices, and
+# smoke-tests installing the tarballs through a loopback registry on every
+# host. This workflow never publishes anything: previews validate the
+# packaging on pull requests and manual dispatch only. The owner cuts real
+# releases from these artifacts by hand (see
 # docs/research/S7.1-portable-releases.md).
 
 on:
   pull_request:
     paths:
       - .github/workflows/release.yml
+      - .github/actions/**
       - scripts/package_release.py
       - scripts/package_npm.py
+      - scripts/third_party_notices.py
+      - scripts/notices/**
       - scripts/npm_registry_fixture.py
       - scripts/test_package_release.py
       - scripts/test_package_npm.py
+      - scripts/test_third_party_notices.py
       - scripts/test_npm_install.py
       - scripts/test_npm_launcher.py
       - scripts/npm/**
@@ -37,6 +44,12 @@ defaults:
   run:
     shell: bash
 
+env:
+  # The tiny model the transcription workflow pins, for the CPU smoke of the
+  # installed packages.
+  MODEL_URL: https://huggingface.co/handy-computer/whisper-tiny-gguf/resolve/6687f30c99641ee265df421e582354adbc8848fc/whisper-tiny-Q8_0.gguf
+  MODEL_SHA256: 325b9c7997cd1eff81ef709d55766565e71be696130cc3a3d444713798706834
+
 jobs:
   package-tests:
     name: Packaging helper tests
@@ -48,6 +61,10 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
 
       - name: Run packaging helper unit tests
         run: python3 -m unittest discover -s scripts -p "test_*.py" -v
@@ -62,12 +79,16 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
+            npm: linux-x64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            npm: win32-x64
           - os: macos-15-intel
             target: x86_64-apple-darwin
+            npm: darwin-x64
           - os: macos-15
             target: aarch64-apple-darwin
+            npm: darwin-arm64
     steps:
       - uses: actions/checkout@v7
 
@@ -153,11 +174,18 @@ jobs:
           print("OK: fully static musl executable")
           PYCODE
 
+      # The archives carry pumice alone, so their notices cover the core.
+      - name: Generate the core third-party notices
+        run: >
+          python3 scripts/third_party_notices.py
+          --platform ${{ matrix.npm }} --core-only --output-dir "$RUNNER_TEMP/notices"
+
       - name: Package archive
         run: >
           python3 scripts/package_release.py
           --target ${{ matrix.target }}
           --binary "target/${{ matrix.target }}/release/pumice"
+          --notices "$RUNNER_TEMP/notices/${{ matrix.npm }}.md"
           --output-dir dist
 
       - name: Smoke test packaged archive
@@ -191,6 +219,107 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # The transcription bundles, built at this run's commit with the same
+  # actions (and job IDs, so the same Rust caches) as the transcription
+  # workflow's bundle jobs, which test them in depth. Each job checks the
+  # stage starts and uploads it for npm-pack.
+  transcription-windows-vulkan:
+    name: Transcription bundle (win32-x64, Vulkan)
+    needs: package-tests
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/windows-vulkan-bundle
+
+      - name: Check the stage starts
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:STAGE 'pumice-transcribe.exe'
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) { throw "--version exited with $LASTEXITCODE" }
+          $ErrorActionPreference = 'Continue'
+          $out = & $exe backends --backend cpu --json 2> $null
+          $report = ($out | Out-String | ConvertFrom-Json).result
+          if ($report.bundle -ne 'verified') { throw "bundle: $($report.bundle)" }
+          Write-Host ($report | ConvertTo-Json -Compress -Depth 5)
+
+      # NTFS has no modes to keep; package_npm.py sets them.
+      - name: Upload the bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: transcription-bundle-win32-x64
+          path: target/windows-vulkan/stage
+          if-no-files-found: error
+          retention-days: 7
+
+  transcription-linux-vulkan:
+    name: Transcription bundle (linux-x64, Vulkan)
+    needs: package-tests
+    # Ubuntu 22.04: glibc 2.35, the bundle's floor.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/linux-vulkan-bundle
+
+      - name: Check the stage starts
+        run: |
+          "$STAGE/pumice-transcribe" --version
+          "$STAGE/pumice-transcribe" backends --backend cpu --json > "$RUNNER_TEMP/backends.json"
+          python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))["result"]; assert r["bundle"]=="verified", r; print(r)' "$RUNNER_TEMP/backends.json"
+
+      # Artifacts drop file modes; a tarball keeps them.
+      - name: Pack the bundle
+        run: |
+          mkdir -p "$RUNNER_TEMP/artifact"
+          tar -C "$(dirname "$STAGE")" --owner=0 --group=0 --numeric-owner \
+            -czf "$RUNNER_TEMP/artifact/linux-x64.tar.gz" stage
+
+      - name: Upload the bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: transcription-bundle-linux-x64
+          path: ${{ runner.temp }}/artifact
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+
+  transcription-macos-metal:
+    name: Transcription bundle (darwin-arm64, Metal)
+    needs: package-tests
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/macos-metal-bundle
+
+      - name: Check the stage starts
+        run: |
+          "$STAGE/pumice-transcribe" --version
+          "$STAGE/pumice-transcribe" backends --backend cpu --json > "$RUNNER_TEMP/backends.json"
+          python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))["result"]; assert r["bundle"]=="verified", r; print(r)' "$RUNNER_TEMP/backends.json"
+
+      # Artifacts drop file modes; a tarball keeps them. No AppleDouble
+      # (._*) entries for extended attributes.
+      - name: Pack the bundle
+        run: |
+          mkdir -p "$RUNNER_TEMP/artifact"
+          COPYFILE_DISABLE=1 tar -C "$(dirname "$STAGE")" --uid 0 --gid 0 --no-mac-metadata \
+            -czf "$RUNNER_TEMP/artifact/darwin-arm64.tar.gz" stage
+
+      - name: Upload the bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: transcription-bundle-darwin-arm64
+          path: ${{ runner.temp }}/artifact
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+
   checksums:
     name: Aggregate checksums
     needs: build
@@ -220,7 +349,11 @@ jobs:
 
   npm-pack:
     name: Stage and pack npm packages
-    needs: checksums
+    needs:
+      - checksums
+      - transcription-windows-vulkan
+      - transcription-linux-vulkan
+      - transcription-macos-metal
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -231,7 +364,10 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "24"
+          node-version: "22"
+
+      # cargo metadata for the notices; nothing is compiled.
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Download release preview archives
         uses: actions/download-artifact@v8
@@ -239,13 +375,50 @@ jobs:
           name: release-preview
           path: dist
 
-      # Stages the five packages from the four REAL release archives and
-      # verifies SHA256SUMS before packing anything. Nothing is published.
+      - name: Download the transcription bundles
+        uses: actions/download-artifact@v8
+        with:
+          pattern: transcription-bundle-*
+          path: bundle-artifacts
+
+      - name: Assemble the bundle stages
+        run: |
+          mkdir bundles
+          mv bundle-artifacts/transcription-bundle-win32-x64 bundles/win32-x64
+          for key in linux-x64 darwin-arm64; do
+            mkdir "unpack-$key"
+            tar -xzf "bundle-artifacts/transcription-bundle-$key/$key.tar.gz" -C "unpack-$key"
+            mv "unpack-$key/stage" "bundles/$key"
+            rmdir "unpack-$key"
+          done
+          for key in win32-x64 linux-x64 darwin-arm64; do
+            jq -c '{version, target, features, files: (.files | length)}' "bundles/$key/bundle.json"
+          done
+
+      - name: Generate the third-party notices
+        run: |
+          cargo fetch --locked
+          python3 scripts/third_party_notices.py --output-dir notices
+
+      # Stages the five packages from the four REAL release archives (their
+      # SHA256SUMS verified) and the three bundles (validated against their
+      # bundle.json), packs them and reads every tarball back. Nothing is
+      # published.
       - name: Stage and pack npm tarballs
         run: >
           python3 scripts/package_npm.py
           --archives-dir dist
+          --bundles-dir bundles
+          --notices-dir notices
           --output-dir dist/npm
+
+      - name: Report package sizes
+        run: |
+          {
+            echo '### npm packages'
+            echo
+            cat dist/npm/PACKAGES.md
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload npm preview
         uses: actions/upload-artifact@v7
@@ -256,7 +429,7 @@ jobs:
           retention-days: 7
 
   npm-smoke:
-    name: npm install smoke (${{ matrix.target }})
+    name: npm install smoke (${{ matrix.npm }})
     needs: npm-pack
     runs-on: ${{ matrix.os }}
     strategy:
@@ -264,13 +437,17 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
+            npm: linux-x64
+            bundle: true
           - os: windows-latest
-            target: x86_64-pc-windows-msvc
+            npm: win32-x64
+            bundle: true
           - os: macos-15-intel
-            target: x86_64-apple-darwin
+            npm: darwin-x64
+            bundle: false
           - os: macos-15
-            target: aarch64-apple-darwin
+            npm: darwin-arm64
+            bundle: true
     steps:
       - uses: actions/checkout@v7
 
@@ -280,11 +457,15 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "24"
+          node-version: "22"
 
+      # A path with spaces, outside the checkout, for the install; every
+      # command after it runs from SMOKE/elsewhere, an unrelated cwd.
       - name: Extract crate version
         id: meta
-        run: echo "version=$(python3 scripts/package_npm.py --print-version)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "version=$(python3 scripts/package_npm.py --print-version)" >> "$GITHUB_OUTPUT"
+          echo "SMOKE=$(cd "$GITHUB_WORKSPACE/.." && pwd)/npm smoke" >> "$GITHUB_ENV"
 
       - name: Download npm preview
         uses: actions/download-artifact@v8
@@ -309,24 +490,162 @@ jobs:
       - name: Install pumice through the test registry
         shell: bash
         run: |
-          : > npm-userconfig.ini
-          : > npm-globalconfig.ini
+          mkdir -p "$SMOKE/elsewhere"
+          : > "$SMOKE/npm-userconfig.ini"
+          : > "$SMOKE/npm-globalconfig.ini"
           npm install -g "@brasillero/pumice@${{ steps.meta.outputs.version }}" \
             --registry "$PUMICE_TEST_REGISTRY_URL" \
-            --prefix "$PWD/prefix" \
-            --userconfig "$PWD/npm-userconfig.ini" \
-            --globalconfig "$PWD/npm-globalconfig.ini" \
-            --cache "$PWD/npm-cache" \
+            --prefix "$SMOKE/prefix" \
+            --userconfig "$SMOKE/npm-userconfig.ini" \
+            --globalconfig "$SMOKE/npm-globalconfig.ini" \
+            --cache "$SMOKE/npm-cache" \
             --no-audit --no-fund --loglevel=error
+          bin="$SMOKE/prefix/bin/pumice"
+          [ -f "$bin" ] || bin="$SMOKE/prefix/pumice"
+          echo "PUMICE_BIN=$bin" >> "$GITHUB_ENV"
+          native="$(find "$SMOKE/prefix" -type d -path '*/@brasillero/pumice-${{ matrix.npm }}' | head -n 1)"
+          test -n "$native"
+          echo "PUMICE_NATIVE=$native" >> "$GITHUB_ENV"
+          echo "installed $native:"
+          ls -lR "$native/bin" | head -n 60
 
       - name: Run installed pumice --version
-        shell: bash
         run: |
-          bin="$PWD/prefix/bin/pumice"
-          [ -f "$bin" ] || bin="$PWD/prefix/pumice"
-          out="$("$bin" --version)"
+          cd "$SMOKE/elsewhere"
+          out="$("$PUMICE_BIN" --version)"
           echo "$out"
           test "$out" = "pumice ${{ steps.meta.outputs.version }}"
+
+      # npm installs the native package's files with the modes they were
+      # packed with (minus the umask): executables must still run, and no
+      # data file may become executable on Linux.
+      - name: Executable bits after install
+        if: runner.os != 'Windows'
+        run: |
+          test -x "$PUMICE_NATIVE/bin/pumice"
+          python3 - "$PUMICE_NATIVE" "${{ matrix.npm }}" <<'PY'
+          import json
+          import os
+          import stat
+          import sys
+          from pathlib import Path
+
+          native, key = Path(sys.argv[1]), sys.argv[2]
+          manifest = native / "bin" / "bundle.json"
+          if not manifest.exists():
+              print("core-only package: bin/ =", sorted(p.name for p in (native / "bin").iterdir()))
+              sys.exit(0)
+          for entry in json.loads(manifest.read_text())["files"]:
+              mode = stat.S_IMODE((native / "bin" / entry["path"]).stat().st_mode)
+              executable = entry["role"] == "executable" or key.startswith("darwin")
+              assert bool(mode & 0o100) == executable, (entry["path"], oct(mode))
+              assert mode & 0o444, (entry["path"], oct(mode))
+              print(f"{oct(mode)} {entry['path']}")
+          PY
+
+      - name: pumice transcribe (version and backends without a model)
+        if: matrix.bundle
+        run: |
+          cd "$SMOKE/elsewhere"
+          out="$("$PUMICE_BIN" transcribe --version)"
+          echo "$out"
+          test "$out" = "pumice-transcribe ${{ steps.meta.outputs.version }}"
+          for mode in cpu auto; do
+            "$PUMICE_BIN" transcribe backends --backend "$mode" --json > "backends-$mode.json"
+            python3 - "backends-$mode.json" "$mode" <<'PY'
+          import json
+          import sys
+
+          data = json.load(open(sys.argv[1]))
+          mode = sys.argv[2]
+          assert data["ok"] is True, data
+          r = data["result"]
+          assert r["requested"] == mode and r["bundle"] == "verified", r
+          if mode == "cpu":
+              assert r["gpu_module"] == "not_requested" and r["fallback_reason"] is None, r
+          print(mode, json.dumps(r))
+          PY
+          done
+
+      - name: pumice transcribe without a bundle (Intel Mac, core only)
+        if: '!matrix.bundle'
+        run: |
+          cd "$SMOKE/elsewhere"
+          set +e
+          "$PUMICE_BIN" transcribe --version 2> err.txt
+          code=$?
+          set -e
+          cat err.txt
+          test "$code" -eq 1
+          grep -q 'pumice-transcribe is not installed next to pumice' err.txt
+
+      - name: Cache Whisper tiny Q8_0 model
+        if: matrix.bundle
+        id: cache-model
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/models
+          key: whisper-tiny-q8_0-npm-smoke-${{ env.MODEL_SHA256 }}
+
+      - name: Download and verify model
+        if: matrix.bundle && steps.cache-model.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/models"
+          curl -L --fail -o "$RUNNER_TEMP/models/whisper-tiny-Q8_0.gguf" "$MODEL_URL"
+
+      - name: pumice transcribe file with the tiny model (CPU)
+        if: matrix.bundle
+        run: |
+          cd "$SMOKE/elsewhere"
+          python3 - "$RUNNER_TEMP/models/whisper-tiny-Q8_0.gguf" "$MODEL_SHA256" <<'PY'
+          import hashlib
+          import sys
+
+          digest = hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest()
+          assert digest == sys.argv[2], digest
+          PY
+          mkdir -p "audio dir"
+          cp "$GITHUB_WORKSPACE/crates/transcription/tests/fixtures/sample-pt.wav" "audio dir/sample pt.wav"
+          "$PUMICE_BIN" transcribe file "audio dir/sample pt.wav" \
+            --model-file "$RUNNER_TEMP/models/whisper-tiny-Q8_0.gguf" --json > file.json
+          python3 - file.json <<'PY'
+          import json
+          import sys
+
+          data = json.load(open(sys.argv[1]))
+          assert data["ok"] is True, data
+          result = data["result"]
+          assert result["language"] == "pt" and result["text"], data
+          assert result["compute"]["backend"] == "cpu", data
+          print("tiny model ok:", json.dumps(result["compute"]))
+          PY
+
+      - name: npx through the test registry
+        run: |
+          cd "$SMOKE/elsewhere"
+          args=(--version)
+          expected="pumice ${{ steps.meta.outputs.version }}"
+          if [ "${{ matrix.bundle }}" = "true" ]; then
+            args=(transcribe --version)
+            expected="pumice-transcribe ${{ steps.meta.outputs.version }}"
+          fi
+          out="$(npx --yes \
+            --registry "$PUMICE_TEST_REGISTRY_URL" \
+            --userconfig "$SMOKE/npm-userconfig.ini" \
+            --globalconfig "$SMOKE/npm-globalconfig.ini" \
+            --cache "$SMOKE/npx-cache" \
+            "@brasillero/pumice@${{ steps.meta.outputs.version }}" "${args[@]}")"
+          echo "$out"
+          test "$out" = "$expected"
+
+      # Recorded, not enforced: whether files npm extracts carry Gatekeeper's
+      # quarantine attribute (the docs depend on the answer).
+      - name: Quarantine attribute on the npm-installed files (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          count="$(xattr -lr "$PUMICE_NATIVE" 2>/dev/null | grep -c com.apple.quarantine || true)"
+          tarball="$(xattr -l dist/npm/brasillero-pumice-${{ matrix.npm }}-*.tgz 2>/dev/null | grep -c com.apple.quarantine || true)"
+          echo "- ${{ matrix.npm }}: com.apple.quarantine on $count installed entries (downloaded artifact tarball: $tarball)" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Stop test registry
         if: always()
@@ -345,7 +664,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "24"
+          node-version: "22"
 
       - uses: pnpm/action-setup@v6
         with:
@@ -379,6 +698,8 @@ jobs:
           grep -q "listening on" registry.log
           echo "PUMICE_TEST_REGISTRY_URL=$(sed -n 's/.*listening on //p' registry.log)" >> "$GITHUB_ENV"
 
+      # pnpm links packages from its store: `pumice` resolves its real path,
+      # so `pumice transcribe` must still find the bundle next to it.
       - name: Install and run with pnpm
         shell: bash
         run: |
@@ -393,6 +714,9 @@ jobs:
           out="$("$PNPM_HOME/bin/pumice" --version)"
           echo "$out"
           test "$out" = "pumice ${{ steps.meta.outputs.version }}"
+          out="$("$PNPM_HOME/bin/pumice" transcribe --version)"
+          echo "$out"
+          test "$out" = "pumice-transcribe ${{ steps.meta.outputs.version }}"
 
       - name: Install and run with Bun
         shell: bash
@@ -403,6 +727,9 @@ jobs:
           out="$("$BUN_INSTALL/bin/pumice" --version)"
           echo "$out"
           test "$out" = "pumice ${{ steps.meta.outputs.version }}"
+          out="$("$BUN_INSTALL/bin/pumice" transcribe --version)"
+          echo "$out"
+          test "$out" = "pumice-transcribe ${{ steps.meta.outputs.version }}"
 
       - name: Stop test registry
         if: always()

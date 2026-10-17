@@ -1,0 +1,110 @@
+name: Windows x64 Vulkan transcription bundle
+description: >
+  Builds, stages and audits the Windows x64 Vulkan bundle of
+  pumice-transcribe (P14.1) with the pinned Vulkan SDK. Shared by the
+  transcription workflow, which tests the bundle, and the release preview,
+  which packs it into npm at the same commit as the core. Run after
+  actions/checkout. Leaves the stage in $STAGE and sets CARGO_TARGET_DIR,
+  TRANSCRIBE_CMAKE_ARGS and VULKAN_SDK for the job's later steps, so clippy
+  and the tests reuse this native build.
+
+runs:
+  using: composite
+  steps:
+    # LunarG Vulkan SDK used by the pinned engine revision
+    # (p14.1-windows-vulkan/D7); SHA-256 as published by LunarG at
+    # https://vulkan.lunarg.com/sdk/sha/1.4.350.0/windows/vulkan_sdk.exe.json
+    # CARGO_TARGET_DIR must match build-windows-vulkan.ps1. Set before the
+    # cache restore so its key sees the same environment as the build.
+    - name: Pin the bundle build
+      shell: pwsh
+      run: |
+        @(
+          'VULKAN_SDK_VERSION=1.4.350.0',
+          'VULKAN_SDK_SHA256=855b27ba05d2d8119c5114c5d4ff870ca38f2c632b11e1bb9923b9b7e6ecfe7b',
+          "CARGO_TARGET_DIR=$env:GITHUB_WORKSPACE\target\windows-vulkan",
+          'TRANSCRIBE_CMAKE_ARGS=-DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded',
+          "STAGE=$env:GITHUB_WORKSPACE\target\windows-vulkan\stage"
+        ) | Add-Content -Path $env:GITHUB_ENV
+
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: x86_64-pc-windows-msvc
+        components: clippy
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: windows-vulkan
+
+    - name: Cache Vulkan SDK installer
+      id: cache-vulkan-sdk
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}\vulkan-sdk\vulkan_sdk.exe
+        key: vulkan-sdk-windows-${{ env.VULKAN_SDK_VERSION }}-${{ env.VULKAN_SDK_SHA256 }}
+
+    - name: Download and verify Vulkan SDK installer
+      shell: pwsh
+      run: |
+        $dir = Join-Path $env:RUNNER_TEMP 'vulkan-sdk'
+        $installer = Join-Path $dir 'vulkan_sdk.exe'
+        if (-not (Test-Path $installer)) {
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $url = "https://sdk.lunarg.com/sdk/download/$env:VULKAN_SDK_VERSION/windows/vulkan_sdk.exe?Human=true"
+          Invoke-WebRequest -Uri $url -OutFile $installer
+        }
+        $hash = (Get-FileHash -Algorithm SHA256 -Path $installer).Hash.ToLowerInvariant()
+        if ($hash -ne $env:VULKAN_SDK_SHA256) {
+          throw "Vulkan SDK installer SHA-256 mismatch: got $hash"
+        }
+        Write-Host "Vulkan SDK installer verified: $hash ($((Get-Item $installer).Length) bytes)"
+
+    # LunarG's own unattended install of the verified installer, as the
+    # pinned engine's CI does. humbletim/install-vulkan-sdk (7z extraction)
+    # yields only Bin\ for this SDK: no headers, vulkan-1.lib or
+    # SPIRV-Headers.
+    - name: Install Vulkan SDK (pinned)
+      shell: pwsh
+      run: |
+        $installer = Join-Path $env:RUNNER_TEMP 'vulkan-sdk\vulkan_sdk.exe'
+        $root = "C:\VulkanSDK\$env:VULKAN_SDK_VERSION"
+        $process = Start-Process -FilePath $installer -Wait -PassThru -NoNewWindow -ArgumentList @(
+          '--root', $root, '--accept-licenses', '--default-answer', '--confirm-command', 'install'
+        )
+        if ($process.ExitCode -ne 0) { throw "Vulkan SDK installer exited with $($process.ExitCode)" }
+        Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_SDK=$root"
+        Add-Content -Path $env:GITHUB_PATH -Value "$root\Bin"
+
+    - name: Preflight build tools
+      shell: pwsh
+      run: |
+        Write-Host "VULKAN_SDK=$env:VULKAN_SDK"
+        Get-ChildItem -Path $env:VULKAN_SDK -Directory | ForEach-Object { Write-Host "  $($_.Name)\" }
+        Write-Host "System32\vulkan-1.dll present: $(Test-Path (Join-Path $env:SystemRoot 'System32\vulkan-1.dll'))"
+        glslc --version
+        if ($LASTEXITCODE -ne 0) { throw 'glslc is not usable' }
+        foreach ($path in 'Include\vulkan\vulkan.h', 'Include\vulkan\vulkan.hpp', 'Lib\vulkan-1.lib') {
+          if (-not (Test-Path (Join-Path $env:VULKAN_SDK $path) -PathType Leaf)) {
+            throw "Vulkan SDK file missing: $path"
+          }
+        }
+        $spirv = Get-ChildItem -Path $env:VULKAN_SDK -Recurse -Filter 'SPIRV-HeadersConfig.cmake' |
+          Select-Object -First 1
+        if (-not $spirv) { throw 'SPIRV-Headers CMake package missing from the Vulkan SDK' }
+        Write-Host "SPIRV-Headers: $($spirv.FullName)"
+        cmake --version
+        $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+        & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+          -property catalog_productDisplayVersion
+        rustc --version --verbose
+
+    # The audit's allowlist checked on synthetic import lists before the
+    # real audit (the build step runs it again).
+    - name: Dependency audit self-test
+      shell: pwsh
+      run: crates/transcription/scripts/build-windows-vulkan.ps1 -SelfTestOnly
+
+    # Bounded by the calling job's timeout (composite steps take none).
+    - name: Build, stage and audit the Vulkan bundle
+      shell: pwsh
+      run: crates/transcription/scripts/build-windows-vulkan.ps1 -TargetDir $env:CARGO_TARGET_DIR
