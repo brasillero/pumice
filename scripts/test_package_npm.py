@@ -572,6 +572,36 @@ class PackageNpmTests(unittest.TestCase):
         self._rewrite_manifest("linux-x64", files=files)
         self.assert_pack_fails("pumice-transcribe needs libtranscribe.so.0")
 
+    def _replace_linux_file(self, path, content):
+        (self.bundles / "linux-x64" / path).write_bytes(content)
+        files = self._manifest("linux-x64")["files"]
+        for entry in files:
+            if entry["path"] == path:
+                entry.update(size=len(content), sha256=hashlib.sha256(content).hexdigest())
+        self._rewrite_manifest("linux-x64", files=files)
+
+    def test_linux_unversioned_needed_name_must_be_shipped(self):
+        # Not a versioned core name: only the allowlist can reject it.
+        self._replace_linux_file(
+            "pumice-transcribe", fake_elf(None, ["libtranscribe.so", "libc.so.6"], b"exe")
+        )
+        self.assert_pack_fails(
+            "pumice-transcribe needs libtranscribe.so, which the bundle does not ship"
+        )
+
+    def test_linux_needed_name_off_the_allowlist_fails(self):
+        self._replace_linux_file(
+            "cpu/x64/libggml-cpu-x64.so",
+            fake_elf(None, ["libggml-base.so.0", "libgomp.so.1"], b"x64"),
+        )
+        self.assert_pack_fails("cpu/x64/libggml-cpu-x64.so needs libgomp.so.1")
+
+    def test_linux_only_the_gpu_module_may_need_vulkan(self):
+        self._replace_linux_file(
+            "libggml.so.0", fake_elf("libggml.so.0", ["libggml-base.so.0", "libvulkan.so.1"])
+        )
+        self.assert_pack_fails("libggml.so.0 needs libvulkan.so.1")
+
     def test_linux_non_elf_library_fails(self):
         stage = self.bundles / "linux-x64"
         content = b"not an elf"

@@ -32,8 +32,9 @@ allowlist and listed in ``bundle.json``, every listed file present with its
 size and SHA-256, ``bundle.json`` written for this version, target and
 feature, POSIX modes as staged (0755 directories and executables, 0644
 data), and on Linux core libraries stored as regular files under their
-SONAME with every bundled DT_NEEDED name present. ``--notices-dir`` must
-hold ``<platform>.md`` for the four native packages
+SONAME and every DT_NEEDED name of every shipped ELF file either a shipped
+core library or on the reviewed OS-library allowlist. ``--notices-dir``
+must hold ``<platform>.md`` for the four native packages
 (``scripts/third_party_notices.py``).
 
 The version is read from ``Cargo.toml``; package names are centralized in
@@ -137,6 +138,24 @@ BUNDLES = {
         "library_mode": DATA_MODE,
         "posix_modes": True,
         "elf": True,
+        # Every DT_NEEDED name of every shipped ELF file must be a shipped
+        # core library (stored under its SONAME) or one of these OS
+        # libraries. Mirrors the reviewed allowlist of the build's own audit
+        # (`system_libs` and the libvulkan.so.1 rule in
+        # crates/transcription/scripts/build-linux-vulkan.sh); change both
+        # together.
+        "system_libraries": (
+            "libc.so.6",
+            "libm.so.6",
+            "libdl.so.2",
+            "libpthread.so.0",
+            "librt.so.1",
+            "ld-linux-x86-64.so.2",
+            "libstdc++.so.6",
+            "libgcc_s.so.1",
+        ),
+        # OS libraries only the GPU module may need.
+        "gpu_system_libraries": ("libvulkan.so.1",),
     },
     "darwin-arm64": {
         "target": "aarch64-apple-darwin",
@@ -570,11 +589,18 @@ def load_bundle(stage: Path, platform_key: str, version: str) -> list[dict]:
                 "sha256": digest,
             }
         )
-    core_pattern = patterns["core"]
+    shipped_core = {path for path, item in entries.items() if item["role"] == "core"}
     for path, needed in elf_needed.items():
+        allowed = shipped_core | set(spec["system_libraries"])
+        if entries[path]["role"] == "gpu":
+            allowed |= set(spec["gpu_system_libraries"])
         for name in needed:
-            if core_pattern.fullmatch(name) and name not in entries:
-                raise _reject(stage, f"{path} needs {name}, which the bundle does not ship")
+            if name not in allowed:
+                raise _reject(
+                    stage,
+                    f"{path} needs {name}, which the bundle does not ship and "
+                    "is not on the reviewed system-library allowlist",
+                )
     return result
 
 
