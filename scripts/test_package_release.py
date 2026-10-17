@@ -61,6 +61,19 @@ class PackageReleaseTests(unittest.TestCase):
         )
         self.assertIn(b"Copyright (c) 2025 CJ Pais", notices)
 
+    def test_generated_notices_replace_the_default(self):
+        notices = self.work / "linux-x64.md"
+        notices.write_text("# Third-party notices — generated\n")
+        archive = package_release.package(
+            LINUX_TARGET, self.binary, self.work / "dist", notices=notices
+        )
+        top = self._expected_top(LINUX_TARGET)
+        with tarfile.open(archive) as handle:
+            members = sorted(member.name for member in handle.getmembers())
+            payload = handle.extractfile(f"{top}/THIRD_PARTY_NOTICES.md").read()
+        self.assertEqual(payload, notices.read_bytes())
+        self.assertEqual(members, sorted(f"{top}/{name}" for name in EXPECTED_MEMBERS))
+
     def test_zip_membership_and_executable_mode(self):
         archive = package_release.package(WINDOWS_TARGET, self.binary, self.work / "dist")
         top = self._expected_top(WINDOWS_TARGET)
