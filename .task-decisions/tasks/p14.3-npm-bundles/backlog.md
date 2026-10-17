@@ -29,4 +29,17 @@
 **To do.**
 - [ ] Add a macOS x86-64 CPU bundle build and ship it in `pumice-darwin-x64`.
 
+### #3 · Deferred · Check why the Rust caches of the bundle jobs are almost empty
+- type: Tech debt
+- area: distribution
+- origin: D4
+- ticket: —
+- created: 2026-10-17
+- reason: builds work; only build time is at stake
+
+**Context.** Recent `v0-rust-linux-vulkan-…` cache entries are about 2.6 KiB, against 304 MiB on 2026-10-16, so the bundle builds may be compiling from scratch. Separately, under D4 the release jobs no longer share caches with `transcription.yml`: the cache key hashes every installed toolchain, and the runner's preinstalled Rust differs from the pinned one.
+
+**To do.**
+- [ ] Find out what the bundle jobs cache today and restore useful caching (and, if worth it, remove the extra toolchains before the cache step).
+
 ## Closed
