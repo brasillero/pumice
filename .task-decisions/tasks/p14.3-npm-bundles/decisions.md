@@ -38,3 +38,29 @@
 **Why.** One versioned package per platform avoids discovery and version-matching problems between a base and a GPU package; the measured sizes are acceptable.
 
 **Rejected.** Separate `-gpu` packages; a download at install or first run.
+
+### D4 · Active · Release builds use a pinned Rust toolchain that matches the pinned standard-library notices
+- date: 2026-10-16
+- decided by: claude (orchestrator, owner-delegated 2026-10-16)
+- origin: conversation
+- area: distribution
+- revisit if: —
+
+**Decision.** Every job in the release preview that builds a shipped binary (core and transcription bundles) installs one fixed Rust version, the same one the standard-library notices in `scripts/notices/` are pinned to (1.99.1 today). Moving to a newer Rust is a deliberate change that re-pins the notices in the same commit. Other workflows keep following stable.
+
+**Why.** The notices generator refuses a toolchain it has no pinned texts for, so with `stable` every Rust release would break the release preview until someone re-pinned; a fixed release toolchain also makes release builds reproducible.
+
+**Rejected.** Following stable and re-pinning after each failure; dropping the version guard (the notices could silently go stale).
+
+### D5 · Active · Release archives stay core-only; the transcription folder ships through npm
+- date: 2026-10-16
+- decided by: claude (orchestrator, owner-delegated 2026-10-16)
+- origin: conversation
+- area: distribution
+- revisit if: the owner wants a downloadable archive with transcription
+
+**Decision.** The `.zip`/`.tar.gz` release archives keep only `pumice` and its notices. Transcription is installed through the npm platform packages (owner's preference, `arch-modules/D16`); the transcription preview artifacts of each CI run remain available for testing.
+
+**Why.** One distribution channel for the bundle keeps release work small while nobody else uses Pumice; npm already carries it.
+
+**Rejected.** Adding the bundle to the archives in this task.
