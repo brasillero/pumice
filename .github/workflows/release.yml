@@ -507,7 +507,7 @@ jobs:
           test -n "$native"
           echo "PUMICE_NATIVE=$native" >> "$GITHUB_ENV"
           echo "installed $native:"
-          ls -lR "$native/bin" | head -n 60
+          ls -lR "$native/bin"
 
       - name: Run installed pumice --version
         run: |

@@ -17,12 +17,15 @@ On Windows, Ctrl-C/Ctrl-Break is delivered to the console, not to a single
 process: while the transcription program handles the event and shuts down,
 `pumice` keeps waiting and then exits with the same full exit code.
 
-> **npm installs:** the npm package's real native binary lives inside the
-> platform package (`node_modules/@brasillero/pumice-<platform>/bin/`), and
-> no transcription binary ships there yet, so `pumice transcribe` is not
-> satisfied by an npm install of the launcher today. Until the Pumice
-> transcription archive ships (planned), install both programs into the
-> same directory, for example `cargo install --path . --locked` and
+> **npm installs:** the Windows x64, Linux x64 (glibc 2.35 or newer) and
+> Apple Silicon platform packages carry the complete bundle described in the
+> Windows, Linux and macOS sections below, in
+> `node_modules/@brasillero/pumice-<platform>/bin/` next to `pumice`, so
+> `pumice transcribe` works after `npm install -g @brasillero/pumice` (see
+> the [installation guide](install.md#option-2-package-manager-nodejs-22)).
+> The Intel Mac package has `pumice` only. The portable release archives
+> also have `pumice` only; with those, or from source, install both programs
+> into the same directory, for example `cargo install --path . --locked` and
 > `cargo install --path crates/transcription --features engine --locked`.
 
 ## Building from source
@@ -109,7 +112,8 @@ in [`docs/research/P7-cpu-variants.md`](../docs/research/P7-cpu-variants.md).
 **Not a release.** A preview of GPU transcription on Windows x64, for checking
 on real hardware. CI builds it in the `Transcription engine` workflow and
 uploads it as the short-lived artifact
-`pumice-transcribe-windows-x64-vulkan-preview`; no release ships it.
+`pumice-transcribe-windows-x64-vulkan-preview`; no release archive ships it
+(the npm package `@brasillero/pumice-win32-x64` carries the same bundle).
 
 The artifact is one folder; keep it together:
 
@@ -183,7 +187,8 @@ musl). CI builds it in the `Transcription engine` workflow on Ubuntu 22.04
 and uploads it as the short-lived artifact
 `pumice-transcribe-linux-x64-vulkan-preview`, which holds one tarball (a
 tarball keeps the executable bit, which artifact downloads drop) and its
-`SHA256SUMS`; no release ships it. Extract it anywhere and keep the folder
+`SHA256SUMS`; no release archive ships it (the npm package
+`@brasillero/pumice-linux-x64` carries the same bundle). Extract it anywhere and keep the folder
 together:
 
 ```text
@@ -267,7 +272,8 @@ newer than Ubuntu 22.04 the audit fails by design.
 `Transcription engine` workflow on a GitHub-hosted Apple Silicon runner
 (`macos-15`) and uploads it as the short-lived artifact
 `pumice-transcribe-macos-arm64-metal-preview`: one tarball (it keeps the
-executable bit) and its `SHA256SUMS`; no release ships it. Extract it
+executable bit) and its `SHA256SUMS`; no release archive ships it (the npm
+package `@brasillero/pumice-darwin-arm64` carries the same bundle). Extract it
 anywhere and keep the folder together:
 
 ```text

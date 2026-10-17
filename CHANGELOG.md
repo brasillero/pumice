@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **npm installs include local transcription.** The Windows x64, Linux x64 and Apple Silicon platform packages now carry `pumice-transcribe` with its engine libraries, CPU variants and GPU module (Vulkan on Windows and Linux, Metal on Apple Silicon) next to `pumice`, so `pumice transcribe` works after `npm install -g @brasillero/pumice`; it runs on the CPU unless asked for the GPU, and models are downloaded separately. The Intel Mac package keeps `pumice` only. The Linux package now needs glibc 2.35 or newer and declares `libc: glibc`, so Alpine and other musl distributions are no longer supported through npm (the portable archive still runs there). The packages grow to about 25 MB (Windows), 27 MB (Linux) and 7 MB (Apple Silicon) compressed.
+- **Complete third-party notices.** Every npm package and release archive ships a `THIRD_PARTY_NOTICES.md` generated for what it contains: the Rust dependencies of `pumice` (and of `pumice-transcribe` where included) with their license texts, plus the native code built in (transcribe.cpp, ggml, libopus, the Vulkan headers, musl, the Rust standard library).
+
 ### Changed
 
 - **`pumice` is now the module dispatcher.** Bare `pumice` prints the command overview and exits; the relay runs as `pumice relay` / `pumice relay serve` (also in-process: one executable still serves); `pumice transcribe …` runs the `pumice-transcribe` installed next to it — replacing itself with it on Unix, and on Windows waiting out console Ctrl-C and exiting with the child's full exit code. The old `pumice` / `pumice --plain` invocations no longer start the service.
