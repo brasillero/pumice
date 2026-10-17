@@ -74,9 +74,12 @@ To move release builds to a newer Rust, in one commit:
 3. Set `RUST_VERSION` to the new version. Nothing in the workflows changes.
 4. Dispatch the release preview on the branch.
 
-The Rust caches (`Swatinem/rust-cache`) are keyed by the rustc version, among
-other things. The release preview's bundle jobs share their caches with the
-transcription workflow's (same job IDs and keys) only while its stable is
-`RUST_VERSION`; once stable moves on, both keep separate caches and the
-first release preview after that, and after each bump, builds the bundles
-from cold (about as long as a first transcription workflow run).
+The release preview's bundle jobs do not share their Rust caches with the
+transcription workflow's, although the job IDs and cache keys match:
+`Swatinem/rust-cache` hashes the version of every installed toolchain, and
+the pinned jobs also have the runner image's preinstalled stable (rustc
+1.99.0 on the first pinned run, next to 1.99.1, while the transcription
+workflow's `stable` update replaces it). So each release preview restores
+only release-preview caches. The cost is one more set of bundle caches per
+branch in the repository's cache storage; the first release preview after a
+bump or a runner image update builds the bundles without a cache.
