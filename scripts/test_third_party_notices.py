@@ -8,7 +8,8 @@ without a license file gets its declared license's standard text, and the
 native components follow the platform's bundle (Vulkan, Metal, musl, or
 none for the core-only Intel Mac package), every package carries the pinned
 Rust standard library notices for its targets (a fake ``rustc`` reports the
-pinned version; another version fails). The real run happens in CI.
+pinned version; another version fails), and MPL crates get links to their
+exact source. The real run happens in CI.
 """
 
 import json
@@ -249,6 +250,50 @@ class NoticesTests(unittest.TestCase):
             "toolchain is rustc 1.100.0",
             str(caught.exception),
         )
+
+    def add_mpl_crate(self, name, license="MPL-2.0", vcs=True, **fields):
+        files = {"LICENSE": "Mozilla Public License Version 2.0\n"}
+        if vcs:
+            files[".cargo_vcs_info.json"] = json.dumps(
+                {"git": {"sha1": "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"}, "path_in_vcs": name}
+            )
+        self.add(name, files=files, license=license, **fields)
+        transcription = self.nodes[[p["name"] for p in self.packages].index("pumice-transcription")]
+        transcription["deps"].append({"pkg": f"{name} 1.0.0", "dep_kinds": [{"kind": None, "target": None}]})
+        self.write_graph()
+
+    def test_mpl_crates_link_to_their_exact_source(self):
+        self.add_mpl_crate(
+            "symphonia-core",
+            source=third_party_notices.CRATES_IO,
+            repository="https://github.com/pdeljanov/Symphonia",
+        )
+        self.add_mpl_crate(
+            "dual-mpl",
+            license="MIT OR MPL-2.0",
+            vcs=False,
+            source=third_party_notices.CRATES_IO,
+        )
+        text = self.generate("linux-x64")
+        self.assertIn("## Source code of MPL-licensed crates", text)
+        self.assertIn("Pumice uses them unmodified, exactly as published", text)
+        self.assertIn(
+            "- symphonia-core 1.0.0: <https://crates.io/api/v1/crates/symphonia-core/1.0.0/download>, "
+            "<https://github.com/pdeljanov/Symphonia/tree/ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee/symphonia-core>",
+            text,
+        )
+        self.assertIn("- dual-mpl 1.0.0: <https://crates.io/api/v1/crates/dual-mpl/1.0.0/download>\n", text)
+        self.assertNotIn("- serde 1.0.0:", text)
+
+    def test_no_mpl_section_without_mpl_crates(self):
+        self.assertNotIn("Source code of MPL-licensed crates", self.generate("linux-x64"))
+
+    def test_mpl_crate_without_a_source_fails(self):
+        self.add_mpl_crate("vendored-mpl", vcs=False, source=None)
+        with self.assertRaises(SystemExit) as caught:
+            self.generate("linux-x64")
+        self.assertIn("vendored-mpl 1.0.0 is MPL-licensed but has no crates.io source", str(caught.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

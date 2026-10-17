@@ -19,6 +19,11 @@ package ships:
   crates.io crates std links on each target), in ``rust_std_entries()``. The
   texts are pinned for ``RUST_VERSION`` in ``scripts/notices/``; a different
   ``rustc --version`` fails the run until they are refreshed.
+- for every crate whose license expression includes the MPL, where its
+  unmodified Source Code Form is available (MPL-2.0 section 3.2): the
+  crates.io download of that exact version and, when the crate records its
+  commit (``.cargo_vcs_info.json``), its repository at that commit.
+- the existing notices for the Handy-derived formatter prompt.
 
 License texts are read from each crate's downloaded source (root files named
 LICENSE*, LICENCE*, COPYING*, NOTICE*, COPYRIGHT*, UNLICENSE*, or the
@@ -39,6 +44,7 @@ import hashlib
 import json
 import re
 import subprocess
+import urllib.parse
 import sys
 from pathlib import Path
 
@@ -410,6 +416,47 @@ def native_text(source: dict, crates: dict[str, Path]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
+
+
+def is_mpl(package: dict) -> bool:
+    return re.search(r"\bMPL-", package.get("license") or "") is not None
+
+
+def source_links(package: dict) -> list[str]:
+    """Where the exact source of one crate version is available (Markdown)."""
+    name, version = package["name"], package["version"]
+    links = []
+    if package.get("source") == CRATES_IO:
+        links.append(
+            f"<https://crates.io/api/v1/crates/{urllib.parse.quote(name)}/"
+            f"{urllib.parse.quote(version)}/download>"
+        )
+    repository = (package.get("repository") or "").rstrip("/").removesuffix(".git")
+    vcs_file = crate_dir(package) / ".cargo_vcs_info.json"
+    if repository and vcs_file.is_file():
+        try:
+            vcs = json.loads(_read_text(vcs_file))
+            commit = vcs["git"]["sha1"]
+        except (ValueError, KeyError, TypeError):
+            commit = None
+        if commit and re.fullmatch(r"[0-9a-f]{40}", commit):
+            path = vcs.get("path_in_vcs") or ""
+            if repository.startswith(("https://github.com/", "https://gitlab.com/")):
+                links.append(f"<{repository}/tree/{commit}/{path}".rstrip("/") + ">")
+            else:
+                links.append(
+                    f"<{repository}> at commit {commit}"
+                    + (f", directory `{path}`" if path else "")
+                )
+    if not links:
+        raise SystemExit(
+            f"error: {name} {version} is MPL-licensed but has no crates.io source "
+            "or recorded repository commit to point recipients to"
+        )
+    return links
+
+
 def _fence(text: str) -> str:
     longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
     fence = "`" * max(3, longest + 1)
@@ -568,6 +615,20 @@ def generate(
             + ".",
             "",
         ]
+
+    mpl = [key for key in sorted(crates) if is_mpl(crates[key])]
+    if mpl:
+        out += [
+            "## Source code of MPL-licensed crates",
+            "",
+            "The crates below are covered by the Mozilla Public License 2.0 "
+            "(their license text is listed above). Pumice uses them unmodified, "
+            "exactly as published; their Source Code Form is available at:",
+            "",
+        ]
+        for key in mpl:
+            out.append(f"- {key[0]} {key[1]}: {', '.join(source_links(crates[key]))}")
+        out.append("")
 
     out += ["## License texts", ""]
     for number, (body, users) in enumerate(text_bodies, start=1):
