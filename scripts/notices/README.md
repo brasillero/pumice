@@ -18,9 +18,9 @@ musl release.
 
 ## Rust standard library (`rust-1.99.1/`)
 
-The texts for the standard library of the toolchain CI builds with
-(`dtolnay/rust-toolchain@stable`, which installed rustc 1.99.1 when
-these were pinned). Beyond its MIT OR
+The texts for the standard library of the toolchain the release preview
+builds every shipped binary with: rustc 1.99.1, `RUST_VERSION` in
+`scripts/third_party_notices.py`. Beyond its MIT OR
 Apache-2.0 code, std carries separately licensed parts: the Unicode tables in `library/core/src/unicode` (Unicode-3.0, from
 the toolchain's `share/doc/rust/COPYRIGHT-library.html` and the tag's
 `REUSE.toml`), `compiler-builtins` with its `libm`, and the crates.io
@@ -51,9 +51,32 @@ and `CRATE(n, v)` is `https://static.crates.io/crates/n/n-v.crate`:
 | `object-0.39.1-LICENSE-MIT` | `LICENSE-MIT` in `CRATE(object, 0.39.1)` | `0b74dfa0bcee5c420c6b7f67b4b2658f9ab8388c97b8e733975f2cecbdd668a6` |
 | `rustc-demangle-0.1.28-LICENSE-MIT` | `LICENSE-MIT` in `CRATE(rustc-demangle, 0.1.28)` | `378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397` |
 
-`scripts/third_party_notices.py` fails when `rustc --version` is not
-`RUST_VERSION`. To move to a new stable: fetch `library/Cargo.lock`,
-`library/std/Cargo.toml` and `REUSE.toml` at the new tag, update
-`RUST_STD_CRATES` (versions, and targets from std's `[target]` tables) and
-the in-tree entries in `rust_std_entries()`, re-fetch the texts above into
-`rust-<version>/`, update this table and `RUST_VERSION`.
+### The release Rust version
+
+`RUST_VERSION` is the single source of the Rust version of shipped binaries
+(`p14.3-npm-bundles/D4`). The release preview's `package-tests` job reads it
+with `python3 scripts/third_party_notices.py --print-rust-version`, and every
+job that builds a shipped binary installs exactly that toolchain: the four
+core builds, the npm notices job, and the three transcription bundle jobs,
+which pass it to the bundle actions in `.github/actions/` as their
+`rust-toolchain` input. The transcription and CI workflows keep following
+stable (the actions default to `stable`). `scripts/third_party_notices.py`
+fails when `rustc --version` is not `RUST_VERSION`, so the notices cannot
+silently cover a different standard library.
+
+To move release builds to a newer Rust, in one commit:
+
+1. Fetch `library/Cargo.lock`, `library/std/Cargo.toml` and `REUSE.toml` at
+   the new tag, and update `RUST_STD_CRATES` (versions, and targets from
+   std's `[target]` tables) and the in-tree entries in `rust_std_entries()`.
+2. Re-fetch the texts above into `rust-<version>/`, delete the old folder
+   and update the table and its heading here.
+3. Set `RUST_VERSION` to the new version. Nothing in the workflows changes.
+4. Dispatch the release preview on the branch.
+
+The Rust caches (`Swatinem/rust-cache`) are keyed by the rustc version, among
+other things. The release preview's bundle jobs share their caches with the
+transcription workflow's (same job IDs and keys) only while its stable is
+`RUST_VERSION`; once stable moves on, both keep separate caches and the
+first release preview after that, and after each bump, builds the bundles
+from cold (about as long as a first transcription workflow run).

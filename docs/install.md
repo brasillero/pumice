@@ -33,6 +33,12 @@ Download the archive for your platform from
 [GitHub Releases](https://github.com/brasillero/pumice/releases) and extract
 it anywhere. The executable inside is self-contained.
 
+The archives carry `pumice` only, without the transcription folder, so
+`pumice transcribe` reports that `pumice-transcribe` is not installed. For
+transcription, install through npm (Option 2): the Windows x64, Linux x64
+and Apple Silicon platform packages carry the complete transcription
+folder.
+
 ### Option 2: package manager (Node.js 22+)
 
 The package is published on npm as `@brasillero/pumice`; the installed command is `pumice`.

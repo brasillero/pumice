@@ -14,6 +14,10 @@ pasted. The app's prompt decides what happens to the text.
 > `@brasillero/pumice` package with npm, pnpm, Bun or npx (Node.js >= 22 for the
 > launcher; the executable itself is standalone). The installed command is `pumice`.
 
+This archive has `pumice` only. Transcription (`pumice transcribe`) ships
+in the npm platform packages for Windows x64, Linux x64 and Apple Silicon;
+install `@brasillero/pumice` with npm for it.
+
 ## Run the service
 
 Extract this archive anywhere and start the service from the extracted
