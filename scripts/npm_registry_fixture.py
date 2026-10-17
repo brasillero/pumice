@@ -40,6 +40,7 @@ MANIFEST_FIELDS = (
     "engines",
     "os",
     "cpu",
+    "libc",
     "files",
     "optionalDependencies",
 )

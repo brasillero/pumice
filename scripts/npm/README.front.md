@@ -21,8 +21,16 @@ also build pumice from source with Cargo — see the
 - **Node.js >= 22** to run the launcher, even when you install with pnpm or
   Bun. The pumice service executable itself is a standalone native binary
   with no runtime dependencies.
-- One of the supported platforms: Linux x64 (glibc and musl), Windows x64,
+- One of the supported platforms: Linux x64 with glibc 2.35 or newer
+  (musl-based distributions such as Alpine are not supported), Windows x64,
   macOS x64 (Intel) or macOS ARM64 (Apple Silicon).
+
+On Windows, Linux and Apple Silicon the platform package also carries local
+transcription (`pumice transcribe`: the `pumice-transcribe` program, its
+engine libraries, CPU variants and GPU module); it runs on the CPU unless
+you ask for the GPU, and needs a Whisper model you download separately. The
+Intel Mac package has `pumice` only. See the
+[transcription guide](https://github.com/brasillero/pumice/blob/main/docs/transcription.md).
 
 ## Install
 

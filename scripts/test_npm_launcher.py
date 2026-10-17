@@ -5,8 +5,8 @@ package plus a fake native binary — and drives the launcher through Node
 with a real process in front of it. Covers argv forwarding (including
 spaces and shell metacharacters), stdin/stdout/stderr pass-through, exit
 code and signal propagation, and the clear error messages for a missing
-native dependency, a version mismatch, an unsupported platform and a
-missing binary. Also pins down that the launcher never resolves the
+native dependency (with the glibc requirement on a musl Linux), a version
+mismatch, an unsupported platform and a missing binary. Also pins down that the launcher never resolves the
 native package from the caller's working directory. No network, no real
 pumice binary.
 """
@@ -102,12 +102,12 @@ class LauncherTests(unittest.TestCase):
         (self.native / "bin" / "pumice").write_text(FAKE_BINARY)
         (self.native / "bin" / "pumice").chmod(0o755)
 
-    def run_launcher(self, args, *, env=None, cwd=None, **popen):
+    def run_launcher(self, args, *, env=None, cwd=None, node_args=(), **popen):
         full_env = dict(os.environ)
         full_env.update(env or {})
         popen.setdefault("timeout", 30)
         return subprocess.run(
-            [NODE, str(self.front / "bin" / "pumice.js"), *args],
+            [NODE, *node_args, str(self.front / "bin" / "pumice.js"), *args],
             input="",
             capture_output=True,
             text=True,
@@ -171,6 +171,28 @@ class LauncherTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("missing native package", result.stderr)
         self.assertIn(NATIVE_NAME, result.stderr)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "glibc host only")
+    def test_missing_native_dependency_on_glibc_stays_generic(self):
+        shutil.rmtree(self.front / "node_modules")
+        result = self.run_launcher([])
+        self.assertIn("Reinstall pumice", result.stderr)
+        self.assertNotIn("glibc", result.stderr)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux only")
+    def test_missing_native_dependency_on_musl_names_glibc(self):
+        # npm skips the linux-x64 package on musl (its libc field); Node on
+        # musl reports no glibc runtime, simulated here with a preload.
+        shutil.rmtree(self.front / "node_modules")
+        preload = self.root / "musl.js"
+        preload.write_text(
+            "process.report.getReport = () => ({ header: {} });\n"
+        )
+        result = self.run_launcher([], node_args=["--require", str(preload)])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing native package", result.stderr)
+        self.assertIn("needs glibc 2.35 or newer", result.stderr)
+        self.assertIn("Alpine", result.stderr)
 
     def test_caller_cwd_cannot_satisfy_missing_dependency(self):
         # A fake native package planted in the calling directory must NOT

@@ -22,7 +22,8 @@ be pasted. The app's prompt decides what happens to the text.
   the CLI you already use.
 - **Node.js 22 or newer**, only if you install through npm/pnpm/Bun. The npm
   package ships a tiny launcher, but the Pumice service itself is a
-  standalone native executable with nothing else to install.
+  standalone native executable with nothing else to install. On Linux, the
+  npm install also needs glibc 2.35 or newer (see below).
 
 ## Install
 
@@ -31,6 +32,12 @@ be pasted. The app's prompt decides what happens to the text.
 Download the archive for your platform from
 [GitHub Releases](https://github.com/brasillero/pumice/releases) and extract
 it anywhere. The executable inside is self-contained.
+
+The archives carry `pumice` only, without the transcription folder, so
+`pumice transcribe` reports that `pumice-transcribe` is not installed. For
+transcription, install through npm (Option 2): the Windows x64, Linux x64
+and Apple Silicon platform packages carry the complete transcription
+folder.
 
 ### Option 2: package manager (Node.js 22+)
 
@@ -43,9 +50,46 @@ bun add -g @brasillero/pumice
 npx @brasillero/pumice@latest --version   # run without installing
 ```
 
-Your package manager fetches the `@brasillero/pumice` package and the single
-native binary matching your platform. Bun works through the same package, with
-Node.js installed for the launcher.
+Your package manager fetches the `@brasillero/pumice` package and the one
+platform package matching your system (an optional dependency; the others are
+skipped). Bun works through the same package, with Node.js installed for the
+launcher. Nothing is downloaded at install or run time beyond those two
+packages, and no install scripts run.
+
+What each platform package holds in its `bin/` folder (keep the folder
+together; `pumice transcribe` only runs the `pumice-transcribe` next to
+`pumice`):
+
+| Platform package | `pumice` | Transcription (`pumice transcribe`) | Size (packed / unpacked) |
+| --- | --- | --- | --- |
+| `@brasillero/pumice-win32-x64` | yes | `pumice-transcribe.exe`, its engine DLLs, 9 CPU variants, the Vulkan GPU module | about 25 / 71 MB |
+| `@brasillero/pumice-linux-x64` | yes (static) | `pumice-transcribe`, its engine libraries, 14 CPU variants, the Vulkan GPU module | about 27 / 77 MB |
+| `@brasillero/pumice-darwin-arm64` | yes | `pumice-transcribe`, its engine libraries, the arm64 CPU module, the Metal GPU module | about 7 / 16 MB |
+| `@brasillero/pumice-darwin-x64` (Intel Mac) | yes | not included yet: `pumice transcribe` reports that `pumice-transcribe` is not installed | about 3 / 6 MB |
+
+Each package's `bundle.json` lists every transcription file with its size and
+SHA-256, and `pumice-transcribe` checks them at startup. Each package also
+carries `THIRD_PARTY_NOTICES.md` with the licenses of everything it ships.
+
+- **Linux needs glibc 2.35 or newer** (Ubuntu 22.04, Debian 12, Fedora 36 or
+  later). The Linux package declares `libc: glibc`, so on musl-based
+  distributions such as **Alpine, which is not supported**, the package
+  manager skips it and `pumice` says the platform package is missing. Use
+  the portable archive there (it has `pumice` only).
+- **Transcription runs on the CPU by default.** The GPU modules are only
+  loaded with `backend: gpu` (or `auto` where it applies); they need a GPU
+  driver with Vulkan (Windows, Linux) or an Apple Silicon Mac. See
+  [Compute backend](transcription.md#compute-backend-cpu-auto-gpu) and the
+  [Windows](transcription.md#windows-vulkan-preview-experimental),
+  [Linux](transcription.md#linux-vulkan-preview-experimental) and
+  [macOS](transcription.md#macos-metal-preview-experimental) sections for the
+  prerequisites. Models are not included: see
+  [Getting models](transcription.md#getting-models).
+- **macOS:** npm, pnpm and Bun download and unpack the packages themselves,
+  so the files carry no `com.apple.quarantine` attribute and Gatekeeper does
+  not block them (checked in CI with npm; `xattr -lr` shows the attribute if
+  some other tool added it, and `xattr -dr com.apple.quarantine <folder>`
+  removes it). The binaries are ad-hoc signed, not notarized.
 
 ## Run the service
 

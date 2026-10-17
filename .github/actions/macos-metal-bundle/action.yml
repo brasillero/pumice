@@ -1,0 +1,74 @@
+name: macOS arm64 Metal transcription bundle
+description: >
+  Builds, stages and audits the Apple Silicon Metal bundle of
+  pumice-transcribe (P14.4) for macOS 11. Run on macos-15 (arm64) after
+  actions/checkout. Shared by the transcription workflow, which tests the
+  bundle, and the release preview, which packs it into npm at the same
+  commit as the core. Leaves the stage in $STAGE, the runner's GPU report
+  in $RUNNER_TEMP/displays.txt, and sets CARGO_TARGET_DIR,
+  TRANSCRIBE_CMAKE_ARGS and MACOSX_DEPLOYMENT_TARGET for the job's later
+  steps, so clippy and the tests reuse this native build.
+
+inputs:
+  rust-toolchain:
+    description: >
+      Rust toolchain to build with. The transcription workflow keeps the
+      default, stable; the release preview passes the version the
+      standard-library notices are pinned to (p14.3-npm-bundles/D4).
+    required: false
+    default: stable
+
+runs:
+  using: composite
+  steps:
+    # CARGO_TARGET_DIR must match build-macos-metal.sh. Set before the cache
+    # restore so its key sees the same environment as the build.
+    - name: Pin the bundle build
+      shell: bash
+      run: |
+        {
+          echo "CARGO_TARGET_DIR=$GITHUB_WORKSPACE/target/macos-metal"
+          echo "TRANSCRIBE_CMAKE_ARGS=-DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF"
+          echo "MACOSX_DEPLOYMENT_TARGET=11.0"
+          echo "STAGE=$GITHUB_WORKSPACE/target/macos-metal/stage"
+        } >> "$GITHUB_ENV"
+
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ inputs.rust-toolchain }}
+        components: clippy
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: macos-metal
+
+    - name: Preflight build tools and the runner's GPU
+      shell: bash
+      run: |
+        sw_vers
+        uname -m
+        sysctl -n machdep.cpu.brand_string
+        xcode-select -p
+        xcodebuild -version
+        echo "macOS SDK $(xcrun --sdk macosx --show-sdk-version)"
+        clang --version | head -n 1
+        cmake --version | head -n 1
+        jq --version
+        bash --version | head -n 1
+        rustc --version --verbose
+        if xcrun --find metal > /dev/null 2>&1; then
+          echo "note: the Metal shader compiler is on this runner; the bundle must not need it"
+        fi
+        # What the VM reports as its GPU and Metal support.
+        system_profiler SPDisplaysDataType | tee "$RUNNER_TEMP/displays.txt"
+
+    # The audit's rules checked on synthetic inputs before the real audit
+    # (the build step runs it again).
+    - name: Mach-O audit self-test
+      shell: bash
+      run: crates/transcription/scripts/build-macos-metal.sh --self-test
+
+    # Bounded by the calling job's timeout (composite steps take none).
+    - name: Build, stage and audit the Metal bundle
+      shell: bash
+      run: crates/transcription/scripts/build-macos-metal.sh

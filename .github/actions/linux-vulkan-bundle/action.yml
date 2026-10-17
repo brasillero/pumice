@@ -1,0 +1,108 @@
+name: Linux x64 Vulkan transcription bundle
+description: >
+  Builds, stages and audits the Linux x86-64 (glibc) Vulkan bundle of
+  pumice-transcribe (P14.5) with the pinned Vulkan SDK. Run on
+  ubuntu-22.04 (glibc 2.35, the bundle's floor) after actions/checkout.
+  Shared by the transcription workflow, which tests the bundle, and the
+  release preview, which packs it into npm at the same commit as the core.
+  Leaves the stage in $STAGE and sets CARGO_TARGET_DIR,
+  TRANSCRIBE_CMAKE_ARGS, VULKAN_SDK and CMAKE_LIBRARY_PATH for the job's
+  later steps, so clippy and the tests reuse this native build.
+
+inputs:
+  rust-toolchain:
+    description: >
+      Rust toolchain to build with. The transcription workflow keeps the
+      default, stable; the release preview passes the version the
+      standard-library notices are pinned to (p14.3-npm-bundles/D4).
+    required: false
+    default: stable
+
+runs:
+  using: composite
+  steps:
+    # The LunarG Vulkan SDK the Windows bundle uses
+    # (p14.1-windows-vulkan/D8); SHA-256 as published by LunarG at
+    # https://vulkan.lunarg.com/sdk/sha/1.4.350.0/linux/vulkan_sdk.tar.xz.json
+    # Ubuntu 22.04's own glslc and headers are older than the pinned
+    # engine's shaders were written for. CARGO_TARGET_DIR must match
+    # build-linux-vulkan.sh. Set before the cache restore so its key sees
+    # the same environment as the build.
+    - name: Pin the bundle build
+      shell: bash
+      run: |
+        {
+          echo "VULKAN_SDK_VERSION=1.4.350.0"
+          echo "VULKAN_SDK_SHA256=b65f068ab36263559da49d7cacd7e7b9df23824ca8b68ccc522a2b06f5725df2"
+          echo "CARGO_TARGET_DIR=$GITHUB_WORKSPACE/target/linux-vulkan"
+          echo "TRANSCRIBE_CMAKE_ARGS=-DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF"
+          echo "STAGE=$GITHUB_WORKSPACE/target/linux-vulkan/stage"
+        } >> "$GITHUB_ENV"
+
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ inputs.rust-toolchain }}
+        components: clippy
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: linux-vulkan
+
+    - name: Cache Vulkan SDK archive
+      id: cache-vulkan-sdk
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/vulkan-sdk/vulkan_sdk.tar.xz
+        key: vulkan-sdk-linux-${{ env.VULKAN_SDK_VERSION }}-${{ env.VULKAN_SDK_SHA256 }}
+
+    - name: Download, verify and unpack the Vulkan SDK (pinned)
+      shell: bash
+      run: |
+        dir="$RUNNER_TEMP/vulkan-sdk"
+        archive="$dir/vulkan_sdk.tar.xz"
+        if [ ! -f "$archive" ]; then
+          mkdir -p "$dir"
+          curl -L --fail -o "$archive" \
+            "https://sdk.lunarg.com/sdk/download/$VULKAN_SDK_VERSION/linux/vulkansdk-linux-x86_64-$VULKAN_SDK_VERSION.tar.xz"
+        fi
+        echo "$VULKAN_SDK_SHA256  $archive" | sha256sum -c -
+        tar -xJf "$archive" -C "$dir"
+        sdk="$dir/$VULKAN_SDK_VERSION/x86_64"
+        echo "VULKAN_SDK=$sdk" >> "$GITHUB_ENV"
+        echo "$sdk/bin" >> "$GITHUB_PATH"
+        # This SDK keeps its loader in lib/VulkanLoader/lib, where CMake's
+        # FindVulkan does not look. The build links against it; only its
+        # SONAME (libvulkan.so.1) is recorded, resolved on the user's
+        # machine. No LD_LIBRARY_PATH: nothing at runtime comes from here.
+        echo "CMAKE_LIBRARY_PATH=$sdk/lib/VulkanLoader/lib" >> "$GITHUB_ENV"
+
+    - name: Preflight build tools
+      shell: bash
+      run: |
+        echo "VULKAN_SDK=$VULKAN_SDK"
+        glslc --version
+        for path in include/vulkan/vulkan.h include/vulkan/vulkan.hpp \
+          lib/VulkanLoader/lib/libvulkan.so share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake; do
+          if [ ! -f "$VULKAN_SDK/$path" ]; then
+            echo "::error::Vulkan SDK file missing: $path"
+            exit 1
+          fi
+        done
+        readelf -d "$VULKAN_SDK/lib/VulkanLoader/lib/libvulkan.so" | grep SONAME
+        cmake --version | head -n 1
+        gcc --version | head -n 1
+        ldd --version | sed -n 1p
+        rustc --version --verbose
+        echo "Vulkan loader on the runner before any runtime test:"
+        ldconfig -p | grep -i vulkan || echo "  none"
+
+    # The audit's rules checked on synthetic inputs before the real audit
+    # (the build step runs it again).
+    - name: Dependency audit self-test
+      shell: bash
+      run: crates/transcription/scripts/build-linux-vulkan.sh --self-test
+
+    # Bounded by the calling job's timeout and the script's own build limit.
+    - name: Build, stage and audit the Vulkan bundle
+      shell: bash
+      run: crates/transcription/scripts/build-linux-vulkan.sh
