@@ -24,6 +24,15 @@ function readJson(file) {
   }
 }
 
+// Node reports the glibc version it runs against; musl builds report none.
+function hasGlibc() {
+  try {
+    return Boolean(process.report.getReport().header.glibcVersionRuntime);
+  } catch {
+    return true;
+  }
+}
+
 const frontPkgPath = path.join(__dirname, '..', 'package.json');
 const frontPkg = readJson(frontPkgPath);
 const platformKey = `${process.platform}-${process.arch}`;
@@ -58,6 +67,14 @@ try {
     paths: [__dirname],
   });
 } catch {
+  if (process.platform === 'linux' && !hasGlibc()) {
+    // The Linux package declares libc: ["glibc"], so package managers skip
+    // it on musl systems instead of installing a bundle that cannot start.
+    fail(
+      `missing native package ${nativeName}: it needs glibc 2.35 or newer.\n` +
+        'musl-based distributions such as Alpine are not supported.'
+    );
+  }
   fail(
     `missing native package ${nativeName}.\n` +
       'Reinstall pumice so the optional dependency is present, for example:\n' +
