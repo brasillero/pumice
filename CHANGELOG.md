@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - **npm installs include local transcription.** The Windows x64, Linux x64 and Apple Silicon platform packages now carry `pumice-transcribe` with its engine libraries, CPU variants and GPU module (Vulkan on Windows and Linux, Metal on Apple Silicon) next to `pumice`, so `pumice transcribe` works after `npm install -g @brasillero/pumice`; it runs on the CPU unless asked for the GPU, and models are downloaded separately. The Intel Mac package keeps `pumice` only. The Linux package now needs glibc 2.35 or newer and declares `libc: glibc`, so Alpine and other musl distributions are no longer supported through npm (the portable archive still runs there). The packages grow to about 25 MB (Windows), 27 MB (Linux) and 7 MB (Apple Silicon) compressed.
-- **Complete third-party notices.** Every npm package and release archive ships a `THIRD_PARTY_NOTICES.md` generated for what it contains: the Rust dependencies of `pumice` (and of `pumice-transcribe` where included) with their license texts, plus the native code built in (transcribe.cpp, ggml, libopus, the Vulkan headers, musl, the Rust standard library).
+- **Complete third-party notices.** Every npm package and release archive ships a `THIRD_PARTY_NOTICES.md` generated for what it contains: the Rust dependencies of `pumice` (and of `pumice-transcribe` where included) with their license texts, plus the native code built in (transcribe.cpp, ggml, libopus, the Vulkan headers, musl) and the Rust standard library with its separately licensed parts (Unicode tables, compiler-builtins and libm, the crates it links). MPL-licensed crates (Symphonia) are listed with links to their exact, unmodified source.
 
 ### Changed
 
