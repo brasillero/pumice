@@ -12,13 +12,17 @@ pinned version; another version fails), and MPL crates get links to their
 exact source. The real run happens in CI.
 """
 
+import contextlib
+import io
 import json
+import re
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+ROOT = Path(__file__).resolve().parent.parent
 
 import third_party_notices
 
@@ -250,6 +254,29 @@ class NoticesTests(unittest.TestCase):
             "toolchain is rustc 1.100.0",
             str(caught.exception),
         )
+        self.assertIn("scripts/notices/rust-1.100.0/", str(caught.exception))
+        self.assertIn('set RUST_VERSION = "1.100.0" in scripts/third_party_notices.py', str(caught.exception))
+
+    def test_print_rust_version_needs_no_toolchain(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(third_party_notices.main(["--print-rust-version"]), 0)
+        self.assertEqual(out.getvalue(), f"{third_party_notices.RUST_VERSION}\n")
+
+    def test_release_builds_install_the_pinned_toolchain(self):
+        # D4: every Rust install in the release preview, direct or through a
+        # bundle action, takes the version from --print-rust-version.
+        release = (ROOT / ".github/workflows/release.yml").read_text()
+        pinned = "${{ needs.package-tests.outputs.rust-version }}"
+        self.assertIn("third_party_notices.py --print-rust-version", release)
+        installs = re.findall(r"uses: dtolnay/rust-toolchain@(\S+)\n\s+with:\n\s+toolchain: (.+)", release)
+        self.assertEqual(len(installs), release.count("dtolnay/rust-toolchain@"))
+        self.assertTrue(installs)
+        for ref, toolchain in installs:
+            self.assertEqual((ref, toolchain.strip()), ("master", pinned))
+        actions = re.findall(r"uses: \./\.github/actions/\S+\n\s+with:\n\s+rust-toolchain: (.+)", release)
+        self.assertEqual(len(actions), release.count("uses: ./.github/actions/"))
+        self.assertEqual({a.strip() for a in actions}, {pinned})
 
     def add_mpl_crate(self, name, license="MPL-2.0", vcs=True, **fields):
         files = {"LICENSE": "Mozilla Public License Version 2.0\n"}

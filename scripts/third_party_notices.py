@@ -88,9 +88,10 @@ def _mit(copyright_line: str) -> dict:
     return {"kind": "mit", "copyright": copyright_line}
 
 
-# The toolchain the std texts below are pinned for (CI installs the current
-# stable with dtolnay/rust-toolchain@stable; generate() checks `rustc
-# --version` against this).
+# The toolchain the std texts below are pinned for, and the single source of
+# the Rust version every shipped binary is built with: the release preview
+# reads it with --print-rust-version and installs exactly this toolchain
+# (p14.3-npm-bundles/D4). generate() checks `rustc --version` against it.
 RUST_VERSION = "1.99.1"
 RUST_TEXTS = f"rust-{RUST_VERSION}"
 
@@ -190,8 +191,13 @@ def check_rust_version(rustc: str) -> None:
         raise SystemExit(
             f"error: the Rust standard library notices are pinned for rustc "
             f"{RUST_VERSION} (scripts/notices/{RUST_TEXTS}/) but the toolchain "
-            f"is rustc {found}; refresh them as scripts/notices/README.md "
-            "describes and update RUST_VERSION"
+            f"is rustc {found}. Build with rustc {RUST_VERSION} "
+            f"(rustup toolchain install {RUST_VERSION}), or move to rustc "
+            f"{found}: in one commit, re-pin the texts into "
+            f"scripts/notices/rust-{found}/, update RUST_STD_CRATES and "
+            f"rust_std_entries(), and set RUST_VERSION = \"{found}\" in "
+            "scripts/third_party_notices.py (the release preview installs "
+            "that version); scripts/notices/README.md has the steps"
         )
 
 
@@ -665,8 +671,7 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        required=True,
-        help="writes <platform>.md for each platform here",
+        help="writes <platform>.md for each platform here (required)",
     )
     parser.add_argument("--cargo", default="cargo", help="cargo executable")
     parser.add_argument(
@@ -674,7 +679,17 @@ def main(argv=None) -> int:
         default="rustc",
         help="rustc of the build toolchain (its version must be RUST_VERSION)",
     )
+    parser.add_argument(
+        "--print-rust-version",
+        action="store_true",
+        help="print RUST_VERSION, the toolchain release builds install, and exit",
+    )
     args = parser.parse_args(argv)
+    if args.print_rust_version:
+        print(RUST_VERSION)
+        return 0
+    if args.output_dir is None:
+        parser.error("the following arguments are required: --output-dir")
 
     platforms = args.platform or sorted(
         key for key, _exe in package_npm.TARGET_TO_NPM.values()

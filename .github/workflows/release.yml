@@ -54,6 +54,13 @@ jobs:
   package-tests:
     name: Packaging helper tests
     runs-on: ubuntu-latest
+    # The Rust version every job that builds a shipped binary installs: the
+    # one the standard-library notices are pinned to, RUST_VERSION in
+    # scripts/third_party_notices.py, its single source
+    # (p14.3-npm-bundles/D4). Moving to a newer Rust re-pins the notices
+    # there; see scripts/notices/README.md.
+    outputs:
+      rust-version: ${{ steps.rust.outputs.version }}
     steps:
       - uses: actions/checkout@v7
 
@@ -68,6 +75,10 @@ jobs:
 
       - name: Run packaging helper unit tests
         run: python3 -m unittest discover -s scripts -p "test_*.py" -v
+
+      - name: Read the pinned Rust version
+        id: rust
+        run: echo "version=$(python3 scripts/third_party_notices.py --print-rust-version)" >> "$GITHUB_OUTPUT"
 
   build:
     name: ${{ matrix.target }}
@@ -100,8 +111,9 @@ jobs:
         id: meta
         run: echo "version=$(python3 scripts/package_release.py --print-version)" >> "$GITHUB_OUTPUT"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ needs.package-tests.outputs.rust-version }}
           targets: ${{ matrix.target }}
 
       # The musl target needs the musl toolchain for linking; install it only
@@ -232,6 +244,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: ./.github/actions/windows-vulkan-bundle
+        with:
+          rust-toolchain: ${{ needs.package-tests.outputs.rust-version }}
 
       - name: Check the stage starts
         shell: pwsh
@@ -264,6 +278,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: ./.github/actions/linux-vulkan-bundle
+        with:
+          rust-toolchain: ${{ needs.package-tests.outputs.rust-version }}
 
       - name: Check the stage starts
         run: |
@@ -296,6 +312,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: ./.github/actions/macos-metal-bundle
+        with:
+          rust-toolchain: ${{ needs.package-tests.outputs.rust-version }}
 
       - name: Check the stage starts
         run: |
@@ -350,6 +368,7 @@ jobs:
   npm-pack:
     name: Stage and pack npm packages
     needs:
+      - package-tests
       - checksums
       - transcription-windows-vulkan
       - transcription-linux-vulkan
@@ -366,8 +385,11 @@ jobs:
         with:
           node-version: "22"
 
-      # cargo metadata for the notices; nothing is compiled.
-      - uses: dtolnay/rust-toolchain@stable
+      # cargo metadata for the notices; nothing is compiled, but the notices
+      # check rustc against the pinned version.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ needs.package-tests.outputs.rust-version }}
 
       - name: Download release preview archives
         uses: actions/download-artifact@v8

@@ -8,6 +8,15 @@ description: >
   TRANSCRIBE_CMAKE_ARGS and VULKAN_SDK for the job's later steps, so clippy
   and the tests reuse this native build.
 
+inputs:
+  rust-toolchain:
+    description: >
+      Rust toolchain to build with. The transcription workflow keeps the
+      default, stable; the release preview passes the version the
+      standard-library notices are pinned to (p14.3-npm-bundles/D4).
+    required: false
+    default: stable
+
 runs:
   using: composite
   steps:
@@ -27,8 +36,9 @@ runs:
           "STAGE=$env:GITHUB_WORKSPACE\target\windows-vulkan\stage"
         ) | Add-Content -Path $env:GITHUB_ENV
 
-    - uses: dtolnay/rust-toolchain@stable
+    - uses: dtolnay/rust-toolchain@master
       with:
+        toolchain: ${{ inputs.rust-toolchain }}
         targets: x86_64-pc-windows-msvc
         components: clippy
 
