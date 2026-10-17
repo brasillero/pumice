@@ -15,3 +15,42 @@ crate, so they are kept here verbatim, fetched on 2026-10-16:
 Update them together with the Vulkan SDK pin in the transcription build
 actions (`.github/actions/`) or when the Rust musl target moves to another
 musl release.
+
+## Rust standard library (`rust-1.99.0/`)
+
+The texts for the standard library of the toolchain CI builds with
+(`dtolnay/rust-toolchain@stable`, which installed rustc 1.99.0
+(b940084d7 2026-09-28) when these were pinned). Beyond its MIT OR
+Apache-2.0 code, std carries separately licensed parts: the Unicode tables in `library/core/src/unicode` (Unicode-3.0, from
+the toolchain's `share/doc/rust/COPYRIGHT-library.html` and the tag's
+`REUSE.toml`), `compiler-builtins` with its `libm`, and the crates.io
+crates std links. Their versions and targets come from the 1.99.0 tag's
+`library/Cargo.lock` and `library/std/Cargo.toml`, cross-checked against
+the path strings in the installed `x86_64-unknown-linux-gnu` rlibs; the
+toolchain's own `COPYRIGHT-library.html` lists other versions of several of
+them (memchr 2.8.0, no addr2line 0.27.1), so it is not used for the crates.
+Fetched on 2026-10-16; `RAW` is `https://raw.githubusercontent.com/rust-lang/rust/1.99.0`
+and `CRATE(n, v)` is `https://static.crates.io/crates/n/n-v.crate`:
+
+| File | Source | SHA-256 |
+| --- | --- | --- |
+| `Unicode-3.0.txt` | `RAW/LICENSES/Unicode-3.0.txt` (identical to the toolchain's `share/doc/rust/licenses/Unicode-3.0.txt`) | `f5062c9a188d81dfe66b56db4182dcf9e4b17c0d9b0d311a8e20b3a1b075c443` |
+| `compiler-builtins-LICENSE.txt` | `RAW/library/compiler-builtins/LICENSE.txt` | `ab6eec6caf0fa5775e411c7a8bc6a45c4ef2956b0980b157ab74fc5cd62a928b` |
+| `libm-LICENSE.txt` | `RAW/library/compiler-builtins/libm/LICENSE.txt` | `3823dda7cf046602f4b4e77ec8e227863dc4736037cc85bb33d9f19febe16bb7` |
+| `addr2line-0.27.1-LICENSE-MIT` | `LICENSE-MIT` in `CRATE(addr2line, 0.27.1)` | `e99d88d232bf57d70f0fb87f6b496d44b6653f99f8a63d250a54c61ea4bcde40` |
+| `adler2-2.0.1-LICENSE-0BSD` | `LICENSE-0BSD` in `CRATE(adler2, 2.0.1)` | `861399f8c21c042b110517e76dc6b63a2b334276c8cf17412fc3c8908ca8dc17` |
+| `cfg-if-1.0.4-LICENSE-MIT` | `LICENSE-MIT` in `CRATE(cfg-if, 1.0.4)` | `378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397` |
+| `gimli-0.34.0-LICENSE-MIT` | `LICENSE-MIT` in `CRATE(gimli, 0.34.0)` | `7b63ecd5f1902af1b63729947373683c32745c16a10e8e6292e2e2dcd7e90ae0` |
+| `hashbrown-0.17.1-LICENSE-MIT` | `LICENSE-MIT` in `CRATE(hashbrown, 0.17.1)` | `ff8f68cb076caf8cefe7a6430d4ac086ce6af2ca8ce2c4e5a2004d4552ef52a2` |
+| `libc-0.2.189-LICENSE-MIT` | `LICENSE-MIT` in `CRATE(libc, 0.2.189)` | `123a331b5dbf04c30097fa43b8f858bc85df671fe776de498d01f3d6b7c1f69e` |
+| `memchr-2.8.3-LICENSE-MIT` | `LICENSE-MIT` in `CRATE(memchr, 2.8.3)` | `0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f` |
+| `miniz_oxide-0.9.1-LICENSE-MIT.md` | `LICENSE-MIT.md` in `CRATE(miniz_oxide, 0.9.1)` | `799e9ca9d179295ef372f25d3769cdda7d25bb2668add6a6a1e22d1e4c678b8d` |
+| `object-0.39.1-LICENSE-MIT` | `LICENSE-MIT` in `CRATE(object, 0.39.1)` | `0b74dfa0bcee5c420c6b7f67b4b2658f9ab8388c97b8e733975f2cecbdd668a6` |
+| `rustc-demangle-0.1.28-LICENSE-MIT` | `LICENSE-MIT` in `CRATE(rustc-demangle, 0.1.28)` | `378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397` |
+
+`scripts/third_party_notices.py` fails when `rustc --version` is not
+`RUST_VERSION`. To move to a new stable: fetch `library/Cargo.lock`,
+`library/std/Cargo.toml` and `REUSE.toml` at the new tag, update
+`RUST_STD_CRATES` (versions, and targets from std's `[target]` tables) and
+the in-tree entries in `rust_std_entries()`, re-fetch the texts above into
+`rust-<version>/`, update this table and `RUST_VERSION`.

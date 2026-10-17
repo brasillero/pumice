@@ -13,8 +13,12 @@ package ships:
   proc-macros are kept, which errs on the side of listing too much.
 - the native components compiled into those files that no crate's own
   license file covers (transcribe.cpp, ggml and the code ggml embeds, libopus,
-  the Vulkan SDK headers, musl, the Rust standard library), in ``NATIVE``.
-- the existing notices for the Handy-derived formatter prompt.
+  the Vulkan SDK headers, musl), in ``NATIVE``.
+- the Rust standard library of the build toolchain and the parts of it
+  licensed separately (its Unicode tables, compiler-builtins and libm, the
+  crates.io crates std links on each target), in ``rust_std_entries()``. The
+  texts are pinned for ``RUST_VERSION`` in ``scripts/notices/``; a different
+  ``rustc --version`` fails the run until they are refreshed.
 
 License texts are read from each crate's downloaded source (root files named
 LICENSE*, LICENCE*, COPYING*, NOTICE*, COPYRIGHT*, UNLICENSE*, or the
@@ -78,21 +82,118 @@ def _mit(copyright_line: str) -> dict:
     return {"kind": "mit", "copyright": copyright_line}
 
 
+# The toolchain the std texts below are pinned for (CI installs the current
+# stable with dtolnay/rust-toolchain@stable; generate() checks `rustc
+# --version` against this).
+RUST_VERSION = "1.99.0"
+RUST_TEXTS = f"rust-{RUST_VERSION}"
+
+# Every core and bundle target, and the subset where std links its
+# backtrace symbolizer and libc (all but windows-msvc; library/std/Cargo.toml).
+ALL_TARGETS = tuple(
+    sorted(
+        set(package_npm.TARGET_TO_NPM)
+        | {bundle["target"] for bundle in package_npm.BUNDLES.values()}
+    )
+)
+NON_MSVC = tuple(target for target in ALL_TARGETS if not target.endswith("-msvc"))
+
+# The crates.io crates std links into executables for our targets, from
+# library/Cargo.lock and library/std/Cargo.toml at the RUST_VERSION tag:
+# (crate, version, declared license, pinned text, targets). The pinned text
+# is the option used here (MIT, or 0BSD for adler2).
+RUST_STD_CRATES = [
+    ("addr2line", "0.27.1", "Apache-2.0 OR MIT", "LICENSE-MIT", NON_MSVC),
+    ("adler2", "2.0.1", "0BSD OR MIT OR Apache-2.0", "LICENSE-0BSD", NON_MSVC),
+    ("cfg-if", "1.0.4", "MIT OR Apache-2.0", "LICENSE-MIT", ALL_TARGETS),
+    ("gimli", "0.34.0", "MIT OR Apache-2.0", "LICENSE-MIT", NON_MSVC),
+    ("hashbrown", "0.17.1", "MIT OR Apache-2.0", "LICENSE-MIT", ALL_TARGETS),
+    ("libc", "0.2.189", "MIT OR Apache-2.0", "LICENSE-MIT", NON_MSVC),
+    ("memchr", "2.8.3", "Unlicense OR MIT", "LICENSE-MIT", NON_MSVC),
+    ("miniz_oxide", "0.9.1", "MIT OR Zlib OR Apache-2.0", "LICENSE-MIT.md", NON_MSVC),
+    ("object", "0.39.1", "Apache-2.0 OR MIT", "LICENSE-MIT", NON_MSVC),
+    ("rustc-demangle", "0.1.28", "MIT/Apache-2.0", "LICENSE-MIT", ALL_TARGETS),
+]
+
+
+def rust_std_entries() -> list[dict]:
+    """``NATIVE``-style entries for the toolchain's standard library."""
+    where = "linked into every Rust executable in this package"
+    entries = [
+        {
+            "name": f"Rust standard library {RUST_VERSION} (core, alloc, std and "
+            "their in-tree crates)",
+            "license": "MIT OR Apache-2.0",
+            "when": "core",
+            "where": where,
+            "texts": [
+                _mit(
+                    "Copyright (c) The Rust Project Developers "
+                    "(see https://thanks.rust-lang.org)\n"
+                    "Copyright (c) 2014 Alex Crichton (library/backtrace)\n"
+                    "Copyright (c) 2019 The Crossbeam Project Developers "
+                    "(library/std/src/sync/mpmc)"
+                ),
+                _repo_file("Apache-2.0.txt"),
+            ],
+        },
+        {
+            "name": f"Unicode data tables in Rust {RUST_VERSION}'s core "
+            "library (library/core/src/unicode)",
+            "license": "Unicode-3.0",
+            "when": "core",
+            "where": where,
+            "texts": [_repo_file(f"{RUST_TEXTS}/Unicode-3.0.txt")],
+        },
+        {
+            "name": f"compiler-builtins 0.1.160 and its libm (Rust {RUST_VERSION} "
+            "library)",
+            "license": "MIT AND Apache-2.0 WITH LLVM-exception; libm MIT",
+            "when": "core",
+            "where": where,
+            "texts": [
+                _repo_file(f"{RUST_TEXTS}/compiler-builtins-LICENSE.txt"),
+                _repo_file(f"{RUST_TEXTS}/libm-LICENSE.txt"),
+            ],
+        },
+    ]
+    for name, version, license_expr, text, targets in RUST_STD_CRATES:
+        entries.append(
+            {
+                "name": f"{name} {version} (a dependency of the Rust "
+                f"{RUST_VERSION} standard library)",
+                "license": license_expr,
+                "when": targets,
+                "where": where,
+                "texts": [_repo_file(f"{RUST_TEXTS}/{name}-{version}-{text}")],
+            }
+        )
+    return entries
+
+
+def check_rust_version(rustc: str) -> None:
+    try:
+        output = subprocess.run(
+            [rustc, "--version"], capture_output=True, text=True, check=True
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise SystemExit(f"error: {rustc} --version failed: {error}") from None
+    match = re.match(r"rustc (\S+)", output)
+    found = match.group(1) if match else output.strip()
+    if found != RUST_VERSION:
+        raise SystemExit(
+            f"error: the Rust standard library notices are pinned for rustc "
+            f"{RUST_VERSION} (scripts/notices/{RUST_TEXTS}/) but the toolchain "
+            f"is rustc {found}; refresh them as scripts/notices/README.md "
+            "describes and update RUST_VERSION"
+        )
+
+
 # Native code no crate-level license file covers. `when` names what must be
 # shipped for the entry to apply: "core" (pumice), "transcription" (any
-# transcription bundle), a bundle feature ("vulkan", "metal") or a core
-# target triple.
+# transcription bundle), a bundle feature ("vulkan", "metal"), a shipped
+# target triple, or a tuple of any of those.
 NATIVE = [
-    {
-        "name": "Rust standard library",
-        "license": "MIT OR Apache-2.0",
-        "when": "core",
-        "where": "linked into every Rust executable in this package",
-        "texts": [
-            _mit("Copyright (c) The Rust Project Contributors"),
-            _repo_file("Apache-2.0.txt"),
-        ],
-    },
     {
         "name": "musl libc 1.2.5",
         "license": "MIT",
@@ -356,7 +457,9 @@ def generate(
     core_only: bool = False,
     cargo: str = "cargo",
     repo_root: Path = REPO_ROOT,
+    rustc: str = "rustc",
 ) -> str:
+    check_rust_version(rustc)
     version = package_release.crate_version(repo_root)
     shipped = components(platform_key, core_only)
 
@@ -373,9 +476,8 @@ def generate(
 
     active = {"core"}
     for item in shipped:
-        if item["binary"] == "pumice":
-            active.add(item["target"])
-        else:
+        active.add(item["target"])
+        if item["binary"] != "pumice":
             active.add("transcription")
             active.update(item["features"])
 
@@ -416,8 +518,9 @@ def generate(
         "## Native components",
         "",
     ]
-    for entry in NATIVE:
-        if entry["when"] not in active:
+    for entry in rust_std_entries() + NATIVE:
+        when = entry["when"]
+        if not active.intersection((when,) if isinstance(when, str) else when):
             continue
         numbers = [
             text_ref(native_text(source, crate_dirs), entry["name"])
@@ -505,6 +608,11 @@ def main(argv=None) -> int:
         help="writes <platform>.md for each platform here",
     )
     parser.add_argument("--cargo", default="cargo", help="cargo executable")
+    parser.add_argument(
+        "--rustc",
+        default="rustc",
+        help="rustc of the build toolchain (its version must be RUST_VERSION)",
+    )
     args = parser.parse_args(argv)
 
     platforms = args.platform or sorted(
@@ -513,7 +621,9 @@ def main(argv=None) -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for platform_key in platforms:
         path = args.output_dir / f"{platform_key}.md"
-        path.write_text(generate(platform_key, args.core_only, args.cargo))
+        path.write_text(
+            generate(platform_key, args.core_only, args.cargo, rustc=args.rustc)
+        )
         print(f"{path} ({path.stat().st_size} bytes)")
     return 0
 

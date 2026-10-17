@@ -6,7 +6,9 @@ registry: the walk keeps normal dependencies only, workspace members and
 dev/build dependencies stay out, identical texts print once, a crate
 without a license file gets its declared license's standard text, and the
 native components follow the platform's bundle (Vulkan, Metal, musl, or
-none for the core-only Intel Mac package). The real run happens in CI.
+none for the core-only Intel Mac package), every package carries the pinned
+Rust standard library notices for its targets (a fake ``rustc`` reports the
+pinned version; another version fails). The real run happens in CI.
 """
 
 import json
@@ -33,6 +35,10 @@ log = Path(__file__).with_name("calls.log")
 with log.open("a") as handle:
     handle.write(f"{target} {features}\\n")
 print(json.dumps(graph))
+"""
+
+FAKE_RUSTC = """#!/bin/sh
+echo "rustc $(cat "$(dirname "$0")/rustc-version") (b940084d7 2026-09-28)"
 """
 
 MIT_ALICE = "MIT License\n\nCopyright (c) Alice\n\nPermission is hereby granted...\n"
@@ -71,8 +77,15 @@ class NoticesTests(unittest.TestCase):
         self.cargo = self.root / "fake-cargo"
         self.cargo.write_text(FAKE_CARGO)
         self.cargo.chmod(0o755)
+        self.rustc = self.root / "fake-rustc"
+        self.rustc.write_text(FAKE_RUSTC)
+        self.rustc.chmod(0o755)
+        self.set_rustc_version(third_party_notices.RUST_VERSION)
 
-    def add(self, name, files=None, deps=(), license="MIT OR Apache-2.0", authors=()):
+    def set_rustc_version(self, version):
+        (self.root / "rustc-version").write_text(version)
+
+    def add(self, name, files=None, deps=(), license="MIT OR Apache-2.0", authors=(), **fields):
         directory = self.crates / name
         directory.mkdir(parents=True)
         (directory / "Cargo.toml").write_text(f'[package]\nname = "{name}"\n')
@@ -89,6 +102,7 @@ class NoticesTests(unittest.TestCase):
                 "license_file": None,
                 "authors": list(authors),
                 "manifest_path": str(directory / "Cargo.toml"),
+                **fields,
             }
         )
         self.nodes.append(
@@ -107,7 +121,9 @@ class NoticesTests(unittest.TestCase):
         )
 
     def generate(self, platform_key, core_only=False):
-        return third_party_notices.generate(platform_key, core_only, cargo=str(self.cargo))
+        return third_party_notices.generate(
+            platform_key, core_only, cargo=str(self.cargo), rustc=str(self.rustc)
+        )
 
     def calls(self):
         return (self.root / "calls.log").read_text().splitlines()
@@ -162,11 +178,11 @@ class NoticesTests(unittest.TestCase):
         mac = self.generate("darwin-arm64")
         self.assertIn("transcribe.cpp", mac)
         self.assertNotIn("Vulkan-Headers", mac)
-        self.assertNotIn("musl libc", mac)
+        self.assertNotIn("**musl libc", mac)
 
         windows = self.generate("win32-x64")
         self.assertIn("Vulkan-Headers", windows)
-        self.assertNotIn("musl libc", windows)
+        self.assertNotIn("**musl libc", windows)
 
     def test_intel_mac_is_core_only(self):
         text = self.generate("darwin-x64")
@@ -191,9 +207,48 @@ class NoticesTests(unittest.TestCase):
 
     def test_output_is_a_generated_notices_file(self):
         out = self.root / "out"
-        third_party_notices.main(["--platform", "darwin-x64", "--output-dir", str(out), "--cargo", str(self.cargo)])
+        third_party_notices.main(
+            ["--platform", "darwin-x64", "--output-dir", str(out), "--cargo", str(self.cargo), "--rustc", str(self.rustc)]
+        )
         self.assertTrue((out / "darwin-x64.md").read_text().startswith("# Third-party notices"))
 
+    def test_every_package_carries_the_rust_std_notices(self):
+        version = third_party_notices.RUST_VERSION
+        for key, core_only in (("darwin-x64", False), ("linux-x64", True), ("win32-x64", True)):
+            text = self.generate(key, core_only)
+            self.assertIn(f"**Rust standard library {version}", text)
+            self.assertIn("Copyright © 1991-2024 Unicode, Inc.", text)
+            self.assertIn("Copyright (c) 2019 The Crossbeam Project Developers", text)
+            self.assertIn(f"**compiler-builtins 0.1.160 and its libm (Rust {version}", text)
+            self.assertIn("Copyright (c) 2018 Jorge Aparicio", text)
+            self.assertIn("Copyright (c) 2016 Amanieu d'Antras", text)  # hashbrown
+
+    def test_rust_std_crates_follow_the_target(self):
+        # std links gimli, libc and friends everywhere but windows-msvc.
+        linux = self.generate("linux-x64", core_only=True)
+        self.assertIn("**gimli 0.34.0 (a dependency of the Rust", linux)
+        self.assertIn("**libc 0.2.189 (a dependency of the Rust", linux)
+        windows = self.generate("win32-x64")
+        self.assertNotIn("**gimli 0.34.0", windows)
+        self.assertNotIn("**libc 0.2.189", windows)
+        self.assertIn("**hashbrown 0.17.1 (a dependency of the Rust", windows)
+
+    def test_pinned_rust_std_texts_exist(self):
+        for entry in third_party_notices.rust_std_entries():
+            for source in entry["texts"]:
+                if source["kind"] == "repo":
+                    self.assertTrue((third_party_notices.TEXTS_DIR / source["path"]).is_file(), source)
+
+    def test_other_rustc_version_fails(self):
+        self.set_rustc_version("1.100.0")
+        with self.assertRaises(SystemExit) as caught:
+            self.generate("linux-x64")
+        self.assertIn(
+            f"pinned for rustc {third_party_notices.RUST_VERSION} "
+            f"(scripts/notices/rust-{third_party_notices.RUST_VERSION}/) but the "
+            "toolchain is rustc 1.100.0",
+            str(caught.exception),
+        )
 
 if __name__ == "__main__":
     unittest.main()
