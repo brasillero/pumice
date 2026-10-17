@@ -16,11 +16,11 @@ Update them together with the Vulkan SDK pin in the transcription build
 actions (`.github/actions/`) or when the Rust musl target moves to another
 musl release.
 
-## Rust standard library (`rust-1.99.0/`)
+## Rust standard library (`rust-1.99.1/`)
 
 The texts for the standard library of the toolchain CI builds with
-(`dtolnay/rust-toolchain@stable`, which installed rustc 1.99.0
-(b940084d7 2026-09-28) when these were pinned). Beyond its MIT OR
+(`dtolnay/rust-toolchain@stable`, which installed rustc 1.99.1 when
+these were pinned). Beyond its MIT OR
 Apache-2.0 code, std carries separately licensed parts: the Unicode tables in `library/core/src/unicode` (Unicode-3.0, from
 the toolchain's `share/doc/rust/COPYRIGHT-library.html` and the tag's
 `REUSE.toml`), `compiler-builtins` with its `libm`, and the crates.io
@@ -29,7 +29,10 @@ crates std links. Their versions and targets come from the 1.99.0 tag's
 the path strings in the installed `x86_64-unknown-linux-gnu` rlibs; the
 toolchain's own `COPYRIGHT-library.html` lists other versions of several of
 them (memchr 2.8.0, no addr2line 0.27.1), so it is not used for the crates.
-Fetched on 2026-10-16; `RAW` is `https://raw.githubusercontent.com/rust-lang/rust/1.99.0`
+1.99.1 changed none of them: its `library/Cargo.lock`,
+`library/std/Cargo.toml`, `REUSE.toml` and the three in-tree license files
+are byte-identical to 1.99.0's (compared 2026-10-17). Fetched on
+2026-10-16; `RAW` is `https://raw.githubusercontent.com/rust-lang/rust/1.99.0`
 and `CRATE(n, v)` is `https://static.crates.io/crates/n/n-v.crate`:
 
 | File | Source | SHA-256 |

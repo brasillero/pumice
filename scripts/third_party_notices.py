@@ -91,7 +91,7 @@ def _mit(copyright_line: str) -> dict:
 # The toolchain the std texts below are pinned for (CI installs the current
 # stable with dtolnay/rust-toolchain@stable; generate() checks `rustc
 # --version` against this).
-RUST_VERSION = "1.99.0"
+RUST_VERSION = "1.99.1"
 RUST_TEXTS = f"rust-{RUST_VERSION}"
 
 # Every core and bundle target, and the subset where std links its
