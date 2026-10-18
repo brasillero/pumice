@@ -26,7 +26,7 @@
 
 **Rejected.** Free-form prompts sent per request by the client as the custom option.
 
-### D3 · Active · When post-processing fails, the transcription endpoint returns the raw transcript by default
+### D3 · Superseded by D4 · When post-processing fails, the transcription endpoint returns the raw transcript by default
 - date: 2026-10-18
 - decided by: claude (orchestrator, owner-delegated 2026-10-18)
 - origin: D1
@@ -38,3 +38,16 @@
 **Why.** The client sent audio and has no text of its own, so an error would lose the whole dictation; the owner agreed to the proposed per-model setting with a raw default. The AGENTS.md rule "on failure return an HTTP error, the app keeps its own text" assumes a text request.
 
 **Rejected.** Errors only; raw fallback without a setting.
+
+### D4 · Active · When post-processing fails, the transcription endpoint always returns the raw transcript
+- date: 2026-10-18
+- decided by: owner (2026-10-18)
+- origin: D3
+- area: api
+- revisit if: —
+
+**Decision.** If transcription succeeds and post-processing (formatter or AI route) fails, the response is a normal success with the raw transcript as `text`; the failure is marked only in Pumice-specific metadata that standard clients ignore. If transcription fails, the endpoint returns an error in OpenAI's error format and status codes. There is no per-model failure setting.
+
+**Why.** The owner: "return the transcribed text, if possible. If the transcription fails, then we will need an error. Just follow the OpenAI API standards."
+
+**Rejected.** D3's per-model `raw`/`error` setting.
