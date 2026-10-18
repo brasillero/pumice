@@ -41,11 +41,14 @@
 //!   port: 17570                  # optional; 7567 is refused, 0 picks a free port
 //!   transcription_model: turbo   # required when enabled
 //!   startup_timeout_ms: 60000    # optional, 1000..=300000
+//!   transcription_flows: [clean] # optional, default empty (p15/D5)
 //! ```
 //!
-//! The section's own shape is checked at load; the rules that tie it to the
-//! flows (every enabled flow uses the served model) are checked only by
-//! `pumice serve`, through [`serve_settings`].
+//! The section's own shape is checked at load (published ids are public
+//! model ids: `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`, each listed once); the
+//! rules that tie it to the flows (every enabled flow uses the served model,
+//! a published flow exists, is enabled and is either off or a complete AI
+//! flow) are checked only by `pumice serve`, through [`serve_settings`].
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -104,8 +107,19 @@ pub struct Serve {
     /// Required when `enabled`; checked at load.
     pub transcription_model: Option<String>,
     pub startup_timeout: Duration,
+    /// The flows published as OpenAI transcription models, in file order;
+    /// empty unless listed (p15-serve-transcriptions/D5).
+    pub transcription_flows: Vec<PublishedFlow>,
     /// Source positions for errors `pumice serve` reports later.
     pub spans: ServeSpans,
+}
+
+/// One `serve.transcription_flows` entry: a flow id, already checked as a
+/// public model id, and where it is written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublishedFlow {
+    pub id: String,
+    pub at: Option<(u64, u64)>,
 }
 
 /// The 1-based (line, column) of the `serve:` section and of its keys.
@@ -125,6 +139,9 @@ pub struct ServeSettings {
     pub startup_timeout: Duration,
     /// Where `serve.transcription_model` is written, for errors about it.
     pub transcription_model_at: Option<(u64, u64)>,
+    /// The published flow ids (the transcription endpoint's models), in
+    /// file order.
+    pub transcription_flows: Vec<String>,
 }
 
 /// The module references. `formatter` is optional only when no enabled flow
@@ -408,11 +425,45 @@ fn validate_serve(raw: Spanned<RawServe>) -> Result<Serve, ConfigError> {
         }
         Some(span) => Duration::from_millis(span.value),
     };
+    let mut transcription_flows: Vec<PublishedFlow> = Vec::new();
+    for entry in serve
+        .transcription_flows
+        .as_ref()
+        .map_or(&[][..], |list| &list.value[..])
+    {
+        if !is_public_model_id(&entry.value) {
+            return Err(ConfigError::at(
+                entry.referenced,
+                format!(
+                    "serve.transcription_flows entries are public model ids: 1 to \
+                     {MAX_SERVED_FLOW_ID_BYTES} characters from A-Z, a-z, 0-9, '.', '_' and '-', \
+                     starting with a letter or digit"
+                ),
+            ));
+        }
+        if transcription_flows
+            .iter()
+            .any(|published| published.id == entry.value)
+        {
+            return Err(ConfigError::at(
+                entry.referenced,
+                format!(
+                    "flow \"{}\" is listed twice in serve.transcription_flows",
+                    entry.value
+                ),
+            ));
+        }
+        transcription_flows.push(PublishedFlow {
+            id: entry.value.clone(),
+            at: position(entry.referenced),
+        });
+    }
     Ok(Serve {
         enabled,
         port,
         transcription_model,
         startup_timeout,
+        transcription_flows,
         spans: ServeSpans {
             section: position(section),
             enabled: serve
@@ -425,6 +476,18 @@ fn validate_serve(raw: Spanned<RawServe>) -> Result<Serve, ConfigError> {
                 .and_then(|span| position(span.referenced)),
         },
     })
+}
+
+/// A published flow id is a public model id: `[A-Za-z0-9][A-Za-z0-9._-]`
+/// up to [`MAX_SERVED_FLOW_ID_BYTES`] characters (p15/D5), so it needs no
+/// escaping in a URL path, a form field or a header.
+pub fn is_public_model_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    (1..=MAX_SERVED_FLOW_ID_BYTES).contains(&bytes.len())
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 /// The frontend port rule shared by `serve.port` and `pumice serve --port`:
@@ -443,8 +506,12 @@ pub fn check_serve_port(port: u16) -> Result<u16, String> {
 /// The settings `pumice serve` runs with: the section must be present and
 /// enabled, and every enabled flow must use the served transcription model
 /// (p13.1-flow-seam/D4), with at most [`MAX_SERVED_FLOWS`] enabled flows
-/// whose ids fit [`MAX_SERVED_FLOW_ID_BYTES`]. Errors carry the
-/// orchestrator file and, when known, the offending value's position.
+/// whose ids fit [`MAX_SERVED_FLOW_ID_BYTES`]. Each published flow must be
+/// a configured, enabled flow that is either off (`formatter: null` with
+/// `relay_route: passthrough`) or has a formatter for its AI route
+/// (p15-serve-transcriptions/D5); being enabled, it uses the served model.
+/// Errors carry the orchestrator file and, when known, the offending
+/// value's position.
 pub fn serve_settings(loaded: &LoadedConfig) -> Result<ServeSettings, ConfigError> {
     let path = &loaded.path;
     let located = |at: Option<(u64, u64)>, message: String| {
@@ -503,12 +570,56 @@ pub fn serve_settings(loaded: &LoadedConfig) -> Result<ServeSettings, ConfigErro
             ));
         }
     }
+    for published in &serve.transcription_flows {
+        let Some(flow) = loaded.flow(&published.id) else {
+            return Err(located(
+                published.at,
+                format!(
+                    "serve.transcription_flows names flow \"{}\", which is not in \"flows\"",
+                    published.id
+                ),
+            ));
+        };
+        if !flow.enabled {
+            return Err(located(
+                published.at,
+                format!(
+                    "serve.transcription_flows names flow \"{}\", which is disabled; \
+                     set \"enabled: true\" on it or remove it from the list",
+                    flow.id
+                ),
+            ));
+        }
+        // `formatter` + passthrough is refused at load already; what is
+        // left is an AI route without rules.
+        if flow.formatter.is_none() && !is_passthrough(&flow.relay_route) {
+            return Err(located(
+                flow.references.formatter.or(flow.references.id),
+                format!(
+                    "flow \"{}\" is published but sends the transcript to an AI route \
+                     without a formatter; give it a formatter, or make it an off flow with \
+                     \"formatter: null\" and \"relay_route: passthrough\"",
+                    flow.id
+                ),
+            ));
+        }
+    }
     Ok(ServeSettings {
         port: serve.port,
         transcription_model: model.clone(),
         startup_timeout: serve.startup_timeout,
         transcription_model_at: serve.spans.transcription_model,
+        transcription_flows: serve
+            .transcription_flows
+            .iter()
+            .map(|published| published.id.clone())
+            .collect(),
     })
+}
+
+/// The relay's built-in route that returns the transcript unchanged.
+pub fn is_passthrough(route: &str) -> bool {
+    route.eq_ignore_ascii_case("passthrough")
 }
 
 fn validate_modules(
@@ -872,6 +983,7 @@ struct RawServe {
     port: Option<Spanned<u16>>,
     transcription_model: Option<Spanned<String>>,
     startup_timeout_ms: Option<Spanned<u64>>,
+    transcription_flows: Option<Spanned<Vec<Spanned<String>>>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1584,8 +1696,10 @@ flows:
                 transcription_model: "turbo".to_owned(),
                 startup_timeout: Duration::from_millis(60_000),
                 transcription_model_at: Some((23, 24)),
+                transcription_flows: Vec::new(),
             }
         );
+        assert!(serve.transcription_flows.is_empty(), "nothing is published");
 
         let loaded = load_text(
             &tmp,
@@ -1725,6 +1839,169 @@ flows:
         assert!(err.contains("ids of at most 128 bytes"), "{err}");
         assert!(err.contains("orchestrator.yml:11:"), "the id line: {err}");
         assert!(!err.contains(&long), "the id is not echoed: {err}");
+    }
+
+    /// [`VALID`] with `raw` enabled, an AI flow without a formatter and a
+    /// disabled flow, served with `turbo` and publishing `published`.
+    fn publishing(published: &str) -> String {
+        format!(
+            "{}  - id: bare
+    enabled: true
+    transcription_model: turbo
+    formatter: null
+    relay_route: claude
+  - id: later
+    enabled: false
+    transcription_model: turbo
+    formatter: null
+    relay_route: passthrough
+serve:
+  enabled: true
+  transcription_model: turbo
+  transcription_flows: {published}
+",
+            VALID.replace("    enabled: false\n", "    enabled: true\n")
+        )
+    }
+
+    /// The 1-based line of the first line of `text` containing `needle`.
+    fn line_of(text: &str, needle: &str) -> usize {
+        text.lines().position(|line| line.contains(needle)).unwrap() + 1
+    }
+
+    #[test]
+    fn published_flows_are_listed_in_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let loaded = load_text(&tmp, &publishing("[raw, clean]")).unwrap();
+        let serve = loaded.config.serve.as_ref().unwrap();
+        assert_eq!(
+            serve
+                .transcription_flows
+                .iter()
+                .map(|flow| flow.id.as_str())
+                .collect::<Vec<_>>(),
+            ["raw", "clean"]
+        );
+        assert!(serve.transcription_flows[0].at.is_some());
+        let settings = serve_settings(&loaded).unwrap();
+        assert_eq!(settings.transcription_flows, ["raw", "clean"]);
+
+        // Block style, and an empty list publishes nothing.
+        let text = publishing("\n    - clean\n    - raw");
+        let settings = serve_settings(&load_text(&tmp, &text).unwrap()).unwrap();
+        assert_eq!(settings.transcription_flows, ["clean", "raw"]);
+        let settings = serve_settings(&load_text(&tmp, &publishing("[]")).unwrap()).unwrap();
+        assert!(settings.transcription_flows.is_empty());
+    }
+
+    #[test]
+    fn published_ids_must_be_public_model_ids_and_unique() {
+        let tmp = tempfile::tempdir().unwrap();
+        let longest = format!("a{}", "-".repeat(MAX_SERVED_FLOW_ID_BYTES - 1));
+        assert!(is_public_model_id(&longest));
+        for good in ["a", "9", "clean-en", "v1.2_x", "A.b-C_d"] {
+            assert!(is_public_model_id(good), "{good}");
+        }
+        let too_long = format!("{longest}x");
+        for bad in [
+            "",
+            "-clean",
+            ".clean",
+            "_clean",
+            "clean en",
+            "clean/en",
+            "clean:en",
+            "Olá",
+            "clean%20",
+            too_long.as_str(),
+        ] {
+            assert!(!is_public_model_id(bad), "{bad}");
+        }
+
+        // At load, with the entry's line; the id is quoted in YAML so the
+        // shape reaches the check.
+        let text = publishing("\n    - clean\n    - \"clean en\"");
+        let err = load_text(&tmp, &text).unwrap_err().to_string();
+        assert!(err.contains("public model ids"), "{err}");
+        let line = line_of(&text, "clean en");
+        assert!(err.contains(&format!("orchestrator.yml:{line}:")), "{err}");
+
+        let text = publishing("\n    - clean\n    - raw\n    - clean");
+        let err = load_text(&tmp, &text).unwrap_err().to_string();
+        assert!(
+            err.contains("flow \"clean\" is listed twice in serve.transcription_flows"),
+            "{err}"
+        );
+        let line = text.lines().count();
+        assert!(err.contains(&format!("orchestrator.yml:{line}:")), "{err}");
+
+        // Not a list of strings.
+        let err = load_text(&tmp, &publishing("clean"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("orchestrator.yml:"), "{err}");
+        // Even a disabled section checks its shape.
+        let err = load_text(
+            &tmp,
+            &with_serve("  enabled: false\n  transcription_flows: [\"-x\"]\n"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("public model ids"), "{err}");
+    }
+
+    #[test]
+    fn published_flows_must_be_enabled_and_off_or_complete() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (published, needle, message) in [
+            (
+                "\n    - clean\n    - nowhere",
+                "- nowhere",
+                "names flow \"nowhere\", which is not in \"flows\"",
+            ),
+            (
+                "\n    - later",
+                "- later",
+                "names flow \"later\", which is disabled",
+            ),
+            (
+                "\n    - bare",
+                "relay_route: claude\n  - id: later",
+                "flow \"bare\" is published but sends the transcript to an AI route without a formatter",
+            ),
+        ] {
+            let text = publishing(published);
+            let err = serve_settings(&load_text(&tmp, &text).unwrap())
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(message), "{err}");
+            // The bare flow's error points at its `formatter: null` line.
+            let line = if needle.starts_with("relay_route") {
+                let at = text.find(needle).unwrap();
+                text[..at].lines().count() - 1
+            } else {
+                line_of(&text, needle)
+            };
+            assert!(
+                err.contains(&format!("orchestrator.yml:{line}:")),
+                "{published}: {err}"
+            );
+        }
+
+        // A published flow uses the served model like every enabled flow:
+        // a different one fails at the flow's transcription_model line.
+        let text = publishing("[raw]").replace(
+            "serve:\n  enabled: true\n  transcription_model: turbo",
+            "serve:\n  enabled: true\n  transcription_model: small",
+        );
+        let err = serve_settings(&load_text(&tmp, &text).unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("uses a different transcription model"),
+            "{err}"
+        );
+        assert!(err.contains("orchestrator.yml:13:"), "{err}");
     }
 
     #[test]
