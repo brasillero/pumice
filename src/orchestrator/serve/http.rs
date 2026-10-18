@@ -1,14 +1,18 @@
 //! `pumice serve`'s loopback frontend (p13.1-flow-seam/D1, D2, D7, D8).
 //!
 //! Routes: `GET /health`, `GET /ready`, `GET /pumice/v1/status`,
-//! `GET /pumice/v1/flows` and `POST /pumice/v1/dictations` (`dictation`);
-//! no OpenAI `/v1/*` routes (D2).
+//! `GET /pumice/v1/flows`, `POST /pumice/v1/dictations` (`dictation`) and
+//! the OpenAI `GET /v1/models`, `GET /v1/models/{id}` and
+//! `POST /v1/audio/transcriptions` (`transcriptions`,
+//! p15-serve-transcriptions/D1, which narrows D2). There is no
+//! `/v1/chat/completions` here (p15/D7).
 //!
 //! Before anything else, every request passes the origin guard (D8): the
 //! `Host` must be the literal `127.0.0.1:<port>`, a present `Origin` must
 //! equal `http://127.0.0.1:<port>` and a present `Sec-Fetch-Site` must be
 //! `same-origin` or `none`, otherwise 403. No CORS headers are ever
-//! sent. Every answer is JSON with `Cache-Control: no-store`, errors use the
+//! sent. Every answer is JSON with `Cache-Control: no-store` (a
+//! transcription asked for as `text` is plain text), errors use the
 //! OpenAI error object (`message`, `type`, `param`, `code`), including 404
 //! and 405 (with `Allow`). On the dictation route every answer, its guard
 //! and method refusals included, is the versioned dictation envelope
@@ -20,7 +24,8 @@
 //! route's [`RoutePolicy`] bounds the rest of the connection: the metadata
 //! routes (and every rejection) use [`METADATA`], a whole connection within
 //! 10 s and answers of at most 128 KiB; the dictation route brings its own
-//! policy ([`dictation::policy`]). Metadata handlers only read in-memory
+//! policy ([`dictation::policy`]), which the transcription route shares.
+//! Metadata handlers, the model routes included, only read in-memory
 //! snapshots: they never wait for the child, the network, a CLI, a model or
 //! the dictations' work permit.
 //!
@@ -58,6 +63,7 @@ use crate::orchestrator::result::{MODULE, SCHEMA_VERSION, stage};
 use crate::orchestrator::serve::dictation::{self, Admission, Dictations};
 use crate::orchestrator::serve::output::Reporter;
 use crate::orchestrator::serve::supervisor::{ChildState, SupervisorHandle};
+use crate::orchestrator::serve::transcriptions::{self, MODELS, TRANSCRIPTIONS};
 
 pub const MAX_CONNECTIONS: usize = 64;
 pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -186,6 +192,19 @@ impl Frontend {
 
     pub(crate) fn dictations(&self) -> Option<Arc<Dictations>> {
         self.dictations.clone()
+    }
+
+    /// The enabled flows.
+    pub(crate) fn flow_infos(&self) -> &[FlowInfo] {
+        &self.flows
+    }
+
+    /// The flows published as transcription models; none without the
+    /// dictation route's runtime.
+    pub(crate) fn published(&self) -> &[String] {
+        self.dictations
+            .as_deref()
+            .map_or(&[], |dictations| &dictations.transcription_flows)
     }
 
     pub(crate) fn admission(&self) -> &Admission {
@@ -378,6 +397,13 @@ async fn serve_connection(stream: tokio::net::TcpStream, frontend: Arc<Frontend>
                 let frontend = Arc::clone(&frontend);
                 Box::pin(async move { Ok(dictation::refuse(&frontend, arrival, error).await) })
             }
+            Routed::Transcription(policy) => {
+                routed.send_replace(Some(policy));
+                let frontend = Arc::clone(&frontend);
+                Box::pin(
+                    async move { Ok(transcriptions::handle(frontend, request, arrival).await) },
+                )
+            }
         };
         answer
     });
@@ -437,7 +463,7 @@ pub fn respond(
 ) -> Response<Full<Bytes>> {
     match route(frontend, method, uri, headers) {
         Routed::Answer(_, response) => response,
-        Routed::Dictation(_) | Routed::Refused(_) => error(
+        Routed::Dictation(_) | Routed::Refused(_) | Routed::Transcription(_) => error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "server_error",
             "internal",
@@ -454,11 +480,16 @@ enum Routed {
     /// The dictation route's guard or method refusal: answered with the
     /// dictation envelope, under [`METADATA`].
     Refused(StageError),
+    /// `POST /v1/audio/transcriptions`, under the dictation route's policy.
+    Transcription(RoutePolicy),
 }
 
 fn route(frontend: &Frontend, method: &Method, uri: &Uri, headers: &HeaderMap) -> Routed {
     let dictations = match &frontend.dictations {
         Some(dictations) if uri.path() == DICTATIONS => dictations,
+        Some(dictations) if uri.path() == TRANSCRIPTIONS => {
+            return transcription_route(frontend, dictations, method, uri, headers);
+        }
         // Everything else, and the guard's rejections, are snapshots.
         _ => {
             let (policy, response) = answer(frontend, method, uri, headers);
@@ -482,6 +513,45 @@ fn route(frontend: &Frontend, method: &Method, uri: &Uri, headers: &HeaderMap) -
         ));
     }
     Routed::Dictation(dictations.policy())
+}
+
+/// The transcription route: the guard, then the method, refused with the
+/// OpenAI error object like the snapshot routes.
+fn transcription_route(
+    frontend: &Frontend,
+    dictations: &Dictations,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+) -> Routed {
+    if let Err(rejection) = check_origin(frontend.port, uri, headers) {
+        let (code, message) = rejection.describe();
+        return Routed::Answer(
+            METADATA,
+            error(
+                StatusCode::FORBIDDEN,
+                "invalid_request_error",
+                code,
+                message,
+            ),
+        );
+    }
+    if let Some(hook) = &frontend.request_hook {
+        hook(uri.path());
+    }
+    if method != Method::POST {
+        let mut response = error(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "invalid_request_error",
+            "method_not_allowed",
+            "This route only accepts POST.",
+        );
+        response
+            .headers_mut()
+            .insert(header::ALLOW, HeaderValue::from_static("POST"));
+        return Routed::Answer(METADATA, response);
+    }
+    Routed::Transcription(dictations.policy())
 }
 
 /// The snapshot routes and every rejection, with the policy that bounds the
@@ -512,6 +582,10 @@ fn answer(
         "/ready" => Route::Ready,
         "/pumice/v1/status" => Route::Status,
         "/pumice/v1/flows" => Route::Flows,
+        MODELS => Route::Models,
+        path if path.starts_with(MODELS) && path.as_bytes().get(MODELS.len()) == Some(&b'/') => {
+            Route::Model(&path[MODELS.len() + 1..])
+        }
         _ => {
             return (
                 METADATA,
@@ -560,21 +634,45 @@ fn answer(
         },
         Route::Status => json_response(StatusCode::OK, &status(frontend)),
         Route::Flows => json_response(StatusCode::OK, &flows(frontend)),
+        Route::Models => json_response(StatusCode::OK, &transcriptions::models(frontend)),
+        Route::Model(id) => match transcriptions::model(frontend, id) {
+            Some(model) => json_response(StatusCode::OK, &model),
+            None => json_response(
+                StatusCode::NOT_FOUND,
+                &json!({
+                    "error": {
+                        "message": "The requested model does not exist on this server.",
+                        "type": "invalid_request_error",
+                        "param": "model",
+                        "code": "model_not_found",
+                    }
+                }),
+            ),
+        },
     };
     (route.policy(), response)
 }
 
-enum Route {
+enum Route<'a> {
     Health,
     Ready,
     Status,
     Flows,
+    Models,
+    /// One model; the id as it appears in the path (published ids need no
+    /// escaping, so anything else is simply unknown).
+    Model(&'a str),
 }
 
-impl Route {
+impl Route<'_> {
     fn policy(&self) -> RoutePolicy {
         match self {
-            Route::Health | Route::Ready | Route::Status | Route::Flows => METADATA,
+            Route::Health
+            | Route::Ready
+            | Route::Status
+            | Route::Flows
+            | Route::Models
+            | Route::Model(_) => METADATA,
         }
     }
 }
@@ -615,7 +713,10 @@ fn status(frontend: &Frontend) -> Value {
             "compute": child.compute,
             "last_failure": child.last_failure,
         },
-        "flows": {"enabled": frontend.flows.len()},
+        "flows": {
+            "enabled": frontend.flows.len(),
+            "published": frontend.published().len(),
+        },
         "dictations": {
             "served": frontend.dictations.is_some(),
             "admission": frontend.admission.state(),
@@ -916,6 +1017,8 @@ mod tests {
             (Method::GET, "/ready", host.clone()),
             (Method::GET, "/pumice/v1/status", host.clone()),
             (Method::GET, "/pumice/v1/flows", host.clone()),
+            (Method::GET, "/v1/models", host.clone()),
+            (Method::GET, "/v1/models/clean", host.clone()),
             (Method::POST, "/health", host.clone()),
             (Method::GET, "/nowhere", host.clone()),
             (Method::GET, "/health", HeaderMap::new()),
@@ -1013,11 +1116,13 @@ mod tests {
     #[test]
     fn unknown_routes_methods_and_openai_paths_are_json_errors() {
         let frontend = frontend(ChildState::Ready);
+        // No chat here (p15/D7); without the dictations' runtime there is
+        // no transcription route either.
         for path in [
             "/",
-            "/v1/models",
             "/v1/chat/completions",
             "/v1/audio/transcriptions",
+            "/v1/modelsx",
             "/health/",
         ] {
             let (status, headers, body) = request(&frontend, Method::GET, path, &[HOST]);
@@ -1032,6 +1137,42 @@ mod tests {
         assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(headers["allow"], "GET");
         assert_eq!(body["error"]["code"], "method_not_allowed");
+    }
+
+    #[test]
+    fn the_model_routes_list_only_published_flows() {
+        // Nothing is published without the dictations' runtime: the
+        // enabled flow `clean` is not a model.
+        let frontend = frontend(ChildState::Ready);
+        let (status, headers, body) = request(&frontend, Method::GET, "/v1/models", &[HOST]);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["cache-control"], "no-store");
+        assert_eq!(body, json!({"object": "list", "data": []}));
+        for path in ["/v1/models/clean", "/v1/models/", "/v1/models/a/b"] {
+            let (status, _, body) = request(&frontend, Method::GET, path, &[HOST]);
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+            assert_eq!(
+                body,
+                json!({"error": {
+                    "message": "The requested model does not exist on this server.",
+                    "type": "invalid_request_error",
+                    "param": "model",
+                    "code": "model_not_found",
+                }})
+            );
+        }
+        // GET only, behind the guard.
+        let (status, headers, _) = request(&frontend, Method::POST, "/v1/models", &[HOST]);
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(headers["allow"], "GET");
+        let (status, _, body) = request(
+            &frontend,
+            Method::GET,
+            "/v1/models",
+            &[HOST, ("origin", "http://evil.example")],
+        );
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "origin_not_allowed");
     }
 
     #[test]
@@ -1074,7 +1215,7 @@ mod tests {
                     },
                     "last_failure": null,
                 },
-                "flows": {"enabled": 1},
+                "flows": {"enabled": 1, "published": 0},
                 "dictations": {
                     "served": false,
                     "admission": "open",

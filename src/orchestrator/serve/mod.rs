@@ -1,9 +1,10 @@
 //! `pumice serve` (p13.3-serve-supervisor): the local stack's service.
 //!
 //! One loopback frontend (`http`), one owned warm transcription child
-//! (`supervisor`, `child`) and the dictation route (`dictation`, `warm`),
-//! which runs the shared flow execution (`flow.rs`) in-process on one
-//! [`Runtime`] built at startup. Startup follows design §4:
+//! (`supervisor`, `child`), the dictation route (`dictation`, `warm`) and
+//! the OpenAI transcription and model routes (`transcriptions`), which run
+//! the shared flow execution (`flow.rs`) in-process on one [`Runtime`]
+//! built at startup. Startup follows design §4:
 //!
 //! 1. signal handlers, before anything is loaded or spawned;
 //! 2. the orchestrator file and its `serve:` section, the relay pipeline,
@@ -28,6 +29,7 @@ pub mod dictation;
 pub mod http;
 pub mod output;
 pub mod supervisor;
+pub mod transcriptions;
 pub mod warm;
 
 use std::path::PathBuf;
@@ -213,6 +215,7 @@ async fn serve(params: &ServeParams, reporter: &Reporter, signals: cancel::Cance
         dictations: Some(Dictations {
             runtime,
             flows: loaded.config.flows.clone(),
+            transcription_flows: settings.transcription_flows,
         }),
         scope,
         request_hook: None,

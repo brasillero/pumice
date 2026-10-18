@@ -21,6 +21,12 @@
 //!
 //! Nothing here logs or reports content: events are metadata only, error
 //! messages are fixed and never quote what the client sent.
+//!
+//! The OpenAI transcription route (`transcriptions`,
+//! p15-serve-transcriptions/D6) runs through the same machinery: [`admit`]
+//! with [`Endpoint::Transcription`] takes the same permit, so a dictation
+//! and a transcription never run at once, and only the request reading
+//! (`prepare`) and the answer differ.
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -48,7 +54,8 @@ use crate::orchestrator::result::{
 };
 use crate::orchestrator::serve::http::{Frontend, RoutePolicy, json_bytes_response};
 use crate::orchestrator::serve::output::Reporter;
-use crate::orchestrator::serve::warm::WarmTranscriber;
+use crate::orchestrator::serve::transcriptions::{self, Answering};
+use crate::orchestrator::serve::warm::{TranscriptionOptions, WarmTranscriber};
 
 /// Upload limits, the transcription module's own (crates/transcription,
 /// `MAX_TOTAL_BODY_BYTES`, `MAX_FILE_BYTES`, `MAX_TEXT_FIELD_BYTES`; kept
@@ -69,11 +76,14 @@ const CONNECTION_MARGIN: Duration = Duration::from_secs(5);
 /// A recycled generation must be confirmed reaped within this.
 const RECYCLE_LIMIT: Duration = Duration::from_secs(2);
 
-/// What the route serves: the service's runtime (built once) and every
-/// configured flow, so a disabled one is told apart from an unknown one.
+/// What the routes serve: the service's runtime (built once), every
+/// configured flow, so a disabled one is told apart from an unknown one,
+/// and the flows published as OpenAI transcription models
+/// (`serve.transcription_flows`, already checked to be enabled).
 pub struct Dictations {
     pub runtime: Arc<Runtime>,
     pub flows: Vec<Flow>,
+    pub transcription_flows: Vec<String>,
 }
 
 impl Dictations {
@@ -264,19 +274,52 @@ impl EventSink for DictationEvents<'_> {
     }
 }
 
+/// Which route admitted an operation: both share the permit, the
+/// execution and the cleanup; they read the request and answer
+/// differently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Endpoint {
+    /// `POST /pumice/v1/dictations`: the run envelope.
+    Dictation,
+    /// `POST /v1/audio/transcriptions`: OpenAI's shape (`transcriptions`).
+    Transcription,
+}
+
+/// What a route's `prepare` stage read from the request.
+pub(crate) struct Admitted {
+    pub flow: PreparedFlow,
+    pub audio: AudioSource,
+    /// For the transcription child only; a dictation's are the defaults.
+    pub options: TranscriptionOptions,
+    /// How a transcription answers; `None` for a dictation.
+    pub answering: Option<Answering>,
+}
+
 /// The route's handler; the guard and the route were checked already.
 pub async fn handle(
     frontend: Arc<Frontend>,
     request: Request<Incoming>,
     arrival: Instant,
 ) -> Response<Full<Bytes>> {
+    admit(frontend, request, arrival, Endpoint::Dictation).await
+}
+
+/// Admission, then the operation on its own task (see the module
+/// documentation), for either route.
+pub(crate) async fn admit(
+    frontend: Arc<Frontend>,
+    request: Request<Incoming>,
+    arrival: Instant,
+    endpoint: Endpoint,
+) -> Response<Full<Bytes>> {
     let operation_id = operation_id();
     let Some(dictations) = frontend.dictations() else {
-        return reject(&frontend, operation_id, arrival, not_served()).await;
+        return reject(&frontend, endpoint, operation_id, arrival, not_served()).await;
     };
     if frontend.stopping() {
         return reject(
             &frontend,
+            endpoint,
             operation_id,
             arrival,
             unavailable("shutting_down"),
@@ -284,11 +327,18 @@ pub async fn handle(
         .await;
     }
     let Ok(permit) = Arc::clone(&frontend.admission().permit).try_acquire_owned() else {
-        return reject(&frontend, operation_id, arrival, busy()).await;
+        return reject(&frontend, endpoint, operation_id, arrival, busy(endpoint)).await;
     };
     if let Some(code) = frontend.unavailable() {
         drop(permit);
-        return reject(&frontend, operation_id, arrival, unavailable(code)).await;
+        return reject(
+            &frontend,
+            endpoint,
+            operation_id,
+            arrival,
+            unavailable(code),
+        )
+        .await;
     }
 
     // The operation runs on its own task, which owns the permit until its
@@ -299,6 +349,7 @@ pub async fn handle(
     let (answer, answered) = oneshot::channel();
     let task_frontend = Arc::clone(&frontend);
     let job = Job {
+        endpoint,
         request,
         arrival,
         operation_id: operation_id.clone(),
@@ -325,14 +376,14 @@ pub async fn handle(
         Ok(response) => response,
         // The operation's task panicked: a core failure the service is
         // already handling.
-        Err(_) => panicked(operation_id, arrival),
+        Err(_) => panicked(endpoint, operation_id, arrival),
     }
 }
 
 /// The answer when the operation's task panicked: its stage reports went
 /// down with it, so every stage reads skipped.
-fn panicked(operation_id: String, arrival: Instant) -> Response<Full<Bytes>> {
-    envelope_response(RunOutput {
+fn panicked(endpoint: Endpoint, operation_id: String, arrival: Instant) -> Response<Full<Bytes>> {
+    let output = RunOutput {
         operation_id,
         flow: None,
         transcript: None,
@@ -346,7 +397,8 @@ fn panicked(operation_id: String, arrival: Instant) -> Response<Full<Bytes>> {
             1,
         )),
         cleanup_failed: false,
-    })
+    };
+    answer(endpoint, output, None)
 }
 
 /// The route's guard or method refusal (`http`), answered like the
@@ -356,11 +408,31 @@ pub(crate) async fn refuse(
     arrival: Instant,
     error: StageError,
 ) -> Response<Full<Bytes>> {
-    reject(frontend, operation_id(), arrival, error).await
+    reject(
+        frontend,
+        Endpoint::Dictation,
+        operation_id(),
+        arrival,
+        error,
+    )
+    .await
+}
+
+/// The finished operation as the route answers it.
+fn answer(
+    endpoint: Endpoint,
+    output: RunOutput,
+    answering: Option<Answering>,
+) -> Response<Full<Bytes>> {
+    match endpoint {
+        Endpoint::Dictation => envelope_response(output),
+        Endpoint::Transcription => transcriptions::respond(output, answering),
+    }
 }
 
 /// One admitted request.
 struct Job {
+    endpoint: Endpoint,
     request: Request<Incoming>,
     arrival: Instant,
     operation_id: String,
@@ -383,6 +455,7 @@ async fn run(
     let _panic = PanicGuard(frontend);
 
     let Job {
+        endpoint,
         request,
         arrival,
         operation_id,
@@ -396,7 +469,10 @@ async fn run(
         admission: Some(admission),
         frontend,
     };
-    let transcriber = WarmTranscriber::new(frontend.supervisor().clone());
+    // Set by the operation: the generation an abandoned transcription left
+    // busy, and how a transcription answers once its request was read.
+    let mut abandoned = None;
+    let mut answering = None;
     let operation = async {
         let mut operation = Operation::start(
             operation_id,
@@ -406,14 +482,30 @@ async fn run(
             Some(&mut events as &mut dyn EventSink),
         );
         let at = operation.stage_started(stage::PREPARE);
-        let prepared = prepare(dictations, request, arrival, operation.cancel()).await;
+        let prepared = match endpoint {
+            Endpoint::Dictation => prepare(dictations, request, arrival, operation.cancel()).await,
+            Endpoint::Transcription => {
+                transcriptions::prepare(dictations, request, arrival, operation.cancel()).await
+            }
+        };
         operation.stage_done(stage::PREPARE, at, prepared.as_ref().err());
         let outcome = match prepared {
-            Ok((flow, audio)) => {
-                operation.set_flow(flow.flow.id.clone());
-                operation
-                    .run_stages(&dictations.runtime, &flow, &transcriber, &audio)
-                    .await
+            Ok(admitted) => {
+                operation.set_flow(admitted.flow.flow.id.clone());
+                answering = admitted.answering;
+                // The request's options, fixed for the operation.
+                let transcriber =
+                    WarmTranscriber::with_options(frontend.supervisor().clone(), admitted.options);
+                let outcome = operation
+                    .run_stages(
+                        &dictations.runtime,
+                        &admitted.flow,
+                        &transcriber,
+                        &admitted.audio,
+                    )
+                    .await;
+                abandoned = transcriber.abandoned();
+                outcome
                 // The audio is dropped here, before the cleanup.
             }
             Err(error) => Err(error),
@@ -430,7 +522,7 @@ async fn run(
     // nothing. D5: an abandoned transcription recycles its generation,
     // confirmed reaped before the permit is released.
     let mut confirmed = !output.cleanup_failed && dictations.runtime.scope().is_empty();
-    if let Some(generation) = transcriber.abandoned() {
+    if let Some(generation) = abandoned {
         let supervisor = frontend.supervisor();
         supervisor.recycle(generation);
         confirmed &= supervisor
@@ -455,7 +547,7 @@ async fn run(
             ));
         }
     }
-    envelope_response(output)
+    answer(endpoint, output, answering)
 }
 
 /// Runs the operation, firing its cancellation with `Shutdown` when the
@@ -485,7 +577,44 @@ async fn prepare(
     request: Request<Incoming>,
     arrival: Instant,
     cancel: &CancelGuard,
-) -> Result<(PreparedFlow, AudioSource), StageError> {
+) -> Result<Admitted, StageError> {
+    let (body, boundary) = read_upload(dictations, request, arrival, cancel).await?;
+    let form = parse_form(body, boundary).await?;
+
+    let flow = match dictations.flows.iter().find(|flow| flow.id == form.flow) {
+        None => {
+            return Err(request_error(
+                "flow_not_found",
+                "No flow with this id is configured.",
+                Some("flow"),
+            ));
+        }
+        Some(flow) if !flow.enabled => {
+            return Err(request_error(
+                "flow_disabled",
+                "This flow is disabled.",
+                Some("flow"),
+            ));
+        }
+        Some(flow) => flow.clone(),
+    };
+    Ok(Admitted {
+        flow: anchor(flow, arrival)?,
+        audio: AudioSource::Bytes(form.file),
+        options: TranscriptionOptions::default(),
+        answering: None,
+    })
+}
+
+/// The whole body of a multipart upload and its boundary, read within the
+/// upload limit from `arrival` and abandoned when the operation is
+/// cancelled. A declared length over the limit is refused unread.
+pub(crate) async fn read_upload(
+    dictations: &Dictations,
+    request: Request<Incoming>,
+    arrival: Instant,
+    cancel: &CancelGuard,
+) -> Result<(Bytes, String), StageError> {
     let (parts, body) = request.into_parts();
     let boundary = boundary(&parts.headers)?;
     if declared_length(&parts.headers).is_some_and(|length| length > MAX_BODY_BYTES) {
@@ -507,25 +636,12 @@ async fn prepare(
             )),
         },
     };
-    let form = parse_form(body, boundary).await?;
+    Ok((body, boundary))
+}
 
-    let flow = match dictations.flows.iter().find(|flow| flow.id == form.flow) {
-        None => {
-            return Err(request_error(
-                "flow_not_found",
-                "No flow with this id is configured.",
-                Some("flow"),
-            ));
-        }
-        Some(flow) if !flow.enabled => {
-            return Err(request_error(
-                "flow_disabled",
-                "This flow is disabled.",
-                Some("flow"),
-            ));
-        }
-        Some(flow) => flow.clone(),
-    };
+/// The selected flow with its budget anchored to the request's arrival; a
+/// budget already spent fails before any work.
+pub(crate) fn anchor(flow: Flow, arrival: Instant) -> Result<PreparedFlow, StageError> {
     let deadlines = Deadlines::anchored(arrival, flow.budgets.total)?;
     if Instant::now() >= deadlines.work() {
         return Err(StageError::new(
@@ -535,15 +651,12 @@ async fn prepare(
             1,
         ));
     }
-    Ok((
-        PreparedFlow { flow, deadlines },
-        AudioSource::Bytes(form.file),
-    ))
+    Ok(PreparedFlow { flow, deadlines })
 }
 
 /// A request error in `prepare`: a fixed message, the route's own
 /// parameter name at most.
-fn request_error(
+pub(crate) fn request_error(
     code: &'static str,
     message: &'static str,
     param: Option<&'static str>,
@@ -555,7 +668,7 @@ fn request_error(
     }
 }
 
-fn body_too_large() -> StageError {
+pub(crate) fn body_too_large() -> StageError {
     request_error(
         "body_too_large",
         "The request body exceeds the maximum size of 26000000 bytes.",
@@ -613,7 +726,7 @@ struct Form {
 }
 
 /// A single-chunk stream over the received body, for the parser.
-struct Once(Option<Bytes>);
+pub(crate) struct Once(pub(crate) Option<Bytes>);
 
 impl futures_core::Stream for Once {
     type Item = Result<Bytes, Infallible>;
@@ -755,13 +868,14 @@ fn not_served() -> StageError {
     StageError::new(stage::PREPARE, "not_found", "Unknown route.", 2)
 }
 
-fn busy() -> StageError {
-    StageError::new(
-        stage::PREPARE,
-        "rate_limit_exceeded",
-        "Another dictation is running. Retry after a short wait.",
-        1,
-    )
+fn busy(endpoint: Endpoint) -> StageError {
+    let message = match endpoint {
+        Endpoint::Dictation => "Another dictation is running. Retry after a short wait.",
+        Endpoint::Transcription => {
+            "The server is busy with another request. Retry after a short wait."
+        }
+    };
+    StageError::new(stage::PREPARE, "rate_limit_exceeded", message, 1)
 }
 
 fn unavailable(code: &'static str) -> StageError {
@@ -786,10 +900,11 @@ fn unavailable(code: &'static str) -> StageError {
     StageError::new(stage::PREPARE, code, message, 1)
 }
 
-/// A request refused before its body was read: the same envelope, with
-/// every stage skipped and no flow.
+/// A request refused before its body was read: the same envelope (or
+/// error), with every stage skipped and no flow.
 async fn reject(
     frontend: &Frontend,
+    endpoint: Endpoint,
     operation_id: String,
     arrival: Instant,
     error: StageError,
@@ -810,7 +925,7 @@ async fn reject(
         Some(&mut events as &mut dyn EventSink),
     );
     let output = operation.finish(Err(error), None).await;
-    envelope_response(output)
+    answer(endpoint, output, None)
 }
 
 /// The envelope as the answer: its status, `Retry-After: 1` for a local
@@ -1047,7 +1162,7 @@ mod tests {
 
     #[test]
     fn a_panicked_operation_still_answers_with_the_envelope() {
-        let response = panicked("op-1".to_owned(), Instant::now());
+        let response = panicked(Endpoint::Dictation, "op-1".to_owned(), Instant::now());
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
         let body = body(response);

@@ -3,8 +3,11 @@
 //! `POST /pumice/v1/transcriptions` on its loopback port.
 //!
 //! The request is rebuilt, never forwarded: a fresh multipart form with
-//! the flow's model and the uploaded bytes unchanged, under a fixed file
-//! name (the client's is never passed on), the literal `Host`
+//! the flow's model, the request's [`TranscriptionOptions`] (none for a
+//! dictation; `language`, `prompt` and `temperature` for an OpenAI
+//! transcription, p15-serve-transcriptions/D6) and the uploaded bytes
+//! unchanged, under a fixed file name (the client's is never passed on),
+//! the literal `Host`
 //! `127.0.0.1:<port>`, no `Origin`, no redirects and no proxy (hyper's
 //! client connection has neither). The answer is read up to
 //! [`MAX_RESULT_BYTES`] and checked strictly against the detailed result
@@ -43,17 +46,42 @@ const FILE_NAME: &str = "audio";
 /// The child's managed route.
 const PATH: &str = "/pumice/v1/transcriptions";
 
+/// What one request asks of the transcription itself, already validated
+/// by the route: forwarded as the child's own form fields, never to the AI.
+/// The default (a dictation) sends none, so the child's defaults apply. No
+/// `Debug`: `prompt` is the user's text.
+#[derive(Clone, Default)]
+pub struct TranscriptionOptions {
+    /// A trimmed ISO-639-1 code; the child checks it against its list.
+    pub language: Option<String>,
+    /// Whisper's initial prompt.
+    pub prompt: Option<String>,
+    /// Between 0 and 1.
+    pub temperature: Option<f32>,
+}
+
 /// Sends one operation's audio to the ready child, once.
 pub struct WarmTranscriber {
     supervisor: SupervisorHandle,
+    /// Fixed for the operation's life.
+    options: TranscriptionOptions,
     /// The generation a request was sent to and then abandoned.
     abandoned: Mutex<Option<u64>>,
 }
 
 impl WarmTranscriber {
+    /// A dictation's transcriber: no per-request options.
     pub fn new(supervisor: SupervisorHandle) -> WarmTranscriber {
+        WarmTranscriber::with_options(supervisor, TranscriptionOptions::default())
+    }
+
+    pub fn with_options(
+        supervisor: SupervisorHandle,
+        options: TranscriptionOptions,
+    ) -> WarmTranscriber {
         WarmTranscriber {
             supervisor,
+            options,
             abandoned: Mutex::new(None),
         }
     }
@@ -108,7 +136,7 @@ impl Transcriber for WarmTranscriber {
             biased;
             reason = cancel::cancelled(&mut cancelled) => Err(SttFailure::Cancelled(reason)),
             () = tokio::time::sleep_until(deadline) => Err(SttFailure::Timeout),
-            outcome = send(child.port, model, file.clone(), &dispatched) => outcome,
+            outcome = send(child.port, model, &self.options, file.clone(), &dispatched) => outcome,
         };
         let dispatched = dispatched.load(Ordering::Acquire);
         match outcome {
@@ -134,6 +162,7 @@ impl Transcriber for WarmTranscriber {
 async fn send(
     port: u16,
     model: &str,
+    options: &TranscriptionOptions,
     file: Bytes,
     dispatched: &AtomicBool,
 ) -> Result<TranscriptOutput, SttFailure> {
@@ -150,7 +179,7 @@ async fn send(
         let _ = connection.await;
     }));
 
-    let form = Form::new(model, file);
+    let form = Form::new(model, options, file);
     let request = hyper::Request::post(PATH)
         .header(hyper::header::HOST, format!("127.0.0.1:{port}"))
         .header(hyper::header::CONTENT_TYPE, form.content_type())
@@ -245,6 +274,9 @@ fn map_error(status: hyper::StatusCode, body: &[u8]) -> SttFailure {
     match (status.as_u16(), code.as_deref()) {
         (400, Some("invalid_audio")) => module("invalid_input"),
         (400, Some(code @ ("unsupported_format" | "audio_too_long"))) => module(code),
+        // Only a forwarded `language` can be refused this way: the route
+        // checks its shape, the child its list.
+        (400, Some("invalid_language")) => module("invalid_language"),
         (413, Some("file_too_large" | "body_too_large")) => module("input_too_large"),
         (500, Some("transcription_failed")) => module("engine_failed"),
         (504, Some("deadline_exceeded")) => SttFailure::Timeout,
@@ -256,8 +288,9 @@ fn map_error(status: hyper::StatusCode, body: &[u8]) -> SttFailure {
     }
 }
 
-/// The internal multipart form: `model`, then `file` with the uploaded
-/// bytes unchanged. Sent as three chunks, so the audio is never copied.
+/// The internal multipart form: `model`, the options that are set, then
+/// `file` with the uploaded bytes unchanged. Sent as three chunks, so the
+/// audio is never copied.
 pub struct Form {
     boundary: String,
     chunks: VecDeque<Bytes>,
@@ -265,13 +298,34 @@ pub struct Form {
 }
 
 impl Form {
-    pub fn new(model: &str, file: Bytes) -> Form {
-        let boundary = boundary_for(&file);
-        let head = format!(
-            "--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{model}\r\n\
-             --{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{FILE_NAME}\"\r\n\
-             Content-Type: application/octet-stream\r\n\r\n"
+    pub fn new(model: &str, options: &TranscriptionOptions, file: Bytes) -> Form {
+        let temperature = options.temperature.map(|value| value.to_string());
+        let fields = [
+            ("model", Some(model)),
+            ("language", options.language.as_deref()),
+            ("prompt", options.prompt.as_deref()),
+            ("temperature", temperature.as_deref()),
+        ];
+        // The boundary occurs in no value: a prompt is the client's text.
+        let mut parts: Vec<&[u8]> = vec![&file];
+        parts.extend(
+            fields
+                .iter()
+                .filter_map(|(_, value)| value.map(str::as_bytes)),
         );
+        let boundary = boundary_for(&parts);
+        let mut head = String::new();
+        for (name, value) in fields {
+            if let Some(value) = value {
+                head.push_str(&format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+                ));
+            }
+        }
+        head.push_str(&format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{FILE_NAME}\"\r\n\
+             Content-Type: application/octet-stream\r\n\r\n"
+        ));
         let tail = format!("\r\n--{boundary}--\r\n");
         let chunks = VecDeque::from([Bytes::from(head), file, Bytes::from(tail)]);
         let len = chunks.iter().map(|chunk| chunk.len() as u64).sum();
@@ -319,9 +373,9 @@ impl Body for Form {
     }
 }
 
-/// A boundary that does not occur in the file (a delimiter is
+/// A boundary that occurs in none of the parts (a delimiter is
 /// `--boundary`; one inside the data would end the part early).
-fn boundary_for(file: &[u8]) -> String {
+fn boundary_for(parts: &[&[u8]]) -> String {
     let mut attempt = 0u32;
     loop {
         let boundary = format!(
@@ -329,7 +383,10 @@ fn boundary_for(file: &[u8]) -> String {
             crate::orchestrator::events::operation_id()
         );
         let delimiter = format!("--{boundary}");
-        if !contains(file, delimiter.as_bytes()) {
+        if !parts
+            .iter()
+            .any(|part| contains(part, delimiter.as_bytes()))
+        {
             return boundary;
         }
         attempt += 1;
@@ -358,7 +415,7 @@ mod tests {
     #[test]
     fn the_form_keeps_the_bytes_and_drops_the_file_name() {
         let audio = Bytes::from_static(b"RIFF\x00\x01--not-a-boundary\r\n\xff");
-        let form = Form::new("turbo", audio.clone());
+        let form = Form::new("turbo", &TranscriptionOptions::default(), audio.clone());
         let boundary = form.boundary.clone();
         let total = form.len();
         let joined: Vec<u8> = form.chunks.iter().flat_map(|c| c.to_vec()).collect();
@@ -373,17 +430,67 @@ mod tests {
             .position(|w| w == b"RIFF")
             .expect("the audio is in the form");
         assert_eq!(&joined[start..start + audio.len()], &audio[..]);
+        for absent in ["language", "prompt", "temperature"] {
+            assert!(!text.contains(absent), "a dictation sends no {absent}");
+        }
+    }
+
+    #[test]
+    fn options_are_sent_as_their_own_fields() {
+        let audio = Bytes::from_static(b"RIFF audio");
+        let options = TranscriptionOptions {
+            language: Some("pt".to_owned()),
+            prompt: Some("Olá, \"Pumice\"\r\nnext line".to_owned()),
+            temperature: Some(0.25),
+        };
+        let form = Form::new("turbo", &options, audio);
+        let boundary = form.boundary.clone();
+        let joined: Vec<u8> = form.chunks.iter().flat_map(|c| c.to_vec()).collect();
+        let text = String::from_utf8(joined).unwrap();
+        let field = |name: &str, value: &str| {
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+            )
+        };
+        let expected = [
+            field("model", "turbo"),
+            field("language", "pt"),
+            field("prompt", "Olá, \"Pumice\"\r\nnext line"),
+            field("temperature", "0.25"),
+        ]
+        .concat();
+        assert!(text.starts_with(&expected), "{text}");
+        assert!(text.contains("filename=\"audio\""));
+
+        // Only the options that are set.
+        let options = TranscriptionOptions {
+            temperature: Some(0.0),
+            ..TranscriptionOptions::default()
+        };
+        let form = Form::new("turbo", &options, Bytes::from_static(b"x"));
+        let joined: Vec<u8> = form.chunks.iter().flat_map(|c| c.to_vec()).collect();
+        let text = String::from_utf8(joined).unwrap();
+        assert!(text.contains("name=\"temperature\"\r\n\r\n0\r\n"), "{text}");
+        assert!(!text.contains("language") && !text.contains("prompt"));
     }
 
     #[test]
     fn the_boundary_never_occurs_in_the_file() {
         // A file that happens to contain a boundary-looking line still gets
         // one that does not occur in it.
-        let probe = boundary_for(b"");
+        let probe = boundary_for(&[b""]);
         let file = format!("x--{probe}y");
-        let boundary = boundary_for(file.as_bytes());
+        let boundary = boundary_for(&[file.as_bytes()]);
         assert!(!contains(
             file.as_bytes(),
+            format!("--{boundary}").as_bytes()
+        ));
+        // Any part counts, a prompt included.
+        let probe = boundary_for(&[b""]);
+        let prompt = format!("--{probe}");
+        let boundary = boundary_for(&[b"audio", prompt.as_bytes()]);
+        assert!(!contains(
+            prompt.as_bytes(),
             format!("--{boundary}").as_bytes()
         ));
         assert!(contains(b"abc--def", b"--d"));
@@ -453,6 +560,10 @@ mod tests {
         assert_eq!(
             module(413, "file_too_large").as_deref(),
             Some("input_too_large")
+        );
+        assert_eq!(
+            module(400, "invalid_language").as_deref(),
+            Some("invalid_language")
         );
         assert_eq!(
             module(500, "transcription_failed").as_deref(),

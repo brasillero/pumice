@@ -172,6 +172,7 @@ async fn start(
         dictations: Some(Dictations {
             runtime: Arc::new(runtime),
             flows: loaded.config.flows.clone(),
+            transcription_flows: Vec::new(),
         }),
         scope: Arc::clone(&scope),
         request_hook,
