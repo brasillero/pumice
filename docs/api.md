@@ -51,10 +51,12 @@ The whole flow — transcription with a warm model, the formatter and the
 relay — behind Pumice routes and an OpenAI transcription route whose
 models are the flows listed in `serve.transcription_flows`. There is no
 `/v1/chat/completions` here (`p15-serve-transcriptions/D7`). Every request
-needs the `Host` `127.0.0.1:<port>`; an `Origin` other than
-`http://127.0.0.1:<port>` or a cross-site `Sec-Fetch-Site` gets 403. No CORS
-headers; no API key; every answer is JSON with `Cache-Control: no-store`
-(a transcription asked for as `text` is plain text). On
+needs the `Host` `127.0.0.1:<port>` or the host of a `serve.allowed_origins`
+entry (for `tailscale serve`); an `Origin` other than that host's own
+(`http://127.0.0.1:<port>` or the listed origin) or a cross-site
+`Sec-Fetch-Site` gets 403. No CORS headers; no API key; every answer is JSON
+with `Cache-Control: no-store` (a transcription asked for as `text` is plain
+text, the test page is HTML). On
 `/pumice/v1/dictations` every answer, 403 and 405 included, is the run
 document below; the OpenAI routes answer OpenAI's shapes.
 
@@ -67,6 +69,7 @@ document below; the OpenAI routes answer OpenAI's shapes.
 | `GET /pumice/v1/status` | Service, transcription child (with its compute snapshot) and dictation admission state (metadata only) |
 | `GET /ready` | 200 when dictations and transcriptions can run, else 503 with a code |
 | `GET /health` | `{"status":"ok","version":…}` |
+| `GET /` | Browser test page (plus `/page.js`, `/page.css`): pick a model, record or upload, see the final text, raw transcript, post-processing status and timings |
 
 ### OpenAI transcriptions
 
@@ -114,6 +117,16 @@ another transcription runs (one shared work permit). Unsupported OpenAI
 fields (`timestamp_granularities[]`, `include[]`, `verbose_json`,
 subtitles, `stream=true`, …) are refused with 400. Details, codes and
 limits: [orchestrator.md](orchestrator.md#openai-transcriptions).
+
+### Test page
+
+Open <http://127.0.0.1:17570/> on the same machine. From another machine,
+use an SSH local forward to the same local port
+(`ssh -L 17570:127.0.0.1:17570 server`, because the Host check expects
+`127.0.0.1:<port>`), or `tailscale serve` with the origin listed in
+`serve.allowed_origins` (never `tailscale funnel`); never expose the port
+itself. Details, headers and the Tailscale steps:
+[orchestrator.md](orchestrator.md#test-page).
 
 ### Dictations
 
