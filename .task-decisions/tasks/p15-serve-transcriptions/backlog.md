@@ -17,19 +17,6 @@
 **To do.**
 - [ ] Design the metadata and request fields once a client or Pumice's own UI can use them.
 
-### #2 · Deferred · Browser test page on `pumice serve`
-- type: Task
-- area: api
-- origin: p13.4-dictations#1
-- ticket: —
-- created: 2026-10-18
-- reason: separate PR (P15.3) after this one merges
-
-**Context.** The owner wants to try the first version from an HTML page before T3. The page records or uploads audio, lists the models from `GET /v1/models` and calls `POST /v1/audio/transcriptions`, showing the final text and, when present, the raw transcript and timings. It replaces the planned P13.5 page for the dictation route.
-
-**To do.**
-- [ ] Serve the page from `pumice serve` and test it with the owner's flows on server-1.
-
 ### #3 · Deferred · Try `pumice serve` from T3 Code
 - type: Task
 - area: api
@@ -44,3 +31,17 @@
 - [ ] Owner configures the base URL and a model in T3 Code and records what works.
 
 ## Closed
+
+### #2 · Moved · Browser test page on `pumice serve`
+- type: Task
+- area: api
+- origin: p13.4-dictations#1
+- ticket: —
+- created: 2026-10-18
+- closed: 2026-10-18
+- outcome: → p15.3-test-page#1
+
+**Context.** The owner wants to try the first version from an HTML page before T3. The page records or uploads audio, lists the models from `GET /v1/models` and calls `POST /v1/audio/transcriptions`, showing the final text and, when present, the raw transcript and timings. It replaces the planned P13.5 page for the dictation route.
+
+**To do.**
+- [ ] Serve the page from `pumice serve` and test it with the owner's flows on server-1.
