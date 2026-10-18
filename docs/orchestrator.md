@@ -495,7 +495,7 @@ parts, in any order, each at most once (OpenAI's subset, D6):
 | --- | --- |
 | `file` | Required. One uploaded, non-empty audio file, handled like a dictation's ([formats and limits](transcription.md#supported-formats-and-limits)) |
 | `model` | Required. A published flow id, matched exactly |
-| `language` | Optional. A two-letter ISO-639-1 code for the transcription (blank: detect) |
+| `language` | Optional. A two-letter ISO-639-1 code for the transcription (blank: use the transcription default, `transcribe.yml`'s `language`; otherwise detect) |
 | `prompt` | Optional. Whisper's initial prompt for the transcription (empty: none) |
 | `temperature` | Optional. 0 to 1, for the transcription |
 | `response_format` | Optional. `json` (default) or `text` |

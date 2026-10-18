@@ -282,8 +282,9 @@ async fn parse_form(body: Bytes, boundary: String) -> Result<Form, StageError> {
     })
 }
 
-/// A blank `language` asks for detection, like none at all; otherwise two
-/// ASCII letters, lowercased. Whether Whisper knows the code is the
+/// A blank `language` is like none at all: the transcription default
+/// (`transcribe.yml`'s `language`, else detection); otherwise two ASCII
+/// letters, lowercased. Whether Whisper knows the code is the
 /// child's check (`invalid_language` either way).
 fn language(value: &str) -> Result<Option<String>, StageError> {
     let trimmed = value.trim();
