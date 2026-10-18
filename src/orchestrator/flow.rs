@@ -660,6 +660,7 @@ pub fn map_stt_failure(
                     "the transcription module refused the audio input"
                 }
                 "model_not_found" => "the transcription model was not found",
+                "invalid_language" => "language must be a supported ISO-639-1 code",
                 _ => "the transcription engine failed",
             };
             let (code_out, exit) = match code.as_str() {
@@ -669,6 +670,12 @@ pub fn map_stt_failure(
                     ("transcription_invalid_input", 2)
                 }
                 "model_not_found" => ("transcription_model_not_found", 2),
+                // A request's own `language` (only `pumice serve`'s OpenAI
+                // route forwards one): the client's mistake.
+                "invalid_language" => {
+                    return StageError::new(stage_name, "invalid_language", message, 2)
+                        .with_param("language");
+                }
                 _ => ("transcription_engine_failed", 1),
             };
             let mut error = StageError::new(stage_name, code_out, message, exit).with_cause(code);

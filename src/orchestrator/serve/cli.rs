@@ -18,7 +18,9 @@ warm transcription child (the pumice-transcribe program installed next to
 pumice) loaded with serve.transcription_model. Needs a `serve:` section
 with `enabled: true` in the orchestrator configuration.
 
-Routes: GET /health, GET /ready, GET /pumice/v1/status, GET /pumice/v1/flows.
+Routes: GET /health, GET /ready, GET /pumice/v1/status, GET /pumice/v1/flows,
+POST /pumice/v1/dictations; OpenAI GET /v1/models, GET /v1/models/{id} and
+POST /v1/audio/transcriptions for the flows in serve.transcription_flows.
 
   --config <FILE>  the orchestrator configuration file
                    (default: the per-user orchestrator.yml)

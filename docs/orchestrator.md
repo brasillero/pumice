@@ -170,11 +170,13 @@ loopback frontend and one warm `pumice-transcribe serve --managed` child
 (the sibling program, found like `pumice run` finds it) with the served
 model loaded for the service's lifetime. It takes dictations
 (`POST /pumice/v1/dictations`: audio plus a flow id in, the raw transcript
-and the final text out, through the same flows as `pumice run`) and
-exposes its health, readiness, status and flow list. There are no OpenAI
-routes here: clients that want `/v1/chat/completions` or
-`/v1/audio/transcriptions` keep using `pumice relay serve` and
-`pumice-transcribe serve` (all HTTP APIs: [`api.md`](api.md)).
+and the final text out, through the same flows as `pumice run`), answers
+OpenAI transcription clients for the flows it publishes
+(`POST /v1/audio/transcriptions` with the flow id as `model`, and
+`GET /v1/models`: see [OpenAI transcriptions](#openai-transcriptions)) and
+exposes its health, readiness, status and flow list. There is no
+`/v1/chat/completions` here: chat clients keep using `pumice relay serve`
+(all HTTP APIs: [`api.md`](api.md)).
 
 ```sh
 pumice serve                          # per-user orchestrator.yml, port 17570
@@ -190,12 +192,35 @@ serve:
   port: 17570                 # optional; 7567 is refused; 0 picks a free port
   transcription_model: turbo  # required when enabled
   startup_timeout_ms: 60000   # optional, 1000 to 300000
+  transcription_flows:        # optional, default empty: the OpenAI models
+    - clean
+    - raw
 ```
 
 - Every **enabled** flow must use `serve.transcription_model` (one model is
   loaded; a flow naming another is a startup error at its
   `transcription_model` line). Disabled flows may use any model. At most 128
   enabled flows, with ids of at most 128 bytes.
+- `transcription_flows` lists the flows published as OpenAI transcription
+  models; nothing is published unless listed. Each entry is a flow id that
+  is also a public model id: 1 to 128 characters from `A–Z a–z 0–9 . _ -`,
+  starting with a letter or digit (checked at load, like duplicates). It
+  must name an enabled flow (so it uses the served model) that is either
+  **off** — `formatter: null` with `relay_route: passthrough`, which returns
+  the raw transcript — or has a formatter for its AI route; a flow that
+  sends the transcript to an AI without a formatter cannot be published.
+  Custom presets are formatter files registered in `formatter.yml`, named
+  by a flow's `formatter` like the built-in ones
+  ([formatter.md](formatter.md)).
+- The routes that list flows must fit their 128 KiB bound in every state:
+  `GET /v1/models` (the published flows) and `GET /pumice/v1/flows` (the
+  enabled ones), each entry with its ids, preset, relay route, served model
+  and an `unavailable` code. A configuration whose list would not fit is a
+  startup error at the first entry that does not (a
+  `transcription_flows` entry or an enabled flow's `id`), even when every
+  field is within its own limit — for example 128 published flows with
+  128-character ids on a 512-byte served model id. Publish fewer flows or
+  shorten their ids, formatter ids, relay routes or the served model id.
 - `--port` overrides `serve.port` only, with the same rules. Port 7567 (the
   relay's) is always refused. An occupied port fails; there is no fallback
   port.
@@ -256,14 +281,17 @@ other names), a request with an `Origin` header is accepted only when it is
 `http://127.0.0.1:<port>`, and one with a `Sec-Fetch-Site` header only when
 it is `same-origin` or `none`; anything else gets 403 `host_not_allowed`,
 `origin_not_allowed` or `cross_site_not_allowed`, before any routing. No
-CORS headers are sent. All answers are JSON with `Cache-Control: no-store`;
+CORS headers are sent. All answers are JSON with `Cache-Control: no-store`
+(an OpenAI transcription asked for as `text` is plain text);
 errors use the OpenAI error object (`message`, `type`, `param`, `code`),
 including 404 `not_found` and 405 `method_not_allowed` (with `Allow: GET`).
 On the dictation route every answer, its 403 and its 405
 `method_not_allowed` (with `Allow: POST`) included, is the dictation
 document below, whose `error` is that object with a few more fields. The
-guard still comes first: a refused origin gets 403 whatever the method. The
-metadata routes only read
+guard still comes first: a refused origin gets 403 whatever the method. On
+`POST /v1/audio/transcriptions` the 403 and the 405 (with `Allow: POST`)
+are the plain OpenAI error object. The metadata routes, the model list
+included, only read
 in-memory state: they never wait for the transcription child, a provider, a
 model or a running dictation.
 
@@ -284,7 +312,7 @@ model or a running dictation.
        "device":{"name":"Vulkan0","description":"NVIDIA GeForce RTX 4070"},
        "cpu_variant":"haswell","fallback_reason":null},
      "last_failure":null},
-   "flows":{"enabled":2},
+   "flows":{"enabled":2,"published":2},
    "dictations":{"served":true,"admission":"busy","active":true,
      "stage":"transcription"}}
   ```
@@ -296,8 +324,10 @@ model or a running dictation.
   while no child is ready;
   `last_failure` is a fixed code such as `transcription_exited`,
   `transcription_probe_failed` or `transcription_recycled`.
-  `dictations.admission` is `open`, `busy` (one is running; `stage` names
-  its current stage: `prepare`, `transcription`, `formatter`, `relay` or
+  `flows.published` counts `serve.transcription_flows`.
+  `dictations.admission` is `open`, `busy` (a dictation or an OpenAI
+  transcription is running; they share one permit, and `stage` names its
+  current stage: `prepare`, `transcription`, `formatter`, `relay` or
   `cleanup`) or `stopped` (a cleanup could not be confirmed; see below).
   No paths, child address, operation ids or content.
 - `GET /pumice/v1/flows` — the enabled flows:
@@ -308,12 +338,15 @@ model or a running dictation.
   ```
   When the service is not ready, each flow has `"ready":false` and an
   `unavailable` code (the same codes as `/ready`).
+- `GET /v1/models`, `GET /v1/models/{id}` — the published flows as OpenAI
+  models ([below](#openai-transcriptions)).
 
 Limits: at most 64 connections (more are closed at once), one request per
 connection, request headers within 5 s and 16 KiB. These metadata routes, and
 every rejection, also bound the whole connection to 10 s from its arrival and
 answers to 128 KiB; a dictation's connection may last its longest enabled
-flow's total budget plus 5 s, with answers up to 16 MiB.
+flow's total budget plus 5 s, with answers up to 16 MiB (an OpenAI
+transcription's too).
 
 ### Dictations
 
@@ -428,6 +461,103 @@ the reported one) and no further dictation is admitted (`admission:
 "stopped"`, `/ready` 503 `admission_stopped`) until `pumice serve` is
 restarted, so no paid call starts over processes that may still run.
 
+### OpenAI transcriptions
+
+The flows in `serve.transcription_flows` are OpenAI transcription models:
+the model id is the flow id, and the flow decides the audio model, the
+post-processing preset and the AI route, so `text` comes back ready to use
+(p15-serve-transcriptions/D1, D5). A generic client only needs the base URL
+`http://127.0.0.1:17570/v1` and a model id; it needs no API key (any
+`Authorization` header is ignored).
+
+`GET /v1/models` lists them in `serve.transcription_flows` order, and
+`GET /v1/models/{id}` returns one (404 `model_not_found` with `param`
+`model` otherwise). Each is an OpenAI model object with a `pumice` object
+that standard clients ignore:
+
+```json
+{"object":"list","data":[
+  {"id":"clean","object":"model","created":0,"owned_by":"pumice",
+   "pumice":{"schema_version":1,"flow":"clean","transcription_model":"turbo",
+     "post_processing":{"preset":"builtin:clean","relay_route":"claude"},
+     "response_formats":["json","text"],"ready":true}}]}
+```
+
+`preset` is the flow's formatter (`null` for an off flow). While the
+service is not ready, every model stays listed with `"ready":false` and an
+`unavailable` code (the codes of `/ready`). Listing never waits for the
+child, a provider or a running request.
+
+`POST /v1/audio/transcriptions` takes `multipart/form-data` with these
+parts, in any order, each at most once (OpenAI's subset, D6):
+
+| Part | |
+| --- | --- |
+| `file` | Required. One uploaded, non-empty audio file, handled like a dictation's ([formats and limits](transcription.md#supported-formats-and-limits)) |
+| `model` | Required. A published flow id, matched exactly |
+| `language` | Optional. A two-letter ISO-639-1 code for the transcription (blank: use the transcription default, `transcribe.yml`'s `language`; otherwise detect) |
+| `prompt` | Optional. Whisper's initial prompt for the transcription (empty: none) |
+| `temperature` | Optional. 0 to 1, for the transcription |
+| `response_format` | Optional. `json` (default) or `text` |
+| `stream` | Optional. Only `false` |
+
+`language`, `prompt` and `temperature` go to the transcription child only,
+replacing `transcribe.yml`'s defaults for this request; they never reach
+the formatter or the AI, which get exactly what a dictation gives them.
+Any other part (`timestamp_granularities[]`, `include[]`,
+`chunking_strategy`, …), `verbose_json`, `srt`, `vtt`, `diarized_json`
+and `stream=true` are refused with 400 before any work.
+
+```sh
+curl --fail-with-body --max-time 200 http://127.0.0.1:17570/v1/audio/transcriptions \
+  -F 'file=@clip.wav' -F 'model=clean' -F 'language=en'
+```
+
+With `json`, `text` is the final text, next to a `pumice` object:
+
+```json
+{"text":"Raw words.","pumice":{"schema_version":1,"operation_id":"…","flow":"clean","transcript":{"text":"raw words","language":"en","audio_seconds":2.1},"post_processing":{"status":"applied","preset":"builtin:clean","relay_route":"claude"},"stages":{"prepare":{"status":"ok","elapsed_ms":2},"transcription":{"status":"ok","elapsed_ms":5900,"inference_ms":5800},"formatter":{"status":"ok","elapsed_ms":0},"relay":{"status":"ok","elapsed_ms":2400}},"timings_ms":{"total":8303}}}
+```
+
+With `text`, the body is exactly the final text (`text/plain;
+charset=utf-8`). Both carry the header `Pumice-Postprocessing-Status` with
+`post_processing.status`:
+
+- `off` — an off flow: `text` is the raw transcript;
+- `applied` — the formatter and the AI route ran;
+- `skipped` — a silent (whitespace-only) transcript: no AI call, `text` is
+  the transcript unchanged;
+- `failed` — the transcription worked but something after it failed: the
+  formatter or the AI route (an error, a timeout, an empty or too large
+  output, a quota or login problem), a shutdown during the formatter or the
+  AI call, or a cleanup that could not be confirmed (`stage` `cleanup`,
+  `code` `cleanup_failed`). The answer is still `200`, `text` is the **raw
+  transcript**, and `post_processing.error` has the failure's safe `stage`,
+  `code`, `message` and `cause_code` (D4, D9). Nothing is retried and no
+  other provider is tried. An unconfirmed cleanup still stops admission
+  afterwards, exactly as for a dictation (`admission: "stopped"`, and
+  every later dictation or transcription gets 503 `admission_stopped`).
+
+Every other failure is an OpenAI error object — exactly `message`, `type`,
+`param` and `code` — with the statuses of the [dictation
+table](#dictations) and these request codes: 400 `missing_model`,
+`text_param_as_file`, `invalid_language`, `invalid_temperature`,
+`invalid_response_format`, `stream_unsupported`, `invalid_stream` (plus the
+dictation's multipart codes; `language` is also refused by the child when
+Whisper does not know it), 404 `model_not_found`, 405 with `Allow: POST`,
+and 429 `rate_limit_exceeded` with `Retry-After: 1`. Transcription
+failures (undecodable audio, engine failure, timeout, an unavailable or
+broken child) are errors, since there is no text to return; so is a
+cleanup that could not be confirmed when no transcript was obtained (500
+`cleanup_failed`). The dictation route keeps its own rule: a dictation
+over an unconfirmed cleanup is never a success.
+
+A transcription is admitted, limited, timed, cancelled and cleaned up
+exactly like a dictation, with the same work permit: while one of them
+runs the other gets 429, and an abandoned transcription recycles the child
+the same way. The same privacy holds: no audio, transcript, prompt or final
+text is logged, and events are the dictation's metadata-only events.
+
 ### Output
 
 Plain mode writes short lines on stderr, starting with
@@ -448,12 +578,12 @@ the transcription module reported its own error code). stderr then carries
 metadata-only events (`child_starting`, `child_ready`, `child_failed`,
 `child_restarting`, `child_recycled`, `transcription_unavailable`,
 `admission_stopped`, `stopping`, `panicked`, …) with the child `generation`
-and fixed codes, and each dictation's own events (`started`,
-`stage_started`, `stage_finished`, `finished`, with stage names, elapsed
-milliseconds and error codes) under the dictation's `operation_id`, as
+and fixed codes, and each dictation's or transcription's own events
+(`started`, `stage_started`, `stage_finished`, `finished`, with stage
+names, elapsed milliseconds and error codes) under its `operation_id`, as
 `pumice run --json` writes them. No event, record or plain line ever
-carries audio, a transcript, a final text, a flow id sent by a client or a
-file name. Like `pumice run`, dictations call the relay's pipeline
+carries audio, a transcript, a prompt, a final text, a flow or model id
+sent by a client or a file name. Like `pumice run`, dictations call the relay's pipeline
 in-process, so the relay's `debug_log` (written by `pumice relay serve`'s
 HTTP handlers) does not record them; `pumice serve` keeps no content log of
 its own. Both streams are bounded and

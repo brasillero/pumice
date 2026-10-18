@@ -5,7 +5,9 @@ All of them listen on `127.0.0.1` only, send no telemetry and need no API
 key. Routes with an OpenAI equivalent follow the OpenAI contract; routes
 with none live under `/pumice/v1/…`, carry a `schema_version` and use the
 OpenAI error object (`message`, `type`, `param`, `code`) plus Pumice
-fields (`p13.1-flow-seam/D1`). No service re-serves another's routes.
+fields (`p13.1-flow-seam/D1`). No service re-serves another's routes;
+`pumice serve`'s OpenAI transcription route runs Pumice flows, not the
+transcription module's route (`p15-serve-transcriptions/D1`).
 
 | Service | Command | Default address | Guide |
 | --- | --- | --- | --- |
@@ -46,20 +48,74 @@ meant for clients. Details: [transcription.md](transcription.md#serve).
 ## Local stack (`pumice serve`)
 
 The whole flow — transcription with a warm model, the formatter and the
-relay — behind custom routes only (no OpenAI routes, `p13.1-flow-seam/D2`).
-Every request needs the `Host` `127.0.0.1:<port>`; an `Origin` other than
+relay — behind Pumice routes and an OpenAI transcription route whose
+models are the flows listed in `serve.transcription_flows`. There is no
+`/v1/chat/completions` here (`p15-serve-transcriptions/D7`). Every request
+needs the `Host` `127.0.0.1:<port>`; an `Origin` other than
 `http://127.0.0.1:<port>` or a cross-site `Sec-Fetch-Site` gets 403. No CORS
-headers; every answer is JSON with `Cache-Control: no-store`. On
+headers; no API key; every answer is JSON with `Cache-Control: no-store`
+(a transcription asked for as `text` is plain text). On
 `/pumice/v1/dictations` every answer, 403 and 405 included, is the run
-document below.
+document below; the OpenAI routes answer OpenAI's shapes.
 
 | Route | Purpose |
 | --- | --- |
+| `POST /v1/audio/transcriptions` | OpenAI transcription: multipart `file` + `model` (a published flow id) and optional `language`, `prompt`, `temperature` (for the transcription only), `response_format` `json`/`text`, `stream=false`; answers the **final** text |
+| `GET /v1/models`, `GET /v1/models/{id}` | The published flows as OpenAI model objects, each with a `pumice` object (preset, AI route, readiness) |
 | `POST /pumice/v1/dictations` | Multipart `file` (audio) + `flow` (an enabled flow id); answers the run envelope: the raw `transcript` and the final `result` apart, per-stage status and timings |
 | `GET /pumice/v1/flows` | The enabled flows and whether each can run now |
 | `GET /pumice/v1/status` | Service, transcription child (with its compute snapshot) and dictation admission state (metadata only) |
-| `GET /ready` | 200 when dictations can run, else 503 with a code |
+| `GET /ready` | 200 when dictations and transcriptions can run, else 503 with a code |
 | `GET /health` | `{"status":"ok","version":…}` |
+
+### OpenAI transcriptions
+
+Point an OpenAI-compatible client at `http://127.0.0.1:17570/v1` and pick a
+model from `GET /v1/models`; the model id is a flow id, so it selects the
+audio model, the post-processing preset (off, `builtin:clean` or a preset
+saved in `formatter.yml`) and the AI route.
+
+```sh
+curl http://127.0.0.1:17570/v1/models
+curl --fail-with-body http://127.0.0.1:17570/v1/audio/transcriptions \
+  -F 'file=@clip.wav' -F 'model=clean' -F 'language=en'
+```
+
+```json
+{"text":"Raw words.","pumice":{"schema_version":1,"operation_id":"…","flow":"clean","transcript":{"text":"raw words","language":"en","audio_seconds":2.1},"post_processing":{"status":"applied","preset":"builtin:clean","relay_route":"claude"},"stages":{…},"timings_ms":{"total":8303}}}
+```
+
+```sh
+curl --fail-with-body http://127.0.0.1:17570/v1/audio/transcriptions \
+  -F 'file=@clip.wav' -F 'model=clean' -F 'response_format=text' -D -
+# HTTP/1.1 200 OK
+# content-type: text/plain; charset=utf-8
+# pumice-postprocessing-status: applied
+#
+# Raw words.
+```
+
+`text` is always the final text; standard clients ignore the `pumice`
+object and the `Pumice-Postprocessing-Status` header (`off`, `applied`,
+`skipped` for silence, `failed`). If the transcription works but anything
+after it fails — the formatter, the AI, a shutdown during them, or a
+cleanup that could not be confirmed (which also stops admission until a
+restart) — the answer is still `200` with the **raw transcript** as `text`,
+status `failed` and the safe reason in `pumice.post_processing.error`:
+
+```json
+{"text":"raw words","pumice":{…,"post_processing":{"status":"failed","preset":"builtin:clean","relay_route":"claude","error":{"stage":"relay","code":"relay_timeout","message":"The provider call exceeded its deadline."}},…}}
+```
+
+Any other failure is an OpenAI error with an OpenAI status, for example
+`404 {"error":{"message":"The requested model does not exist on this server.","type":"invalid_request_error","param":"model","code":"model_not_found"}}`
+or `429` `rate_limit_exceeded` with `Retry-After: 1` while a dictation or
+another transcription runs (one shared work permit). Unsupported OpenAI
+fields (`timestamp_granularities[]`, `include[]`, `verbose_json`,
+subtitles, `stream=true`, …) are refused with 400. Details, codes and
+limits: [orchestrator.md](orchestrator.md#openai-transcriptions).
+
+### Dictations
 
 ```sh
 curl --fail-with-body http://127.0.0.1:17570/pumice/v1/dictations \

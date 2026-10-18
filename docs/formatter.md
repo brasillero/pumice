@@ -96,6 +96,12 @@ that names nothing. See [`formatter.example.yml`](../formatter.example.yml)
 and [`example-formatter.clean.yml`](../example-formatter.clean.yml) for a
 complete pair.
 
+A registered definition is a post-processing preset for the orchestrator:
+a flow names it in `formatter:` like `builtin:clean`, and a flow published
+in `pumice serve`'s `serve.transcription_flows` makes it selectable by
+OpenAI transcription clients through the flow id as the model
+([orchestrator.md](orchestrator.md#openai-transcriptions)).
+
 ## Commands
 
 All commands accept `--config FILE`. Every command supports `--json`, which

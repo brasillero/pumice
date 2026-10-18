@@ -139,9 +139,17 @@ pub fn http_class(error: &StageError) -> HttpClass {
         | "flow_not_text"
         | "invalid_utf8"
         | "nul_in_text"
-        | "flow_disabled" => (400, REQUEST),
+        | "flow_disabled"
+        // `pumice serve`'s OpenAI transcription route.
+        | "missing_model"
+        | "text_param_as_file"
+        | "invalid_language"
+        | "invalid_response_format"
+        | "invalid_temperature"
+        | "invalid_stream"
+        | "stream_unsupported" => (400, REQUEST),
         "host_not_allowed" | "origin_not_allowed" | "cross_site_not_allowed" => (403, REQUEST),
-        "flow_not_found" | "not_found" => (404, REQUEST),
+        "flow_not_found" | "not_found" | "model_not_found" => (404, REQUEST),
         "method_not_allowed" => (405, REQUEST),
         "upload_timeout" => (408, REQUEST),
         "body_too_large" | "file_too_large" | "field_too_large" => (413, REQUEST),

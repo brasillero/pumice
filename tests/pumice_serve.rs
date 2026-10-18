@@ -388,7 +388,7 @@ fn serves_health_ready_status_and_flows_then_stops() {
             "fallback_reason": null,
         })
     );
-    assert_eq!(body["flows"], json!({"enabled": 1}));
+    assert_eq!(body["flows"], json!({"enabled": 1, "published": 0}));
     let text = body.to_string();
     assert!(
         !text.contains(&rig.dir.path().display().to_string()),
@@ -412,8 +412,12 @@ fn serves_health_ready_status_and_flows_then_stops() {
         })
     );
 
-    // No OpenAI routes; JSON errors with Allow on 405.
+    // Nothing published: an empty model list, no chat route; JSON errors
+    // with Allow on 405.
     let (status, body) = get(port, "/v1/models");
+    assert_eq!(status, 200);
+    assert_eq!(body, json!({"object": "list", "data": []}));
+    let (status, body) = get(port, "/v1/chat/completions");
     assert_eq!(status, 404);
     assert_eq!(body["error"]["code"], "not_found");
     let (status, headers, body) = http(
