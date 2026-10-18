@@ -2,18 +2,6 @@
 
 ## Active
 
-### #2 · To do · Browser test page on `pumice serve`
-- type: Task
-- area: api
-- origin: p13.4-dictations#1
-- ticket: —
-- created: 2026-10-18
-
-**Context.** The owner wants to try the first version from an HTML page before T3. The page records or uploads audio, lists the models from `GET /v1/models` and calls `POST /v1/audio/transcriptions`, showing the final text and, when present, the raw transcript and timings. It replaces the planned P13.5 page for the dictation route.
-
-**To do.**
-- [ ] Serve the page from `pumice serve` and test it with the owner's flows on server-1.
-
 ## Deferred
 
 ### #1 · Deferred · Select post-processing through metadata instead of model names
@@ -28,6 +16,19 @@
 
 **To do.**
 - [ ] Design the metadata and request fields once a client or Pumice's own UI can use them.
+
+### #2 · Deferred · Browser test page on `pumice serve`
+- type: Task
+- area: api
+- origin: p13.4-dictations#1
+- ticket: —
+- created: 2026-10-18
+- reason: separate PR (P15.3) after this one merges
+
+**Context.** The owner wants to try the first version from an HTML page before T3. The page records or uploads audio, lists the models from `GET /v1/models` and calls `POST /v1/audio/transcriptions`, showing the final text and, when present, the raw transcript and timings. It replaces the planned P13.5 page for the dictation route.
+
+**To do.**
+- [ ] Serve the page from `pumice serve` and test it with the owner's flows on server-1.
 
 ### #3 · Deferred · Try `pumice serve` from T3 Code
 - type: Task
