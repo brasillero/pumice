@@ -44,13 +44,13 @@ use pumice_relay::process::CleanupScope;
 use crate::dispatch;
 use crate::orchestrator::cancel::{self, CancelReason};
 use crate::orchestrator::config;
-use crate::orchestrator::error::StageError;
+use crate::orchestrator::error::{ConfigError, StageError};
 use crate::orchestrator::flow::{self, Runtime, set_reference_location};
 use crate::orchestrator::result::stage;
 use crate::orchestrator::serve::child::{ChildSpec, Failure, code};
 use crate::orchestrator::serve::dictation::Dictations;
 use crate::orchestrator::serve::http::{
-    CleanupHook, FlowInfo, Frontend, RequestHook, ServiceState,
+    CleanupHook, FlowInfo, Frontend, Oversized, RequestHook, ServiceState,
 };
 use crate::orchestrator::serve::output::Reporter;
 use crate::orchestrator::serve::supervisor::{
@@ -142,6 +142,22 @@ async fn serve(params: &ServeParams, reporter: &Reporter, signals: cancel::Cance
             return 2;
         }
     };
+    let flows: Vec<FlowInfo> = loaded
+        .config
+        .flows
+        .iter()
+        .filter(|flow| flow.enabled)
+        .map(|flow| FlowInfo {
+            id: flow.id.clone(),
+            transcription_model: flow.transcription_model.clone(),
+            formatter: flow.formatter.clone(),
+            relay_route: flow.relay_route.clone(),
+        })
+        .collect();
+    if let Err(error) = check_snapshots(&loaded, &flows, &settings.transcription_flows) {
+        reporter.error("invalid_config", None, &error.to_string());
+        return 2;
+    }
     let scope = Arc::new(CleanupScope::new());
     // Built once, for the service's lifetime: every dictation runs on it, so
     // the relay pipeline's own limits keep applying (design §6).
@@ -185,18 +201,6 @@ async fn serve(params: &ServeParams, reporter: &Reporter, signals: cancel::Cance
             return 1;
         }
     };
-    let flows = loaded
-        .config
-        .flows
-        .iter()
-        .filter(|flow| flow.enabled)
-        .map(|flow| FlowInfo {
-            id: flow.id.clone(),
-            transcription_model: flow.transcription_model.clone(),
-            formatter: flow.formatter.clone(),
-            relay_route: flow.relay_route.clone(),
-        })
-        .collect();
     let service = Service {
         listener,
         supervisor: SupervisorConfig {
@@ -222,6 +226,53 @@ async fn serve(params: &ServeParams, reporter: &Reporter, signals: cancel::Cance
         cleanup_hook: None,
     };
     run(service, reporter, signals).await
+}
+
+/// The metadata routes that list flows must fit their bound in every
+/// state ([`http::oversized_snapshot`]); otherwise a configuration error at
+/// the first entry that does not fit.
+fn check_snapshots(
+    loaded: &config::LoadedConfig,
+    flows: &[FlowInfo],
+    published: &[String],
+) -> Result<(), ConfigError> {
+    let limit = http::METADATA.max_response_bytes;
+    let (at, message) = match http::oversized_snapshot(flows, published) {
+        None => return Ok(()),
+        Some(Oversized::Models { published }) => (
+            loaded
+                .config
+                .serve
+                .as_ref()
+                .and_then(|serve| serve.transcription_flows.get(published))
+                .and_then(|entry| entry.at),
+            format!(
+                "serve.transcription_flows publishes more than GET /v1/models can list in \
+                 {limit} bytes, from this entry on; publish fewer flows, or shorten their ids, \
+                 formatter ids, relay routes or serve.transcription_model"
+            ),
+        ),
+        Some(Oversized::Flows { enabled }) => (
+            loaded
+                .config
+                .flows
+                .iter()
+                .filter(|flow| flow.enabled)
+                .nth(enabled)
+                .and_then(|flow| flow.references.id),
+            format!(
+                "the enabled flows are more than GET /pumice/v1/flows can list in {limit} bytes, \
+                 from this flow on; enable fewer flows, or shorten their ids, formatter ids, \
+                 relay routes or serve.transcription_model"
+            ),
+        ),
+    };
+    Err(ConfigError::at_file(
+        &loaded.path,
+        at.map(|(line, _)| line),
+        at.map(|(_, column)| column),
+        message,
+    ))
 }
 
 /// Serves until a signal or a core failure, then tears everything down

@@ -583,6 +583,61 @@ fn the_models_are_the_published_flows() {
 }
 
 #[test]
+fn a_model_list_past_its_bound_is_refused_at_startup() {
+    // Every field within its own limit (128 published flows, 128-character
+    // ids, a 512-byte served model), but `/v1/models` in its largest state
+    // would exceed 128 KiB: a located configuration error, before any child.
+    let model = "m".repeat(512);
+    let ids: Vec<String> = (0..128)
+        .map(|index| format!("{index:03}{}", "f".repeat(125)))
+        .collect();
+    let mut config = String::from("flows:\n");
+    for id in &ids {
+        config.push_str(&format!(
+            "  - id: {id}\n    enabled: true\n    transcription_model: {model}\n    formatter: null\n    relay_route: passthrough\n"
+        ));
+    }
+    config.push_str(&format!(
+        "serve:\n  enabled: true\n  port: 0\n  transcription_model: {model}\n  transcription_flows:\n"
+    ));
+    for id in &ids {
+        config.push_str(&format!("    - {id}\n"));
+    }
+    let rig = rig(&config, json!([{}]));
+    let child = Command::new(rig.install.join(exe("pumice")))
+        .arg("serve")
+        .arg("--config")
+        .arg(rig.cfg.join("orchestrator.yml"))
+        .arg("--json")
+        .env("XDG_CONFIG_HOME", rig.dir.path())
+        .env("APPDATA", rig.dir.path())
+        .env("HOME", rig.dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start pumice serve");
+    let output = OwnedChild::new("pumice serve", child).finish(WAIT);
+    assert_eq!(output.status.code(), Some(2));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let record: Value = serde_json::from_str(stdout.trim()).expect("one record");
+    assert_eq!(record["event"], "error", "{record}");
+    assert_eq!(record["code"], "invalid_config", "{record}");
+    let message = record["message"].as_str().unwrap();
+    assert!(message.contains("GET /v1/models"), "{message}");
+    // Located at a `serve.transcription_flows` entry: `- <id>` on its line.
+    let (location, _) = message.split_once(": ").unwrap();
+    let line: usize = location.rsplit(':').nth(1).unwrap().parse().unwrap();
+    let text = fs::read_to_string(rig.cfg.join("orchestrator.yml")).unwrap();
+    let located = text.lines().nth(line - 1).unwrap();
+    assert!(
+        located.trim_start().starts_with("- ") && ids.contains(&located.trim()[2..].to_owned()),
+        "{located}"
+    );
+    assert!(rig.log_events("spawn").is_empty(), "no child spawned");
+}
+
+#[test]
 fn an_unready_service_lists_its_models_as_unready_and_refuses_work() {
     let rig = rig(
         &config(30_000, 10_000),

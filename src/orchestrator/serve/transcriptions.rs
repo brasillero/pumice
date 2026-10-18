@@ -40,7 +40,7 @@ use crate::orchestrator::serve::dictation::{
     self, Admitted, Dictations, Endpoint, MAX_BODY_BYTES, MAX_FILE_BYTES, MAX_RESPONSE_BYTES,
     MAX_SCALAR_BYTES, Once, request_error,
 };
-use crate::orchestrator::serve::http::{Frontend, json_bytes_response};
+use crate::orchestrator::serve::http::{FlowInfo, Frontend, json_bytes_response};
 use crate::orchestrator::serve::warm::TranscriptionOptions;
 
 /// The transcription route.
@@ -528,10 +528,24 @@ fn internal_error() -> Response<Full<Bytes>> {
 /// `GET /v1/models`: the published flows, in `serve.transcription_flows`
 /// order.
 pub(crate) fn models(frontend: &Frontend) -> Value {
-    let data: Vec<Value> = frontend
-        .published()
+    models_body(
+        frontend.flow_infos(),
+        frontend.published(),
+        frontend.unavailable(),
+    )
+}
+
+/// The model list for these flows and this state; startup checks its
+/// largest form against the metadata bound (`http::oversized_snapshot`).
+pub(crate) fn models_body(
+    flows: &[FlowInfo],
+    published: &[String],
+    unavailable: Option<&str>,
+) -> Value {
+    let data: Vec<Value> = published
         .iter()
-        .filter_map(|id| model(frontend, id))
+        .filter_map(|id| flows.iter().find(|flow| &flow.id == id))
+        .map(|flow| model_object(flow, unavailable))
         .collect();
     json!({"object": "list", "data": data})
 }
@@ -543,7 +557,10 @@ pub(crate) fn model(frontend: &Frontend, id: &str) -> Option<Value> {
         return None;
     }
     let flow = frontend.flow_infos().iter().find(|flow| flow.id == id)?;
-    let unavailable = frontend.unavailable();
+    Some(model_object(flow, frontend.unavailable()))
+}
+
+fn model_object(flow: &FlowInfo, unavailable: Option<&str>) -> Value {
     let mut details = json!({
         "schema_version": SCHEMA_VERSION,
         "flow": flow.id,
@@ -558,13 +575,13 @@ pub(crate) fn model(frontend: &Frontend, id: &str) -> Option<Value> {
     if let Some(code) = unavailable {
         details["unavailable"] = json!(code);
     }
-    Some(json!({
+    json!({
         "id": flow.id,
         "object": "model",
         "created": 0,
         "owned_by": "pumice",
         "pumice": details,
-    }))
+    })
 }
 
 #[cfg(test)]

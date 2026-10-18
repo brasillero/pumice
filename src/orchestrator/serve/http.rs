@@ -262,6 +262,8 @@ impl Frontend {
     }
 
     /// Why the service is not ready, or `None` when it is.
+    /// Why work is refused now, one of [`UNAVAILABLE_CODES`]; `None` when
+    /// ready.
     pub(crate) fn unavailable(&self) -> Option<&'static str> {
         match self.state() {
             ServiceState::Stopping => return Some("shutting_down"),
@@ -278,6 +280,68 @@ impl Frontend {
             ChildState::Stopping => Some("shutting_down"),
         }
     }
+}
+
+/// Every code [`Frontend::unavailable`] can return. The metadata snapshots
+/// that list flows are largest in an unavailable state (they add the
+/// code), so startup checks each of these ([`oversized_snapshot`]).
+pub(crate) const UNAVAILABLE_CODES: [&str; 5] = [
+    "service_starting",
+    "transcription_restarting",
+    "transcription_failed",
+    "admission_stopped",
+    "shutting_down",
+];
+
+/// A metadata snapshot that this configuration would make larger than
+/// [`METADATA`] allows, with the first entry that does not fit.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Oversized {
+    /// `GET /v1/models`, from this `serve.transcription_flows` entry on.
+    Models { published: usize },
+    /// `GET /pumice/v1/flows`, from this enabled flow on.
+    Flows { enabled: usize },
+}
+
+/// Checks, once at startup, that the snapshots that grow with the
+/// configuration (`/v1/models` and `/pumice/v1/flows`) fit [`METADATA`] in
+/// their largest state, so a valid configuration never makes a metadata
+/// route fail. The per-field limits alone cannot bound them: formatter ids
+/// and relay routes have no length limit, and JSON escaping can grow the
+/// served model id.
+pub(crate) fn oversized_snapshot(flows: &[FlowInfo], published: &[String]) -> Option<Oversized> {
+    let fits = |count: usize, body: &dyn Fn(usize, &str) -> Value| {
+        UNAVAILABLE_CODES.iter().all(|code| {
+            serde_json::to_vec(&body(count, code))
+                .is_ok_and(|bytes| bytes.len() <= METADATA.max_response_bytes)
+        })
+    };
+    // The whole list first; only when it does not fit, the shortest prefix
+    // that does not (a list only grows with its entries), to name its last
+    // entry.
+    let first_over = |total: usize, body: &dyn Fn(usize, &str) -> Value| {
+        if fits(total, body) {
+            return None;
+        }
+        let (mut fitting, mut over) = (0, total);
+        while over - fitting > 1 {
+            let middle = fitting + (over - fitting) / 2;
+            if fits(middle, body) {
+                fitting = middle;
+            } else {
+                over = middle;
+            }
+        }
+        Some(over - 1)
+    };
+    let models = |count: usize, code: &str| {
+        transcriptions::models_body(flows, &published[..count], Some(code))
+    };
+    if let Some(published) = first_over(published.len(), &models) {
+        return Some(Oversized::Models { published });
+    }
+    let listed = |count: usize, code: &str| flows_body(&flows[..count], Some(code));
+    first_over(flows.len(), &listed).map(|enabled| Oversized::Flows { enabled })
 }
 
 /// A request handler panicked: a core failure (p13.1-flow-seam/D9).
@@ -730,9 +794,11 @@ fn status(frontend: &Frontend) -> Value {
 /// run now, with a safe code when not. No formatter rules, no paths, no
 /// disabled flows.
 fn flows(frontend: &Frontend) -> Value {
-    let unavailable = frontend.unavailable();
-    let flows: Vec<Value> = frontend
-        .flows
+    flows_body(&frontend.flows, frontend.unavailable())
+}
+
+fn flows_body(flows: &[FlowInfo], unavailable: Option<&str>) -> Value {
+    let flows: Vec<Value> = flows
         .iter()
         .map(|flow| {
             let mut entry = json!({
@@ -1137,6 +1203,103 @@ mod tests {
         assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(headers["allow"], "GET");
         assert_eq!(body["error"]["code"], "method_not_allowed");
+    }
+
+    /// `count` enabled off flows with ids of the longest allowed length,
+    /// all published, on a served model id of the longest allowed length.
+    fn registry(count: usize) -> (Vec<FlowInfo>, Vec<String>) {
+        let model = "m".repeat(512);
+        let flows: Vec<FlowInfo> = (0..count)
+            .map(|index| FlowInfo {
+                id: format!("{index:03}{}", "f".repeat(125)),
+                transcription_model: model.clone(),
+                formatter: None,
+                relay_route: "passthrough".to_owned(),
+            })
+            .collect();
+        let published = flows.iter().map(|flow| flow.id.clone()).collect();
+        (flows, published)
+    }
+
+    fn size(body: &Value) -> usize {
+        serde_json::to_vec(body).unwrap().len()
+    }
+
+    #[test]
+    fn every_unavailable_code_is_checked_at_startup() {
+        for state in [
+            ChildState::Ready,
+            ChildState::Starting,
+            ChildState::Restarting,
+            ChildState::Failed,
+            ChildState::Stopping,
+        ] {
+            let frontend = frontend(state);
+            for service in [
+                ServiceState::Starting,
+                ServiceState::Running,
+                ServiceState::Stopping,
+            ] {
+                frontend.set_state(service);
+                if let Some(code) = frontend.unavailable() {
+                    assert!(UNAVAILABLE_CODES.contains(&code), "{code}");
+                }
+            }
+            frontend.set_state(ServiceState::Running);
+            frontend.admission().stop();
+            let code = frontend.unavailable().unwrap();
+            assert!(UNAVAILABLE_CODES.contains(&code), "{code}");
+        }
+    }
+
+    #[test]
+    fn a_model_list_too_large_for_its_bound_is_refused_at_startup() {
+        let limit = METADATA.max_response_bytes;
+        // Every field within its own limit, but the list in its largest
+        // state (`transcription_restarting`) is past the bound.
+        let (flows, published) = registry(128);
+        let largest =
+            transcriptions::models_body(&flows, &published, Some("transcription_restarting"));
+        assert!(size(&largest) > limit, "{}", size(&largest));
+        let Some(Oversized::Models { published: first }) = oversized_snapshot(&flows, &published)
+        else {
+            panic!("refused")
+        };
+        // The named entry is the first that does not fit.
+        let fits = |count: usize| {
+            UNAVAILABLE_CODES.iter().all(|code| {
+                size(&transcriptions::models_body(
+                    &flows,
+                    &published[..count],
+                    Some(code),
+                )) <= limit
+            })
+        };
+        assert!(fits(first) && !fits(first + 1), "{first}");
+
+        // Up to that entry, the largest snapshot of every state fits.
+        let (flows, published) = registry(first);
+        assert_eq!(oversized_snapshot(&flows, &published), None);
+        for code in UNAVAILABLE_CODES {
+            let body = transcriptions::models_body(&flows, &published, Some(code));
+            assert!(size(&body) <= limit, "{code}");
+        }
+        assert!(
+            size(&transcriptions::models_body(&flows, &published, None))
+                <= size(&transcriptions::models_body(
+                    &flows,
+                    &published,
+                    Some("shutting_down")
+                ))
+        );
+
+        // The flow list has its own check: a long formatter id, unpublished.
+        let mut flows = registry(1).0;
+        flows[0].formatter = Some("x".repeat(limit));
+        assert_eq!(
+            oversized_snapshot(&flows, &[]),
+            Some(Oversized::Flows { enabled: 0 })
+        );
     }
 
     #[test]

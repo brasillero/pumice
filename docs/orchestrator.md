@@ -212,6 +212,15 @@ serve:
   Custom presets are formatter files registered in `formatter.yml`, named
   by a flow's `formatter` like the built-in ones
   ([formatter.md](formatter.md)).
+- The routes that list flows must fit their 128 KiB bound in every state:
+  `GET /v1/models` (the published flows) and `GET /pumice/v1/flows` (the
+  enabled ones), each entry with its ids, preset, relay route, served model
+  and an `unavailable` code. A configuration whose list would not fit is a
+  startup error at the first entry that does not (a
+  `transcription_flows` entry or an enabled flow's `id`), even when every
+  field is within its own limit — for example 128 published flows with
+  128-character ids on a 512-byte served model id. Publish fewer flows or
+  shorten their ids, formatter ids, relay routes or the served model id.
 - `--port` overrides `serve.port` only, with the same rules. Port 7567 (the
   relay's) is always refused. An occupied port fails; there is no fallback
   port.
