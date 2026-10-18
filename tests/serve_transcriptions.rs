@@ -423,10 +423,13 @@ fn request(
     let mut all = headers.to_vec();
     all.push(("Content-Length", body.len().to_string()));
     let mut stream = connect(port, deadline);
-    bounded::send(&mut stream, &head(port, method, path, &all), deadline)
-        .unwrap_or_else(|error| panic!("write: {error}"));
-    // A refusal can come before the body is read: ignore a broken write.
-    let _ = bounded::send(&mut stream, body, deadline);
+    // A refusal can come before the body is read, and the connection then
+    // closes with the body unread, which resets it. The request goes out in
+    // one write, so a small one reaches the service in one piece and leaves
+    // nothing unread; a broken write still reads the answer.
+    let mut request = head(port, method, path, &all);
+    request.extend_from_slice(body);
+    let _ = bounded::send(&mut stream, &request, deadline);
     read_response(&mut stream, deadline).expect("a complete response")
 }
 
