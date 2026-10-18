@@ -103,3 +103,16 @@
 **Why.** One command gives the owner something to test; no Python proxy and no external assets.
 
 **Rejected.** A separate page server; exposing the port beyond loopback.
+
+### D9 · Active · Any failure after a successful transcription returns the raw transcript
+- date: 2026-10-18
+- decided by: claude (orchestrator, owner-delegated 2026-10-18)
+- origin: D4
+- area: api
+- revisit if: —
+
+**Decision.** On the transcription endpoint, once the transcription has succeeded, any later failure gives a 200 with the raw transcript as `text` and `post_processing.status: "failed"`, including a failed cleanup of the AI call's temporary directory (`cleanup_failed`) and a shutdown during the formatter or AI call. A failed cleanup still stops admission afterwards, as for dictations. The dictation route keeps its own behaviour.
+
+**Why.** The owner asked to return the transcribed text whenever possible (D4); the transcript is valid even when cleanup is not, and stopping admission keeps the safety rule.
+
+**Rejected.** A 500 `cleanup_failed` that loses the transcript.
