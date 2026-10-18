@@ -86,3 +86,10 @@ flows:
 #   transcription_flows:
 #     - clean
 #     - raw
+#   # Optional; default empty. Browser origins accepted besides
+#   # http://127.0.0.1:<port>, for a reverse proxy on this machine such as
+#   # `tailscale serve` (pumice serve still listens on 127.0.0.1 only). Exact
+#   # origins: http or https, lowercase host, no path, no wildcards, no
+#   # default port. No authentication: whoever reaches the proxy can use it.
+#   allowed_origins:
+#     - https://server-1.example-tailnet.ts.net:17570

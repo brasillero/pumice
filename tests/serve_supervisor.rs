@@ -784,6 +784,7 @@ async fn start_service(
         model: "turbo".to_owned(),
         flows: Vec::new(),
         dictations: None,
+        allowed_origins: Vec::new(),
         request_hook,
         cleanup_hook: None,
     };

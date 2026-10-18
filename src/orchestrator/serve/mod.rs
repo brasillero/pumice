@@ -28,6 +28,7 @@ pub mod cli;
 pub mod dictation;
 pub mod http;
 pub mod output;
+pub mod page;
 pub mod supervisor;
 pub mod transcriptions;
 pub mod warm;
@@ -43,7 +44,7 @@ use pumice_relay::process::CleanupScope;
 
 use crate::dispatch;
 use crate::orchestrator::cancel::{self, CancelReason};
-use crate::orchestrator::config;
+use crate::orchestrator::config::{self, AllowedOrigin};
 use crate::orchestrator::error::{ConfigError, StageError};
 use crate::orchestrator::flow::{self, Runtime, set_reference_location};
 use crate::orchestrator::result::stage;
@@ -116,6 +117,8 @@ pub struct Service {
     /// The dictation route's runtime and flows; `None` serves no
     /// dictations (404).
     pub dictations: Option<Dictations>,
+    /// `serve.allowed_origins`: origins accepted besides the loopback one.
+    pub allowed_origins: Vec<AllowedOrigin>,
     /// The service's cleanup scope, drained at the end; the supervisor's
     /// configuration and the dictations' runtime carry the same one.
     pub scope: Arc<CleanupScope>,
@@ -221,6 +224,7 @@ async fn serve(params: &ServeParams, reporter: &Reporter, signals: cancel::Cance
             flows: loaded.config.flows.clone(),
             transcription_flows: settings.transcription_flows,
         }),
+        allowed_origins: settings.allowed_origins,
         scope,
         request_hook: None,
         cleanup_hook: None,
@@ -284,6 +288,7 @@ pub async fn run(service: Service, reporter: &Reporter, mut signals: cancel::Can
         model,
         flows,
         dictations,
+        allowed_origins,
         scope,
         request_hook,
         cleanup_hook,
@@ -300,6 +305,7 @@ pub async fn run(service: Service, reporter: &Reporter, mut signals: cancel::Can
     let mut supervisor = supervisor::spawn(supervisor, reporter.clone());
     let mut frontend = Frontend::new(port, supervisor.handle(), model, flows);
     frontend.set_reporter(reporter.clone());
+    frontend.set_allowed_origins(allowed_origins);
     if let Some(dictations) = dictations {
         frontend.set_dictations(dictations);
     }

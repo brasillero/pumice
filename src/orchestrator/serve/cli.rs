@@ -20,7 +20,9 @@ with `enabled: true` in the orchestrator configuration.
 
 Routes: GET /health, GET /ready, GET /pumice/v1/status, GET /pumice/v1/flows,
 POST /pumice/v1/dictations; OpenAI GET /v1/models, GET /v1/models/{id} and
-POST /v1/audio/transcriptions for the flows in serve.transcription_flows.
+POST /v1/audio/transcriptions for the flows in serve.transcription_flows;
+a browser test page at GET /. Requests must use the Host 127.0.0.1:<port>
+or a host in serve.allowed_origins.
 
   --config <FILE>  the orchestrator configuration file
                    (default: the per-user orchestrator.yml)

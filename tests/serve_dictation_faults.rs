@@ -195,6 +195,7 @@ async fn start(
             transcription_flows: vec!["raw".to_owned(), "clean".to_owned()],
         }),
         scope: Arc::clone(&scope),
+        allowed_origins: Vec::new(),
         request_hook,
         cleanup_hook,
     };
