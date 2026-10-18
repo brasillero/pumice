@@ -195,6 +195,7 @@ serve:
   transcription_flows:        # optional, default empty: the OpenAI models
     - clean
     - raw
+  allowed_origins: []         # optional, default empty: see "Reaching pumice serve over Tailscale"
 ```
 
 - Every **enabled** flow must use `serve.transcription_model` (one model is
@@ -221,6 +222,16 @@ serve:
   field is within its own limit — for example 128 published flows with
   128-character ids on a 512-byte served model id. Publish fewer flows or
   shorten their ids, formatter ids, relay routes or the served model id.
+- `allowed_origins` lists browser origins accepted besides
+  `http://127.0.0.1:<port>`, for a reverse proxy on the same machine
+  ([below](#reaching-pumice-serve-over-tailscale)); nothing is accepted
+  unless listed. Each entry is an exact origin as browsers send it:
+  `http://` or `https://`, a lowercase host name or IPv4 address, and a port
+  only when it is not the scheme's default (`https://host.example:17570`,
+  `https://host.example`); no path (not even a trailing `/`), query,
+  fragment, user name, wildcard or IPv6 address, and no duplicates (checked
+  at load, with the entry's line). `pumice serve` still listens on
+  `127.0.0.1` only.
 - `--port` overrides `serve.port` only, with the same rules. Port 7567 (the
   relay's) is always refused. An occupied port fails; there is no fallback
   port.
@@ -277,12 +288,17 @@ not a core failure: it is restarted as above.
 ### Routes
 
 Every request must carry the `Host` `127.0.0.1:<port>` (no `localhost` or
-other names), a request with an `Origin` header is accepted only when it is
-`http://127.0.0.1:<port>`, and one with a `Sec-Fetch-Site` header only when
-it is `same-origin` or `none`; anything else gets 403 `host_not_allowed`,
+other names) or the host of a `serve.allowed_origins` entry (with its port,
+which may be left out on the scheme's default port; any letter case). A
+request with an `Origin` header is accepted only when it is the origin of
+that host: `http://127.0.0.1:<port>`, or the listed origin exactly (so a
+listed origin is refused on the loopback host, and the other way round).
+One with a `Sec-Fetch-Site` header is accepted only when it is
+`same-origin` or `none`. Anything else gets 403 `host_not_allowed`,
 `origin_not_allowed` or `cross_site_not_allowed`, before any routing. No
 CORS headers are sent. All answers are JSON with `Cache-Control: no-store`
-(an OpenAI transcription asked for as `text` is plain text);
+(an OpenAI transcription asked for as `text` is plain text, the
+[test page](#test-page) is HTML, JavaScript and CSS);
 errors use the OpenAI error object (`message`, `type`, `param`, `code`),
 including 404 `not_found` and 405 `method_not_allowed` (with `Allow: GET`).
 On the dictation route every answer, its 403 and its 405
@@ -340,6 +356,7 @@ model or a running dictation.
   `unavailable` code (the same codes as `/ready`).
 - `GET /v1/models`, `GET /v1/models/{id}` — the published flows as OpenAI
   models ([below](#openai-transcriptions)).
+- `GET /`, `GET /page.js`, `GET /page.css` — the [test page](#test-page).
 
 Limits: at most 64 connections (more are closed at once), one request per
 connection, request headers within 5 s and 16 KiB. These metadata routes, and
@@ -557,6 +574,98 @@ exactly like a dictation, with the same work permit: while one of them
 runs the other gets 429, and an abandoned transcription recycles the child
 the same way. The same privacy holds: no audio, transcript, prompt or final
 text is logged, and events are the dictation's metadata-only events.
+
+### Test page
+
+`pumice serve` has a small browser page for trying its transcription
+models (p15-serve-transcriptions/D8). It is a test page, not the product
+interface. On the same machine, open <http://127.0.0.1:17570/> (your
+`serve.port`; `localhost` is refused by the Host check). The page:
+
+- lists `GET /v1/models` with each model's preset, AI route and readiness
+  (Refresh reloads it);
+- takes an optional two-letter language (blank: the transcription default);
+- records from the microphone — the browser's own WebM/Opus through
+  MediaRecorder (default), or a WAV built in the page, which is also the
+  fallback when the browser cannot record WebM/Opus — and sends at 2
+  minutes at the latest, or uploads a file (WAV, MP3, FLAC, Ogg/Vorbis,
+  WebM/Opus, up to 25,000,000 bytes and 120 s); the microphone is released
+  when recording stops;
+- sends it to `POST /v1/audio/transcriptions` with
+  `response_format=json` and shows the final `text` (with a Copy button),
+  the raw transcript with its language and length, the post-processing
+  status (`failed` is highlighted with its safe stage, code and message),
+  the per-stage and total server timings, the round trip, the HTTP status
+  and the raw answer; OpenAI errors are shown readably (for example 429
+  busy, 404 unknown model, 503 not ready);
+- has a Cancel button, which discards a recording or aborts the request
+  (closing the request also cancels the transcription on the server), and
+  gives up after 200 s with a message.
+
+Audio and results stay in the page's memory (reload to clear them);
+nothing is stored and everything is rendered as text. It loads only its
+own `page.js` and `page.css` and talks only to its own origin, under
+`Content-Security-Policy: default-src 'none'; script-src 'self'; style-src
+'self'; connect-src 'self'; img-src 'self' data:; media-src 'self' blob:;
+frame-ancestors 'none'; base-uri 'none'; form-action 'none'`, with
+`X-Content-Type-Options: nosniff`, `Cache-Control: no-store`,
+`Referrer-Policy: no-referrer` and `Permissions-Policy: microphone=(self)`.
+The three files are GET only (other methods: 405 with `Allow: GET`) and
+behind the same guard as every route.
+
+**From another machine** the page must reach `pumice serve` through
+something that keeps the guard's Host and Origin. Never expose the port
+itself beyond loopback. Two ways:
+
+- **SSH local forward to the same port** (nothing to configure):
+
+  ```sh
+  ssh -L 17570:127.0.0.1:17570 server
+  ```
+
+  then open <http://127.0.0.1:17570/> on your machine. Use the same local
+  port as the server's: the Host check expects `127.0.0.1:<serve.port>`.
+  The browser treats `127.0.0.1` as a secure context, so the microphone
+  works.
+- **Tailscale**, [below](#reaching-pumice-serve-over-tailscale): HTTPS on
+  your tailnet, also from a phone.
+
+### Reaching pumice serve over Tailscale
+
+`tailscale serve` can put `pumice serve` on your tailnet over HTTPS while
+it keeps listening on `127.0.0.1` only. The proxy passes the browser's own
+`Host` (`<machine>.<tailnet>.ts.net:<port>`) and `Origin`, so list that
+origin in `serve.allowed_origins` first; without it every request through
+the proxy gets 403 `host_not_allowed`. HTTPS is also what lets a browser on
+another device use the microphone.
+
+1. Find the machine's tailnet name (for example with `tailscale status`) and
+   add the origin, with the HTTPS port you will serve on, to the `serve:`
+   section:
+
+   ```yaml
+   serve:
+     allowed_origins:
+       - https://server-1.example-tailnet.ts.net:17570
+   ```
+
+   Restart `pumice serve`.
+2. Proxy that HTTPS port on the tailnet to the loopback port:
+
+   ```sh
+   tailscale serve --bg --https=17570 http://127.0.0.1:17570
+   ```
+
+3. Open `https://server-1.example-tailnet.ts.net:17570/` from a device on
+   the tailnet.
+
+Use `tailscale serve` (tailnet only), **never `tailscale funnel`**, which
+publishes to the internet. There is no authentication: every device and
+user that can reach this machine on your tailnet (as your tailnet's access
+rules allow) can use the page and the API and spend your AI subscriptions.
+When you stop using it, turn the proxy off (see `tailscale serve --help`
+for your version) and remove the origin from `serve.allowed_origins`. The
+SSH forward above is the alternative without any listed origin.
 
 ### Output
 

@@ -4,15 +4,18 @@
 //! `GET /pumice/v1/flows`, `POST /pumice/v1/dictations` (`dictation`) and
 //! the OpenAI `GET /v1/models`, `GET /v1/models/{id}` and
 //! `POST /v1/audio/transcriptions` (`transcriptions`,
-//! p15-serve-transcriptions/D1, which narrows D2). There is no
+//! p15-serve-transcriptions/D1, which narrows D2), and the browser test
+//! page at `GET /` with its two assets (`page`, p15/D8). There is no
 //! `/v1/chat/completions` here (p15/D7).
 //!
 //! Before anything else, every request passes the origin guard (D8): the
-//! `Host` must be the literal `127.0.0.1:<port>`, a present `Origin` must
-//! equal `http://127.0.0.1:<port>` and a present `Sec-Fetch-Site` must be
-//! `same-origin` or `none`, otherwise 403. No CORS headers are ever
-//! sent. Every answer is JSON with `Cache-Control: no-store` (a
-//! transcription asked for as `text` is plain text), errors use the
+//! `Host` must be the literal `127.0.0.1:<port>` or the host of a
+//! `serve.allowed_origins` entry, a present `Origin` must be the origin of
+//! that host (`http://127.0.0.1:<port>`, or the listed origin) and a
+//! present `Sec-Fetch-Site` must be `same-origin` or `none`, otherwise 403.
+//! No CORS headers are ever sent. Every answer is JSON with
+//! `Cache-Control: no-store` (a transcription asked for as `text` is plain
+//! text; the test page is HTML, JavaScript and CSS), errors use the
 //! OpenAI error object (`message`, `type`, `param`, `code`), including 404
 //! and 405 (with `Allow`). On the dictation route every answer, its guard
 //! and method refusals included, is the versioned dictation envelope
@@ -58,10 +61,12 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use crate::orchestrator::cancel::{self, CancelGuard, CancelHandle, CancelReason};
+use crate::orchestrator::config::AllowedOrigin;
 use crate::orchestrator::error::StageError;
 use crate::orchestrator::result::{MODULE, SCHEMA_VERSION, stage};
 use crate::orchestrator::serve::dictation::{self, Admission, Dictations};
 use crate::orchestrator::serve::output::Reporter;
+use crate::orchestrator::serve::page;
 use crate::orchestrator::serve::supervisor::{ChildState, SupervisorHandle};
 use crate::orchestrator::serve::transcriptions::{self, MODELS, TRANSCRIPTIONS};
 
@@ -143,6 +148,8 @@ pub struct Frontend {
     shutdown: (CancelHandle, CancelGuard),
     /// Set when a dictation's task panicked (a core failure).
     failed: watch::Sender<bool>,
+    /// `serve.allowed_origins`: accepted besides the loopback origin.
+    allowed_origins: Vec<AllowedOrigin>,
     request_hook: Option<RequestHook>,
     cleanup_hook: Option<CleanupHook>,
 }
@@ -165,6 +172,7 @@ impl Frontend {
             reporter: Reporter::silent(),
             shutdown: cancel::context(),
             failed: watch::channel(false).0,
+            allowed_origins: Vec::new(),
             request_hook: None,
             cleanup_hook: None,
         }
@@ -173,6 +181,11 @@ impl Frontend {
     /// Serves `POST /pumice/v1/dictations` (404 without it).
     pub fn set_dictations(&mut self, dictations: Dictations) {
         self.dictations = Some(Arc::new(dictations));
+    }
+
+    /// Accepts these origins' requests besides the loopback origin's.
+    pub fn set_allowed_origins(&mut self, origins: Vec<AllowedOrigin>) {
+        self.allowed_origins = origins;
     }
 
     /// Where dictations report their metadata-only events.
@@ -561,7 +574,7 @@ fn route(frontend: &Frontend, method: &Method, uri: &Uri, headers: &HeaderMap) -
         }
     };
     // The guard first, then the method, as on every route.
-    if let Err(rejection) = check_origin(frontend.port, uri, headers) {
+    if let Err(rejection) = check_origin(frontend.port, &frontend.allowed_origins, uri, headers) {
         let (code, message) = rejection.describe();
         return Routed::Refused(StageError::new(stage::PREPARE, code, message, 2));
     }
@@ -588,7 +601,7 @@ fn transcription_route(
     uri: &Uri,
     headers: &HeaderMap,
 ) -> Routed {
-    if let Err(rejection) = check_origin(frontend.port, uri, headers) {
+    if let Err(rejection) = check_origin(frontend.port, &frontend.allowed_origins, uri, headers) {
         let (code, message) = rejection.describe();
         return Routed::Answer(
             METADATA,
@@ -626,7 +639,7 @@ fn answer(
     uri: &Uri,
     headers: &HeaderMap,
 ) -> (RoutePolicy, Response<Full<Bytes>>) {
-    if let Err(rejection) = check_origin(frontend.port, uri, headers) {
+    if let Err(rejection) = check_origin(frontend.port, &frontend.allowed_origins, uri, headers) {
         let (code, message) = rejection.describe();
         return (
             METADATA,
@@ -650,17 +663,20 @@ fn answer(
         path if path.starts_with(MODELS) && path.as_bytes().get(MODELS.len()) == Some(&b'/') => {
             Route::Model(&path[MODELS.len() + 1..])
         }
-        _ => {
-            return (
-                METADATA,
-                error(
-                    StatusCode::NOT_FOUND,
-                    "invalid_request_error",
-                    "not_found",
-                    "Unknown route.",
-                ),
-            );
-        }
+        path => match page::asset(path) {
+            Some((content_type, body)) => Route::Page(content_type, body),
+            None => {
+                return (
+                    METADATA,
+                    error(
+                        StatusCode::NOT_FOUND,
+                        "invalid_request_error",
+                        "not_found",
+                        "Unknown route.",
+                    ),
+                );
+            }
+        },
     };
     if method != Method::GET {
         let mut response = error(
@@ -713,6 +729,7 @@ fn answer(
                 }),
             ),
         },
+        Route::Page(content_type, body) => page::response(content_type, body),
     };
     (route.policy(), response)
 }
@@ -726,6 +743,8 @@ enum Route<'a> {
     /// One model; the id as it appears in the path (published ids need no
     /// escaping, so anything else is simply unknown).
     Model(&'a str),
+    /// The test page or one of its assets: content type and body.
+    Page(&'static str, &'static str),
 }
 
 impl Route<'_> {
@@ -736,7 +755,8 @@ impl Route<'_> {
             | Route::Status
             | Route::Flows
             | Route::Models
-            | Route::Model(_) => METADATA,
+            | Route::Model(_)
+            | Route::Page(..) => METADATA,
         }
     }
 }
@@ -834,7 +854,8 @@ impl Rejected {
         match self {
             Rejected::Host => (
                 "host_not_allowed",
-                "This service only accepts the Host 127.0.0.1 with its own port.",
+                "This service only accepts the Host 127.0.0.1 with its own port, \
+                 or a host in serve.allowed_origins.",
             ),
             Rejected::Origin => (
                 "origin_not_allowed",
@@ -848,31 +869,51 @@ impl Rejected {
     }
 }
 
-/// The D8 guard: exactly one `Host`, the literal `127.0.0.1:<port>` (an
-/// absolute request target must name the same authority), no `Origin` but
-/// this listener's own, and no cross-site fetch metadata (design §9): a
+/// The D8 guard: exactly one `Host`, either the literal `127.0.0.1:<port>`
+/// or the host of a `serve.allowed_origins` entry (an absolute request
+/// target must name the same authority); no `Origin` but one of the origins
+/// that `Host` belongs to; and no cross-site fetch metadata (design §9): a
 /// present `Sec-Fetch-Site` must be `same-origin` or `none` (typed by the
 /// user). Native clients send neither header.
-fn check_origin(port: u16, uri: &Uri, headers: &HeaderMap) -> Result<(), Rejected> {
-    let authority = format!("127.0.0.1:{port}");
+fn check_origin(
+    port: u16,
+    allowed: &[AllowedOrigin],
+    uri: &Uri,
+    headers: &HeaderMap,
+) -> Result<(), Rejected> {
     let mut hosts = headers.get_all(header::HOST).iter();
-    let host_ok = matches!(
-        (hosts.next(), hosts.next()),
-        (Some(host), None) if host.as_bytes() == authority.as_bytes()
-    ) && uri
+    let (Some(host), None) = (hosts.next(), hosts.next()) else {
+        return Err(Rejected::Host);
+    };
+    let host = host.as_bytes();
+    // The origins this Host belongs to: the loopback one, or listed ones
+    // (two when a host is listed with both schemes).
+    let loopback = format!("http://127.0.0.1:{port}");
+    let sites: Vec<&str> = if host == &loopback.as_bytes()["http://".len()..] {
+        vec![&loopback]
+    } else {
+        allowed
+            .iter()
+            .filter(|origin| origin.matches_host(host))
+            .map(|origin| origin.origin.as_str())
+            .collect()
+    };
+    let target_ok = uri
         .authority()
-        .is_none_or(|uri_authority| uri_authority.as_str() == authority)
-        && uri
-            .scheme()
-            .is_none_or(|scheme| scheme == &hyper::http::uri::Scheme::HTTP);
-    if !host_ok {
+        .is_none_or(|authority| authority.as_str().as_bytes() == host)
+        && uri.scheme_str().is_none_or(|scheme| {
+            sites.iter().any(|site| {
+                site.strip_prefix(scheme)
+                    .is_some_and(|rest| rest.starts_with("://"))
+            })
+        });
+    if sites.is_empty() || !target_ok {
         return Err(Rejected::Host);
     }
-    let origin = format!("http://{authority}");
     let mut origins = headers.get_all(header::ORIGIN).iter();
     let origin_ok = match (origins.next(), origins.next()) {
         (None, _) => true,
-        (Some(value), None) => value.as_bytes() == origin.as_bytes(),
+        (Some(value), None) => sites.iter().any(|site| value.as_bytes() == site.as_bytes()),
         (Some(_), Some(_)) => false,
     };
     if !origin_ok {
@@ -1185,7 +1226,8 @@ mod tests {
         // No chat here (p15/D7); without the dictations' runtime there is
         // no transcription route either.
         for path in [
-            "/",
+            "/index.html",
+            "/page.js/",
             "/v1/chat/completions",
             "/v1/audio/transcriptions",
             "/v1/modelsx",
@@ -1203,6 +1245,205 @@ mod tests {
         assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(headers["allow"], "GET");
         assert_eq!(body["error"]["code"], "method_not_allowed");
+    }
+
+    #[test]
+    fn the_test_page_and_its_assets_are_served_with_a_strict_policy() {
+        // Served without the dictations' runtime too: the page then lists
+        // no models.
+        let frontend = frontend(ChildState::Ready);
+        for (path, content_type, marker) in [
+            ("/", "text/html; charset=utf-8", "<!doctype html>"),
+            (
+                "/page.js",
+                "text/javascript; charset=utf-8",
+                "'use strict';",
+            ),
+            ("/page.css", "text/css; charset=utf-8", ":root"),
+        ] {
+            let (status, headers, body) = raw(&frontend, Method::GET, path, &[HOST]);
+            assert_eq!(status, StatusCode::OK, "{path}");
+            let mut names: Vec<&str> = headers.keys().map(|name| name.as_str()).collect();
+            names.sort_unstable();
+            assert_eq!(
+                names,
+                [
+                    "cache-control",
+                    "content-security-policy",
+                    "content-type",
+                    "permissions-policy",
+                    "referrer-policy",
+                    "x-content-type-options",
+                ],
+                "{path}"
+            );
+            assert_eq!(headers["content-type"], content_type);
+            assert_eq!(
+                headers["content-security-policy"],
+                "default-src 'none'; script-src 'self'; style-src 'self'; \
+                 connect-src 'self'; img-src 'self' data:; media-src 'self' blob:; \
+                 frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+            );
+            assert_eq!(headers["x-content-type-options"], "nosniff");
+            assert_eq!(headers["cache-control"], "no-store");
+            assert_eq!(headers["referrer-policy"], "no-referrer");
+            assert_eq!(headers["permissions-policy"], "microphone=(self)");
+            assert!(
+                std::str::from_utf8(&body).unwrap().contains(marker),
+                "{path}"
+            );
+            assert_eq!(&body[..], page::asset(path).unwrap().1.as_bytes());
+
+            // The browser's own navigation and requests pass the guard.
+            for (name, value) in [
+                ("sec-fetch-site", "none"),
+                ("sec-fetch-site", "same-origin"),
+                ("origin", "http://127.0.0.1:41234"),
+            ] {
+                let (status, _, _) = raw(&frontend, Method::GET, path, &[HOST, (name, value)]);
+                assert_eq!(status, StatusCode::OK, "{path} {name}: {value}");
+            }
+            // A foreign Host, Origin or site gets the guard's JSON 403.
+            for (headers, code) in [
+                (vec![("host", "localhost:41234")], "host_not_allowed"),
+                (vec![("host", "evil.example")], "host_not_allowed"),
+                (
+                    vec![HOST, ("origin", "http://evil.example")],
+                    "origin_not_allowed",
+                ),
+                (
+                    vec![HOST, ("sec-fetch-site", "cross-site")],
+                    "cross_site_not_allowed",
+                ),
+            ] {
+                let (status, headers, body) = request(&frontend, Method::GET, path, &headers);
+                assert_eq!(status, StatusCode::FORBIDDEN, "{path} {code}");
+                assert_eq!(body["error"]["code"], code);
+                assert_eq!(headers["content-type"], "application/json");
+                assert!(headers.get("access-control-allow-origin").is_none());
+            }
+            // GET only, like the other snapshot routes.
+            for method in [Method::HEAD, Method::POST, Method::PUT, Method::OPTIONS] {
+                let (status, headers, body) = request(&frontend, method.clone(), path, &[HOST]);
+                assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{method} {path}");
+                assert_eq!(headers["allow"], "GET");
+                assert_eq!(body["error"]["code"], "method_not_allowed");
+            }
+        }
+    }
+
+    #[test]
+    fn listed_origins_pass_the_guard_on_their_own_host_only() {
+        const TAILNET: &str = "https://server-1.tail59f332.ts.net:17570";
+        const TAILNET_HOST: (&str, &str) = ("host", "server-1.tail59f332.ts.net:17570");
+        let mut frontend = frontend(ChildState::Ready);
+        frontend.set_allowed_origins(vec![AllowedOrigin::parse(TAILNET).unwrap()]);
+        // What a browser on the tailnet sends through `tailscale serve`.
+        for path in ["/", "/page.js", "/v1/models", "/health"] {
+            for headers in [
+                vec![TAILNET_HOST],
+                vec![TAILNET_HOST, ("sec-fetch-site", "none")],
+                vec![
+                    TAILNET_HOST,
+                    ("origin", TAILNET),
+                    ("sec-fetch-site", "same-origin"),
+                ],
+                vec![("host", "SERVER-1.tail59f332.ts.net:17570")],
+            ] {
+                let (status, _, _) = raw(&frontend, Method::GET, path, &headers);
+                assert_eq!(status, StatusCode::OK, "{path} {headers:?}");
+            }
+        }
+        // Loopback keeps working as before.
+        let (status, _, _) = raw(
+            &frontend,
+            Method::GET,
+            "/v1/models",
+            &[HOST, ("origin", "http://127.0.0.1:41234")],
+        );
+        assert_eq!(status, StatusCode::OK);
+
+        for (headers, code) in [
+            // Unlisted hosts, or the listed host on another port.
+            (
+                vec![("host", "other.tail59f332.ts.net:17570")],
+                "host_not_allowed",
+            ),
+            (
+                vec![("host", "server-1.tail59f332.ts.net")],
+                "host_not_allowed",
+            ),
+            (
+                vec![("host", "server-1.tail59f332.ts.net:443")],
+                "host_not_allowed",
+            ),
+            (vec![("host", "localhost:41234")], "host_not_allowed"),
+            // A listed host with a foreign origin, a loopback origin or the
+            // listed origin over http.
+            (
+                vec![TAILNET_HOST, ("origin", "https://evil.example")],
+                "origin_not_allowed",
+            ),
+            (
+                vec![TAILNET_HOST, ("origin", "http://127.0.0.1:41234")],
+                "origin_not_allowed",
+            ),
+            (
+                vec![
+                    TAILNET_HOST,
+                    ("origin", "http://server-1.tail59f332.ts.net:17570"),
+                ],
+                "origin_not_allowed",
+            ),
+            // The listed origin is not accepted on the loopback host.
+            (vec![HOST, ("origin", TAILNET)], "origin_not_allowed"),
+            (
+                vec![TAILNET_HOST, ("origin", TAILNET), ("origin", TAILNET)],
+                "origin_not_allowed",
+            ),
+            (
+                vec![TAILNET_HOST, ("sec-fetch-site", "cross-site")],
+                "cross_site_not_allowed",
+            ),
+        ] {
+            let (status, _, body) = request(&frontend, Method::GET, "/v1/models", &headers);
+            assert_eq!(status, StatusCode::FORBIDDEN, "{headers:?}");
+            assert_eq!(body["error"]["code"], code, "{headers:?}");
+        }
+        // An absolute target must name the Host's authority, with the
+        // origin's scheme.
+        for (target, ok) in [
+            ("https://server-1.tail59f332.ts.net:17570/health", true),
+            ("http://server-1.tail59f332.ts.net:17570/health", false),
+            ("http://127.0.0.1:41234/health", false),
+            ("ftp://server-1.tail59f332.ts.net:17570/health", false),
+        ] {
+            let (status, _, _) = raw(&frontend, Method::GET, target, &[TAILNET_HOST]);
+            assert_eq!(status == StatusCode::OK, ok, "{target}");
+        }
+        // Without the list, the tailnet host is refused.
+        let frontend = self::frontend(ChildState::Ready);
+        let (status, _, body) = request(&frontend, Method::GET, "/", &[TAILNET_HOST]);
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "host_not_allowed");
+    }
+
+    fn raw(
+        frontend: &Frontend,
+        method: Method,
+        target: &str,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, HeaderMap, Bytes) {
+        let mut map = HeaderMap::new();
+        for (name, value) in headers {
+            map.append(
+                header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        let response = respond(frontend, &method, &target.parse().unwrap(), &map);
+        let (status, headers) = (response.status(), response.headers().clone());
+        (status, headers, futures_body(response))
     }
 
     /// `count` enabled off flows with ids of the longest allowed length,

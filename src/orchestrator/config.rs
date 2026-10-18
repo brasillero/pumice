@@ -42,6 +42,8 @@
 //!   transcription_model: turbo   # required when enabled
 //!   startup_timeout_ms: 60000    # optional, 1000..=300000
 //!   transcription_flows: [clean] # optional, default empty (p15/D5)
+//!   allowed_origins: []          # optional, default empty: browser origins
+//!                                # besides 127.0.0.1, e.g. a tailnet name
 //! ```
 //!
 //! The section's own shape is checked at load (published ids are public
@@ -110,6 +112,8 @@ pub struct Serve {
     /// The flows published as OpenAI transcription models, in file order;
     /// empty unless listed (p15-serve-transcriptions/D5).
     pub transcription_flows: Vec<PublishedFlow>,
+    /// Origins accepted besides the loopback one; empty unless listed.
+    pub allowed_origins: Vec<AllowedOrigin>,
     /// Source positions for errors `pumice serve` reports later.
     pub spans: ServeSpans,
 }
@@ -120,6 +124,103 @@ pub struct Serve {
 pub struct PublishedFlow {
     pub id: String,
     pub at: Option<(u64, u64)>,
+}
+
+/// One `serve.allowed_origins` entry: a browser origin whose requests
+/// `pumice serve` accepts besides `http://127.0.0.1:<port>`, for a reverse
+/// proxy on the same machine such as `tailscale serve` (the service itself
+/// still listens on loopback only).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AllowedOrigin {
+    /// Exactly as a browser sends it in `Origin`: `scheme://host[:port]`,
+    /// lowercase, without the scheme's default port.
+    pub origin: String,
+    pub host: String,
+    /// The origin's port, the scheme's default when it has none.
+    pub port: u16,
+    /// Whether the origin names its port (a browser's `Host` then does too).
+    pub explicit_port: bool,
+}
+
+impl AllowedOrigin {
+    /// Parses one entry; the error says what is wrong without quoting it.
+    pub fn parse(text: &str) -> Result<AllowedOrigin, &'static str> {
+        let (scheme, rest) = text
+            .split_once("://")
+            .ok_or("must be an origin like https://host.example:17570")?;
+        let default_port = match scheme {
+            "http" => 80,
+            "https" => 443,
+            _ => return Err("must start with http:// or https:// (lowercase)"),
+        };
+        if rest.contains('*') {
+            return Err("must not contain wildcards");
+        }
+        if rest.contains('@') {
+            return Err("must not contain a user name or password");
+        }
+        if rest.contains(['/', '?', '#']) {
+            return Err(
+                "must be an origin only: no path, query or fragment, not even a trailing /",
+            );
+        }
+        if rest.starts_with('[') {
+            return Err("IPv6 addresses are not supported; use a host name or an IPv4 address");
+        }
+        let (host, port) = match rest.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (rest, None),
+        };
+        if host.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            return Err("must write the host in lowercase, as browsers send it");
+        }
+        let labels_ok = host
+            .split('.')
+            .all(|label| !label.is_empty() && !label.starts_with('-') && !label.ends_with('-'));
+        if !labels_ok
+            || !host.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+            })
+        {
+            return Err("must name a host made of letters, digits, '-' and '.'");
+        }
+        let port = match port {
+            None => default_port,
+            Some(port) => {
+                let parsed = (!port.starts_with('0')
+                    && port.bytes().all(|byte| byte.is_ascii_digit()))
+                .then(|| port.parse::<u16>().ok())
+                .flatten()
+                .filter(|port| *port != 0)
+                .ok_or("must have a port from 1 to 65535")?;
+                if parsed == default_port {
+                    return Err("must leave out the scheme's default port, as browsers do");
+                }
+                parsed
+            }
+        };
+        Ok(AllowedOrigin {
+            origin: text.to_owned(),
+            host: host.to_owned(),
+            port,
+            explicit_port: port != default_port,
+        })
+    }
+
+    /// Whether a request's `Host` names this origin's host and port: the
+    /// host in any case, the port as written or, for an origin on its
+    /// scheme's default port, left out.
+    pub fn matches_host(&self, host: &[u8]) -> bool {
+        let (name, port) = match host.iter().rposition(|byte| *byte == b':') {
+            Some(colon) => (&host[..colon], Some(&host[colon + 1..])),
+            None => (host, None),
+        };
+        let port_ok = match port {
+            None => !self.explicit_port,
+            Some(port) => port == self.port.to_string().as_bytes(),
+        };
+        port_ok && name.eq_ignore_ascii_case(self.host.as_bytes())
+    }
 }
 
 /// The 1-based (line, column) of the `serve:` section and of its keys.
@@ -142,6 +243,8 @@ pub struct ServeSettings {
     /// The published flow ids (the transcription endpoint's models), in
     /// file order.
     pub transcription_flows: Vec<String>,
+    /// Origins accepted besides the loopback one.
+    pub allowed_origins: Vec<AllowedOrigin>,
 }
 
 /// The module references. `formatter` is optional only when no enabled flow
@@ -458,12 +561,33 @@ fn validate_serve(raw: Spanned<RawServe>) -> Result<Serve, ConfigError> {
             at: position(entry.referenced),
         });
     }
+    let mut allowed_origins: Vec<AllowedOrigin> = Vec::new();
+    for entry in serve
+        .allowed_origins
+        .as_ref()
+        .map_or(&[][..], |list| &list.value[..])
+    {
+        let origin = AllowedOrigin::parse(&entry.value).map_err(|problem| {
+            ConfigError::at(
+                entry.referenced,
+                format!("each serve.allowed_origins entry {problem}"),
+            )
+        })?;
+        if allowed_origins.contains(&origin) {
+            return Err(ConfigError::at(
+                entry.referenced,
+                "this origin is listed twice in serve.allowed_origins",
+            ));
+        }
+        allowed_origins.push(origin);
+    }
     Ok(Serve {
         enabled,
         port,
         transcription_model,
         startup_timeout,
         transcription_flows,
+        allowed_origins,
         spans: ServeSpans {
             section: position(section),
             enabled: serve
@@ -614,6 +738,7 @@ pub fn serve_settings(loaded: &LoadedConfig) -> Result<ServeSettings, ConfigErro
             .iter()
             .map(|published| published.id.clone())
             .collect(),
+        allowed_origins: serve.allowed_origins.clone(),
     })
 }
 
@@ -984,6 +1109,7 @@ struct RawServe {
     transcription_model: Option<Spanned<String>>,
     startup_timeout_ms: Option<Spanned<u64>>,
     transcription_flows: Option<Spanned<Vec<Spanned<String>>>>,
+    allowed_origins: Option<Spanned<Vec<Spanned<String>>>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1697,6 +1823,7 @@ flows:
                 startup_timeout: Duration::from_millis(60_000),
                 transcription_model_at: Some((23, 24)),
                 transcription_flows: Vec::new(),
+                allowed_origins: Vec::new(),
             }
         );
         assert!(serve.transcription_flows.is_empty(), "nothing is published");
@@ -1892,6 +2019,127 @@ serve:
         assert_eq!(settings.transcription_flows, ["clean", "raw"]);
         let settings = serve_settings(&load_text(&tmp, &publishing("[]")).unwrap()).unwrap();
         assert!(settings.transcription_flows.is_empty());
+    }
+
+    #[test]
+    fn allowed_origins_are_exact_browser_origins() {
+        let origin = AllowedOrigin::parse("https://server-1.tail59f332.ts.net:17570").unwrap();
+        assert_eq!(
+            origin,
+            AllowedOrigin {
+                origin: "https://server-1.tail59f332.ts.net:17570".to_owned(),
+                host: "server-1.tail59f332.ts.net".to_owned(),
+                port: 17570,
+                explicit_port: true,
+            }
+        );
+        assert!(origin.matches_host(b"server-1.tail59f332.ts.net:17570"));
+        assert!(origin.matches_host(b"Server-1.Tail59f332.ts.net:17570"));
+        for host in [
+            &b"server-1.tail59f332.ts.net"[..],
+            b"server-1.tail59f332.ts.net:443",
+            b"server-1.tail59f332.ts.net:17571",
+            b"server-1.tail59f332.ts.net.:17570",
+            b"evil.example:17570",
+            b"127.0.0.1:17570",
+        ] {
+            assert!(
+                !origin.matches_host(host),
+                "{}",
+                String::from_utf8_lossy(host)
+            );
+        }
+        // On the scheme's default port the origin has no port, and the
+        // Host may name it or not.
+        let default = AllowedOrigin::parse("https://pumice.example").unwrap();
+        assert_eq!((default.port, default.explicit_port), (443, false));
+        assert!(default.matches_host(b"pumice.example"));
+        assert!(default.matches_host(b"pumice.example:443"));
+        assert!(!default.matches_host(b"pumice.example:80"));
+        let plain = AllowedOrigin::parse("http://10.0.0.5:8080").unwrap();
+        assert!(plain.matches_host(b"10.0.0.5:8080"));
+
+        for (bad, problem) in [
+            ("server-1.ts.net:17570", "must be an origin like"),
+            ("ftp://server-1.ts.net", "http:// or https://"),
+            ("HTTPS://server-1.ts.net", "http:// or https://"),
+            (
+                "https://server-1.ts.net:17570/",
+                "no path, query or fragment",
+            ),
+            ("https://server-1.ts.net/page", "no path, query or fragment"),
+            ("https://server-1.ts.net?x=1", "no path, query or fragment"),
+            ("https://server-1.ts.net#top", "no path, query or fragment"),
+            ("https://*.ts.net", "wildcards"),
+            ("https://user:pass@server-1.ts.net", "user name or password"),
+            ("https://Server-1.ts.net", "lowercase"),
+            ("https://[::1]:17570", "IPv6"),
+            ("https://", "letters, digits"),
+            ("https://bad_host.example", "letters, digits"),
+            ("https://-bad.example", "letters, digits"),
+            ("https://bad..example", "letters, digits"),
+            ("https://server-1.ts.net:", "port from 1 to 65535"),
+            ("https://server-1.ts.net:0", "port from 1 to 65535"),
+            ("https://server-1.ts.net:017570", "port from 1 to 65535"),
+            ("https://server-1.ts.net:65536", "port from 1 to 65535"),
+            ("https://server-1.ts.net:+1", "port from 1 to 65535"),
+            ("https://server-1.ts.net:443", "default port"),
+            ("http://server-1.ts.net:80", "default port"),
+        ] {
+            let error = AllowedOrigin::parse(bad).unwrap_err();
+            assert!(error.contains(problem), "{bad}: {error}");
+        }
+    }
+
+    #[test]
+    fn allowed_origins_default_to_none_and_errors_are_located() {
+        let tmp = tempfile::tempdir().unwrap();
+        let loaded = load_text(
+            &tmp,
+            &with_serve("  enabled: true\n  transcription_model: turbo\n"),
+        )
+        .unwrap();
+        assert!(serve_settings(&loaded).unwrap().allowed_origins.is_empty());
+
+        let text = with_serve(
+            "  enabled: true\n  transcription_model: turbo\n  allowed_origins:\n    - https://server-1.ts.net:17570\n    - http://pumice.example\n",
+        );
+        let loaded = load_text(&tmp, &text).unwrap();
+        let origins: Vec<String> = serve_settings(&loaded)
+            .unwrap()
+            .allowed_origins
+            .into_iter()
+            .map(|origin| origin.origin)
+            .collect();
+        assert_eq!(
+            origins,
+            ["https://server-1.ts.net:17570", "http://pumice.example"]
+        );
+
+        for (entries, problem) in [
+            ("    - https://server-1.ts.net:17570/\n", "no path"),
+            ("    - '*'\n", "must be an origin like"),
+            (
+                "    - https://server-1.ts.net:17570\n    - https://server-1.ts.net:17570\n",
+                "listed twice",
+            ),
+        ] {
+            let text = with_serve(&format!(
+                "  enabled: true\n  transcription_model: turbo\n  allowed_origins:\n{entries}"
+            ));
+            let err = load_text(&tmp, &text).unwrap_err().to_string();
+            assert!(err.contains(problem), "{err}");
+            assert!(err.contains("serve.allowed_origins"), "{err}");
+            let line = text.lines().count();
+            assert!(err.contains(&format!("orchestrator.yml:{line}:")), "{err}");
+        }
+        let err = load_text(
+            &tmp,
+            &with_serve("  enabled: true\n  transcription_model: turbo\n  allowed_origins: https://a.example\n"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("orchestrator.yml:"), "{err}");
     }
 
     #[test]

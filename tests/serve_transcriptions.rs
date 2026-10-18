@@ -368,7 +368,14 @@ fn form(parts: &[Part]) -> Vec<u8> {
 fn head(port: u16, method: &[u8], path: &str, headers: &[(&str, String)]) -> Vec<u8> {
     let mut head = Vec::new();
     head.extend_from_slice(method);
-    head.extend_from_slice(format!(" {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n").as_bytes());
+    head.extend_from_slice(format!(" {path} HTTP/1.1\r\n").as_bytes());
+    // The loopback Host unless the test names its own.
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+    {
+        head.extend_from_slice(format!("Host: 127.0.0.1:{port}\r\n").as_bytes());
+    }
     for (name, value) in headers {
         head.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
     }
@@ -416,10 +423,13 @@ fn request(
     let mut all = headers.to_vec();
     all.push(("Content-Length", body.len().to_string()));
     let mut stream = connect(port, deadline);
-    bounded::send(&mut stream, &head(port, method, path, &all), deadline)
-        .unwrap_or_else(|error| panic!("write: {error}"));
-    // A refusal can come before the body is read: ignore a broken write.
-    let _ = bounded::send(&mut stream, body, deadline);
+    // A refusal can come before the body is read, and the connection then
+    // closes with the body unread, which resets it. The request goes out in
+    // one write, so a small one reaches the service in one piece and leaves
+    // nothing unread; a broken write still reads the answer.
+    let mut request = head(port, method, path, &all);
+    request.extend_from_slice(body);
+    let _ = bounded::send(&mut stream, &request, deadline);
     read_response(&mut stream, deadline).expect("a complete response")
 }
 
@@ -765,6 +775,108 @@ fn a_transcription_answers_the_final_text_and_forwards_its_options() {
     running.wait_idle();
     let stderr = running.stop();
     assert_events_metadata_only(&stderr);
+    rig.assert_children_gone();
+}
+
+/// What a tailnet browser sends through `tailscale serve`: its Host and
+/// Origin, with the listener still on loopback.
+#[test]
+fn a_listed_origin_reaches_every_route_through_a_proxy() {
+    const ORIGIN: &str = "https://server-1.tail59f332.ts.net:17570";
+    let text = format!("{}  allowed_origins: [{ORIGIN}]\n", config(30_000, 10_000));
+    let rig = rig(&text, json!([transcript(RAW)]));
+    let running = rig.start();
+    let port = running.port;
+    let proxied = |site: &str| {
+        vec![
+            ("Host", "server-1.tail59f332.ts.net:17570".to_owned()),
+            ("Origin", ORIGIN.to_owned()),
+            ("Sec-Fetch-Site", site.to_owned()),
+        ]
+    };
+
+    // The page on loopback, GET only.
+    let (status, headers, _) = request(port, b"GET", "/page.js", &[], b"");
+    assert_eq!(status, 200);
+    assert_eq!(
+        header(&headers, "content-type"),
+        Some("text/javascript; charset=utf-8")
+    );
+    let response = request(port, b"HEAD", "/", &[], b"");
+    assert_eq!(response.0, 405);
+    assert_eq!(header(&response.1, "allow"), Some("GET"));
+
+    let (status, headers, body) = request(port, b"GET", "/", &proxied("none")[..1], b"");
+    assert_eq!(status, 200);
+    assert_eq!(
+        header(&headers, "content-type"),
+        Some("text/html; charset=utf-8")
+    );
+    assert!(header(&headers, "content-security-policy").is_some());
+    assert!(String::from_utf8_lossy(&body).starts_with("<!doctype html>"));
+    let (status, _, body) = request(port, b"GET", "/v1/models", &proxied("same-origin"), b"");
+    assert_eq!(status, 200);
+    assert_eq!(json_body(&body)["data"][0]["id"], "raw");
+    let (status, _, body) = request(
+        port,
+        b"GET",
+        "/pumice/v1/status",
+        &proxied("same-origin"),
+        b"",
+    );
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+
+    let mut headers = proxied("same-origin");
+    headers.push(multipart_type());
+    let (status, response_headers, body) = request(
+        port,
+        b"POST",
+        "/v1/audio/transcriptions",
+        &headers,
+        &form(&[("file", Some("clip.wav"), AUDIO), ("model", None, b"raw")]),
+    );
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(
+        header(&response_headers, "pumice-postprocessing-status"),
+        Some("off")
+    );
+    assert_eq!(json_body(&body)["text"], RAW);
+
+    // The listed host with a foreign Origin, and an unlisted host, are
+    // refused before any work, on the transcription route as elsewhere.
+    for (host, origin, code) in [
+        (
+            "server-1.tail59f332.ts.net:17570",
+            "https://evil.example",
+            "origin_not_allowed",
+        ),
+        (
+            "other.tail59f332.ts.net:17570",
+            "https://other.tail59f332.ts.net:17570",
+            "host_not_allowed",
+        ),
+    ] {
+        for path in ["/", "/v1/models", "/v1/audio/transcriptions"] {
+            let headers = [
+                ("Host", host.to_owned()),
+                ("Origin", origin.to_owned()),
+                multipart_type(),
+            ];
+            let method: &[u8] = if path.ends_with("transcriptions") {
+                b"POST"
+            } else {
+                b"GET"
+            };
+            let response = request(port, method, path, &headers, b"");
+            assert_openai_error(&response, 403, code, None);
+        }
+        // The dictation route answers its own envelope, from the same guard.
+        let headers = [("Host", host.to_owned()), ("Origin", origin.to_owned())];
+        let (status, _, body) = request(port, b"POST", "/pumice/v1/dictations", &headers, b"");
+        assert_eq!(status, 403);
+        assert_eq!(json_body(&body)["error"]["code"], code);
+    }
+    drop(running.stop());
     rig.assert_children_gone();
 }
 

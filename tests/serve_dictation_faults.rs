@@ -195,6 +195,7 @@ async fn start(
             transcription_flows: vec!["raw".to_owned(), "clean".to_owned()],
         }),
         scope: Arc::clone(&scope),
+        allowed_origins: Vec::new(),
         request_hook,
         cleanup_hook,
     };
@@ -203,21 +204,15 @@ async fn start(
 }
 
 /// One request over a real socket: the status and JSON body, or `None`
-/// when the connection closed without an answer.
+/// when the connection closed without a complete answer.
 async fn send(port: u16, method: &str, path: &str, body: &[u8]) -> Option<(u16, Value)> {
-    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
-        .await
-        .ok()?;
     let head = format!(
         "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: multipart/form-data; boundary={BOUNDARY}\r\nContent-Length: {}\r\n\r\n",
         body.len()
     );
-    stream.write_all(head.as_bytes()).await.ok()?;
-    stream.write_all(body).await.ok()?;
-    let mut answer = Vec::new();
-    let _ = tokio::time::timeout(WAIT, stream.read_to_end(&mut answer)).await;
+    let answer = exchange(port, head, body).await?;
     let split = answer.windows(4).position(|w| w == b"\r\n\r\n")?;
-    let status = std::str::from_utf8(&answer[9..12]).ok()?.parse().ok()?;
+    let status = std::str::from_utf8(answer.get(9..12)?).ok()?.parse().ok()?;
     Some((status, serde_json::from_slice(&answer[split + 4..]).ok()?))
 }
 
@@ -227,20 +222,13 @@ async fn transcribe(port: u16, model: &str, format: &str) -> (u16, Option<String
     let body = format!(
         "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n\r\nRIFF audio\r\n--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{model}\r\n--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"response_format\"\r\n\r\n{format}\r\n--{BOUNDARY}--\r\n"
     );
-    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
-        .await
-        .expect("connect");
     let head = format!(
         "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: multipart/form-data; boundary={BOUNDARY}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    stream.write_all(head.as_bytes()).await.unwrap();
-    stream.write_all(body.as_bytes()).await.unwrap();
-    let mut answer = Vec::new();
-    tokio::time::timeout(WAIT, stream.read_to_end(&mut answer))
+    let answer = exchange(port, head, body.as_bytes())
         .await
-        .expect("an answer in time")
-        .unwrap();
+        .expect("a complete answer");
     let split = answer
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -253,6 +241,80 @@ async fn transcribe(port: u16, model: &str, format: &str) -> (u16, Option<String
             .then(|| value.trim().to_owned())
     });
     (status, post_processing, answer[split + 4..].to_vec())
+}
+
+/// Sends `head` and `body` over a fresh connection and reads the answer
+/// until the service closes it, within [`WAIT`]: the bytes, or `None` when
+/// the connection could not be made or ended without a complete answer.
+///
+/// A refusal (a 503 once admission stopped) comes before the body is
+/// read, and the connection then closes with the body unread, which
+/// resets it; on Windows the reset can even drop an answer not yet read.
+/// So the request goes out in one write, to reach the service in one
+/// piece, a failed write still reads the answer, and a reset counts only
+/// after a complete answer.
+async fn exchange(port: u16, head: String, body: &[u8]) -> Option<Vec<u8>> {
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .ok()?;
+    let mut request = head.into_bytes();
+    request.extend_from_slice(body);
+    let _ = stream.write_all(&request).await;
+    let mut answer = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match tokio::time::timeout_at(deadline, stream.read(&mut chunk)).await {
+            Ok(Ok(0)) => return Some(answer),
+            Ok(Ok(n)) => answer.extend_from_slice(&chunk[..n]),
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Ok(Err(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ) && complete_response(&answer) =>
+            {
+                return Some(answer);
+            }
+            Ok(Err(_)) => return None,
+            Err(_) => return complete_response(&answer).then_some(answer),
+        }
+    }
+}
+
+/// Whether `bytes` hold one whole HTTP/1.1 response: a status line, the
+/// headers and as many body bytes as their `Content-Length` announces.
+fn complete_response(bytes: &[u8]) -> bool {
+    let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let Ok(head) = std::str::from_utf8(&bytes[..end]) else {
+        return false;
+    };
+    let mut lines = head.split("\r\n");
+    let status_line = lines.next().unwrap_or_default();
+    if !status_line.starts_with("HTTP/1.1 ") || status_line.len() < 12 {
+        return false;
+    }
+    let length = lines.find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse::<usize>().ok())
+            .flatten()
+    });
+    length.is_some_and(|length| bytes.len() - (end + 4) == length)
+}
+
+#[test]
+fn only_a_whole_response_counts_as_complete() {
+    let whole =
+        b"HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}";
+    assert!(complete_response(whole));
+    for cut in 1..whole.len() {
+        assert!(!complete_response(&whole[..cut]), "{cut}");
+    }
+    assert!(!complete_response(b"HTTP/1.1 200 OK\r\n\r\n{}"));
+    assert!(!complete_response(b""));
 }
 
 fn dictation(flow: &str) -> Vec<u8> {

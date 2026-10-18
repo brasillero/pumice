@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pumice · Test page</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/page.css">
+<script src="/page.js" defer></script>
+</head>
+<body>
+<h1>Pumice test page</h1>
+<p class="muted">Record or upload audio and send it to this <code>pumice serve</code>'s <code>/v1/audio/transcriptions</code>. Audio and results stay in this page's memory; reload to clear them.</p>
+
+<fieldset><legend>Model</legend>
+<div class="row">
+<label class="grow">Model <select id="model"><option value="">Loading…</option></select></label>
+<button id="refresh" type="button">Refresh</button>
+</div>
+<p id="modelInfo" class="muted" role="status"></p>
+<label>Language (optional) <input id="language" maxlength="2" autocomplete="off" spellcheck="false" placeholder="e.g. pt, en; blank: transcription default"></label>
+</fieldset>
+
+<fieldset><legend>Audio</legend>
+<p id="notice" class="muted" role="status"></p>
+<label>Recording format <select id="recFormat">
+<option value="webm">Browser's own recording (WebM/Opus)</option>
+<option value="wav">WAV built in the page</option>
+</select></label>
+<p id="formatNote" class="muted" role="status"></p>
+<div class="row">
+<button id="record" type="button">Record</button>
+<output id="timer">0:00 / 2:00</output>
+<meter id="level" min="0" max="1" value="0" aria-label="Microphone level"></meter>
+</div>
+<p class="muted">Recording stops and sends at 2 minutes. Or upload WAV, MP3, FLAC, Ogg/Vorbis or WebM/Opus, up to 25,000,000 bytes and 120 seconds.</p>
+<div class="row">
+<input id="file" type="file" accept=".wav,.mp3,.flac,.ogg,.webm,audio/*" aria-label="Audio file">
+<button id="upload" type="button">Transcribe file</button>
+</div>
+</fieldset>
+
+<div class="row">
+<p id="progress" class="grow" role="status" aria-live="polite">Ready.</p>
+<button id="cancel" type="button" disabled>Cancel</button>
+</div>
+<div id="error" role="alert" hidden></div>
+
+<section id="result" hidden>
+<h2>Final text</h2>
+<pre id="text" tabindex="0" aria-label="Final text"></pre>
+<div class="row"><button id="copy" type="button">Copy</button> <span id="copied" class="muted" role="status"></span></div>
+<p>Post-processing: <strong id="ppStatus"></strong> <span id="ppDetail" class="muted"></span></p>
+<div id="ppError" class="failed" hidden></div>
+<h2>Raw transcript</h2>
+<pre id="transcript" tabindex="0" aria-label="Raw transcript"></pre>
+<p id="transcriptInfo" class="muted"></p>
+<h2>Timings</h2>
+<table><tbody id="timings"></tbody></table>
+</section>
+
+<section id="request" hidden>
+<p class="muted">HTTP <output id="status"></output> · round trip <output id="elapsed"></output> ms (this browser to <code>pumice serve</code>) · sent <output id="sent"></output></p>
+<audio id="playback" controls hidden></audio>
+<details><summary>Raw response</summary><pre id="raw"></pre></details>
+</section>
+</body>
+</html>

@@ -1,5 +1,11 @@
 # Transcription browser test
 
+For `pumice serve`, use its built-in test page instead: open
+<http://127.0.0.1:17570/> ([orchestrator.md](../../docs/orchestrator.md#test-page)).
+It needs no helper, shows the post-processing details and stays current
+with that service. This tool remains for the standalone
+`pumice-transcribe serve`, which has no page of its own.
+
 A standalone development client for Pumice's OpenAI-compatible transcription API.
 No build step, packages, CDN, or external assets. The page uses only its configured
 endpoint; the helper uses Python 3's standard library.
