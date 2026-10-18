@@ -565,6 +565,16 @@ fn the_models_are_the_published_flows() {
     }
     let (_, status) = running.get("/pumice/v1/status");
     assert_eq!(status["flows"], json!({"enabled": 3, "published": 2}));
+    // No API key: an OpenAI client's Authorization header is ignored.
+    let (status, _, body) = request(
+        running.port,
+        b"GET",
+        "/v1/models",
+        &[("Authorization", "Bearer sk-anything".to_owned())],
+        b"",
+    );
+    assert_eq!(status, 200);
+    assert_eq!(json_body(&body)["data"].as_array().unwrap().len(), 2);
     drop(running.stop());
     // Listing never started a transcription or a provider.
     assert!(rig.log_events("transcription").is_empty());
@@ -1182,5 +1192,60 @@ fn a_client_gone_during_transcription_recycles_the_child() {
             .any(|line| line.contains("\"code\":\"cancelled\"")),
         "{stderr}"
     );
+    rig.assert_children_gone();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_shutdown_during_the_ai_call_answers_the_raw_transcript() {
+    // Unix only: SIGTERM, and the provider's PID checked with kill(2).
+    let rig = rig(&config(60_000, 50_000), json!([transcript(RAW)]));
+    rig.set_fake(json!({"stdout": claude_envelope(false, CLEANED), "sleep_ms": 60_000}));
+    let running = rig.start();
+    stage("held POST /v1/audio/transcriptions");
+    let deadline = Instant::now() + WAIT;
+    let body = form(&[("file", Some("a.wav"), AUDIO), ("model", None, b"clean")]);
+    let mut stream = connect(running.port, deadline);
+    let mut bytes = head(
+        running.port,
+        b"POST",
+        "/v1/audio/transcriptions",
+        &[multipart_type(), ("Content-Length", body.len().to_string())],
+    );
+    bytes.extend_from_slice(&body);
+    bounded::send(&mut stream, &bytes, deadline).unwrap();
+    running.wait_status("the relay stage", |status| {
+        status["dictations"]["stage"] == "relay"
+    });
+    stage("wait for the provider to start");
+    let pid = loop {
+        if let Some(report) = rig.fake_report() {
+            break report["pid"].as_u64().unwrap() as u32;
+        }
+        assert!(Instant::now() < deadline, "the provider never started");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    // SAFETY: plain kill(2) on the child this test owns.
+    assert_eq!(
+        unsafe { libc::kill(running.process.id() as libc::pid_t, libc::SIGTERM) },
+        0
+    );
+    let (status, headers, body) =
+        read_response(&mut stream, Instant::now() + WAIT).expect("an answer before the stop");
+    assert_eq!(status, 200);
+    assert_eq!(
+        header(&headers, "pumice-postprocessing-status"),
+        Some("failed")
+    );
+    let body = json_body(&body);
+    assert_eq!(body["text"], RAW);
+    let error = &body["pumice"]["post_processing"]["error"];
+    assert_eq!(error["stage"], "relay", "{body}");
+    assert_eq!(error["code"], "cancelled");
+    assert_eq!(error["cause_code"], "service_shutdown");
+    assert_eq!(body["pumice"]["stages"]["relay"]["status"], "cancelled");
+    let stderr = running.stop();
+    assert!(!pid_alive(pid), "the provider was reaped");
+    assert_events_metadata_only(&stderr);
     rig.assert_children_gone();
 }
