@@ -4,6 +4,19 @@
 
 ## Deferred
 
+### #2 · Deferred · Read the upload before an early refusal so browsers see the error
+- type: Improvement
+- area: api
+- origin: conversation
+- ticket: —
+- created: 2026-10-18
+- reason: valid HTTP today; only the client-side message is affected
+
+**Context.** When `pumice serve` refuses a request early (admission stopped, busy), it answers after reading only the request head and closes the connection. A client still uploading audio can then see a connection reset instead of the 503 or 429 (seen in Windows CI in PR #122, fixed there on the test side).
+
+**To do.**
+- [ ] Drain a bounded part of the body, or delay the close, before refusing, and test it from a slow uploader.
+
 ## Closed
 
 ### #1 · Done · Browser test page on `pumice serve`
