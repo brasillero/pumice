@@ -1,9 +1,10 @@
-//! In-process fault tests of `pumice serve`'s dictation route
-//! (p13.4-dictations): the whole service (`serve::run`) with the
-//! scenario-driven `pumice-test-transcribe` as its child and the relay's
-//! `pumice-root-test-cli` as the provider, driven through the service's test
-//! seams to inject a panic into a dictation's task and an unconfirmed
-//! cleanup. No real transcription module, model or AI CLI is involved.
+//! In-process fault tests of `pumice serve`'s dictation and transcription
+//! routes (p13.4-dictations, p15-serve-transcriptions): the whole service
+//! (`serve::run`) with the scenario-driven `pumice-test-transcribe` as its
+//! child and the relay's `pumice-root-test-cli` as the provider, driven
+//! through the service's test seams to inject a panic into a dictation's
+//! task, an unconfirmed cleanup and a late formatter stage. No real
+//! transcription module, model or AI CLI is involved.
 
 #[path = "../crates/relay/tests/support/install.rs"]
 mod install;
@@ -50,6 +51,8 @@ struct Setup {
     dir: TempDir,
     stub: PathBuf,
     log: PathBuf,
+    /// Written by the fake provider when it runs: proof of an AI call.
+    report: PathBuf,
 }
 
 fn setup() -> Setup {
@@ -66,12 +69,14 @@ fn setup() -> Setup {
     )
     .unwrap();
     let fake = dir.path().join(exe("fake-claude"));
+    let report = dir.path().join("fake-report.json");
     install_executable(Path::new(env!("CARGO_BIN_EXE_pumice-root-test-cli")), &fake);
     fs::write(
         scenario_path(&fake),
         json!({
             "stdout": json!({"type": "result", "subtype": "success", "is_error": false, "result": "done"}).to_string(),
             "sleep_ms": 30_000,
+            "report_path": report,
         })
         .to_string(),
     )
@@ -85,12 +90,15 @@ fn setup() -> Setup {
     )
     .unwrap();
     fs::write(dir.path().join("transcribe.yml"), "schema_version: 1\n").unwrap();
+    fs::write(dir.path().join("formatter.yml"), "schema_version: 1\n").unwrap();
     fs::write(
         dir.path().join("orchestrator.yml"),
         "schema_version: 1
 modules:
   transcription:
     config: ./transcribe.yml
+  formatter:
+    config: ./formatter.yml
   relay:
     location: in_process
     config: ./relay.yml
@@ -105,10 +113,22 @@ flows:
     transcription_model: turbo
     formatter: null
     relay_route: passthrough
+  - id: clean
+    enabled: true
+    transcription_model: turbo
+    formatter: builtin:clean
+    relay_route: claude
+    budgets_ms:
+      formatter: 50
 ",
     )
     .unwrap();
-    Setup { dir, stub, log }
+    Setup {
+        dir,
+        stub,
+        log,
+        report,
+    }
 }
 
 impl Setup {
@@ -172,7 +192,7 @@ async fn start(
         dictations: Some(Dictations {
             runtime: Arc::new(runtime),
             flows: loaded.config.flows.clone(),
-            transcription_flows: Vec::new(),
+            transcription_flows: vec!["raw".to_owned(), "clean".to_owned()],
         }),
         scope: Arc::clone(&scope),
         request_hook,
@@ -199,6 +219,40 @@ async fn send(port: u16, method: &str, path: &str, body: &[u8]) -> Option<(u16, 
     let split = answer.windows(4).position(|w| w == b"\r\n\r\n")?;
     let status = std::str::from_utf8(&answer[9..12]).ok()?.parse().ok()?;
     Some((status, serde_json::from_slice(&answer[split + 4..]).ok()?))
+}
+
+/// One OpenAI transcription request: the status, the post-processing
+/// status header and the raw body.
+async fn transcribe(port: u16, model: &str, format: &str) -> (u16, Option<String>, Vec<u8>) {
+    let body = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n\r\nRIFF audio\r\n--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{model}\r\n--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"response_format\"\r\n\r\n{format}\r\n--{BOUNDARY}--\r\n"
+    );
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect");
+    let head = format!(
+        "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: multipart/form-data; boundary={BOUNDARY}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    stream.write_all(body.as_bytes()).await.unwrap();
+    let mut answer = Vec::new();
+    tokio::time::timeout(WAIT, stream.read_to_end(&mut answer))
+        .await
+        .expect("an answer in time")
+        .unwrap();
+    let split = answer
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("a head");
+    let head = String::from_utf8_lossy(&answer[..split]).into_owned();
+    let status = head[9..12].parse().unwrap();
+    let post_processing = head.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("pumice-postprocessing-status")
+            .then(|| value.trim().to_owned())
+    });
+    (status, post_processing, answer[split + 4..].to_vec())
 }
 
 fn dictation(flow: &str) -> Vec<u8> {
@@ -314,6 +368,44 @@ async fn an_unconfirmed_cleanup_stops_admitting_dictations() {
     assert_eq!(body["error"]["code"], "admission_stopped");
     assert_eq!(body["stages"]["prepare"]["status"], "skipped");
     assert_eq!(setup.spawns().len(), 1);
+
+    signal.cancel(CancelReason::Terminate);
+    let exit = tokio::time::timeout(WAIT, task).await.unwrap().unwrap();
+    assert_eq!(exit, 143);
+}
+
+/// D4: a formatter stage past its budget answers the raw transcript and
+/// never calls the AI. The hook holds the stage's start past its 50 ms
+/// budget, so the formatter's own deadline check fails it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_formatter_past_its_budget_answers_the_raw_transcript_without_the_ai() {
+    let setup = setup();
+    let hook: RequestHook = Arc::new(|point: &str| {
+        if point == "dictation:formatter" {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    });
+    let (task, port, signal, _scope) = start(&setup, Some(hook), None).await;
+    wait_ready(port).await;
+
+    let (status, post_processing, body) = transcribe(port, "clean", "json").await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(post_processing.as_deref(), Some("failed"));
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["text"], "stub transcript", "{body}");
+    let failure = &body["pumice"]["post_processing"];
+    assert_eq!(failure["status"], "failed", "{body}");
+    assert_eq!(failure["preset"], "builtin:clean");
+    assert_eq!(failure["error"]["stage"], "formatter");
+    assert_eq!(failure["error"]["code"], "formatter_timeout");
+    assert_eq!(body["pumice"]["stages"]["formatter"]["status"], "error");
+    assert_eq!(body["pumice"]["stages"]["relay"]["status"], "skipped");
+    assert!(!setup.report.exists(), "the AI was never called");
+
+    // Nothing was left behind: admission stays open.
+    let (status, body) = send(port, "GET", "/pumice/v1/status", b"").await.unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body["dictations"]["admission"], "open", "{body}");
 
     signal.cancel(CancelReason::Terminate);
     let exit = tokio::time::timeout(WAIT, task).await.unwrap().unwrap();
