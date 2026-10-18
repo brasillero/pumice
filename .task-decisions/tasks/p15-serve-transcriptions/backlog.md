@@ -35,7 +35,7 @@
 - origin: conversation
 - ticket: —
 - created: 2026-10-18
-- reason: after the test page works; the owner does it
+- reason: upstream T3 Code (9c16146) has no configurable OpenAI transcription endpoint (design report); needs a T3 build that offers one
 
 **Context.** The owner wants to use Pumice from T3 Code and similar tools through their OpenAI-compatible settings.
 

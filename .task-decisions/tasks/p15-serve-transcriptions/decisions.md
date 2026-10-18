@@ -51,3 +51,55 @@
 **Why.** The owner: "return the transcribed text, if possible. If the transcription fails, then we will need an error. Just follow the OpenAI API standards."
 
 **Rejected.** D3's per-model `raw`/`error` setting.
+
+### D5 · Active · Published flows are the transcription models
+- date: 2026-10-18
+- decided by: claude (orchestrator, owner-delegated 2026-10-18)
+- origin: reports/2026-10-18-p15-design.md
+- area: config
+- revisit if: #1 adds separate metadata choices
+
+**Decision.** A model on `pumice serve`'s transcription endpoint is an orchestrator flow, and its id is the flow id. `serve.transcription_flows` lists the flows to publish (empty by default; nothing is published implicitly). Published ids use only `A–Z a–z 0–9 . _ -`, start with a letter or digit and are at most 128 characters. Post-processing is off when a flow has `formatter: null` and `relay_route: passthrough`. All published flows use the served transcription model, because `pumice serve` keeps one audio model loaded.
+
+**Why.** Flows already combine audio model, formatter preset and AI route with their time budgets; a second list would duplicate them.
+
+**Rejected.** A separate models section; generated combinations of every preset and route.
+
+### D6 · Active · The transcription endpoint supports `json` and `text`, with Pumice details in a `pumice` object
+- date: 2026-10-18
+- decided by: claude (orchestrator, owner-delegated 2026-10-18)
+- origin: reports/2026-10-18-p15-design.md
+- area: api
+- revisit if: a client needs `verbose_json`, subtitles or streaming
+
+**Decision.** Accepted fields: `file`, `model`, `language`, `prompt`, `temperature`, `response_format` (`json` or `text`) and `stream=false`; anything else is a 400. `language`, `prompt` and `temperature` go to the transcription only; `prompt` never reaches the AI. In `json`, `text` is the final text and a `pumice` object carries the raw transcript, the post-processing status (`off`, `applied`, `skipped`, `failed`), stages and timings. In `text`, the body is the final text and a `Pumice-Postprocessing-Status` header carries the status. Errors use OpenAI's error object and status codes. Dictations and transcriptions share one work permit.
+
+**Why.** Standard clients read `text` and ignore extra fields; `verbose_json` and subtitles need segment timings that do not exist after rewriting or translation.
+
+**Rejected.** Fabricated `verbose_json`; returning the dictation run envelope.
+
+### D7 · Active · `pumice serve` does not add `/v1/chat/completions`
+- date: 2026-10-18
+- decided by: claude (orchestrator, owner-delegated 2026-10-18)
+- origin: reports/2026-10-18-p15-design.md
+- area: api
+- revisit if: a client needs chat on the same port
+
+**Decision.** Chat stays on `pumice relay serve`.
+
+**Why.** The owner's first version is audio in, final text out; chat on this port needs its own validation, routing and model-list design.
+
+**Rejected.** Mounting the relay router on `pumice serve` now.
+
+### D8 · Active · The browser test page is served by `pumice serve` at `/`
+- date: 2026-10-18
+- decided by: claude (orchestrator, owner-delegated 2026-10-18)
+- origin: reports/2026-10-18-p15-design.md
+- area: api
+- revisit if: —
+
+**Decision.** `pumice` embeds the test page (based on `tools/transcribe-test`) and serves it at `GET /` with a strict content security policy and the existing Host/Origin guard. It lists `/v1/models`, records or uploads audio and calls `/v1/audio/transcriptions` on the same origin. On server-1 the owner opens it through an SSH local forward of `127.0.0.1:17570` to the same local port.
+
+**Why.** One command gives the owner something to test; no Python proxy and no external assets.
+
+**Rejected.** A separate page server; exposing the port beyond loopback.
