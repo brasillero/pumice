@@ -10,9 +10,9 @@
 //! `temperature` go to the transcription child only, never to the AI.
 //!
 //! The answer's `text` is the final text. When the transcription succeeded
-//! and the post-processing (formatter or relay) failed, the answer is still
-//! a success, with the raw transcript as `text` and the failure only in the
-//! Pumice details (D4). Every other failure is an OpenAI error object with
+//! and anything after it failed (the formatter, the relay, a shutdown or
+//! the cleanup), the answer is still a success, with the raw transcript as
+//! `text` and the failure only in the Pumice details (D4, D9). Every other failure is an OpenAI error object with
 //! an OpenAI status. Pumice details: a `pumice` object next to `text` in
 //! `json`, the `Pumice-Postprocessing-Status` header in both formats.
 //!
@@ -348,7 +348,8 @@ enum Status {
     Applied,
     /// A silent (whitespace-only) transcript: no AI call.
     Skipped,
-    /// The formatter or relay failed: the raw transcript is `text` (D4).
+    /// A failure after the transcription (formatter, relay, shutdown or
+    /// cleanup): the raw transcript is `text` (D4, D9).
     Failed,
 }
 
@@ -365,11 +366,10 @@ impl Status {
 
 /// The finished (or refused) operation as an OpenAI answer.
 pub(crate) fn respond(output: RunOutput, answering: Option<Answering>) -> Response<Full<Bytes>> {
-    // D4: past a successful transcription, a post-processing failure is a
-    // success with the raw transcript. A cleanup failure is the server's.
-    let post_processing_failed = output.error.as_ref().is_some_and(|error| {
-        matches!(error.stage, stage::FORMATTER | stage::RELAY) && output.transcript.is_some()
-    });
+    // D4, D9: past a successful transcription (its transcript is kept only
+    // then), any later failure is a success with the raw transcript, a
+    // failed cleanup included (admission is stopped all the same).
+    let post_processing_failed = output.error.is_some() && output.transcript.is_some();
     if let Some(error) = &output.error
         && !post_processing_failed
     {
@@ -941,6 +941,46 @@ mod tests {
     }
 
     #[test]
+    fn a_cleanup_failure_after_the_transcription_answers_the_raw_transcript() {
+        // D9: the transcript stays valid; the failure is reported, not lost.
+        let failed = || {
+            let mut output = output(
+                None,
+                Some(StageError::new(stage::CLEANUP, "cleanup_failed", "x", 1)),
+                StageStatus::Ok,
+            );
+            output.cleanup_failed = true;
+            output
+        };
+        let (status, headers, body) = read(respond(
+            failed(),
+            Some(answering(
+                ResponseFormat::Json,
+                Some("builtin:clean"),
+                "claude",
+            )),
+        ));
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[STATUS_HEADER], "failed");
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["text"], " raw words");
+        let failure = &body["pumice"]["post_processing"];
+        assert_eq!(failure["status"], "failed");
+        assert_eq!(failure["error"]["stage"], "cleanup");
+        assert_eq!(failure["error"]["code"], "cleanup_failed");
+        assert!(failure["error"]["message"].is_string());
+
+        let (status, headers, body) = read(respond(
+            failed(),
+            Some(answering(ResponseFormat::Text, None, "passthrough")),
+        ));
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[STATUS_HEADER], "failed");
+        assert_eq!(headers[header::CONTENT_TYPE], "text/plain; charset=utf-8");
+        assert_eq!(&body[..], b" raw words");
+    }
+
+    #[test]
     fn other_failures_are_openai_errors() {
         let mut no_transcript = output(
             None,
@@ -970,17 +1010,6 @@ mod tests {
                 "code": "transcription_timeout",
             }})
         );
-
-        // A cleanup failure after a success is the server's own.
-        let (status, _, _) = read(respond(
-            output(
-                None,
-                Some(StageError::new(stage::CLEANUP, "cleanup_failed", "x", 1)),
-                StageStatus::Ok,
-            ),
-            Some(answering(ResponseFormat::Json, None, "passthrough")),
-        ));
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 
         // Busy: 429 with Retry-After; a refused model: 404 on `model`.
         let mut refused = output(None, Some(dictation_busy()), StageStatus::Skipped);

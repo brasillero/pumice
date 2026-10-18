@@ -518,13 +518,16 @@ charset=utf-8`). Both carry the header `Pumice-Postprocessing-Status` with
 - `applied` — the formatter and the AI route ran;
 - `skipped` — a silent (whitespace-only) transcript: no AI call, `text` is
   the transcript unchanged;
-- `failed` — the transcription worked but the formatter or the AI route
-  failed (an error, a timeout, an empty or too large output, a quota or
-  login problem, or a shutdown during the call): the answer is still
-  `200`, `text` is the **raw transcript**, and
-  `post_processing.error` has the failure's safe `stage`, `code`,
-  `message` and `cause_code` (D4). Nothing is retried and no other provider
-  is tried.
+- `failed` — the transcription worked but something after it failed: the
+  formatter or the AI route (an error, a timeout, an empty or too large
+  output, a quota or login problem), a shutdown during the formatter or the
+  AI call, or a cleanup that could not be confirmed (`stage` `cleanup`,
+  `code` `cleanup_failed`). The answer is still `200`, `text` is the **raw
+  transcript**, and `post_processing.error` has the failure's safe `stage`,
+  `code`, `message` and `cause_code` (D4, D9). Nothing is retried and no
+  other provider is tried. An unconfirmed cleanup still stops admission
+  afterwards, exactly as for a dictation (`admission: "stopped"`, and
+  every later dictation or transcription gets 503 `admission_stopped`).
 
 Every other failure is an OpenAI error object — exactly `message`, `type`,
 `param` and `code` — with the statuses of the [dictation
@@ -536,7 +539,9 @@ Whisper does not know it), 404 `model_not_found`, 405 with `Allow: POST`,
 and 429 `rate_limit_exceeded` with `Retry-After: 1`. Transcription
 failures (undecodable audio, engine failure, timeout, an unavailable or
 broken child) are errors, since there is no text to return; so is a
-cleanup that could not be confirmed (500 `cleanup_failed`).
+cleanup that could not be confirmed when no transcript was obtained (500
+`cleanup_failed`). The dictation route keeps its own rule: a dictation
+over an unconfirmed cleanup is never a success.
 
 A transcription is admitted, limited, timed, cancelled and cleaned up
 exactly like a dictation, with the same work permit: while one of them

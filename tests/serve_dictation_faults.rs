@@ -374,6 +374,59 @@ async fn an_unconfirmed_cleanup_stops_admitting_dictations() {
     assert_eq!(exit, 143);
 }
 
+/// D9: an unconfirmed cleanup after a successful transcription still
+/// answers the raw transcript, and stops admission as for dictations.
+async fn cleanup_failure_answers_the_raw_transcript(format: &str) {
+    let setup = setup();
+    let hook: CleanupHook = Arc::new(|| true);
+    let (task, port, signal, _scope) = start(&setup, None, Some(hook)).await;
+    wait_ready(port).await;
+
+    let (status, post_processing, body) = transcribe(port, "raw", format).await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(post_processing.as_deref(), Some("failed"));
+    if format == "text" {
+        assert_eq!(body, b"stub transcript");
+    } else {
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["text"], "stub transcript", "{body}");
+        let failure = &body["pumice"]["post_processing"];
+        assert_eq!(failure["status"], "failed", "{body}");
+        assert_eq!(failure["error"]["stage"], "cleanup");
+        assert_eq!(failure["error"]["code"], "cleanup_failed");
+        assert!(failure["error"]["message"].is_string());
+        assert_eq!(body["pumice"]["transcript"]["text"], "stub transcript");
+    }
+
+    // Admission is stopped all the same: both routes refuse new work.
+    let (status, body) = send(port, "GET", "/pumice/v1/status", b"").await.unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body["dictations"]["admission"], "stopped", "{body}");
+    let (status, _, body) = transcribe(port, "raw", "json").await;
+    assert_eq!(status, 503);
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["code"], "admission_stopped", "{body}");
+    let (status, body) = send(port, "POST", "/pumice/v1/dictations", &dictation("raw"))
+        .await
+        .unwrap();
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(setup.spawns().len(), 1);
+
+    signal.cancel(CancelReason::Terminate);
+    let exit = tokio::time::timeout(WAIT, task).await.unwrap().unwrap();
+    assert_eq!(exit, 143);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cleanup_failure_after_a_transcription_answers_the_raw_transcript_as_json() {
+    cleanup_failure_answers_the_raw_transcript("json").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cleanup_failure_after_a_transcription_answers_the_raw_transcript_as_text() {
+    cleanup_failure_answers_the_raw_transcript("text").await;
+}
+
 /// D4: a formatter stage past its budget answers the raw transcript and
 /// never calls the AI. The hook holds the stage's start past its 50 ms
 /// budget, so the formatter's own deadline check fails it.

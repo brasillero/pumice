@@ -97,10 +97,11 @@ curl --fail-with-body http://127.0.0.1:17570/v1/audio/transcriptions \
 
 `text` is always the final text; standard clients ignore the `pumice`
 object and the `Pumice-Postprocessing-Status` header (`off`, `applied`,
-`skipped` for silence, `failed`). If the transcription works but the
-formatter or the AI fails, the answer is still `200` with the **raw
-transcript** as `text`, status `failed` and the safe reason in
-`pumice.post_processing.error`:
+`skipped` for silence, `failed`). If the transcription works but anything
+after it fails — the formatter, the AI, a shutdown during them, or a
+cleanup that could not be confirmed (which also stops admission until a
+restart) — the answer is still `200` with the **raw transcript** as `text`,
+status `failed` and the safe reason in `pumice.post_processing.error`:
 
 ```json
 {"text":"raw words","pumice":{…,"post_processing":{"status":"failed","preset":"builtin:clean","relay_route":"claude","error":{"stage":"relay","code":"relay_timeout","message":"The provider call exceeded its deadline."}},…}}
