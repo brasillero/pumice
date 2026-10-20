@@ -96,3 +96,42 @@
 **Why.** It is where catalog downloads already go, follows the platform convention for app data, and needs no setting.
 
 **Rejected.** A folder next to the config files: model files are large (about 900 MB for turbo) and config folders are kept small.
+
+### D8 · Active · Catalog models are recognised by size and SHA-256
+- date: 2026-10-20
+- decided by: brasillero
+- origin: reports/2026-10-20-implementation-design.md
+- area: transcription
+- revisit if: —
+
+**Decision.** A file in the models folder takes its catalog id when its size and SHA-256 match a catalog entry, whatever its file name; other `.gguf` files keep their file name without the extension.
+
+**Why.** A renamed catalog file is still recognised, and a file is never given a catalog name from its name alone.
+
+**Rejected.** Matching the exact catalog file name: breaks on renames and trusts the name.
+
+### D9 · Active · With the relay off, `pumice serve` runs no AI processing
+- date: 2026-10-20
+- decided by: brasillero
+- origin: reports/2026-10-20-implementation-design.md
+- area: api
+- revisit if: —
+
+**Decision.** When the serve relay setting is off, `pumice serve` builds no relay or formatter runtime: `GET /v1/models` lists only the plain model ids, AI dictation flows report that the relay is disabled, and raw dictations keep working. `pumice run` is not affected.
+
+**Why.** "Relay off" should mean no AI calls at all, and choices that cannot run must not appear in the model list.
+
+**Rejected.** Only hiding the formatted ids while AI dictations still run.
+
+### D10 · Active · Explicit settings ship as their own pull request before the model changes
+- date: 2026-10-20
+- decided by: brasillero
+- origin: reports/2026-10-20-implementation-design.md
+- area: process
+- revisit if: —
+
+**Decision.** D3 is implemented for all four module configs in a separate first pull request; the models folder (D4, D7, D8) and the served model ids (D1, D2, D9) follow in their own pull requests.
+
+**Why.** Small pull requests, and the later changes can then require their new keys without exceptions.
+
+**Rejected.** Requiring only the new `serve` keys now and leaving the rest for later.
