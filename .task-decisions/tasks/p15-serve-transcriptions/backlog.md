@@ -16,6 +16,7 @@
 
 **To do.**
 - [ ] Design the metadata and request fields once a client or Pumice's own UI can use them.
+- [ ] Consider a formatter `user_template` with placeholders (`{{transcript}}` in `<transcript>` tags, `{{language}}`): on 2026-10-20 Claude Haiku followed the owner's list rules when they sat in the user message with the tagged transcript (Handy's layout), but mostly not as a system prompt.
 
 ### #3 · Deferred · Try `pumice serve` from T3 Code
 - type: Task
