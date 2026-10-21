@@ -15,7 +15,8 @@ usage: pumice serve [--config <FILE>] [--port <PORT>] [--json]
 
 Runs the local dictation stack on 127.0.0.1: one loopback frontend and one
 warm transcription child (the pumice-transcribe program installed next to
-pumice) loaded with serve.transcription_model. Needs a `serve:` section
+pumice) loaded with serve.transcription_model, a model id from the
+transcription models folder. Needs a `serve:` section
 with `enabled: true` in the orchestrator configuration.
 
 Routes: GET /health, GET /ready, GET /pumice/v1/status, GET /pumice/v1/flows,

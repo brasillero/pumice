@@ -10,7 +10,8 @@
 //! 2. the orchestrator file and its `serve:` section, the relay pipeline,
 //!    the formatter registry and every enabled flow's references;
 //! 3. the sibling `pumice-transcribe` and its `models list` (the served
-//!    model must be configured and installed);
+//!    model must be in the transcription models folder), within
+//!    `serve.startup_timeout_ms`;
 //! 4. the frontend port, claimed before the child starts (an occupied port
 //!    fails, with no fallback);
 //! 5. the child, until its handshake succeeds (never retried).
@@ -57,10 +58,8 @@ use crate::orchestrator::serve::output::Reporter;
 use crate::orchestrator::serve::supervisor::{
     Checkpoints, Event, StartupError, SupervisorConfig, Timings,
 };
-use crate::orchestrator::transcription::Transcribe;
+use crate::orchestrator::transcription::{SttFailure, Transcribe};
 
-/// The `models list` preflight never takes longer than this.
-const MODELS_LIST_CAP: Duration = Duration::from_secs(5);
 /// The supervisor's whole stop: the 2.5 s grace plus the reap.
 const SUPERVISOR_STOP_LIMIT: Duration = Duration::from_millis(3_750);
 /// The frontend task's own end, after it was told to stop: its drain
@@ -401,9 +400,12 @@ pub async fn run(service: Service, reporter: &Reporter, mut signals: cancel::Can
     }
 }
 
-/// The served model must be in the transcription configuration and
-/// installed, checked with `models list` like `pumice run` checks a flow's
-/// model; a missing one is reported at `serve.transcription_model`.
+/// The served model must be in the transcription models folder, checked
+/// with `models list` like `pumice run` checks a flow's model; a missing one
+/// is reported at `serve.transcription_model`. Listing hashes the folder's
+/// catalog-sized files, which can take seconds for large models, so it gets
+/// the explicit `serve.startup_timeout_ms`, like each child start, never a
+/// hidden cap.
 async fn check_model(
     binary: &std::path::Path,
     transcribe_config: &std::path::Path,
@@ -412,20 +414,34 @@ async fn check_model(
     signals: &cancel::CancelGuard,
 ) -> Result<(), StageError> {
     let stt = Transcribe::new(binary.to_path_buf(), transcribe_config.to_path_buf());
-    let deadline = Instant::now() + MODELS_LIST_CAP;
+    let deadline = Instant::now() + settings.startup_timeout;
     let entries = stt
         .models_list(deadline, signals)
         .await
-        .map_err(|failure| flow::map_stt_failure(stage::PREPARE, failure, deadline))?;
-    let message = match entries
+        .map_err(|failure| match failure {
+            // No flow runs yet: the startup budget ran out, not a flow's.
+            SttFailure::Timeout => StageError::new(
+                stage::PREPARE,
+                "transcription_timeout",
+                "the transcription module did not list its models within \
+                 serve.startup_timeout_ms",
+                1,
+            ),
+            failure => flow::map_stt_failure(stage::PREPARE, failure, deadline),
+        })?;
+    if entries
         .iter()
-        .find(|entry| entry.id == settings.transcription_model)
+        .any(|entry| entry.id == settings.transcription_model)
     {
-        Some(entry) if entry.exists => return Ok(()),
-        Some(_) => "the served transcription model file is missing; install or download it first",
-        None => "serve.transcription_model is not in the transcription configuration",
-    };
-    let mut error = StageError::new(stage::PREPARE, "transcription_model_not_found", message, 2);
+        return Ok(());
+    }
+    let mut error = StageError::new(
+        stage::PREPARE,
+        "transcription_model_not_found",
+        "serve.transcription_model is not a model in the transcription models folder; \
+         put its file there or download it first",
+        2,
+    );
     set_reference_location(&mut error, orchestrator, settings.transcription_model_at);
     Err(error)
 }

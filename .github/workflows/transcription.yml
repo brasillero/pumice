@@ -1311,16 +1311,13 @@ jobs:
           # not under test are the example files' ones.
           {
             echo 'schema_version: 1'
-            echo 'default_model: tiny'
+            echo 'default_model: whisper-tiny-q8_0'
             echo 'language: null'
             echo 'threads: auto'
             echo 'backend: auto'
             echo 'server:'
             echo '  port: null'
-            echo 'models_dir: null'
-            echo 'models:'
-            echo '  - id: tiny'
-            echo "    path: '$model'"
+            echo "models_dir: '$MODEL_DIR'"
           } > d2-cfg/transcribe.yml
           {
             echo 'port: 7567'
@@ -1348,7 +1345,7 @@ jobs:
             echo 'flows:'
             echo '  - id: raw'
             echo '    enabled: true'
-            echo '    transcription_model: tiny'
+            echo '    transcription_model: whisper-tiny-q8_0'
             echo '    formatter: null'
             echo '    relay_route: passthrough'
             echo '    budgets_ms:'
@@ -1359,7 +1356,7 @@ jobs:
             echo 'serve:'
             echo '  enabled: true'
             echo '  port: 0'
-            echo '  transcription_model: tiny'
+            echo '  transcription_model: whisper-tiny-q8_0'
             echo '  startup_timeout_ms: 60000'
             echo '  transcription_flows:'
             echo '    - raw'

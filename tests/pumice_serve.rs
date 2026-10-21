@@ -114,10 +114,14 @@ fn rig(serve: &str, generations: Value) -> Rig {
     let models = json!({
         "schema_version": 1,
         "ok": true,
-        "result": [
-            {"id": "turbo", "path": "/models/turbo.gguf", "exists": true, "size": 1, "default": true},
-            {"id": "absent", "path": "/models/absent.gguf", "exists": false, "size": null, "default": false}
-        ]
+        "result": {
+            "models_dir": "/models",
+            "models": [
+                {"id": "turbo", "file": "/models/turbo.gguf", "size": 1, "catalog": false, "default": true},
+                {"id": "Absent", "file": "/models/Absent.gguf", "size": 1, "catalog": false, "default": false}
+            ],
+            "diagnostics": []
+        }
     });
     let mut scenario = install.join(exe("pumice-transcribe")).into_os_string();
     scenario.push(".scenario.json");
@@ -138,7 +142,7 @@ fn rig(serve: &str, generations: Value) -> Rig {
         ),
     )
     .unwrap();
-    fs::write(cfg.join("transcribe.yml"), "schema_version: 1\ndefault_model: null\nlanguage: null\nthreads: auto\nbackend: cpu\nserver:\n  port: null\nmodels_dir: null\nmodels: []\n").unwrap();
+    fs::write(cfg.join("transcribe.yml"), "schema_version: 1\ndefault_model: null\nlanguage: null\nthreads: auto\nbackend: cpu\nserver:\n  port: null\nmodels_dir: null\n").unwrap();
     fs::write(
         cfg.join("orchestrator.yml"),
         format!(
@@ -636,6 +640,49 @@ fn a_startup_error_record_from_the_child_is_a_configuration_error() {
     rig.assert_children_gone();
 }
 
+/// Delays the stub's `models list` answer by `ms`.
+fn delay_models_list(rig: &Rig, ms: u64) {
+    let mut path = rig.install.join(exe("pumice-transcribe")).into_os_string();
+    path.push(".scenario.json");
+    let mut scenario: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    scenario["models_list"]["sleep_ms"] = json!(ms);
+    fs::write(&path, scenario.to_string()).unwrap();
+}
+
+#[test]
+fn the_models_list_preflight_gets_the_startup_budget() {
+    // Listing hashes the models folder's catalog-sized files, which takes
+    // seconds for large models: a list slower than the former fixed 5 s
+    // preflight still starts within serve.startup_timeout_ms...
+    let slow = rig(SERVE, json!([{}]));
+    delay_models_list(&slow, 5_500);
+    let mut running = slow.start(&["--json"]);
+    let port = running.port();
+    running.ready(port);
+    drop(running);
+
+    // ...and that budget, not a hidden one, ends a list that takes longer.
+    let rig = rig(
+        "serve:\n  enabled: true\n  port: 0\n  transcription_model: turbo\n  startup_timeout_ms: 1000\n",
+        json!([{}]),
+    );
+    delay_models_list(&rig, 30_000);
+    let started = Instant::now();
+    let output = rig.output(&["--json"]);
+    assert!(started.elapsed() < Duration::from_secs(5), "{output:?}");
+    let record = one_error_record(&output);
+    assert_eq!(output.status.code(), Some(1), "{record}");
+    assert_eq!(record["code"], "transcription_timeout", "{record}");
+    assert!(
+        record["message"]
+            .as_str()
+            .unwrap()
+            .contains("serve.startup_timeout_ms"),
+        "{record}"
+    );
+    assert!(rig.spawns().is_empty(), "no child spawned");
+}
+
 #[test]
 fn configuration_errors_exit_2_before_any_child() {
     let disabled = "serve:\n  enabled: false\n";
@@ -650,11 +697,15 @@ fn configuration_errors_exit_2_before_any_child() {
             mismatch,
             "flow \"raw\" uses a different transcription model",
         ),
-        (missing_model, "model file is missing"),
+        (
+            missing_model,
+            "is not a model in the transcription models folder",
+        ),
     ] {
         let rig = rig(serve, json!([{}]));
         if serve == missing_model {
-            // Every enabled flow uses the served model, which is not installed.
+            // Every enabled flow uses the served model, which is not in the
+            // folder (ids are case-sensitive: `Absent` is another model).
             let path = rig.cfg.join("orchestrator.yml");
             let text = fs::read_to_string(&path).unwrap();
             fs::write(

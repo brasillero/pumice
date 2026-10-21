@@ -3,11 +3,11 @@ use crate::compute::{BackendMode, Compute};
 use crate::config::{self, Config, LoadedConfig, Threads};
 use crate::download::{self, DownloadSpec, Downloader, FetchResult};
 use crate::engine::{CancelToken, Engine, EngineRequest};
+use crate::inventory::{self, Diagnostic, Inventory};
 use crate::managed::{self, Lifecycle, StopReason};
 use crate::models_dir;
 use crate::service::{
-    decode_audio_from_reader, normalize_language, normalize_threads, resolve_model_id,
-    transcribe_pcm,
+    decode_audio_from_reader, normalize_language, normalize_threads, transcribe_pcm,
 };
 use crate::{Error, ErrorCode, JsonError, TranscriptionOptions};
 use clap::error::ErrorKind;
@@ -43,9 +43,9 @@ pub enum Command {
     File(FileArgs),
     /// Serve the HTTP API.
     Serve(ServeArgs),
-    /// Validate the configuration file and exit.
+    /// Validate the configuration file and the models folder, and exit.
     CheckConfig(CheckConfigArgs),
-    /// Inspect configured models and the built-in catalog.
+    /// Inspect the models folder and the built-in catalog.
     Models {
         #[command(subcommand)]
         command: ModelsCommand,
@@ -61,13 +61,15 @@ pub struct FileArgs {
     /// Path to the audio file (WAV, MP3, FLAC, Ogg Vorbis).
     audio: PathBuf,
 
-    /// Model id from the configuration file.
+    /// Model id: a model in the models folder (its catalog id or file
+    /// name without `.gguf`). Defaults to the configured `default_model`.
     #[arg(long, value_name = "ID", group = "model_source")]
     model: Option<String>,
 
-    /// Direct path to a GGUF model file. With it, `file` also runs without a
-    /// configuration file: the other settings then come from the flags and
-    /// their defaults. A configuration file that exists must be complete.
+    /// Direct path to a GGUF model file, named by the models folder's rule
+    /// in the result. With it, `file` also runs without a configuration
+    /// file: the other settings then come from the flags and their
+    /// defaults. A configuration file that exists must be complete.
     #[arg(long, value_name = "PATH.gguf", group = "model_source")]
     model_file: Option<PathBuf>,
 
@@ -115,7 +117,8 @@ pub struct CheckConfigArgs {
 
 #[derive(ClapArgs, Debug)]
 pub struct ServeArgs {
-    /// Model id to serve. Defaults to the configured `default_model`.
+    /// Model id to serve, from the models folder. Defaults to the configured
+    /// `default_model`.
     #[arg(long, value_name = "ID")]
     model: Option<String>,
 
@@ -139,11 +142,11 @@ pub struct ServeArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum ModelsCommand {
-    /// List configured models.
+    /// List the models in the models folder.
     List(ModelsListArgs),
     /// List the built-in downloadable catalog and what is installed.
     Catalog(ModelsCatalogArgs),
-    /// Download a catalog model into the models directory.
+    /// Download a catalog model into the models folder.
     Download(ModelsDownloadArgs),
     /// Re-hash an installed catalog model against the catalog.
     Verify(ModelsVerifyArgs),
@@ -190,6 +193,9 @@ pub struct ModelsVerifyArgs {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SuccessOutput {
+    /// The model id: its id in the models folder, or for a one-off
+    /// `--model-file` the id the folder's naming rule gives the file.
+    pub model: String,
     pub text: String,
     pub language: Option<String>,
     pub audio_seconds: f64,
@@ -216,16 +222,21 @@ struct CheckConfigResult {
     file: PathBuf,
 }
 
+/// `models list`: the models folder's snapshot.
+#[derive(Debug, Clone, Serialize)]
+struct ModelsListOutput {
+    models_dir: PathBuf,
+    models: Vec<ModelListEntry>,
+    diagnostics: Vec<Diagnostic>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct ModelListEntry {
     id: String,
-    path: PathBuf,
-    exists: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    size: Option<u64>,
-    /// Built-in catalog id when the entry uses `catalog:` instead of `path`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    catalog: Option<String>,
+    file: PathBuf,
+    size: u64,
+    /// The file matched a catalog entry by size and SHA-256.
+    catalog: bool,
     default: bool,
 }
 
@@ -237,8 +248,8 @@ struct CatalogListEntry {
     size: u64,
     sha256: &'static str,
     license: &'static str,
-    /// The file is present with the expected size. Only `models verify`
-    /// re-hashes it.
+    /// A model file of the expected size is in the models folder, under any
+    /// name. `models list` and `models verify` hash it.
     installed: bool,
 }
 
@@ -262,7 +273,7 @@ struct VerifyOutput {
 enum CommandOutput {
     Transcription(SuccessOutput),
     CheckConfig(PathBuf),
-    ModelsList(Vec<ModelListEntry>),
+    ModelsList(ModelsListOutput),
     ModelsCatalog(Vec<CatalogListEntry>),
     Download(DownloadOutput),
     Verify(VerifyOutput),
@@ -273,6 +284,7 @@ enum CommandOutput {
 impl From<SuccessOutput> for serde_json::Value {
     fn from(out: SuccessOutput) -> Self {
         let mut result = serde_json::json!({
+            "model": out.model,
             "text": out.text,
             "language": out.language,
             "audio_seconds": out.audio_seconds,
@@ -367,8 +379,8 @@ where
                 }
             }
         }
-        Ok(CommandOutput::ModelsList(entries)) => {
-            match print_models_list(&entries, json, &mut stdout) {
+        Ok(CommandOutput::ModelsList(output)) => {
+            match print_models_list(&output, json, &mut stdout, &mut stderr) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(_) => {
                     let _ = stderr.write_all(b"failed to write output\n");
@@ -463,8 +475,8 @@ where
     let config_arg = args.config.as_deref();
     match args.command {
         Command::File(file_args) => {
-            let config = file_config(&file_args, config_arg)?;
-            run_file(file_args, &config, config_arg, |_| Ok(engine))
+            let loaded = file_config(&file_args, config_arg)?;
+            run_file(file_args, loaded.as_ref(), config_arg, |_| Ok(engine))
         }
         _ => Err(Error::invalid_arguments(
             "run_with_engine only supports the file subcommand",
@@ -479,18 +491,26 @@ where
     let config_arg = args.config.as_deref();
     match args.command {
         Command::File(file_args) => {
-            let config = file_config(&file_args, config_arg)?;
-            let output = run_file(file_args, &config, config_arg, make_engine)?;
+            let loaded = file_config(&file_args, config_arg)?;
+            let output = run_file(file_args, loaded.as_ref(), config_arg, make_engine)?;
             Ok(CommandOutput::Transcription(output))
         }
         Command::Serve(serve_args) => {
             let loaded = load_config(config_arg)?;
-            match run_serve(serve_args, &loaded.config, config_arg, make_engine, None)? {
+            match run_serve(serve_args, &loaded, config_arg, make_engine, None)? {
                 Served::Stopped => Ok(CommandOutput::None),
                 Served::Retired => Err(Error::new(ErrorCode::EngineFailed, RETIRED)),
             }
         }
-        Command::CheckConfig(_) => Ok(CommandOutput::CheckConfig(load_config(config_arg)?.path)),
+        Command::CheckConfig(_) => {
+            let loaded = load_config(config_arg)?;
+            let inventory = discover(&loaded.config)?;
+            warn(&inventory.diagnostics);
+            if loaded.config.default_model.is_some() {
+                select_model(&loaded, &inventory, None, config_arg)?;
+            }
+            Ok(CommandOutput::CheckConfig(loaded.path))
+        }
         Command::Models { command } => run_models_command(command, config_arg),
         Command::Backends(backends_args) => {
             // A report like `models catalog`: it also runs before a
@@ -552,7 +572,8 @@ async fn retired(retire: Option<CancellationToken>) {
 }
 
 /// `models list` needs the configuration; `catalog`, `download` and
-/// `verify` also run before one exists, in the per-user models directory.
+/// `verify` also run before one exists, in the per-user models folder, and
+/// whatever else the folder holds never blocks them.
 fn run_models_command(
     command: ModelsCommand,
     config_arg: Option<&Path>,
@@ -560,7 +581,11 @@ fn run_models_command(
     match command {
         ModelsCommand::List(_) => {
             let loaded = load_config(config_arg)?;
-            Ok(CommandOutput::ModelsList(build_model_list(&loaded.config)))
+            let inventory = discover(&loaded.config)?;
+            Ok(CommandOutput::ModelsList(build_model_list(
+                &loaded.config,
+                inventory,
+            )))
         }
         ModelsCommand::Catalog(_) => {
             let dir = models_dir_for(config_arg)?;
@@ -570,6 +595,18 @@ fn run_models_command(
             let entry = find_catalog_entry(&args.id)?;
             let dir = models_dir_for(config_arg)?;
             let spec = DownloadSpec::from(entry);
+
+            // A copy under another name is the same model (D8): a second
+            // copy would make its id a duplicate.
+            if let Some(path) = inventory::catalog_copies(&dir, entry)?.into_iter().next() {
+                return Ok(CommandOutput::Download(DownloadOutput {
+                    model: entry.id.to_string(),
+                    file: path,
+                    bytes: entry.size_bytes,
+                    sha256: entry.sha256.to_string(),
+                    already_installed: true,
+                }));
+            }
 
             let mut stderr = io::stderr();
             let mut reporter =
@@ -612,7 +649,13 @@ fn run_models_command(
             let entry = find_catalog_entry(&args.id)?;
             let dir = models_dir_for(config_arg)?;
             let spec = DownloadSpec::from(entry);
-            let path = dir.join(entry.file_name);
+            // The catalog file name, else a copy under another name.
+            let mut path = dir.join(entry.file_name);
+            if std::fs::symlink_metadata(&path).is_err()
+                && let Some(copy) = inventory::catalog_copies(&dir, entry)?.into_iter().next()
+            {
+                path = copy;
+            }
             let verified = download::verify_file(&path, &spec)?;
             Ok(CommandOutput::Verify(VerifyOutput {
                 model: entry.id.to_string(),
@@ -638,9 +681,9 @@ fn models_dir_for(config_arg: Option<&Path>) -> Result<PathBuf, Error> {
     resolve_models_dir(loaded.as_ref().map(|loaded| &loaded.config))
 }
 
-/// Where downloaded catalog models go: the configured `models_dir`, else
-/// (`models_dir: null`, or no configuration file) the per-user data
-/// directory (see `models_dir::default_models_dir`).
+/// The models folder: the configured `models_dir`, else (`models_dir:
+/// null`, or no configuration file) the per-user data directory (see
+/// `models_dir::default_models_dir`).
 fn resolve_models_dir(config: Option<&Config>) -> Result<PathBuf, Error> {
     config
         .and_then(|config| config.models_dir.clone())
@@ -652,27 +695,93 @@ fn resolve_models_dir(config: Option<&Config>) -> Result<PathBuf, Error> {
         })
 }
 
-/// Error for a missing model file. A `catalog:` entry names the command that
-/// fixes it — preserving an explicit `--config`, since a `models_dir` override
-/// only takes effect through the same config file.
-fn missing_model_error(path: &Path, catalog: Option<&str>, config_arg: Option<&Path>) -> Error {
-    let message = match catalog {
-        Some(id) => {
-            let command = match config_arg {
-                Some(config) => format!(
-                    "pumice-transcribe --config {} models download {id}",
-                    shell_quote(&config.to_string_lossy())
-                ),
-                None => format!("pumice-transcribe models download {id}"),
-            };
-            format!(
-                "model file not found: {} (catalog model `{id}`); download it with: {command}",
-                path.display()
-            )
+/// The models in the configured models folder, read once.
+fn discover(config: &Config) -> Result<Inventory, Error> {
+    inventory::discover(&resolve_models_dir(Some(config))?)
+}
+
+/// Writes inventory diagnostics to stderr, as warnings.
+fn warn(diagnostics: &[Diagnostic]) {
+    for diagnostic in diagnostics {
+        eprintln!(
+            "warning: {}: {}",
+            diagnostic.file.display(),
+            diagnostic.message
+        );
+    }
+}
+
+/// The model a command runs.
+struct Selected {
+    id: String,
+    path: PathBuf,
+}
+
+/// Selects `requested`, else the configured `default_model`, among the
+/// models in the folder. A missing requested id is `model_not_found`; a
+/// missing default is a configuration error at `default_model`.
+fn select_model(
+    loaded: &LoadedConfig,
+    inventory: &Inventory,
+    requested: Option<&str>,
+    config_arg: Option<&Path>,
+) -> Result<Selected, Error> {
+    let (id, from_default) = match (requested, loaded.config.default_model.as_deref()) {
+        (Some(id), _) => (id, false),
+        (None, Some(id)) => (id, true),
+        (None, None) => {
+            return Err(Error::invalid_arguments(
+                "no model selected; use --model ID, --model-file PATH, or set default_model in transcribe.yml",
+            ));
         }
-        None => format!("model file not found: {}", path.display()),
     };
-    Error::new(ErrorCode::ModelNotFound, message)
+    if let Some(model) = inventory.get(id) {
+        return Ok(Selected {
+            id: model.id.clone(),
+            path: model.file.clone(),
+        });
+    }
+    let mut message = format!(
+        "{}model `{id}` is not in the models folder {} (models there: {})",
+        if from_default { "default_model: " } else { "" },
+        inventory.dir.display(),
+        inventory.id_list()
+    );
+    if let Some(command) = download_command(id, config_arg) {
+        message.push_str(&format!("; download it with: {command}"));
+    }
+    if from_default {
+        Err(Error::invalid_config(loaded.default_model_error(message)))
+    } else {
+        Err(Error::new(ErrorCode::ModelNotFound, message))
+    }
+}
+
+/// The command that downloads catalog model `id`, preserving an explicit
+/// `--config`, since a `models_dir` override only takes effect through the
+/// same config file. `None` when `id` is not a catalog id.
+fn download_command(id: &str, config_arg: Option<&Path>) -> Option<String> {
+    let entry = catalog::find(id)?;
+    Some(match config_arg {
+        Some(config) => format!(
+            "pumice-transcribe --config {} models download {}",
+            shell_quote(&config.to_string_lossy()),
+            entry.id
+        ),
+        None => format!("pumice-transcribe models download {}", entry.id),
+    })
+}
+
+/// A selected model file that disappeared after the folder was read.
+fn missing_model_error(model: &Selected) -> Error {
+    Error::new(
+        ErrorCode::ModelNotFound,
+        format!(
+            "model file not found: {} (model `{}`); the models folder changed after it was read",
+            model.path.display(),
+            model.id
+        ),
+    )
 }
 
 /// Quotes an argument for POSIX-style shells when it contains characters
@@ -696,15 +805,6 @@ fn shell_quote(arg: &str) -> String {
     } else {
         format!("'{}'", arg.replace('\'', "'\\''"))
     }
-}
-
-/// The catalog id of the configured entry `model_id` names, if any.
-fn catalog_of<'a>(config: &'a Config, model_id: &str) -> Option<&'a str> {
-    config
-        .models
-        .iter()
-        .find(|m| m.id == model_id)
-        .and_then(|m| m.catalog.as_deref())
 }
 
 /// `serve --managed`: every outcome is reported as lifecycle records on
@@ -739,7 +839,7 @@ where
         };
         run_serve(
             serve_args,
-            &loaded.config,
+            &loaded,
             args.config.as_deref(),
             make_engine,
             Some(&lifecycle),
@@ -763,9 +863,12 @@ where
     }
 }
 
+/// Serves one model, selected from the models folder as read at startup.
+/// A managed child is always started with `--model`, so a restart reloads
+/// the same id or fails.
 fn run_serve<F>(
     serve_args: ServeArgs,
-    config: &Config,
+    loaded: &LoadedConfig,
     config_arg: Option<&Path>,
     make_engine: F,
     lifecycle: Option<&Arc<Lifecycle>>,
@@ -773,21 +876,23 @@ fn run_serve<F>(
 where
     F: FnOnce(EngineRequest<'_>) -> Result<Box<dyn Engine>, Error>,
 {
+    let config = &loaded.config;
     let threads = normalize_threads(config.threads.count())?;
     let backend = serve_args.backend.unwrap_or(config.backend);
-    let (served_model_id, model_path) =
-        resolve_model_id(config, serve_args.model.as_deref(), None)?;
+    let inventory = discover(config)?;
+    warn(&inventory.diagnostics);
+    let model = select_model(loaded, &inventory, serve_args.model.as_deref(), config_arg)?;
     if lifecycle.is_some() {
-        managed::validate_model_id(&served_model_id)?;
+        managed::validate_model_id(&model.id)?;
     }
 
-    if !model_path.is_file() {
-        return Err(missing_model_error(
-            &model_path,
-            catalog_of(config, &served_model_id),
-            config_arg,
-        ));
+    if !model.path.is_file() {
+        return Err(missing_model_error(&model));
     }
+    let Selected {
+        id: served_model_id,
+        path: model_path,
+    } = model;
 
     let port = serve_args.port.or(config.server_port).ok_or_else(|| {
         Error::invalid_arguments(
@@ -927,50 +1032,69 @@ fn load_optional_config(config_arg: Option<&Path>) -> Result<Option<LoadedConfig
     config::load_optional(config_arg).map_err(Error::invalid_config)
 }
 
-/// The settings for `file`. A one-off `file --model-file PATH` also runs
-/// without a configuration file, from its flags and their defaults
-/// ([`flag_defaults`]); D3 governs the YAML settings, so a file that exists
-/// must still be complete. `--model ID` and `default_model` need the file.
-fn file_config(file_args: &FileArgs, config_arg: Option<&Path>) -> Result<Config, Error> {
+/// The configuration for `file`. A one-off `file --model-file PATH` also
+/// runs without a configuration file (`None`), from its flags and their
+/// defaults ([`flag_defaults`]); D3 governs the YAML settings, so a file
+/// that exists must still be complete. `--model ID` and `default_model`
+/// need the file.
+fn file_config(
+    file_args: &FileArgs,
+    config_arg: Option<&Path>,
+) -> Result<Option<LoadedConfig>, Error> {
     if file_args.model_file.is_none() {
-        return load_config(config_arg).map(|loaded| loaded.config);
+        return load_config(config_arg).map(Some);
     }
-    Ok(load_optional_config(config_arg)?.map_or_else(flag_defaults, |loaded| loaded.config))
+    load_optional_config(config_arg)
 }
 
 /// What the `file` flags fall back to without a configuration file:
 /// language detection, `auto` threads (the available parallelism, capped at
-/// 32), the cpu backend and no configured models.
+/// 32) and the cpu backend.
 fn flag_defaults() -> Config {
     Config {
         default_model: None,
+        default_model_at: None,
         language: None,
         threads: Threads::Auto,
         backend: BackendMode::Cpu,
         server_port: None,
         models_dir: None,
-        models: Vec::new(),
     }
 }
 
+/// `file`: `loaded` is `None` only for a one-off `--model-file` without a
+/// configuration file.
 fn run_file<F>(
     file_args: FileArgs,
-    config: &Config,
+    loaded: Option<&LoadedConfig>,
     config_arg: Option<&Path>,
     make_engine: F,
 ) -> Result<SuccessOutput, Error>
 where
     F: FnOnce(EngineRequest<'_>) -> Result<Box<dyn Engine>, Error>,
 {
+    let defaults = flag_defaults();
+    let config = loaded.map_or(&defaults, |loaded| &loaded.config);
     let language = normalize_language(file_args.language.or_else(|| config.language.clone()))?;
     let threads = normalize_threads(file_args.threads.or(config.threads.count()))?;
     let backend = file_args.backend.unwrap_or(config.backend);
 
-    let (model_id, model_path) = resolve_model_id(
-        config,
-        file_args.model.as_deref(),
-        file_args.model_file.as_deref(),
-    )?;
+    // A model from the folder is selected before the audio is read; a
+    // one-off file is named after it, where its existence is checked.
+    let selected = match (&file_args.model_file, loaded) {
+        (Some(_), _) => None,
+        (None, Some(loaded)) => {
+            let inventory = discover(config)?;
+            warn(&inventory.diagnostics);
+            Some(select_model(
+                loaded,
+                &inventory,
+                file_args.model.as_deref(),
+                config_arg,
+            )?)
+        }
+        (None, None) => unreachable!("file_config loads the file without --model-file"),
+    };
 
     let file = open_regular_file(&file_args.audio)?;
     let metadata = file.metadata()?;
@@ -980,13 +1104,26 @@ where
 
     let (pcm, audio_seconds) = decode_audio_from_reader(file)?;
 
-    if !model_path.is_file() {
-        return Err(missing_model_error(
-            &model_path,
-            catalog_of(config, &model_id),
-            config_arg,
-        ));
-    }
+    let Selected {
+        id: model_id,
+        path: model_path,
+    } = match (selected, &file_args.model_file) {
+        (Some(selected), _) => {
+            if !selected.path.is_file() {
+                return Err(missing_model_error(&selected));
+            }
+            selected
+        }
+        (None, Some(path)) => {
+            let (model, diagnostics) = inventory::name_file(path)?;
+            warn(&diagnostics);
+            Selected {
+                id: model.id,
+                path: path.clone(),
+            }
+        }
+        (None, None) => unreachable!("a model is selected or given as a file"),
+    };
 
     let start = Instant::now();
     let engine = make_engine(EngineRequest {
@@ -1010,6 +1147,7 @@ where
     let transcription_ms = start.elapsed().as_millis() as u64;
 
     Ok(SuccessOutput {
+        model: model_id,
         text: transcript.text,
         language: language.or(transcript.language),
         audio_seconds,
@@ -1019,43 +1157,56 @@ where
     })
 }
 
-fn build_model_list(config: &Config) -> Vec<ModelListEntry> {
-    config
-        .models
-        .iter()
-        .map(|entry| {
-            let (exists, size) = match std::fs::metadata(&entry.path) {
-                Ok(meta) if meta.is_file() => (true, Some(meta.len())),
-                _ => (false, None),
-            };
-            ModelListEntry {
-                id: entry.id.clone(),
-                path: entry.path.clone(),
-                exists,
-                size,
-                catalog: entry.catalog.clone(),
-                default: config.default_model.as_ref() == Some(&entry.id),
-            }
+/// `models list`. A missing folder and a `default_model` missing from it
+/// are diagnostics here, so the listing still shows what is there.
+fn build_model_list(config: &Config, inventory: Inventory) -> ModelsListOutput {
+    let Inventory {
+        dir,
+        models,
+        mut diagnostics,
+    } = inventory;
+    if !dir.exists() {
+        diagnostics.push(Diagnostic {
+            file: dir.clone(),
+            message: "the models folder does not exist yet".to_owned(),
+        });
+    }
+    if let Some(default) = &config.default_model
+        && !models.iter().any(|model| &model.id == default)
+    {
+        diagnostics.push(Diagnostic {
+            file: dir.clone(),
+            message: format!("default_model `{default}` is not in the models folder"),
+        });
+    }
+    let models = models
+        .into_iter()
+        .map(|model| ModelListEntry {
+            default: config.default_model.as_ref() == Some(&model.id),
+            id: model.id,
+            file: model.file,
+            size: model.size,
+            catalog: model.catalog,
         })
-        .collect()
+        .collect();
+    ModelsListOutput {
+        models_dir: dir,
+        models,
+        diagnostics,
+    }
 }
 
 fn build_catalog_list(models_dir: &Path) -> Vec<CatalogListEntry> {
     catalog::CATALOG
         .iter()
-        .map(|entry| {
-            let installed = std::fs::metadata(models_dir.join(entry.file_name))
-                .map(|meta| meta.is_file() && meta.len() == entry.size_bytes)
-                .unwrap_or(false);
-            CatalogListEntry {
-                id: entry.id,
-                description: entry.description,
-                file_name: entry.file_name,
-                size: entry.size_bytes,
-                sha256: entry.sha256,
-                license: entry.license,
-                installed,
-            }
+        .map(|entry| CatalogListEntry {
+            id: entry.id,
+            description: entry.description,
+            file_name: entry.file_name,
+            size: entry.size_bytes,
+            sha256: entry.sha256,
+            license: entry.license,
+            installed: inventory::has_file_of_size(models_dir, entry.size_bytes),
         })
         .collect()
 }
@@ -1282,54 +1433,58 @@ fn print_check_config(file: &Path, json: bool, stdout: &mut dyn Write) -> io::Re
 }
 
 fn print_models_list(
-    entries: &[ModelListEntry],
+    output: &ModelsListOutput,
     json: bool,
     stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
 ) -> io::Result<()> {
     if json {
         let envelope = Envelope {
             schema_version: 1,
             ok: true,
-            result: Some(serde_json::to_value(entries)?),
+            result: Some(serde_json::to_value(output)?),
             error: None,
         };
-        writeln!(stdout, "{}", serde_json::to_string(&envelope).unwrap())
-    } else {
-        if entries.is_empty() {
-            writeln!(stdout, "No models configured.")?;
-            return Ok(());
-        }
-        let id_width = entries.iter().map(|e| e.id.len()).max().unwrap_or(0).max(2);
-        let path_width = entries
-            .iter()
-            .map(|e| e.path.to_string_lossy().len())
-            .max()
-            .unwrap_or(0)
-            .max(4);
+        return writeln!(stdout, "{}", serde_json::to_string(&envelope).unwrap());
+    }
+    for diagnostic in &output.diagnostics {
+        writeln!(
+            stderr,
+            "warning: {}: {}",
+            diagnostic.file.display(),
+            diagnostic.message
+        )?;
+    }
+    writeln!(stdout, "models folder: {}", output.models_dir.display())?;
+    let entries = &output.models;
+    if entries.is_empty() {
+        writeln!(stdout, "No models in the models folder.")?;
+        return Ok(());
+    }
+    let id_width = entries.iter().map(|e| e.id.len()).max().unwrap_or(0).max(2);
+    let size_width = entries
+        .iter()
+        .map(|e| e.size.to_string().len())
+        .max()
+        .unwrap_or(0)
+        .max(4);
+    writeln!(
+        stdout,
+        "{:<id_width$}  {:>size_width$}  {:<7}  {:<7}  FILE",
+        "ID", "SIZE", "CATALOG", "DEFAULT",
+    )?;
+    for entry in entries {
         writeln!(
             stdout,
-            "{:<id_width$}  {:<path_width$}  {:<8}  {:>12}  {:<7}",
-            "ID", "PATH", "EXISTS", "SIZE", "DEFAULT",
+            "{:<id_width$}  {:>size_width$}  {:<7}  {:<7}  {}",
+            entry.id,
+            entry.size,
+            if entry.catalog { "yes" } else { "no" },
+            if entry.default { "yes" } else { "no" },
+            entry.file.display(),
         )?;
-        for entry in entries {
-            let size = entry
-                .size
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            writeln!(
-                stdout,
-                "{:<id_width$}  {:<path_width$}  {:<8}  {:>12}  {:<7}",
-                entry.id,
-                entry.path.display(),
-                if entry.exists { "yes" } else { "no" },
-                size,
-                if entry.default { "yes" } else { "no" },
-                id_width = id_width,
-                path_width = path_width,
-            )?;
-        }
-        Ok(())
     }
+    Ok(())
 }
 
 fn print_models_catalog(
@@ -1471,6 +1626,7 @@ mod tests {
 
     fn success_output() -> SuccessOutput {
         SuccessOutput {
+            model: "tiny".to_string(),
             text: "hello".to_string(),
             language: None,
             audio_seconds: 1.0,
@@ -1498,16 +1654,20 @@ mod tests {
             "'/tmp/config with spaces.yml'"
         );
         assert_eq!(shell_quote("/tmp/it's.yml"), "'/tmp/it'\\''s.yml'");
-        let command = missing_model_error(
-            Path::new("/models/model.gguf"),
-            Some("whisper-tiny-q8_0"),
+        let command = download_command(
+            "whisper-tiny-q8_0",
             Some(Path::new("/tmp/config with spaces.yml")),
         )
-        .message;
-        assert!(
-            command.contains("--config '/tmp/config with spaces.yml' models download"),
-            "unexpected message: {command}"
+        .unwrap();
+        assert_eq!(
+            command,
+            "pumice-transcribe --config '/tmp/config with spaces.yml' models download whisper-tiny-q8_0"
         );
+        assert_eq!(
+            download_command("whisper-tiny-q8_0", None).unwrap(),
+            "pumice-transcribe models download whisper-tiny-q8_0"
+        );
+        assert_eq!(download_command("tiny", None), None);
     }
 
     #[cfg(windows)]
@@ -1533,11 +1693,12 @@ mod tests {
         std::fs::write(
             &config_path,
             format!(
-                "schema_version: 1\ndefault_model: null\nlanguage: null\nthreads: auto\n{backend}server:\n  port: null\nmodels_dir: null\nmodels:\n  - id: tiny\n    path: model.gguf\n"
+                "schema_version: 1\ndefault_model: null\nlanguage: null\nthreads: auto\n{backend}server:\n  port: null\nmodels_dir: models\n"
             ),
         )
         .unwrap();
-        std::fs::write(temp.path().join("model.gguf"), b"not a model").unwrap();
+        std::fs::create_dir(temp.path().join("models")).unwrap();
+        std::fs::write(temp.path().join("models").join("tiny.gguf"), b"not a model").unwrap();
         let audio = temp.path().join("audio.wav");
         std::fs::write(&audio, wav_bytes()).unwrap();
         let mut argv: Vec<OsString> = vec![
@@ -1701,25 +1862,63 @@ mod tests {
         }
     }
 
+    fn model(id: &str, catalog: bool) -> inventory::Model {
+        inventory::Model {
+            id: id.to_string(),
+            file: PathBuf::from(format!("/models/{id}.gguf")),
+            size: 7,
+            catalog,
+        }
+    }
+
     #[test]
-    fn build_model_list_includes_catalog_source() {
-        let config = Config {
-            default_model: None,
-            language: None,
-            threads: crate::config::Threads::Auto,
-            backend: BackendMode::Cpu,
-            server_port: None,
-            models_dir: None,
-            models: vec![crate::config::ModelEntry {
-                id: "tiny".to_string(),
-                path: PathBuf::from("/models/whisper-tiny-Q8_0.gguf"),
-                catalog: Some("whisper-tiny-q8_0".to_string()),
-            }],
+    fn build_model_list_marks_the_default_and_reports_a_missing_one() {
+        let mut config = flag_defaults();
+        config.default_model = Some("whisper-tiny-q8_0".to_string());
+        let folder = tempfile::tempdir().unwrap();
+        let inventory = Inventory {
+            dir: folder.path().to_path_buf(),
+            models: vec![model("Custom", false), model("whisper-tiny-q8_0", true)],
+            diagnostics: Vec::new(),
         };
-        let entries = build_model_list(&config);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].catalog.as_deref(), Some("whisper-tiny-q8_0"));
-        assert!(!entries[0].exists);
+        let output = build_model_list(&config, inventory.clone());
+        assert_eq!(output.models_dir, folder.path());
+        assert!(output.diagnostics.is_empty());
+        let flags: Vec<(&str, bool, bool)> = output
+            .models
+            .iter()
+            .map(|m| (m.id.as_str(), m.catalog, m.default))
+            .collect();
+        assert_eq!(
+            flags,
+            [("Custom", false, false), ("whisper-tiny-q8_0", true, true)]
+        );
+        let value = serde_json::to_value(&output).unwrap();
+        assert_eq!(
+            value["models"][1],
+            serde_json::json!({"id": "whisper-tiny-q8_0", "file": "/models/whisper-tiny-q8_0.gguf",
+                "size": 7, "catalog": true, "default": true})
+        );
+
+        config.default_model = Some("gone".to_string());
+        let output = build_model_list(&config, inventory);
+        assert!(output.models.iter().all(|m| !m.default));
+        assert_eq!(output.diagnostics.len(), 1);
+        assert!(
+            output.diagnostics[0]
+                .message
+                .contains("default_model `gone`")
+        );
+
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        print_models_list(&output, false, &mut stdout, &mut stderr).unwrap();
+        let stdout = String::from_utf8(stdout).unwrap();
+        assert!(
+            stdout.starts_with(&format!("models folder: {}\n", folder.path().display())),
+            "{stdout}"
+        );
+        assert!(stdout.contains("whisper-tiny-q8_0"), "{stdout}");
+        assert!(String::from_utf8(stderr).unwrap().contains("warning:"));
     }
 
     #[test]

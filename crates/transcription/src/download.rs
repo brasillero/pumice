@@ -1113,6 +1113,31 @@ mod tests {
     }
 
     #[test]
+    fn a_downloaded_file_is_discovered_under_its_catalog_id() {
+        let tmp = private_dir();
+        let server = serve(|_, stream| respond(stream, 200, &[], TEST_BYTES));
+        let entry = CatalogEntry {
+            id: "fake-model-q8_0",
+            description: "fake",
+            url: Box::leak(format!("{}/file", server.base).into_boxed_str()),
+            file_name: "fake-model-Q8_0.gguf",
+            size_bytes: TEST_BYTES.len() as u64,
+            sha256: Box::leak(sha256_of(TEST_BYTES).into_boxed_str()),
+            license: "test",
+        };
+        fetch(&DownloadSpec::from(&entry), tmp.path(), false).unwrap();
+
+        // The lock file stays; it is not a model.
+        let inventory = crate::inventory::discover_with(tmp.path(), &[entry]).unwrap();
+        assert_eq!(inventory.models.len(), 1, "{:?}", inventory.models);
+        let model = &inventory.models[0];
+        assert_eq!(model.id, "fake-model-q8_0");
+        assert!(model.catalog);
+        assert_eq!(model.file, tmp.path().join("fake-model-Q8_0.gguf"));
+        assert!(inventory.diagnostics.is_empty());
+    }
+
+    #[test]
     fn download_installs_verified_file() {
         let tmp = private_dir();
         let server = serve(|path, stream| {

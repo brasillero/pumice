@@ -39,11 +39,14 @@ modules:
 # `formatter` is an id or null (null adds no instructions; combine it with
 # `relay_route: passthrough` for a raw-only flow).
 flows:
-  # Dictation cleanup: transcribe with the `turbo` model, apply the built-in
-  # cleanup rules, call the relay route `claude`.
+  # Dictation cleanup: transcribe with the catalog model
+  # whisper-large-v3-turbo-q8_0, apply the built-in cleanup rules, call the
+  # relay route `claude`. `transcription_model` is a model id from the
+  # transcription models folder (`pumice-transcribe models list` shows them):
+  # a catalog model's catalog id, any other .gguf file's name without .gguf.
   - id: clean
     enabled: true
-    transcription_model: turbo
+    transcription_model: whisper-large-v3-turbo-q8_0
     formatter: builtin:clean
     relay_route: claude
     # Every flow writes all four budgets. One overall clock from command
@@ -63,7 +66,7 @@ flows:
   # passthrough route returns the transcript without calling an AI.
   - id: raw
     enabled: true
-    transcription_model: turbo
+    transcription_model: whisper-large-v3-turbo-q8_0
     formatter: null
     relay_route: passthrough
     budgets_ms:
@@ -80,11 +83,13 @@ serve:
   # 7567 (the relay's port) is refused; 0 picks a free port and announces
   # it. `pumice serve --port` overrides it.
   port: 17570
-  # Every enabled flow must use this model. null only while serve is
-  # disabled.
-  transcription_model: turbo
-  # From 1000 to 300000. How long the transcription child may take to load
-  # its model and become ready.
+  # A model id from the transcription models folder; every enabled flow must
+  # use this model. null only while serve is disabled.
+  transcription_model: whisper-large-v3-turbo-q8_0
+  # From 1000 to 300000. How long the transcription module may take to list
+  # its models folder (it hashes files the size of a catalog model, a few
+  # seconds for large ones) and, separately, how long each child start may
+  # take to read the folder again, load its model and become ready.
   startup_timeout_ms: 60000
   # The flows published as OpenAI transcription models (`[]` publishes
   # none): `GET /v1/models` lists them and `POST /v1/audio/transcriptions`

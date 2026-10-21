@@ -65,9 +65,12 @@ pumice-transcribe file audio.wav --model-file model.gguf --language pt --json
 `--model-file` takes a direct GGUF path; this one-off form also runs without
 a configuration file, from its flags (`--language`, default: detect;
 `--threads`, default: the available parallelism, capped at 32; `--backend`,
-default: `cpu`). You can also use `--model ID` to select a model configured
-in `transcribe.yml`, or omit both flags to use the configured
-`default_model`; both need the file. `transcribe.yml` (`--config` or the
+default: `cpu`). You can also use `--model ID` to select a file from the
+models folder (`~/.local/share/pumice/models` on Linux, overridden by
+`models_dir` in `transcribe.yml`), or omit both flags to use the configured
+`default_model`; both need the config file. Catalog files are named by size
+and SHA-256; other `.gguf` files use their file name without the extension.
+Run `models list` to see the available ids. `transcribe.yml` (`--config` or the
 per-user file) must be complete whenever it exists; start from
 [`transcribe.example.yml`](../../transcribe.example.yml).
 

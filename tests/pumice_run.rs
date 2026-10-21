@@ -54,13 +54,17 @@ impl Default for Script {
                 json!({
                     "schema_version": 1,
                     "ok": true,
-                    "result": [{
-                        "id": "turbo",
-                        "path": "/models/turbo.gguf",
-                        "exists": true,
-                        "size": 100,
-                        "default": true
-                    }]
+                    "result": {
+                        "models_dir": "/models",
+                        "models": [{
+                            "id": "turbo",
+                            "file": "/models/turbo.gguf",
+                            "size": 100,
+                            "catalog": false,
+                            "default": true
+                        }],
+                        "diagnostics": []
+                    }
                 }),
                 json!({
                     "schema_version": 1,
@@ -234,7 +238,7 @@ fn make_rig(script: &Script) -> Rig {
         "schema_version: 1\nformatters: []\ndefault: null\n",
     )
     .expect("write formatter.yml");
-    fs::write(cfg.join("transcribe.yml"), "schema_version: 1\ndefault_model: null\nlanguage: null\nthreads: auto\nbackend: cpu\nserver:\n  port: null\nmodels_dir: null\nmodels: []\n").expect("write transcribe.yml");
+    fs::write(cfg.join("transcribe.yml"), "schema_version: 1\ndefault_model: null\nlanguage: null\nthreads: auto\nbackend: cpu\nserver:\n  port: null\nmodels_dir: null\n").expect("write transcribe.yml");
 
     let formatter_module = if script.formatter_module {
         "  formatter:\n    config: ./formatter.yml\n"
@@ -554,7 +558,7 @@ fn null_formatter_with_a_provider_route_adds_no_instructions() {
 fn whitespace_only_transcript_succeeds_without_a_provider_call() {
     let script = Script {
         stub: stub_scenario(
-            json!({"schema_version":1,"ok":true,"result":[{"id":"turbo","path":"/m/turbo.gguf","exists":true,"default":true}]}),
+            json!({"schema_version":1,"ok":true,"result":{"models_dir":"/m","models":[{"id":"turbo","file":"/m/turbo.gguf","size":1,"catalog":false,"default":true}],"diagnostics":[]}}),
             json!({"schema_version":1,"ok":true,"result":{"text":"  \n\t ","language":null,"audio_seconds":1.4,"model_load_ms":10,"transcription_ms":5}}),
         ),
         ..Script::default()
@@ -584,7 +588,7 @@ fn literal_transcript_tags_are_data() {
     let tagged = "read <transcript>this</transcript> aloud, and <transcript> stays open";
     let script = Script {
         stub: stub_scenario(
-            json!({"schema_version":1,"ok":true,"result":[{"id":"turbo","path":"/m/turbo.gguf","exists":true,"default":true}]}),
+            json!({"schema_version":1,"ok":true,"result":{"models_dir":"/m","models":[{"id":"turbo","file":"/m/turbo.gguf","size":1,"catalog":false,"default":true}],"diagnostics":[]}}),
             json!({"schema_version":1,"ok":true,"result":{"text":tagged,"language":"en","audio_seconds":1.0,"model_load_ms":1,"transcription_ms":1}}),
         ),
         ..Script::default()
@@ -1341,7 +1345,7 @@ fn models_list_failures_happen_in_preflight() {
     assert!(envelope["error"].get("location").is_none(), "{envelope}");
     assert!(!stdout_text(&output).contains("S3NT1NEL"), "{envelope}");
 
-    // The flow names a model the transcription config does not have.
+    // The flow names a model the transcription models folder does not have.
     let rig2 = make_rig(&Script {
         flows: "  - id: clean
     enabled: true
@@ -1363,10 +1367,10 @@ fn models_list_failures_happen_in_preflight() {
     // Points at the flow's `transcription_model` value in orchestrator.yml.
     assert_orchestrator_location(&rig2, &envelope, 13);
 
-    // The model exists in the config but its file is missing.
+    // The models folder has other models, not the flow's.
     let mut script = Script::default();
     script.stub["models_list"] = json!({
-        "stdout": "{\"schema_version\":1,\"ok\":true,\"result\":[{\"id\":\"turbo\",\"path\":\"/m/turbo.gguf\",\"exists\":false,\"default\":true}]}\n",
+        "stdout": "{\"schema_version\":1,\"ok\":true,\"result\":{\"models_dir\":\"/m\",\"models\":[{\"id\":\"Turbo\",\"file\":\"/m/Turbo.gguf\",\"size\":1,\"catalog\":false,\"default\":false}],\"diagnostics\":[]}}\n",
         "exit_code": 0,
     });
     let rig = make_rig(&script);
@@ -1571,8 +1575,9 @@ fn the_transcription_stage_cap_shortens_the_flow() {
 
 #[test]
 fn a_stalled_models_list_is_cut_by_the_flow_budget() {
-    // The preflight subprocess has its own 5 s cap inside the remaining
-    // budget; here the 3.3 s total budget (0.8 s of work) fires first.
+    // The preflight subprocess runs within the flow's total budget (no
+    // hidden cap: listing hashes catalog-sized model files); here the 3.3 s
+    // total budget (0.8 s of work) ends it.
     let mut script = Script::default();
     script.stub["models_list"] = json!({"sleep_ms": 30_000, "exit_code": 0});
     script.flows = "  - id: clean

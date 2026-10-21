@@ -1,11 +1,10 @@
 use crate::audio::{
     MAX_FILE_BYTES, decode_audio_with_cancel, normalize_and_validate, resample_to_target,
 };
-use crate::config::{Config, validate_language};
+use crate::config::validate_language;
 use crate::engine::{CancelToken, Engine};
 use crate::{Error, ErrorCode, Transcript, TranscriptionOptions};
 use std::io::Read;
-use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Result of the shared decode → resample → engine pipeline.
@@ -79,57 +78,6 @@ pub fn transcribe_pcm_from_reader<R: Read + Send + Sync>(
         audio_seconds,
         inference,
     })
-}
-
-/// Resolve a model selection against the configuration. Returns the configured
-/// model id and its absolute path.
-pub fn resolve_model_id(
-    config: &Config,
-    model_id: Option<&str>,
-    model_file: Option<&Path>,
-) -> Result<(String, PathBuf), Error> {
-    match (model_id, model_file) {
-        (Some(_), Some(_)) => Err(Error::invalid_arguments(
-            "--model and --model-file are mutually exclusive",
-        )),
-        (None, Some(path)) => Ok((
-            path.file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "model".to_string()),
-            path.to_path_buf(),
-        )),
-        (Some(id), None) => {
-            let entry = config
-                .models
-                .iter()
-                .find(|m| m.id == *id)
-                .ok_or_else(|| Error::invalid_arguments(unknown_model_message(id, config)))?;
-            Ok((id.to_string(), entry.path.clone()))
-        }
-        (None, None) => match &config.default_model {
-            Some(id) => {
-                let entry = config
-                    .models
-                    .iter()
-                    .find(|m| m.id == *id)
-                    .expect("default_model was validated against models");
-                Ok((id.clone(), entry.path.clone()))
-            }
-            None => Err(Error::invalid_arguments(
-                "no model selected; use --model ID, --model-file PATH, or set default_model in transcribe.yml",
-            )),
-        },
-    }
-}
-
-fn unknown_model_message(id: &str, config: &Config) -> String {
-    let ids: Vec<&str> = config.models.iter().map(|m| m.id.as_str()).collect();
-    let list = if ids.is_empty() {
-        "(none configured)".to_string()
-    } else {
-        ids.join(", ")
-    };
-    format!("unknown model id `{id}`; configured ids: {list}")
 }
 
 /// Normalize a language hint and run it through the same validation as the

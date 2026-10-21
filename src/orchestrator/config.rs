@@ -17,7 +17,7 @@
 //! flows:
 //!   - id: clean
 //!     enabled: true
-//!     transcription_model: turbo
+//!     transcription_model: whisper-large-v3-turbo-q8_0  # a models folder id
 //!     formatter: builtin:clean      # an id, or an explicit null
 //!     relay_route: claude
 //!     budgets_ms:
@@ -28,8 +28,9 @@
 //! serve:
 //!   enabled: true                # false keeps pumice serve off
 //!   port: 17570                  # 7567 is refused, 0 picks a free port
-//!   transcription_model: turbo   # null only while serve is disabled
-//!   startup_timeout_ms: 60000    # 1000..=300000
+//!   transcription_model: whisper-large-v3-turbo-q8_0  # null only while off
+//!   startup_timeout_ms: 60000    # 1000..=300000, the models list and each
+//!                                # child start
 //!   transcription_flows: [clean] # may be empty (p15/D5)
 //!   allowed_origins: []          # browser origins besides 127.0.0.1, e.g.
 //!                                # a tailnet name; may be empty

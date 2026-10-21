@@ -7,6 +7,7 @@ pub mod config;
 pub mod download;
 pub mod engine;
 pub mod error;
+pub mod inventory;
 pub mod managed;
 pub mod models_dir;
 #[cfg(feature = "opus")]
@@ -17,9 +18,7 @@ pub mod service;
 
 pub use engine::{CancelToken, Engine, FakeEngine};
 pub use error::{Error, ErrorCode, JsonError};
-pub use service::{
-    normalize_language, normalize_threads, resolve_model_id, transcribe_pcm_from_reader,
-};
+pub use service::{normalize_language, normalize_threads, transcribe_pcm_from_reader};
 
 /// Options passed to the engine. No `Debug`: `prompt` is client text that must
 /// never reach a log by accident.

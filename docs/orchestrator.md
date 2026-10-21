@@ -43,7 +43,7 @@ modules:
 flows:
   - id: clean
     enabled: true
-    transcription_model: turbo
+    transcription_model: whisper-large-v3-turbo-q8_0
     formatter: builtin:clean
     relay_route: claude
     budgets_ms:
@@ -61,8 +61,12 @@ serve:
 ```
 
 Relative module paths resolve against the orchestrator file's directory.
-Module settings (model files, provider binaries, timeouts, language) live in
-the module files and are never copied here. `modules.formatter` names a
+Module settings (the models folder, provider binaries, timeouts, language)
+live in the module files and are never copied here. A flow's
+`transcription_model` is a model id from the transcription models folder:
+a catalog model's catalog id (`whisper-large-v3-turbo-q8_0`), any other
+`.gguf` file's exact name without `.gguf`
+([transcription.md](transcription.md#the-models-folder)). `modules.formatter` names a
 file once any enabled flow selects a formatter — even a built-in (an empty
 registry file is enough); otherwise it may be `null`. `modules.relay.location` must be `in_process`;
 external relays are a later option. See
@@ -88,8 +92,11 @@ than a silent choice.
 `pumice run` requires `pumice-transcribe` installed next to `pumice` (the
 same rule as `pumice transcribe`). Before transcribing, it validates the
 module configurations, every enabled flow's route and formatter, and the
-selected flow's transcription model (via the sibling's `models list`), so a
-misconfiguration fails fast, before any inference and before any paid call.
+selected flow's transcription model (it must be in the models folder, via
+the sibling's `models list`), so a misconfiguration fails fast, before any
+inference and before any paid call. Listing hashes the folder's files that
+have a catalog model's size (a few seconds for large models), within the
+flow's `budgets_ms.total`; the `file` call then reads the folder again.
 
 ## Budgets and cancellation
 
@@ -206,8 +213,8 @@ file writes in full (`enabled: false` keeps it off for `pumice run`):
 serve:
   enabled: true               # nothing starts implicitly
   port: 17570                 # 7567 is refused; 0 picks a free port
-  transcription_model: turbo  # null only while serve is disabled
-  startup_timeout_ms: 60000   # 1000 to 300000
+  transcription_model: whisper-large-v3-turbo-q8_0  # a models folder id; null only while off
+  startup_timeout_ms: 60000   # 1000 to 300000; the models list and each child start
   transcription_flows:        # the OpenAI models; [] publishes none
     - clean
     - raw
@@ -256,8 +263,10 @@ serve:
 
 **Startup.** Signals are handled from the start. The configuration, the relay
 and formatter configurations and every enabled flow's references are checked;
-`pumice-transcribe models list` confirms the served model is configured and
-installed. The frontend then claims its port (before any child starts), and
+`pumice-transcribe models list` confirms the served model is in the
+transcription models folder, within `serve.startup_timeout_ms` (listing
+hashes files with a catalog model's size, a few seconds for large models;
+there is no other limit). The frontend then claims its port (before any child starts), and
 the child is started with `--port 0 --managed --instance-id <fresh id>` and
 the absolute transcription configuration. Its `ready` record must match the
 requested instance id, protocol version 2, pumice's exact version, the
@@ -278,8 +287,11 @@ probes in a row, the child is killed, reaped and restarted after 0.5, 1 and
 episode. A child that retires itself after a GPU engine failure (`stopping`
 with reason `engine_failed`, then its exit) is restarted the same way. When
 the restarts are used up the transcription state stays
-`failed` until `pumice serve` is restarted. A protocol, version or
-configuration error goes to `failed` at once, and so does a restarted child
+`failed` until `pumice serve` is restarted. Every child start reads the
+transcription models folder again and loads the same model id, or fails:
+a model no longer in the folder (`model_not_found`) is never replaced by
+another. A protocol, version or configuration error, or a missing model,
+goes to `failed` at once, and so does a restarted child
 reporting `gpu_unavailable` (`backend: gpu` without a usable GPU). A previous child is always
 reaped before the next one starts. Nothing is ever replayed.
 
