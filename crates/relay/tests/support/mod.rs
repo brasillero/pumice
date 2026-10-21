@@ -16,6 +16,38 @@ pub mod fake_http;
 pub mod install;
 pub mod test_provider;
 
+/// Every top-level `relay.yml` setting with the value `relay.example.yml`
+/// writes, keyed by its name. [`relay_config`] appends the ones a test does
+/// not write.
+const RELAY_SETTINGS: [(&str, &str); 5] = [
+    ("port", "port: 7567\n"),
+    ("total_timeout_secs", "total_timeout_secs: 30\n"),
+    ("max_parallel", "max_parallel: 4\n"),
+    ("providers", "providers: []\n"),
+    (
+        "debug_log",
+        "debug_log:\n  enabled: false\n  path: pumice-debug.jsonl\n",
+    ),
+];
+
+/// A complete `relay.yml` for a test: `text`, then every top-level setting
+/// it does not write itself (every setting is required). Appending keeps the
+/// line numbers in `text` unchanged. Provider entries are never completed:
+/// a test writes each entry's keys itself.
+pub fn relay_config(text: &str) -> String {
+    let mut yaml = text.to_owned();
+    if !yaml.is_empty() && !yaml.ends_with('\n') {
+        yaml.push('\n');
+    }
+    for (key, line) in RELAY_SETTINGS {
+        let prefix = format!("{key}:");
+        if !text.lines().any(|written| written.starts_with(&prefix)) {
+            yaml.push_str(line);
+        }
+    }
+    yaml
+}
+
 /// Path of the fake CLI built by Cargo for this test run.
 pub const FAKE_CLI_BIN: &str = env!("CARGO_BIN_EXE_pumice-test-cli");
 

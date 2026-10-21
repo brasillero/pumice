@@ -89,9 +89,28 @@ pub async fn detect(
     detect_with_timeout(config, descriptors, runner, PROBE_TIMEOUT).await
 }
 
+/// [`detect`] without a configuration file (`pumice relay doctor` before one
+/// exists): every provider is disabled and probed by its standard command
+/// name.
+pub async fn detect_unconfigured(
+    descriptors: &[ProviderDescriptor],
+    runner: &ProcessRunner,
+) -> Vec<ProviderStatus> {
+    detect_entries(None, descriptors, runner, PROBE_TIMEOUT).await
+}
+
 /// [`detect`] with an injectable probe deadline for tests.
 pub async fn detect_with_timeout(
     config: &Config,
+    descriptors: &[ProviderDescriptor],
+    runner: &ProcessRunner,
+    probe_timeout: Duration,
+) -> Vec<ProviderStatus> {
+    detect_entries(Some(config), descriptors, runner, probe_timeout).await
+}
+
+async fn detect_entries(
+    config: Option<&Config>,
     descriptors: &[ProviderDescriptor],
     runner: &ProcessRunner,
     probe_timeout: Duration,
@@ -107,7 +126,10 @@ pub async fn detect_with_timeout(
             found.push(Found::NotApplicable);
             continue;
         }
-        let program = probe_program(descriptor, config.provider(descriptor.id));
+        let program = probe_program(
+            descriptor,
+            config.and_then(|config| config.provider(descriptor.id)),
+        );
         let resolved = match resolve_program(&program) {
             Ok(resolved) => Found::Found(resolved.path),
             Err(ProviderError::Other {
@@ -146,7 +168,7 @@ pub async fn detect_with_timeout(
         .iter()
         .enumerate()
         .map(|(index, descriptor)| {
-            let settings = config.provider(descriptor.id);
+            let settings = config.and_then(|config| config.provider(descriptor.id));
             let version = match (&found[index], descriptor.probe) {
                 (Found::Found(_), ProbeSpec::Version(_)) => {
                     probed.get(&index).cloned().unwrap_or(Version::Unavailable)

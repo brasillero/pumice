@@ -35,7 +35,7 @@ fn hermetic_yaml(port: u16) -> (Vec<FakeCli>, String) {
     for id in ["claude", "codex", "kimi", "kiro"] {
         let fake = FakeCli::new(json!({}));
         yaml.push_str(&format!(
-            "  - id: {id}\n    enabled: false\n    binary: '{}'\n",
+            "  - id: {id}\n    enabled: false\n    model: null\n    binary: '{}'\n    timeout_secs: 30\n",
             fake.path().display()
         ));
         fakes.push(fake);
@@ -48,7 +48,7 @@ fn hermetic_yaml(port: u16) -> (Vec<FakeCli>, String) {
 fn write_config(yaml: &str) -> (TempDir, PathBuf) {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join("relay.yml");
-    fs::write(&path, yaml).expect("write config");
+    fs::write(&path, support::relay_config(yaml)).expect("write config");
     (dir, path)
 }
 
@@ -416,7 +416,7 @@ fn an_option_value_spelled_like_help_is_a_value_not_a_help_flag() {
     let (_fakes, yaml) = hermetic_yaml(grab_free_port());
     let cwd = TempDir::new().expect("temp dir");
     // A config file literally named `--help`.
-    fs::write(cwd.path().join("--help"), yaml).expect("write config");
+    fs::write(cwd.path().join("--help"), support::relay_config(&yaml)).expect("write config");
     for args in [
         &["check-config", "--config", "--help"][..],
         &["--config", "--help", "check-config"][..],
@@ -633,7 +633,7 @@ fn startup_prints_the_route_line_naming_the_enabled_providers() {
     let claude = FakeCli::new(json!({}));
     let codex = FakeCli::new(json!({}));
     let (_dir, path) = write_config(&format!(
-        "port: {port}\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{}'\n",
+        "port: {port}\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{}'\n    timeout_secs: 30\n",
         claude.path().display(),
         codex.path().display()
     ));
@@ -655,7 +655,7 @@ fn startup_prints_the_route_line_naming_the_enabled_providers() {
 fn startup_with_no_enabled_providers_prints_one_clear_line() {
     let port = grab_free_port();
     let (_dir, path) = write_config(&format!(
-        "port: {port}\nproviders:\n  - id: claude\n    enabled: false\n"
+        "port: {port}\nproviders:\n  - id: claude\n    enabled: false\n    model: null\n    binary: claude\n    timeout_secs: 30\n"
     ));
     let child = Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
         .args(["--config", path.to_str().expect("UTF-8 path")])

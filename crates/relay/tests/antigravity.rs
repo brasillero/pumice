@@ -251,9 +251,17 @@ fn no_env(_: &str) -> Option<OsString> {
     None
 }
 
+/// Loads `text`, completed with the top-level settings it does not write.
+fn load_completed(text: &str) -> config::LoadedConfig {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("relay.yml");
+    fs::write(&path, support::relay_config(text)).expect("write config");
+    config::load_with_env(Some(&path), no_env).expect("config loads")
+}
+
 #[test]
 fn absent_entry_means_not_configured() {
-    let loaded = config::load_with_env(None, no_env).expect("defaults load");
+    let loaded = load_completed("providers: []\n");
     assert!(
         loaded.config.provider("antigravity").is_none(),
         "providers are only configured by list entries"
@@ -267,7 +275,7 @@ fn a_config_entry_is_refused_as_archived() {
     let path = dir.path().join("relay.yml");
     fs::write(
         &path,
-        "providers:\n  - id: antigravity\n    enabled: false\n",
+        support::relay_config("providers:\n  - id: antigravity\n    enabled: false\n"),
     )
     .expect("write config");
 
@@ -301,7 +309,7 @@ fn build_fails_even_when_called_directly() {
 
 #[test]
 fn models_listing_never_includes_antigravity() {
-    let loaded = config::load_with_env(None, no_env).expect("defaults load");
+    let loaded = load_completed("providers: []\n");
     let providers = build_from_config(&loaded.config, Arc::new(ProcessRunner::new()))
         .expect("enabled providers build");
     let pipeline = Pipeline::new(&loaded.config, providers);
@@ -350,7 +358,9 @@ async fn end_to_end_format_through_the_fake_cli() {
 fn enabled_true_is_refused_at_the_enabled_line() {
     // The archived descriptor still refuses enablement at the exact line.
     let error = config::validate_text_with_descriptors(
-        "providers:\n  - id: antigravity\n    enabled: true\n",
+        &support::relay_config(
+            "providers:\n  - id: antigravity\n    enabled: true\n    model: null\n    binary: agy\n    timeout_secs: 30\n",
+        ),
         std::path::Path::new("relay.yml"),
         &[pumice_relay::providers::antigravity::DESCRIPTOR],
     )

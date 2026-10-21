@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use crate::api;
-use crate::config::{self, ConfigSource, LoadedConfig};
+use crate::config::{self, LoadedConfig};
 use crate::doctor;
 use crate::logging::DebugLog;
 use crate::pipeline::Pipeline;
@@ -380,10 +380,15 @@ fn doctor(leading: Option<&Path>, args: &[&str], name: &str) -> ExitCode {
 }
 
 /// The default, quota-free report: fresh detection over the whole registry.
+/// It also runs before any configuration exists (every provider disabled);
+/// a configuration file that exists must be valid.
 fn doctor_report(explicit: Option<&Path>) -> ExitCode {
-    let loaded = match load_config(explicit) {
+    let loaded = match config::load_optional(explicit) {
         Ok(loaded) => loaded,
-        Err(code) => return code,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(2);
+        }
     };
     let runtime = match build_runtime() {
         Ok(runtime) => runtime,
@@ -391,9 +396,14 @@ fn doctor_report(explicit: Option<&Path>) -> ExitCode {
     };
     runtime.block_on(async {
         let runner = ProcessRunner::new();
-        let detection =
-            providers::discovery::detect(&loaded.config, providers::PROVIDERS, &runner).await;
-        print!("{}", doctor::render(&loaded.source, &detection));
+        let detection = match &loaded {
+            Some(loaded) => {
+                providers::discovery::detect(&loaded.config, providers::PROVIDERS, &runner).await
+            }
+            None => providers::discovery::detect_unconfigured(providers::PROVIDERS, &runner).await,
+        };
+        let path = loaded.as_ref().map(|loaded| loaded.path.as_path());
+        print!("{}", doctor::render(path, &detection));
         let (ready, total) = doctor::enabled_ready(&detection);
         if ready == total {
             ExitCode::SUCCESS
@@ -490,7 +500,7 @@ async fn run_service(loaded: LoadedConfig, name: &str, plain: bool) -> ExitCode 
             eprintln!(
                 "error: port {} on 127.0.0.1 is already in use. Change \"port\" in {}.",
                 config.port,
-                config_location(&loaded.source)
+                loaded.path.display()
             );
             return ExitCode::from(1);
         }
@@ -509,7 +519,7 @@ async fn run_service(loaded: LoadedConfig, name: &str, plain: bool) -> ExitCode 
             &pipeline,
             config.total_timeout,
             config.max_parallel,
-            &config_location(&loaded.source)
+            &loaded.path.display().to_string()
         )
     );
     println!("{name} listening on http://127.0.0.1:{}/v1", config.port);
@@ -616,19 +626,9 @@ fn route_line(
     )
 }
 
-fn config_location(source: &ConfigSource) -> String {
-    match source {
-        ConfigSource::File(path) => path.display().to_string(),
-        ConfigSource::BuiltInDefaults => "the configuration file".to_owned(),
-    }
-}
-
 /// Prints where the configuration came from and a summary of its settings.
 fn print_summary(loaded: &LoadedConfig) {
-    match &loaded.source {
-        ConfigSource::File(path) => println!("config: {}", path.display()),
-        ConfigSource::BuiltInDefaults => println!("config: built-in defaults"),
-    }
+    println!("config: {}", loaded.path.display());
     let config = &loaded.config;
     println!("port: {}", config.port);
     println!("total timeout: {}s", config.total_timeout.as_secs());

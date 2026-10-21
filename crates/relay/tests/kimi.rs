@@ -381,7 +381,7 @@ fn descriptor_defaults_ship_disabled_with_an_empty_model() {
 fn load(text: &str) -> Result<Config, String> {
     let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let path = dir.path().join("relay.yml");
-    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    std::fs::write(&path, support::relay_config(text)).map_err(|e| e.to_string())?;
     config::load_with_env(Some(&path), |_| None)
         .map(|loaded| loaded.config)
         .map_err(|error| error.to_string())
@@ -408,7 +408,7 @@ fn enabled_with_an_explicit_model_loads() {
     // Kimi validates the alias itself; any well-formed alias is accepted.
     for model in [TEST_MODEL, "kimi-k2.8-code"] {
         let config = load(&format!(
-            "providers:\n  - id: kimi\n    enabled: true\n    model: {model}\n"
+            "providers:\n  - id: kimi\n    enabled: true\n    model: {model}\n    binary: kimi\n    timeout_secs: 30\n"
         ))
         .unwrap_or_else(|error| panic!("{model}: {error}"));
         let kimi = config.provider(ID).expect("kimi configured");
@@ -418,11 +418,11 @@ fn enabled_with_an_explicit_model_loads() {
 }
 
 #[test]
-fn enabled_without_a_model_reports_the_entry() {
+fn enabled_with_a_null_model_reports_the_value() {
     assert_error(
-        "providers:\n  - id: kimi\n    enabled: true\n",
-        2,
-        9,
+        "providers:\n  - id: kimi\n    enabled: true\n    model: null\n    binary: kimi\n    timeout_secs: 30\n",
+        4,
+        12,
         "providers.kimi.model is required when the provider is enabled",
     );
 }
@@ -430,7 +430,7 @@ fn enabled_without_a_model_reports_the_entry() {
 #[test]
 fn malformed_model_reports_the_value() {
     assert_error(
-        "providers:\n  - id: kimi\n    enabled: true\n    model: bad model\n",
+        "providers:\n  - id: kimi\n    enabled: true\n    model: bad model\n    binary: kimi\n    timeout_secs: 30\n",
         4,
         12,
         "providers.kimi.model must be a nonempty model alias of at most 256 bytes, without whitespace, control characters or a leading '-'",

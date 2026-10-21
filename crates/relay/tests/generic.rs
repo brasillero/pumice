@@ -989,15 +989,18 @@ fn handy_request(model: &str, text: &str) -> ExtractedRequest {
 
 #[test]
 fn nothing_is_enabled_without_an_entry() {
-    let loaded = config::load_with_env(None, |_| None).expect("defaults load");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("relay.yml");
+    std::fs::write(&path, support::relay_config("providers: []\n")).expect("write config");
+    let loaded = config::load_with_env(Some(&path), |_| None).expect("config loads");
     assert!(
         loaded.config.provider("generic").is_none(),
         "providers are only configured by list entries"
     );
     assert!(loaded.config.providers.is_empty());
 
-    // Building the default configuration yields no provider at all, so a
-    // default-config service makes zero connections.
+    // Building a configuration without entries yields no provider at all,
+    // so such a service makes zero connections.
     let built = pumice_relay::providers::build_from_config(
         &loaded.config,
         Arc::new(pumice_relay::process::ProcessRunner::new()),

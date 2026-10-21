@@ -126,7 +126,7 @@ fn rig(flows: &str, generations: Value) -> Rig {
     fs::write(
         cfg.join("relay.yml"),
         format!(
-            "providers:\n  - id: claude\n    enabled: true\n    model: haiku-test\n    binary: '{}'\n",
+            "port: 7567\ntotal_timeout_secs: 30\nmax_parallel: 4\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku-test\n    binary: '{}'\n    timeout_secs: 30\ndebug_log:\n  enabled: false\n  path: pumice-debug.jsonl\n",
             fake.display()
         ),
     )
@@ -1548,7 +1548,7 @@ impl Rig {
         fs::write(
             self.cfg.join("relay.yml"),
             format!(
-                "providers:\n  - id: claude\n    enabled: true\n    model: haiku-test\n    binary: '{}'\n",
+                "port: 7567\ntotal_timeout_secs: 30\nmax_parallel: 4\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku-test\n    binary: '{}'\n    timeout_secs: 30\ndebug_log:\n  enabled: false\n  path: pumice-debug.jsonl\n",
                 script.display()
             ),
         )
