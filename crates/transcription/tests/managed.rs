@@ -268,7 +268,9 @@ fn setup_with_model_id(model_present: bool, model: &str) -> Setup {
     let config = dir.path().join("transcribe.yml");
     std::fs::write(
         &config,
-        format!("schema_version: 1\nmodels:\n  - id: {model}\n    path: model.gguf\n"),
+        format!(
+            "schema_version: 1\ndefault_model: null\nlanguage: null\nthreads: auto\nbackend: cpu\nserver:\n  port: null\nmodels_dir: null\nmodels:\n  - id: {model}\n    path: model.gguf\n"
+        ),
     )
     .unwrap();
     let started_file = dir.path().join("started");
