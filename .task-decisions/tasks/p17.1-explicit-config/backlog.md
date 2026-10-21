@@ -22,27 +22,6 @@
 - `crates/relay/src/providers/mod.rs` (`ProviderDescriptor::defaults`, `ProviderSettings::binary`)
 - `crates/relay/src/providers/claude.rs`, `codex.rs`, `kimi.rs`, `kiro.rs` (`defaults`, `build`)
 
-### #3 · Deferred · Complete the owner's live configs before deploying
-- type: Task
-- area: config
-- origin: p17-serve-model-names/reports/2026-10-20-implementation-design.md
-- ticket: —
-- created: 2026-10-20
-- reason: done by the orchestrator when these binaries are deployed to server-1
-
-**Context.** The new binaries refuse a config that leaves a setting out, and both live services (`pumice.service` on 7567 and `pumice-serve`) read the owner's per-user files. The migration in the design report (step 4) covers `relay.yml`; the other three files need the same. This pull request never touched `~/.config/pumice`.
-
-**To do.**
-- [ ] Back up the four YAML files and the binaries.
-- [ ] `relay.yml`: `port`, `total_timeout_secs`, `max_parallel`, `debug_log.enabled` and `debug_log.path`; on every provider `model` (`null` when disabled), `binary` (the command, e.g. `kiro-cli`) and `timeout_secs`.
-- [ ] `transcribe.yml`: `default_model`, `language`, `threads` (`auto` for the old default), `backend`, `server.port`, `models_dir` (`null` for the old default) and `models`.
-- [ ] `formatter.yml`: `formatters` and `default` (`null` for none).
-- [ ] `orchestrator.yml`: `modules.formatter`, every flow's `enabled` and four `budgets_ms`, and every `serve` key.
-- [ ] Validate each file with the candidate binaries' `check-config` (orchestrator: `pumice serve` startup), then restart both services and check both ports.
-
-**Acceptance criteria.**
-- Both services start with the new binaries and answer as before.
-
 ## Closed
 
 ### #2 · Done · Fix the stale relay rename clause in AGENTS.md
@@ -61,6 +40,28 @@
 
 **Where in the code.**
 - `AGENTS.md` (Stack and constraints → Configuration)
+
+### #3 · Done · Complete the owner's live configs before deploying
+- type: Task
+- area: config
+- origin: p17-serve-model-names/reports/2026-10-20-implementation-design.md
+- ticket: —
+- created: 2026-10-20
+- closed: 2026-10-21
+- outcome: deployed after PR #125; all live settings and both services verified in p17-live-migration/reports/2026-10-21-live-migration.md
+
+**Context.** The new binaries refuse a config that leaves a setting out, and both live services (`pumice.service` on 7567 and `pumice-serve`) read the owner's per-user files. The migration in the design report (step 4) covers `relay.yml`; the other three files need the same. This pull request never touched `~/.config/pumice`.
+
+**To do.**
+- [x] Back up the four YAML files and the binaries.
+- [x] `relay.yml`: `port`, `total_timeout_secs`, `max_parallel`, `debug_log.enabled` and `debug_log.path`; on every provider `model` (`null` when disabled), `binary` (the command, e.g. `kiro-cli`) and `timeout_secs`.
+- [x] `transcribe.yml`: `default_model`, `language`, `threads` (`auto` for the old default), `backend`, `server.port`, `models_dir` (`null` for the old default) and `models`.
+- [x] `formatter.yml`: `formatters` and `default` (`null` for none).
+- [x] `orchestrator.yml`: `modules.formatter`, every flow's `enabled` and four `budgets_ms`, and every `serve` key.
+- [x] Validate each file with the candidate binaries' `check-config` (orchestrator: `pumice serve` startup), then restart both services and check both ports.
+
+**Acceptance criteria.**
+- Both services start with the new binaries and answer as before.
 
 ### #4 · Done · Owner: confirm that a one-off `file --model-file` runs without a config
 - type: Alignment
