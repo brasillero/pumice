@@ -1670,9 +1670,11 @@ fn a_one_off_model_file_runs_without_a_config_file() {
     ];
     let out = run_without_config(tmp.path(), &args);
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    // Which engine error depends on the build (the Metal build reports
+    // `engine_failed` for the empty model).
     let code = json["error"]["code"].as_str().unwrap();
     assert!(
-        ["model_load_failed", "engine_not_available"].contains(&code),
+        ["model_load_failed", "engine_not_available", "engine_failed"].contains(&code),
         "{json}"
     );
 
