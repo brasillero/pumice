@@ -11,12 +11,13 @@
 //! workspace and configured timeout — and it never
 //! prints the response: only `ok (<ms> ms)` or a text-free error category.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::Instant;
 
-use crate::config::{Config, ConfigError, ConfigSource};
+use crate::config::{Config, ConfigError};
 use crate::process::ProcessRunner;
 use crate::prompts::compose_prompts;
 use crate::providers::discovery::{self, Found, ProviderStatus, Version};
@@ -26,15 +27,20 @@ use crate::request::{ChatCompletionRequest, Content, Message, extract_request};
 /// The fixed tiny dictation the login check formats.
 pub const LOGIN_CHECK_SAMPLE: &str = "pumice login check";
 
-/// Renders the full doctor report: the config source, one line per registered
+/// Renders the full doctor report: the config file, one line per registered
 /// provider and the readiness summary. Pure over the config and the detection
 /// statuses; never prints dictated text or probe output. Every enabled
-/// provider is shown the same way: no provider-specific warnings.
-pub fn render(source: &ConfigSource, statuses: &[ProviderStatus]) -> String {
+/// provider is shown the same way: no provider-specific warnings. Without a
+/// configuration file (`config_path` is `None`) every provider is disabled
+/// and probed by its standard command name.
+pub fn render(config_path: Option<&Path>, statuses: &[ProviderStatus]) -> String {
     let mut out = String::new();
-    match source {
-        ConfigSource::File(path) => out.push_str(&format!("config: {}\n", path.display())),
-        ConfigSource::BuiltInDefaults => out.push_str("config: built-in defaults\n"),
+    match config_path {
+        Some(path) => out.push_str(&format!("config: {}\n", path.display())),
+        None => out.push_str(
+            "config: none found (pass --config <path> or create the per-user relay.yml); \
+             providers are probed by their standard command names\n",
+        ),
     }
     for status in statuses {
         out.push_str(&provider_line(status));
@@ -269,9 +275,9 @@ mod tests {
 
     #[test]
     fn render_lists_every_provider_and_the_summary() {
-        let report = render(&ConfigSource::BuiltInDefaults, &full_scan());
+        let report = render(None, &full_scan());
 
-        assert!(report.contains("config: built-in defaults\n"), "{report}");
+        assert!(report.contains("config: none found"), "{report}");
         assert!(
             report.contains("claude: enabled, found 2.1.288\n"),
             "{report}"
@@ -298,7 +304,7 @@ mod tests {
     fn render_marks_missing_enabled_providers_and_counts_them_unready() {
         let mut statuses = full_scan();
         statuses[1] = status("codex", true, Found::Missing, Version::Unavailable);
-        let report = render(&ConfigSource::File(PathBuf::from("relay.yml")), &statuses);
+        let report = render(Some(Path::new("relay.yml")), &statuses);
 
         assert!(
             report.contains("codex: enabled, missing (install: npm install -g @openai/codex)\n"),
@@ -316,7 +322,7 @@ mod tests {
         let mut statuses = full_scan();
         statuses[0] = status("claude", true, found(), Version::Unavailable);
         statuses[1] = status("codex", true, Found::UnsupportedShim, Version::Unavailable);
-        let report = render(&ConfigSource::BuiltInDefaults, &statuses);
+        let report = render(None, &statuses);
 
         assert!(
             report.contains("claude: enabled, found (version unavailable)\n"),
@@ -340,7 +346,7 @@ mod tests {
     fn render_shows_an_enabled_provider_without_warnings() {
         let mut statuses = full_scan();
         statuses[2] = status("kimi", true, found(), Version::Unavailable);
-        let report = render(&ConfigSource::BuiltInDefaults, &statuses);
+        let report = render(None, &statuses);
 
         assert!(
             report.contains("kimi: enabled, found (version unavailable)\n"),
@@ -362,7 +368,7 @@ mod tests {
             Found::NotApplicable,
             Version::Skipped,
         ));
-        let report = render(&ConfigSource::BuiltInDefaults, &statuses);
+        let report = render(None, &statuses);
 
         assert!(
             report.contains("generic: enabled, local endpoint (checked at call time)\n"),

@@ -22,8 +22,7 @@ use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-const CLAUDE_AT_FAKE: &str =
-    "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n";
+const CLAUDE_AT_FAKE: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n";
 
 fn success_envelope(result: &str) -> String {
     json!({
@@ -97,7 +96,7 @@ async fn start_monitored_server(
     let yaml = yaml.replace("{binary}", &fake.path().display().to_string());
     let config_dir = TempDir::new().expect("temp dir");
     let config_path = config_dir.path().join("relay.yml");
-    fs::write(&config_path, yaml).expect("write config");
+    fs::write(&config_path, support::relay_config(&yaml)).expect("write config");
     let config = config::load_with_env(Some(&config_path), |_| None)
         .expect("config loads")
         .config;

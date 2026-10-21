@@ -1,11 +1,13 @@
-//! Validated configuration with built-in defaults.
+//! Validated configuration.
 //!
-//! One YAML file configures Pumice ([`load`]); each CLI keeps its own login,
-//! routing and settings. When the file is missing or empty
-//! every setting falls back to a built-in default — which since 0.2 includes
-//! no providers at all: providers are an explicit, ordered list and nothing
-//! is enabled unless the file says so. Validation rejects problems with a
-//! `file:line:column` position and the setting path.
+//! One YAML file configures the relay ([`load`]); each CLI keeps its own
+//! login, routing and settings. Every setting must be written in the file:
+//! an omitted one is an error, never a built-in default
+//! (p17-serve-model-names/D3), and so is a missing file. Providers are an
+//! explicit, ordered list and nothing is enabled unless the file says so.
+//! Validation rejects problems with a `file:line:column` position and the
+//! setting path; a missing setting is reported at the mapping it belongs in
+//! (line 1 for a top-level one).
 
 mod error;
 mod raw;
@@ -19,19 +21,13 @@ use serde_saphyr::Spanned;
 pub use error::ConfigError;
 
 use crate::providers::{self, ProviderSettings};
+use raw::{Setting, Within};
 
-/// Port the service binds to when the configuration does not say otherwise.
-pub const DEFAULT_PORT: u16 = 7567;
-
-const DEFAULT_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
-/// Default number of provider calls that may run at the same time.
-pub const DEFAULT_MAX_PARALLEL: usize = 4;
 /// Hard upper bound for `max_parallel`, kept small to limit resource use.
 pub const MAX_PARALLEL_LIMIT: usize = 32;
-const DEFAULT_DEBUG_LOG_FILE: &str = "pumice-debug.jsonl";
 const PER_USER_FILE: &str = "relay.yml";
 
-/// Validated settings with every default applied.
+/// Validated settings, every one written in the file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub port: u16,
@@ -54,7 +50,7 @@ impl Config {
 }
 
 /// One entry of the configuration's `providers:` list: the provider id and
-/// its validated, fully defaulted settings.
+/// its validated settings.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ProviderConfig {
     pub id: String,
@@ -67,24 +63,15 @@ pub struct DebugLogSettings {
     pub path: PathBuf,
 }
 
-/// Where the effective configuration came from.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ConfigSource {
-    /// Loaded from this configuration file.
-    File(PathBuf),
-    /// No file was requested or found; built-in defaults apply.
-    BuiltInDefaults,
-}
-
-/// The effective configuration and the file it came from, if any.
+/// The effective configuration and the file it came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoadedConfig {
     pub config: Config,
-    pub source: ConfigSource,
+    pub path: PathBuf,
 }
 
 /// Loads the configuration: an explicit `--config` path when given, else the
-/// per-user configuration file, else built-in defaults.
+/// per-user configuration file. A missing file is an error.
 pub fn load(explicit: Option<&Path>) -> Result<LoadedConfig, ConfigError> {
     load_with_env(explicit, |key| std::env::var_os(key))
 }
@@ -96,37 +83,74 @@ pub fn load_with_env(
     explicit: Option<&Path>,
     get_env: impl Fn(&str) -> Option<OsString>,
 ) -> Result<LoadedConfig, ConfigError> {
-    let source = match explicit {
-        Some(path) => {
-            if !path.exists() {
-                return Err(ConfigError::file(
-                    path,
-                    "the configuration file does not exist",
-                ));
-            }
-            ConfigSource::File(path.to_path_buf())
-        }
-        None => match per_user_config_path(&get_env) {
-            Some(candidate) if candidate.exists() => ConfigSource::File(candidate),
-            _ => ConfigSource::BuiltInDefaults,
-        },
-    };
-    let config = match &source {
-        ConfigSource::File(path) => load_file(path)?,
-        ConfigSource::BuiltInDefaults => validate(None, None, providers::PROVIDERS)?,
-    };
-    Ok(LoadedConfig { config, source })
+    match locate(explicit, &get_env)? {
+        Located::File(path) => load_file(path),
+        Located::Absent(Some(candidate)) => Err(ConfigError::file(
+            candidate,
+            "the relay configuration file does not exist; pass --config <path> or create it \
+             (relay.example.yml has every setting)",
+        )),
+        Located::Absent(None) => Err(ConfigError::general(
+            "no per-user configuration directory found (XDG_CONFIG_HOME, HOME or APPDATA); \
+             pass --config <path>",
+        )),
+    }
 }
 
-fn load_file(path: &Path) -> Result<Config, ConfigError> {
-    let text = std::fs::read_to_string(path).map_err(|error| {
-        ConfigError::file(path, format!("cannot read configuration file: {error}"))
+/// [`load`] for the commands that also work without a configuration file
+/// (`doctor`'s report): `None` when no `--config` is given and the per-user
+/// file does not exist. A missing explicit file is still an error, and a
+/// file that exists must be complete.
+pub fn load_optional(explicit: Option<&Path>) -> Result<Option<LoadedConfig>, ConfigError> {
+    load_optional_with_env(explicit, |key| std::env::var_os(key))
+}
+
+/// [`load_optional`] with an injectable environment reader.
+pub fn load_optional_with_env(
+    explicit: Option<&Path>,
+    get_env: impl Fn(&str) -> Option<OsString>,
+) -> Result<Option<LoadedConfig>, ConfigError> {
+    match locate(explicit, &get_env)? {
+        Located::File(path) => load_file(path).map(Some),
+        Located::Absent(_) => Ok(None),
+    }
+}
+
+/// Where the configuration file is, or the per-user path it was looked for
+/// at (`None` when the platform places none).
+enum Located {
+    File(PathBuf),
+    Absent(Option<PathBuf>),
+}
+
+fn locate(
+    explicit: Option<&Path>,
+    get_env: &dyn Fn(&str) -> Option<OsString>,
+) -> Result<Located, ConfigError> {
+    match explicit {
+        Some(path) if !path.exists() => Err(ConfigError::file(
+            path,
+            "the configuration file does not exist",
+        )),
+        Some(path) => Ok(Located::File(path.to_path_buf())),
+        None => Ok(match per_user_config_path(get_env) {
+            Some(candidate) if candidate.exists() => Located::File(candidate),
+            candidate => Located::Absent(candidate),
+        }),
+    }
+}
+
+fn load_file(path: PathBuf) -> Result<LoadedConfig, ConfigError> {
+    let text = std::fs::read_to_string(&path).map_err(|error| {
+        ConfigError::file(&path, format!("cannot read configuration file: {error}"))
     })?;
-    let config_dir = config_dir_of(path);
+    let config_dir = config_dir_of(&path);
     let raw =
         serde_saphyr::from_str_with_options::<Option<raw::RawConfig>>(&text, saphyr_options())
-            .map_err(|error| parse_error(path, &error))?;
-    validate(raw, Some(&config_dir), providers::PROVIDERS).map_err(|error| error.with_file(path))
+            .map_err(|error| parse_error(&path, &error))?;
+    let config = validate(raw, Some(&config_dir), providers::PROVIDERS)
+        .map_err(|error| error.with_file(&path))?;
+    Ok(LoadedConfig { config, path })
 }
 
 /// Validates YAML `text` against an explicit provider descriptor list
@@ -169,6 +193,7 @@ fn validate(
     config_dir: Option<&Path>,
     descriptors: &[providers::ProviderDescriptor],
 ) -> Result<Config, ConfigError> {
+    // An empty document is a file that writes no setting at all.
     let raw = raw.unwrap_or_default();
 
     // Removed settings are parsed only to fail at their own position with
@@ -207,26 +232,57 @@ fn validate(
         ));
     }
 
-    let port = match &raw.port {
-        Some(span) if span.value == 0 => {
-            return Err(ConfigError::at(
-                span.referenced,
-                "port must be greater than zero",
-            ));
-        }
-        Some(span) => span.value,
-        None => DEFAULT_PORT,
-    };
+    let port = raw.port.required(Within::Root, "\"port\"")?;
+    if port.value == 0 {
+        return Err(ConfigError::at(
+            port.referenced,
+            "port must be greater than zero",
+        ));
+    }
+    let port = port.value;
 
+    let total_timeout = raw
+        .total_timeout_secs
+        .required(Within::Root, "\"total_timeout_secs\"")?;
+    if total_timeout.value == 0 {
+        return Err(ConfigError::at(
+            total_timeout.referenced,
+            "total_timeout_secs must be greater than zero",
+        ));
+    }
+    let total_timeout = Duration::from_secs(total_timeout.value);
+
+    let max_parallel = raw
+        .max_parallel
+        .required(Within::Root, "\"max_parallel\"")?;
+    if max_parallel.value == 0 {
+        return Err(ConfigError::at(
+            max_parallel.referenced,
+            "max_parallel must be at least 1",
+        ));
+    }
+    if max_parallel.value > MAX_PARALLEL_LIMIT as u64 {
+        return Err(ConfigError::at(
+            max_parallel.referenced,
+            format!("max_parallel must be at most {MAX_PARALLEL_LIMIT}"),
+        ));
+    }
+    let max_parallel = max_parallel.value as usize;
+
+    let entries = raw.providers.required(Within::Root, "\"providers\"")?;
     let mut configured: Vec<ProviderConfig> = Vec::new();
-    for entry in &raw.providers {
+    for entry in &entries.value.0 {
         let entry_location = entry.referenced;
+        let within = Within::Mapping(entry_location);
         let entry = &entry.value;
-        let Some(id) = &entry.id else {
-            return Err(ConfigError::at(
-                entry_location,
-                "a providers entry has no \"id\"; every entry starts with \"- id: <provider>\"",
-            ));
+        let id = match &entry.id {
+            Setting::Value(id) => id,
+            Setting::Missing | Setting::Null(_) => {
+                return Err(ConfigError::at(
+                    entry.id.location().unwrap_or(entry_location),
+                    "a providers entry has no \"id\"; every entry starts with \"- id: <provider>\"",
+                ));
+            }
         };
         let Some(descriptor) = descriptors.iter().find(|d| d.id == id.value) else {
             // Archived and removed providers get a precise message.
@@ -245,62 +301,46 @@ fn validate(
                 format!("duplicate provider \"{}\" in providers", id.value),
             ));
         }
-        let Some(enabled) = &entry.enabled else {
-            return Err(ConfigError::at(
-                id.referenced,
-                format!(
-                    "providers entry \"{}\" has no \"enabled\"; add \"enabled: true\" or \"enabled: false\"",
-                    id.value
-                ),
-            ));
+        let enabled = match &entry.enabled {
+            Setting::Missing => {
+                return Err(ConfigError::at(
+                    id.referenced,
+                    format!(
+                        "providers entry \"{}\" has no \"enabled\"; add \"enabled: true\" or \"enabled: false\"",
+                        id.value
+                    ),
+                ));
+            }
+            enabled => {
+                enabled.required(within, &format!("providers entry \"{}\".enabled", id.value))?
+            }
         };
-        let settings = provider_settings(descriptor, id, entry, enabled, config_dir)?;
+        let settings = provider_settings(descriptor, id, entry, enabled, within, config_dir)?;
         configured.push(ProviderConfig {
             id: id.value.clone(),
             settings,
         });
     }
 
-    let total_timeout = match &raw.total_timeout_secs {
-        Some(span) if span.value == 0 => {
-            return Err(ConfigError::at(
-                span.referenced,
-                "total_timeout_secs must be greater than zero",
-            ));
-        }
-        Some(span) => Duration::from_secs(span.value),
-        None => DEFAULT_TOTAL_TIMEOUT,
-    };
-
-    let max_parallel = match &raw.max_parallel {
-        Some(span) if span.value == 0 => {
-            return Err(ConfigError::at(
-                span.referenced,
-                "max_parallel must be at least 1",
-            ));
-        }
-        Some(span) if span.value > MAX_PARALLEL_LIMIT as u64 => {
-            return Err(ConfigError::at(
-                span.referenced,
-                format!("max_parallel must be at most {MAX_PARALLEL_LIMIT}"),
-            ));
-        }
-        Some(span) => span.value as usize,
-        None => DEFAULT_MAX_PARALLEL,
-    };
-
-    let debug_log = {
-        let raw_log = raw.debug_log.as_ref();
-        DebugLogSettings {
-            enabled: raw_log
-                .and_then(|log| log.enabled.as_ref())
-                .map(|enabled| enabled.value)
-                .unwrap_or(false),
-            path: raw_log
-                .and_then(|log| log.path.as_ref())
-                .map(|path| resolve_against(&path.value, config_dir))
-                .unwrap_or_else(|| resolve_against(Path::new(DEFAULT_DEBUG_LOG_FILE), config_dir)),
-        }
+    let debug_log = raw.debug_log.required(Within::Root, "\"debug_log\"")?;
+    let within = Within::Mapping(debug_log.referenced);
+    let enabled = debug_log
+        .value
+        .enabled
+        .required(within, "\"debug_log.enabled\"")?;
+    let path = debug_log
+        .value
+        .path
+        .required(within, "\"debug_log.path\"")?;
+    if path.value.as_os_str().is_empty() {
+        return Err(ConfigError::at(
+            path.referenced,
+            "debug_log.path must not be empty",
+        ));
+    }
+    let debug_log = DebugLogSettings {
+        enabled: enabled.value,
+        path: resolve_against(&path.value, config_dir),
     };
 
     Ok(Config {
@@ -312,69 +352,21 @@ fn validate(
     })
 }
 
-/// Applies one provider's defaults and the entry's overrides, then runs its
-/// full-settings validator. The entry's `enabled` is authoritative: nothing
-/// is enabled unless the file says so.
+/// Builds one provider's settings from its entry, then runs its
+/// full-settings validator. Every key of the entry is written; the entry's
+/// `enabled` is authoritative: nothing is enabled unless the file says so.
 fn provider_settings(
     descriptor: &providers::ProviderDescriptor,
     id: &Spanned<String>,
     raw: &raw::RawProviderEntry,
     enabled: &Spanned<bool>,
+    within: Within,
     config_dir: Option<&Path>,
 ) -> Result<ProviderSettings, ConfigError> {
     let base = format!("providers entry \"{}\"", id.value);
-    let mut settings = (descriptor.defaults)();
-    settings.enabled = enabled.value;
-    let mut locations = providers::ProviderLocations {
-        provider: Some(id.referenced),
-        enabled: Some(enabled.referenced),
-        ..providers::ProviderLocations::default()
-    };
-    if let Some(binary) = &raw.binary {
-        if binary.value.as_os_str().is_empty() {
-            return Err(ConfigError::at(
-                binary.referenced,
-                format!(
-                    "{base}.binary must not be empty; remove the key to use the command on PATH"
-                ),
-            ));
-        }
-        locations.binary = Some(binary.referenced);
-        settings.binary = Some(resolve_binary(&binary.value, config_dir));
-    }
-    if let Some(model) = &raw.model {
-        locations.model = Some(model.referenced);
-        if model.value.trim().is_empty() && enabled.value {
-            return Err(ConfigError::at(
-                model.referenced,
-                format!("{base}.model must not be empty"),
-            ));
-        }
-        // Every CLI receives the model as a command-line argument: a
-        // leading '-' would be read as a flag.
-        if model.value.trim_start().starts_with('-') {
-            return Err(ConfigError::at(
-                model.referenced,
-                format!("{base}.model must not start with '-'"),
-            ));
-        }
-        settings.model = model.value.clone();
-    } else {
-        // Missing-model complaints point at the entry's id.
-        locations.model = Some(id.referenced);
-    }
-    if let Some(timeout) = &raw.timeout_secs {
-        if timeout.value == 0 {
-            return Err(ConfigError::at(
-                timeout.referenced,
-                format!("{base}.timeout_secs must be greater than zero"),
-            ));
-        }
-        settings.timeout = Duration::from_secs(timeout.value);
-    }
-
-    // Each CLI keeps its own configuration (gateway, routing, login); Pumice
-    // inherits it and does not duplicate it here.
+    // Removed keys fail first, like the top-level ones. Each CLI keeps its
+    // own configuration (gateway, routing, login); Pumice inherits it and
+    // does not duplicate it here.
     for (key, span) in [("env", &raw.env), ("options", &raw.options)] {
         if let Some(span) = span {
             return Err(ConfigError::at(
@@ -385,6 +377,77 @@ fn provider_settings(
             ));
         }
     }
+    // The descriptor's settings are only the shape; every field below is
+    // replaced with the entry's own value.
+    let mut settings = (descriptor.defaults)();
+    settings.enabled = enabled.value;
+    let mut locations = providers::ProviderLocations {
+        provider: Some(id.referenced),
+        enabled: Some(enabled.referenced),
+        ..providers::ProviderLocations::default()
+    };
+
+    let command_hint = format!(
+        "write the command, e.g. \"binary: {}\" to look it up on PATH",
+        descriptor.default_binary
+    );
+    let binary = match &raw.binary {
+        Setting::Value(binary) => binary,
+        Setting::Null(location) => {
+            return Err(ConfigError::at(
+                *location,
+                format!("{base}.binary must not be null; {command_hint}"),
+            ));
+        }
+        Setting::Missing => return Err(raw::missing(within, &format!("{base}.binary"))),
+    };
+    if binary.value.as_os_str().is_empty() {
+        return Err(ConfigError::at(
+            binary.referenced,
+            format!("{base}.binary must not be empty; {command_hint}"),
+        ));
+    }
+    locations.binary = Some(binary.referenced);
+    settings.binary = Some(resolve_binary(&binary.value, config_dir));
+
+    // `model: null` means no model; only a disabled entry may say so (the
+    // checks below reject it on an enabled one).
+    match raw.model.nullable(within, &format!("{base}.model"))? {
+        Some(model) => {
+            locations.model = Some(model.referenced);
+            if model.value.trim().is_empty() && enabled.value {
+                return Err(ConfigError::at(
+                    model.referenced,
+                    format!("{base}.model must not be empty"),
+                ));
+            }
+            // Every CLI receives the model as a command-line argument: a
+            // leading '-' would be read as a flag.
+            if model.value.trim_start().starts_with('-') {
+                return Err(ConfigError::at(
+                    model.referenced,
+                    format!("{base}.model must not start with '-'"),
+                ));
+            }
+            settings.model = model.value.clone();
+        }
+        None => {
+            locations.model = raw.model.location();
+            settings.model = String::new();
+        }
+    }
+
+    let timeout = raw
+        .timeout_secs
+        .required(within, &format!("{base}.timeout_secs"))?;
+    if timeout.value == 0 {
+        return Err(ConfigError::at(
+            timeout.referenced,
+            format!("{base}.timeout_secs must be greater than zero"),
+        ));
+    }
+    settings.timeout = Duration::from_secs(timeout.value);
+
     // The descriptor runs first: its refusal (Antigravity) and its own
     // requirements (an explicit provider/model, a plausible alias) keep
     // their established messages and positions.
@@ -393,7 +456,7 @@ fn provider_settings(
     // an enabled entry always needs a usable model.
     if settings.enabled && settings.model.trim().is_empty() {
         return Err(ConfigError::at(
-            id.referenced,
+            locations.model.unwrap_or(id.referenced),
             format!("{base} is enabled but has no model; add \"model: <name>\""),
         ));
     }

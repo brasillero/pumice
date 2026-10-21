@@ -10,7 +10,9 @@
 #
 # The orchestrator file refers to the module configurations; it never copies
 # their settings (models, provider binaries and timeouts stay in the module
-# files). Full guide: docs/orchestrator.md
+# files). Every setting below must be written: leaving one out is an error
+# that names the file and line. There are no built-in defaults; this file is
+# the starting configuration. Full guide: docs/orchestrator.md
 
 schema_version: 1
 
@@ -19,8 +21,9 @@ modules:
   # resolve against this file's directory.
   transcription:
     config: ./transcribe.yml
-  # Required once any enabled flow selects a formatter (even a built-in);
-  # an empty registry file is enough for builtin:clean.
+  # Needed once any enabled flow selects a formatter (even a built-in); an
+  # empty registry file is enough for builtin:clean. Write `formatter: null`
+  # when no enabled flow selects one.
   formatter:
     config: ./formatter.yml
   # Required. Only `in_process` is supported: the relay runs inside the
@@ -32,9 +35,9 @@ modules:
 # Named flows; `pumice run <AUDIO> --flow <ID>` runs one of them, and so
 # does a `pumice serve` dictation naming its id (or an OpenAI transcription
 # naming it as `model`, once listed in serve.transcription_flows). Nothing is
-# enabled implicitly: a flow needs `enabled: true`, and `formatter` must be
-# written explicitly — an id or null (null adds no instructions; combine it
-# with `relay_route: passthrough` for a raw-only flow).
+# enabled implicitly: every flow writes `enabled` (true or false), and
+# `formatter` is an id or null (null adds no instructions; combine it with
+# `relay_route: passthrough` for a raw-only flow).
 flows:
   # Dictation cleanup: transcribe with the `turbo` model, apply the built-in
   # cleanup rules, call the relay route `claude`.
@@ -43,7 +46,7 @@ flows:
     transcription_model: turbo
     formatter: builtin:clean
     relay_route: claude
-    # Optional; the defaults are shown below. One overall clock from command
+    # Every flow writes all four budgets. One overall clock from command
     # start (for `pumice serve`, from the request's arrival, upload
     # included); a stage's deadline is the earlier of its own cap and the
     # remaining total (which never resets). The last 2500 ms of the total
@@ -63,33 +66,40 @@ flows:
     transcription_model: turbo
     formatter: null
     relay_route: passthrough
+    budgets_ms:
+      total: 180000
+      transcription: 120000
+      formatter: 1000
+      relay: 60000
 
-# Optional: `pumice serve`, the local service with one warm transcription
-# model (docs/orchestrator.md). Files without this section stay valid for
-# `pumice run`. Nothing starts implicitly: `enabled` defaults to false.
-# serve:
-#   enabled: true
-#   # Optional; default 17570. 7567 (the relay's port) is refused; 0 picks a
-#   # free port and announces it. `pumice serve --port` overrides it.
-#   port: 17570
-#   # Required when enabled. Every enabled flow must use this model.
-#   transcription_model: turbo
-#   # Optional; default 60000, from 1000 to 300000. How long the
-#   # transcription child may take to load its model and become ready.
-#   startup_timeout_ms: 60000
-#   # Optional; default empty. The flows published as OpenAI transcription
-#   # models: `GET /v1/models` lists them and `POST /v1/audio/transcriptions`
-#   # runs the one named by `model`, answering its final text. Ids use only
-#   # A-Z a-z 0-9 . _ - (starting with a letter or digit, at most 128). Each
-#   # must be an enabled flow that is off (formatter: null + passthrough) or
-#   # has a formatter for its AI route.
-#   transcription_flows:
-#     - clean
-#     - raw
-#   # Optional; default empty. Browser origins accepted besides
-#   # http://127.0.0.1:<port>, for a reverse proxy on this machine such as
-#   # `tailscale serve` (pumice serve still listens on 127.0.0.1 only). Exact
-#   # origins: http or https, lowercase host, no path, no wildcards, no
-#   # default port. No authentication: whoever reaches the proxy can use it.
-#   allowed_origins:
-#     - https://server-1.example-tailnet.ts.net:17570
+# `pumice serve`, the local service with one warm transcription model
+# (docs/orchestrator.md). The section is written even when only `pumice run`
+# is used: `enabled: false` keeps it off. Nothing starts implicitly.
+serve:
+  enabled: false
+  # 7567 (the relay's port) is refused; 0 picks a free port and announces
+  # it. `pumice serve --port` overrides it.
+  port: 17570
+  # Every enabled flow must use this model. null only while serve is
+  # disabled.
+  transcription_model: turbo
+  # From 1000 to 300000. How long the transcription child may take to load
+  # its model and become ready.
+  startup_timeout_ms: 60000
+  # The flows published as OpenAI transcription models (`[]` publishes
+  # none): `GET /v1/models` lists them and `POST /v1/audio/transcriptions`
+  # runs the one named by `model`, answering its final text. Ids use only
+  # A-Z a-z 0-9 . _ - (starting with a letter or digit, at most 128). Each
+  # must be an enabled flow that is off (formatter: null + passthrough) or
+  # has a formatter for its AI route.
+  transcription_flows:
+    - clean
+    - raw
+  # Browser origins accepted besides http://127.0.0.1:<port> (`[]` accepts
+  # none), for a reverse proxy on this machine such as `tailscale serve`
+  # (pumice serve still listens on 127.0.0.1 only). Exact origins: http or
+  # https, lowercase host, no path, no wildcards, no default port. No
+  # authentication: whoever reaches the proxy can use it.
+  allowed_origins: []
+  # e.g. allowed_origins:
+  #   - https://server-1.example-tailnet.ts.net:17570

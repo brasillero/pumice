@@ -57,7 +57,7 @@ platform from the registry.
 ```sh
 pumice relay serve        # starts the service on http://127.0.0.1:7567/v1
 pumice relay doctor       # shows which AI CLIs are installed and reachable
-pumice relay check-config # validates the optional YAML config
+pumice relay check-config # validates the YAML config
 ```
 
 (`pumice relay` with no further arguments is the start command, and
@@ -70,11 +70,29 @@ without calling an AI, or `inspect` to echo the full JSON request body for
 diagnostics; `inspect` includes Handy's attached prompt and pastes the result
 as JSON. Stop the service with Ctrl-C.
 
-Every setting has a built-in default, so a config file is not required. To
-customize, create the per-user config and edit it:
+The service needs a config file in which every setting is written (there
+are no built-in defaults; a missing setting is reported with its file and
+line). Create the per-user config:
 
 - Windows: `%APPDATA%\pumice\relay.yml`
 - Linux and macOS: `~/.config/pumice/relay.yml`
+
+```yaml
+port: 7567
+total_timeout_secs: 30
+max_parallel: 4
+providers:
+  - id: claude
+    enabled: true
+    model: haiku
+    binary: claude
+    timeout_secs: 30
+debug_log:
+  enabled: false
+  path: pumice-debug.jsonl
+```
+
+`pumice relay doctor` runs before the file exists.
 
 The service listens on `127.0.0.1` only, sends no telemetry and makes no
 external connections of its own.

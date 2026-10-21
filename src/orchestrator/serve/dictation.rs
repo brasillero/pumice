@@ -999,7 +999,9 @@ mod tests {
             relay_route: "passthrough".to_owned(),
             budgets: Budgets {
                 total: Duration::from_millis(total_ms),
-                ..Budgets::default()
+                transcription: Duration::from_millis(120_000),
+                formatter: Duration::from_millis(1_000),
+                relay: Duration::from_millis(60_000),
             },
             references: Default::default(),
         }

@@ -1,6 +1,6 @@
 use crate::catalog;
 use crate::compute::{BackendMode, Compute};
-use crate::config::{self, Config, ConfigSource, LoadedConfig};
+use crate::config::{self, Config, LoadedConfig, Threads};
 use crate::download::{self, DownloadSpec, Downloader, FetchResult};
 use crate::engine::{CancelToken, Engine, EngineRequest};
 use crate::managed::{self, Lifecycle, StopReason};
@@ -38,7 +38,8 @@ pub struct Args {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Transcribe an audio file.
+    /// Transcribe an audio file. With --model-file it also runs without a
+    /// configuration file, from its flags and their defaults.
     File(FileArgs),
     /// Serve the HTTP API.
     Serve(ServeArgs),
@@ -64,22 +65,27 @@ pub struct FileArgs {
     #[arg(long, value_name = "ID", group = "model_source")]
     model: Option<String>,
 
-    /// Direct path to a GGUF model file.
+    /// Direct path to a GGUF model file. With it, `file` also runs without a
+    /// configuration file: the other settings then come from the flags and
+    /// their defaults. A configuration file that exists must be complete.
     #[arg(long, value_name = "PATH.gguf", group = "model_source")]
     model_file: Option<PathBuf>,
 
-    /// Optional language hint (ISO-639-1 two-letter code). When given, this
-    /// value is reported in the result; otherwise the engine-detected language
-    /// is reported.
+    /// Optional language hint (ISO-639-1 two-letter code). Overrides
+    /// `language` in the configuration file; without one, the language is
+    /// detected. When given, this value is reported in the result; otherwise
+    /// the engine-detected language is reported.
     #[arg(long, value_name = "xx")]
     language: Option<String>,
 
-    /// Number of threads to use for inference (default: available parallelism, capped at 32).
+    /// Number of threads to use for inference (1-32). Overrides `threads` in
+    /// the configuration file; without one, the available parallelism,
+    /// capped at 32.
     #[arg(long, value_name = "N")]
     threads: Option<usize>,
 
-    /// Compute backend. Overrides `backend` in the configuration file
-    /// (default: cpu).
+    /// Compute backend. Overrides `backend` in the configuration file;
+    /// without one, cpu.
     #[arg(long, value_name = "MODE")]
     backend: Option<BackendMode>,
 
@@ -91,7 +97,7 @@ pub struct FileArgs {
 #[derive(ClapArgs, Debug)]
 pub struct BackendsArgs {
     /// Backend mode to register for. Overrides `backend` in the
-    /// configuration file (default: cpu).
+    /// configuration file; required when there is none.
     #[arg(long, value_name = "MODE")]
     backend: Option<BackendMode>,
 
@@ -117,8 +123,7 @@ pub struct ServeArgs {
     #[arg(long, value_name = "PORT")]
     port: Option<u16>,
 
-    /// Compute backend. Overrides `backend` in the configuration file
-    /// (default: cpu).
+    /// Compute backend. Overrides `backend` in the configuration file.
     #[arg(long, value_name = "MODE")]
     backend: Option<BackendMode>,
 
@@ -208,7 +213,7 @@ struct Envelope {
 
 #[derive(Debug, Clone, Serialize)]
 struct CheckConfigResult {
-    file: Option<PathBuf>,
+    file: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -256,7 +261,7 @@ struct VerifyOutput {
 
 enum CommandOutput {
     Transcription(SuccessOutput),
-    CheckConfig(Option<PathBuf>),
+    CheckConfig(PathBuf),
     ModelsList(Vec<ModelListEntry>),
     ModelsCatalog(Vec<CatalogListEntry>),
     Download(DownloadOutput),
@@ -354,7 +359,7 @@ where
             }
         },
         Ok(CommandOutput::CheckConfig(file)) => {
-            match print_check_config(file.as_deref(), json, &mut stdout) {
+            match print_check_config(&file, json, &mut stdout) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(_) => {
                     let _ = stderr.write_all(b"failed to write output\n");
@@ -455,12 +460,11 @@ where
     T: Into<OsString> + Clone,
 {
     let args = Args::try_parse_from(args).map_err(|e| Error::invalid_arguments(format!("{e}")))?;
-    let loaded = load_config(&args)?;
+    let config_arg = args.config.as_deref();
     match args.command {
         Command::File(file_args) => {
-            run_file(file_args, &loaded.config, args.config.as_deref(), |_| {
-                Ok(engine)
-            })
+            let config = file_config(&file_args, config_arg)?;
+            run_file(file_args, &config, config_arg, |_| Ok(engine))
         }
         _ => Err(Error::invalid_arguments(
             "run_with_engine only supports the file subcommand",
@@ -472,26 +476,35 @@ fn run_command<F>(args: Args, make_engine: F) -> Result<CommandOutput, Error>
 where
     F: FnOnce(EngineRequest<'_>) -> Result<Box<dyn Engine>, Error>,
 {
-    let loaded = load_config(&args)?;
     let config_arg = args.config.as_deref();
     match args.command {
         Command::File(file_args) => {
-            let output = run_file(file_args, &loaded.config, config_arg, make_engine)?;
+            let config = file_config(&file_args, config_arg)?;
+            let output = run_file(file_args, &config, config_arg, make_engine)?;
             Ok(CommandOutput::Transcription(output))
         }
         Command::Serve(serve_args) => {
+            let loaded = load_config(config_arg)?;
             match run_serve(serve_args, &loaded.config, config_arg, make_engine, None)? {
                 Served::Stopped => Ok(CommandOutput::None),
                 Served::Retired => Err(Error::new(ErrorCode::EngineFailed, RETIRED)),
             }
         }
-        Command::CheckConfig(_) => Ok(CommandOutput::CheckConfig(match loaded.source {
-            ConfigSource::File(path) => Some(path),
-            ConfigSource::NoFile => None,
-        })),
-        Command::Models { command } => run_models_command(command, &loaded.config),
+        Command::CheckConfig(_) => Ok(CommandOutput::CheckConfig(load_config(config_arg)?.path)),
+        Command::Models { command } => run_models_command(command, config_arg),
         Command::Backends(backends_args) => {
-            let mode = backends_args.backend.unwrap_or(loaded.config.backend);
+            // A report like `models catalog`: it also runs before a
+            // configuration exists, with the mode given on the command line.
+            let loaded = load_optional_config(config_arg)?;
+            let mode = match (backends_args.backend, loaded) {
+                (Some(mode), _) => mode,
+                (None, Some(loaded)) => loaded.config.backend,
+                (None, None) => {
+                    return Err(Error::invalid_arguments(
+                        "no backend mode: pass --backend MODE, or a configuration file with --config FILE or as the per-user transcribe.yml",
+                    ));
+                }
+            };
             backends(mode).map(CommandOutput::Backends)
         }
     }
@@ -538,16 +551,24 @@ async fn retired(retire: Option<CancellationToken>) {
     }
 }
 
-fn run_models_command(command: ModelsCommand, config: &Config) -> Result<CommandOutput, Error> {
+/// `models list` needs the configuration; `catalog`, `download` and
+/// `verify` also run before one exists, in the per-user models directory.
+fn run_models_command(
+    command: ModelsCommand,
+    config_arg: Option<&Path>,
+) -> Result<CommandOutput, Error> {
     match command {
-        ModelsCommand::List(_) => Ok(CommandOutput::ModelsList(build_model_list(config))),
+        ModelsCommand::List(_) => {
+            let loaded = load_config(config_arg)?;
+            Ok(CommandOutput::ModelsList(build_model_list(&loaded.config)))
+        }
         ModelsCommand::Catalog(_) => {
-            let dir = resolve_models_dir(config)?;
+            let dir = models_dir_for(config_arg)?;
             Ok(CommandOutput::ModelsCatalog(build_catalog_list(&dir)))
         }
         ModelsCommand::Download(args) => {
             let entry = find_catalog_entry(&args.id)?;
-            let dir = resolve_models_dir(config)?;
+            let dir = models_dir_for(config_arg)?;
             let spec = DownloadSpec::from(entry);
 
             let mut stderr = io::stderr();
@@ -589,7 +610,7 @@ fn run_models_command(command: ModelsCommand, config: &Config) -> Result<Command
         }
         ModelsCommand::Verify(args) => {
             let entry = find_catalog_entry(&args.id)?;
-            let dir = resolve_models_dir(config)?;
+            let dir = models_dir_for(config_arg)?;
             let spec = DownloadSpec::from(entry);
             let path = dir.join(entry.file_name);
             let verified = download::verify_file(&path, &spec)?;
@@ -611,12 +632,18 @@ fn find_catalog_entry(id: &str) -> Result<&'static catalog::CatalogEntry, Error>
     })
 }
 
-/// Where downloaded catalog models go: the configured `models_dir`, else the
-/// per-user data directory (see `models_dir::default_models_dir`).
-fn resolve_models_dir(config: &Config) -> Result<PathBuf, Error> {
+/// [`resolve_models_dir`] for the configuration file, if there is one.
+fn models_dir_for(config_arg: Option<&Path>) -> Result<PathBuf, Error> {
+    let loaded = load_optional_config(config_arg)?;
+    resolve_models_dir(loaded.as_ref().map(|loaded| &loaded.config))
+}
+
+/// Where downloaded catalog models go: the configured `models_dir`, else
+/// (`models_dir: null`, or no configuration file) the per-user data
+/// directory (see `models_dir::default_models_dir`).
+fn resolve_models_dir(config: Option<&Config>) -> Result<PathBuf, Error> {
     config
-        .models_dir
-        .clone()
+        .and_then(|config| config.models_dir.clone())
         .or_else(|| models_dir::default_models_dir(&|key| std::env::var_os(key)))
         .ok_or_else(|| {
             Error::invalid_arguments(
@@ -706,7 +733,7 @@ where
         return exit_code(&error);
     }
 
-    let result = load_config(&args).and_then(|loaded| {
+    let result = load_config(args.config.as_deref()).and_then(|loaded| {
         let Command::Serve(serve_args) = args.command else {
             unreachable!("only serve has a managed mode");
         };
@@ -746,7 +773,7 @@ fn run_serve<F>(
 where
     F: FnOnce(EngineRequest<'_>) -> Result<Box<dyn Engine>, Error>,
 {
-    let threads = normalize_threads(config.threads)?;
+    let threads = normalize_threads(config.threads.count())?;
     let backend = serve_args.backend.unwrap_or(config.backend);
     let (served_model_id, model_path) =
         resolve_model_id(config, serve_args.model.as_deref(), None)?;
@@ -890,8 +917,40 @@ async fn serve_managed(
     Ok(served(retire.as_ref()))
 }
 
-fn load_config(args: &Args) -> Result<LoadedConfig, Error> {
-    config::load(args.config.as_deref()).map_err(Error::invalid_config)
+/// The configuration file, which the command needs.
+fn load_config(config_arg: Option<&Path>) -> Result<LoadedConfig, Error> {
+    config::load(config_arg).map_err(Error::invalid_config)
+}
+
+/// The configuration file, for a command that also runs without one.
+fn load_optional_config(config_arg: Option<&Path>) -> Result<Option<LoadedConfig>, Error> {
+    config::load_optional(config_arg).map_err(Error::invalid_config)
+}
+
+/// The settings for `file`. A one-off `file --model-file PATH` also runs
+/// without a configuration file, from its flags and their defaults
+/// ([`flag_defaults`]); D3 governs the YAML settings, so a file that exists
+/// must still be complete. `--model ID` and `default_model` need the file.
+fn file_config(file_args: &FileArgs, config_arg: Option<&Path>) -> Result<Config, Error> {
+    if file_args.model_file.is_none() {
+        return load_config(config_arg).map(|loaded| loaded.config);
+    }
+    Ok(load_optional_config(config_arg)?.map_or_else(flag_defaults, |loaded| loaded.config))
+}
+
+/// What the `file` flags fall back to without a configuration file:
+/// language detection, `auto` threads (the available parallelism, capped at
+/// 32), the cpu backend and no configured models.
+fn flag_defaults() -> Config {
+    Config {
+        default_model: None,
+        language: None,
+        threads: Threads::Auto,
+        backend: BackendMode::Cpu,
+        server_port: None,
+        models_dir: None,
+        models: Vec::new(),
+    }
 }
 
 fn run_file<F>(
@@ -904,7 +963,7 @@ where
     F: FnOnce(EngineRequest<'_>) -> Result<Box<dyn Engine>, Error>,
 {
     let language = normalize_language(file_args.language.or_else(|| config.language.clone()))?;
-    let threads = normalize_threads(file_args.threads.or(config.threads))?;
+    let threads = normalize_threads(file_args.threads.or(config.threads.count()))?;
     let backend = file_args.backend.unwrap_or(config.backend);
 
     let (model_id, model_path) = resolve_model_id(
@@ -1206,22 +1265,19 @@ fn print_backends(
     Ok(())
 }
 
-fn print_check_config(file: Option<&Path>, json: bool, stdout: &mut dyn Write) -> io::Result<()> {
+fn print_check_config(file: &Path, json: bool, stdout: &mut dyn Write) -> io::Result<()> {
     if json {
         let envelope = Envelope {
             schema_version: 1,
             ok: true,
             result: Some(serde_json::to_value(CheckConfigResult {
-                file: file.map(Path::to_path_buf),
+                file: file.to_path_buf(),
             })?),
             error: None,
         };
         writeln!(stdout, "{}", serde_json::to_string(&envelope).unwrap())
     } else {
-        match file {
-            Some(path) => writeln!(stdout, "config ok: {}", path.display()),
-            None => writeln!(stdout, "config ok: no per-user file found"),
-        }
+        writeln!(stdout, "config ok: {}", file.display())
     }
 }
 
@@ -1469,12 +1525,16 @@ mod tests {
 
     /// Runs `args` through the real command dispatch with a fake engine
     /// that records the backend it was asked for.
-    fn requested_backend(config: &str, args: &[&str]) -> (Result<(), Error>, Option<BackendMode>) {
+    /// Runs `args` against a complete configuration whose `backend` line is
+    /// `backend`.
+    fn requested_backend(backend: &str, args: &[&str]) -> (Result<(), Error>, Option<BackendMode>) {
         let temp = tempfile::tempdir().unwrap();
         let config_path = temp.path().join("transcribe.yml");
         std::fs::write(
             &config_path,
-            format!("schema_version: 1\n{config}models:\n  - id: tiny\n    path: model.gguf\n"),
+            format!(
+                "schema_version: 1\ndefault_model: null\nlanguage: null\nthreads: auto\n{backend}server:\n  port: null\nmodels_dir: null\nmodels:\n  - id: tiny\n    path: model.gguf\n"
+            ),
         )
         .unwrap();
         std::fs::write(temp.path().join("model.gguf"), b"not a model").unwrap();
@@ -1519,7 +1579,7 @@ mod tests {
     }
 
     #[test]
-    fn the_backend_flag_overrides_the_config_which_overrides_cpu() {
+    fn the_backend_flag_overrides_the_config() {
         let file = ["file", "AUDIO", "--model", "tiny"];
         let serve = ["serve", "--model", "tiny", "--port", "0"];
         for command in [&file[..], &serve[..]] {
@@ -1530,7 +1590,10 @@ mod tests {
                 }
                 args
             };
-            assert_eq!(requested_backend("", &with(None)).1, Some(BackendMode::Cpu));
+            assert_eq!(
+                requested_backend("backend: cpu\n", &with(None)).1,
+                Some(BackendMode::Cpu)
+            );
             assert_eq!(
                 requested_backend("backend: auto\n", &with(None)).1,
                 Some(BackendMode::Auto)
@@ -1543,7 +1606,7 @@ mod tests {
                 requested_backend("backend: gpu\n", &with(Some("cpu"))).1,
                 Some(BackendMode::Cpu)
             );
-            let (result, _) = requested_backend("", &with(Some("auto")));
+            let (result, _) = requested_backend("backend: cpu\n", &with(Some("auto")));
             assert_eq!(result.unwrap_err().code, ErrorCode::ModelLoadFailed);
         }
     }
@@ -1641,12 +1704,17 @@ mod tests {
     #[test]
     fn build_model_list_includes_catalog_source() {
         let config = Config {
+            default_model: None,
+            language: None,
+            threads: crate::config::Threads::Auto,
+            backend: BackendMode::Cpu,
+            server_port: None,
+            models_dir: None,
             models: vec![crate::config::ModelEntry {
                 id: "tiny".to_string(),
                 path: PathBuf::from("/models/whisper-tiny-Q8_0.gguf"),
                 catalog: Some("whisper-tiny-q8_0".to_string()),
             }],
-            ..Config::default()
         };
         let entries = build_model_list(&config);
         assert_eq!(entries.len(), 1);

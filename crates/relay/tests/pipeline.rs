@@ -28,8 +28,7 @@ use tokio::time::Instant;
 
 /// Minimal YAML configuring `claude` at the fake CLI. `{binary}` is replaced
 /// by the fake's path.
-const CLAUDE_AT_FAKE: &str =
-    "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n";
+const CLAUDE_AT_FAKE: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n";
 
 /// Builds a pipeline from `yaml` (`{binary}` replaced by the fake's path)
 /// together with the fake CLI its provider will run.
@@ -38,7 +37,7 @@ fn pipeline(yaml: &str, scenario: Value) -> (Pipeline, FakeCli) {
     let yaml = yaml.replace("{binary}", &fake.path().display().to_string());
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join("relay.yml");
-    fs::write(&path, yaml).expect("write config");
+    fs::write(&path, support::relay_config(&yaml)).expect("write config");
     let config = config::load_with_env(Some(&path), |_| None)
         .expect("config loads")
         .config;
@@ -198,7 +197,7 @@ async fn no_model_fails_and_runs_nothing() {
 #[tokio::test]
 async fn model_selects_the_named_provider_regardless_of_list_order() {
     // codex is listed first, claude second; naming claude still runs claude.
-    let yaml = "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n";
+    let yaml = "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: codex\n    timeout_secs: 30\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n";
     let (pipeline, fake) = pipeline(yaml, success_scenario("Feito."));
     let outcome = pipeline
         .format(&handy_request(Some("claude"), "dita"), Instant::now())
@@ -245,11 +244,11 @@ async fn removed_default_key_fails_the_config() {
     // Through real YAML: `default:` no longer loads with a warning; it is a
     // removed key and fails at its own line:column.
     let fake = FakeCli::new(success_scenario("unused"));
-    let yaml = "default: claude\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n"
+    let yaml = "default: claude\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n"
         .replace("{binary}", &fake.path().display().to_string());
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join("relay.yml");
-    fs::write(&path, yaml).expect("write config");
+    fs::write(&path, support::relay_config(&yaml)).expect("write config");
     let error = config::load_with_env(Some(&path), |_| None)
         .expect_err("the removed key fails the config")
         .to_string();
@@ -281,7 +280,7 @@ async fn missing_binary_fails_and_keeps_the_dictation() {
     let dir = TempDir::new().expect("temp dir");
     let missing = dir.path().join("no-such-cli");
     let yaml = format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n",
         missing.display()
     );
     let (pipeline, fake) = pipeline(&yaml, json!({}));
@@ -317,7 +316,7 @@ async fn malformed_output_fails_and_keeps_the_dictation() {
 #[tokio::test]
 async fn total_timeout_stops_a_slow_cli() {
     let (pipeline, fake) = pipeline(
-        "total_timeout_secs: 1\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n",
+        "total_timeout_secs: 1\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n",
         json!({
             "stdout": success_envelope("too late"),
             "exit_code": 0,
@@ -454,7 +453,7 @@ async fn caller_deadline_never_extends_the_module_budget() {
     // The caller allows 30 s but the module's total budget is 1 s: the
     // module budget still wins.
     let (pipeline, _fake) = pipeline(
-        "total_timeout_secs: 1\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n",
+        "total_timeout_secs: 1\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n",
         json!({
             "stdout": success_envelope("too late"),
             "exit_code": 0,
@@ -489,7 +488,7 @@ async fn caller_deadline_never_extends_the_module_budget() {
 #[tokio::test]
 async fn spent_caller_deadline_starts_no_cli() {
     let (pipeline, fake) = pipeline(
-        "total_timeout_secs: 30\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n",
+        "total_timeout_secs: 30\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n",
         success_scenario("unused"),
     );
     let started = Instant::now();
@@ -529,7 +528,7 @@ async fn caller_deadline_with_room_runs_like_format() {
 #[tokio::test]
 async fn exhausted_budget_never_starts_the_cli() {
     let (pipeline, fake) = pipeline(
-        "total_timeout_secs: 2\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n",
+        "total_timeout_secs: 2\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n",
         success_scenario("unused"),
     );
     // The request arrived long enough ago that its budget is spent.
@@ -646,7 +645,7 @@ async fn a_second_run_fails_when_its_budget_runs_out_waiting() {
 #[tokio::test]
 async fn queued_request_runs_after_the_slot_frees() {
     let (pipeline, fake) = pipeline(
-        "total_timeout_secs: 10\nmax_parallel: 1\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n",
+        "total_timeout_secs: 10\nmax_parallel: 1\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n",
         json!({
             "stdout": success_envelope("Olá."),
             "exit_code": 0,

@@ -17,7 +17,7 @@ Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude
 
 ## Status
 
-Pumice works end to end through Claude, Codex, Kimi and Kiro. Antigravity and the local OpenAI-compatible adapter are archived for now. You choose the providers in an explicit list in the YAML config — nothing is enabled by default, and there is no fallback: a failure is answered with an HTTP error and the app pastes its own transcript. Run `pumice relay doctor` to see which CLIs it found.
+Pumice works end to end through Claude, Codex, Kimi and Kiro. Antigravity and the local OpenAI-compatible adapter are archived for now. You choose the providers in an explicit list in the YAML config — nothing is enabled by default, and there is no fallback: a failure is answered with an HTTP error and the app pastes its own transcript. Every setting is written in the module's YAML file: there are no built-in defaults, and a missing setting stops the module with an error naming the file and line (the `*.example.yml` files write every setting and are the starting configuration). Run `pumice relay doctor` to see which CLIs it found.
 
 Pumice supports standalone downloads and the npm package `@brasillero/pumice` (installable with npm, pnpm, Bun or npx; the installed command is `pumice`). Check [GitHub Releases](https://github.com/brasillero/pumice/releases) and the [npm registry](https://www.npmjs.com/package/@brasillero/pumice) for published versions. See the [installation guide](docs/install.md) for installation, startup and Handy setup; building from source is also supported below.
 
@@ -29,6 +29,8 @@ With [Rust](https://rustup.rs/) installed:
 
 ```sh
 cargo build --release --locked --bin pumice
+mkdir -p ~/.config/pumice
+cp relay.example.yml ~/.config/pumice/relay.yml   # every setting; edit the providers
 ./target/release/pumice relay check-config   # validates the per-user config (or --config <path>)
 ./target/release/pumice relay doctor         # checks which CLIs are installed
 ./target/release/pumice relay serve          # starts the service (live view; use --plain for one-line stderr logs)

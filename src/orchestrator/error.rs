@@ -41,6 +41,17 @@ impl ConfigError {
         }
     }
 
+    /// A problem at a position no parsed value carries, such as line 1 for a
+    /// missing top-level setting.
+    pub fn at_line(line: u64, column: u64, message: impl Into<String>) -> ConfigError {
+        ConfigError {
+            file: None,
+            line: Some(line),
+            column: Some(column),
+            message: message.into(),
+        }
+    }
+
     /// A problem with no source position at all.
     pub fn general(message: impl Into<String>) -> ConfigError {
         ConfigError {

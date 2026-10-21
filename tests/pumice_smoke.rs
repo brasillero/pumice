@@ -201,7 +201,7 @@ fn format_show_output_reloads_to_the_exact_same_definition() {
     .expect("write definition");
     fs::write(
         dir.join("formatter.yml"),
-        "schema_version: 1\nformatters:\n  - path: notes.yml\n",
+        "schema_version: 1\nformatters:\n  - path: notes.yml\ndefault: null\n",
     )
     .expect("write formatter.yml");
 
@@ -219,6 +219,13 @@ fn format_show_output_reloads_to_the_exact_same_definition() {
 #[test]
 fn format_apply_transforms_a_request_and_names_the_program_in_errors() {
     let home = HermeticHome::new();
+    let dir = home.pumice_dir();
+    fs::create_dir_all(&dir).expect("create per-user config dir");
+    fs::write(
+        dir.join("formatter.yml"),
+        "schema_version: 1\nformatters: []\ndefault: null\n",
+    )
+    .expect("write formatter.yml");
     let request =
         br#"{"model":"claude","messages":[{"role":"user","content":"hi"}],"stream":false}"#;
     let output = run_with_stdin(
@@ -296,7 +303,11 @@ fn relay_check_config_reads_the_per_user_relay_yml() {
     let dir = home.pumice_dir();
     fs::create_dir_all(&dir).expect("create per-user config dir");
     let config = dir.join("relay.yml");
-    fs::write(&config, "port: 17655\n").expect("write relay.yml");
+    fs::write(
+        &config,
+        "port: 17655\ntotal_timeout_secs: 30\nmax_parallel: 4\nproviders: []\ndebug_log:\n  enabled: false\n  path: pumice-debug.jsonl\n",
+    )
+    .expect("write relay.yml");
 
     let output = run(&mut home.command(&["relay", "check-config"]));
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
@@ -316,7 +327,11 @@ fn relay_check_config_honours_an_explicit_config_path() {
     let home = HermeticHome::new();
     let dir = TempDir::new().expect("temp dir");
     let config = dir.path().join("elsewhere.yml");
-    fs::write(&config, "port: 17656\n").expect("write config");
+    fs::write(
+        &config,
+        "port: 17656\ntotal_timeout_secs: 30\nmax_parallel: 4\nproviders: []\ndebug_log:\n  enabled: false\n  path: pumice-debug.jsonl\n",
+    )
+    .expect("write config");
 
     let output = run(&mut home.command(&[
         "relay",
@@ -342,20 +357,20 @@ fn legacy_pumice_yaml_in_the_config_dir_is_ignored() {
     let dir = home.pumice_dir();
     fs::create_dir_all(&dir).expect("create per-user config dir");
     // Not just absent but invalid: if the relay still read the old name,
-    // this would fail with a parse error instead of falling back to defaults.
+    // this would fail with a parse error instead of naming relay.yml.
     fs::write(dir.join("pumice.yaml"), "port: [unclosed\n").expect("write legacy file");
 
     let output = run(&mut home.command(&["relay", "check-config"]));
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "pumice.yaml must not be read: {}",
-        stderr(&output)
+    let stderr = stderr(&output);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains(&dir.join("relay.yml").display().to_string())
+            && stderr.contains("the relay configuration file does not exist"),
+        "only relay.yml is looked for: {stderr}"
     );
     assert!(
-        stdout(&output).contains("config: built-in defaults"),
-        "the old file is ignored entirely: {}",
-        stdout(&output)
+        !stderr.contains("pumice.yaml"),
+        "the old file is ignored entirely: {stderr}"
     );
 }
 

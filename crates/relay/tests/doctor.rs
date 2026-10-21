@@ -24,7 +24,7 @@ const FIXTURE_RESULT: &str = "Formatted text.";
 fn write_config(yaml: &str) -> (TempDir, PathBuf) {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join("relay.yml");
-    fs::write(&path, yaml).expect("write config");
+    fs::write(&path, support::relay_config(yaml)).expect("write config");
     (dir, path)
 }
 
@@ -62,10 +62,11 @@ fn full_fake_yaml() -> (Vec<FakeCli>, String) {
     ] {
         let fake = FakeCli::new(json!({"stdout": stdout, "exit_code": 0}));
         yaml.push_str(&format!("  - id: {id}\n    enabled: {}\n", model.is_some()));
-        if let Some(model) = model {
-            yaml.push_str(&format!("    model: {model}\n"));
-        }
-        yaml.push_str(&format!("    binary: '{}'\n", fake.path().display()));
+        yaml.push_str(&format!("    model: {}\n", model.unwrap_or("null")));
+        yaml.push_str(&format!(
+            "    binary: '{}'\n    timeout_secs: 30\n",
+            fake.path().display()
+        ));
         fakes.push(fake);
     }
     (fakes, yaml)
@@ -117,7 +118,7 @@ fn missing_enabled_codex_exits_1_with_the_install_hint() {
     let missing_dir = TempDir::new().expect("temp dir");
     let missing = missing_dir.path().join("no-such-codex");
     let (_dir, config_path) = write_config(&format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{}'\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{}'\n    timeout_secs: 30\n",
         claude.path().display(),
         missing.display()
     ));
@@ -139,7 +140,7 @@ fn missing_enabled_codex_exits_1_with_the_install_hint() {
 #[test]
 fn no_enabled_providers_prints_the_original_text_note_and_exits_0() {
     let (_dir, config_path) = write_config(
-        "providers:\n  - id: claude\n    enabled: false\n  - id: codex\n    enabled: false\n",
+        "providers:\n  - id: claude\n    enabled: false\n    model: null\n    binary: claude\n    timeout_secs: 30\n  - id: codex\n    enabled: false\n    model: null\n    binary: codex\n    timeout_secs: 30\n",
     );
 
     let output = run_doctor(&config_path, &[]);
@@ -169,6 +170,51 @@ fn config_errors_exit_2() {
     assert!(text.contains("nope"), "output: {text}");
 }
 
+/// Runs `pumice-relay <args...>` with no per-user configuration directory
+/// content and an empty PATH, so nothing real is looked up.
+fn run_without_config(home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
+        .args(args)
+        .env("XDG_CONFIG_HOME", home)
+        .env("HOME", home)
+        .env("APPDATA", home)
+        .env("PATH", home)
+        .output()
+        .expect("run pumice-relay")
+}
+
+#[test]
+fn the_report_runs_without_a_configuration_file() {
+    let home = TempDir::new().expect("temp dir");
+    let output = run_without_config(home.path(), &["doctor"]);
+    let text = combined(&output);
+
+    assert_eq!(output.status.code(), Some(0), "output: {text}");
+    assert!(text.contains("config: none found"), "output: {text}");
+    for id in ["claude", "codex", "kimi", "kiro"] {
+        assert!(
+            text.contains(&format!("{id}: disabled, missing")),
+            "output: {text}"
+        );
+    }
+    assert!(
+        text.contains("0 of 0 enabled providers ready\n"),
+        "output: {text}"
+    );
+
+    // The login check needs the provider's settings, so it needs the file.
+    let output = run_without_config(
+        home.path(),
+        &["doctor", "--login-check", "--provider", "claude"],
+    );
+    let text = combined(&output);
+    assert_eq!(output.status.code(), Some(2), "output: {text}");
+    assert!(
+        text.contains("the relay configuration file does not exist"),
+        "output: {text}"
+    );
+}
+
 #[test]
 fn login_check_ok_against_the_success_fixture() {
     let claude = FakeCli::new(json!({
@@ -176,7 +222,7 @@ fn login_check_ok_against_the_success_fixture() {
         "exit_code": 0,
     }));
     let (_dir, config_path) = write_config(&format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: codex\n    enabled: false\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n  - id: codex\n    enabled: false\n    model: null\n    binary: codex\n    timeout_secs: 30\n",
         claude.path().display()
     ));
 
@@ -204,7 +250,7 @@ fn login_check_not_logged_in_reports_the_category_and_exits_1() {
         "exit_code": 0,
     }));
     let (_dir, config_path) = write_config(&format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: codex\n    enabled: false\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n  - id: codex\n    enabled: false\n    model: null\n    binary: codex\n    timeout_secs: 30\n",
         claude.path().display()
     ));
 
@@ -258,7 +304,7 @@ fn login_check_runs_kimi_through_the_fake() {
         "exit_code": 0,
     }));
     let (_dir, config_path) = write_config(&format!(
-        "providers:\n  - id: kimi\n    enabled: true\n    model: kimi-k2.7-code-highspeed\n    binary: '{}'\n",
+        "providers:\n  - id: kimi\n    enabled: true\n    model: kimi-k2.7-code-highspeed\n    binary: '{}'\n    timeout_secs: 30\n",
         fake.path().display()
     ));
 
@@ -296,7 +342,7 @@ fn login_check_failure_never_runs_other_providers() {
     }));
     let codex = FakeCli::new(json!({"stdout": "0.160.0\n", "exit_code": 0}));
     let (_dir, config_path) = write_config(&format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{}'\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{}'\n    timeout_secs: 30\n",
         claude.path().display(),
         codex.path().display()
     ));

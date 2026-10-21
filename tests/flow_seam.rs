@@ -42,21 +42,41 @@ const FLOWS: &str = "  - id: raw
     transcription_model: turbo
     formatter: null
     relay_route: passthrough
+    budgets_ms:
+      total: 180000
+      transcription: 120000
+      formatter: 1000
+      relay: 60000
   - id: clean
     enabled: true
     transcription_model: turbo
     formatter: builtin:clean
     relay_route: claude
+    budgets_ms:
+      total: 180000
+      transcription: 120000
+      formatter: 1000
+      relay: 60000
   - id: plain
     enabled: true
     transcription_model: turbo
     formatter: null
     relay_route: claude
+    budgets_ms:
+      total: 180000
+      transcription: 120000
+      formatter: 1000
+      relay: 60000
   - id: house
     enabled: true
     transcription_model: turbo
     formatter: house
     relay_route: claude
+    budgets_ms:
+      total: 180000
+      transcription: 120000
+      formatter: 1000
+      relay: 60000
   - id: tight
     enabled: true
     transcription_model: turbo
@@ -64,6 +84,19 @@ const FLOWS: &str = "  - id: raw
     relay_route: passthrough
     budgets_ms:
       total: 4000
+      transcription: 120000
+      formatter: 1000
+      relay: 60000
+";
+
+/// `pumice serve` stays off: these tests drive the flow seam directly.
+const SERVE_OFF: &str = "serve:
+  enabled: false
+  port: 17570
+  transcription_model: null
+  startup_timeout_ms: 60000
+  transcription_flows: []
+  allowed_origins: []
 ";
 
 /// An in-memory transcription transport. It records the deadline it was
@@ -188,7 +221,7 @@ fn rig(fake: Value) -> Rig {
     fs::write(
         root.join("relay.yml"),
         format!(
-            "providers:\n  - id: claude\n    enabled: true\n    model: haiku-test\n    binary: '{}'\n",
+            "port: 7567\ntotal_timeout_secs: 30\nmax_parallel: 4\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku-test\n    binary: '{}'\n    timeout_secs: 30\ndebug_log:\n  enabled: false\n  path: pumice-debug.jsonl\n",
             cli.display()
         ),
     )
@@ -200,14 +233,14 @@ fn rig(fake: Value) -> Rig {
     .expect("write house.yml");
     fs::write(
         root.join("formatter.yml"),
-        "schema_version: 1\nformatters:\n  - path: house.yml\n",
+        "schema_version: 1\nformatters:\n  - path: house.yml\ndefault: null\n",
     )
     .expect("write formatter.yml");
-    fs::write(root.join("transcribe.yml"), "schema_version: 1\n").expect("write transcribe.yml");
+    fs::write(root.join("transcribe.yml"), "schema_version: 1\ndefault_model: null\nlanguage: null\nthreads: auto\nbackend: cpu\nserver:\n  port: null\nmodels_dir: null\nmodels: []\n").expect("write transcribe.yml");
     fs::write(
         root.join("orchestrator.yml"),
         format!(
-            "schema_version: 1\nmodules:\n  transcription:\n    config: ./transcribe.yml\n  formatter:\n    config: ./formatter.yml\n  relay:\n    location: in_process\n    config: ./relay.yml\nflows:\n{FLOWS}"
+            "schema_version: 1\nmodules:\n  transcription:\n    config: ./transcribe.yml\n  formatter:\n    config: ./formatter.yml\n  relay:\n    location: in_process\n    config: ./relay.yml\nflows:\n{FLOWS}{SERVE_OFF}"
         ),
     )
     .expect("write orchestrator.yml");

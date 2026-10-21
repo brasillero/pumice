@@ -822,8 +822,9 @@ D2 — downloads never edit the config and never enable a model):
   `~/Library/Application Support/pumice/models`
 - Windows: `%LOCALAPPDATA%\pumice\models`
 
-Set `models_dir` in `transcribe.yml` to override it (relative values resolve
-against the config file's directory; `~` is not expanded). On Unix the
+Set `models_dir` in `transcribe.yml` to a path to override it (`models_dir:
+null` keeps this directory; relative values resolve against the config
+file's directory; `~` is not expanded). On Unix the
 directory is created mode 0700, and a download refuses an existing directory
 that group or others can write — see
 [Downloading models](#downloading-models).
@@ -835,8 +836,7 @@ of the two is required. The entry resolves to the catalog file inside the
 models directory:
 
 ```yaml
-schema_version: 1
-models:
+models:                 # the file's other settings are left out here
   - id: turbo
     catalog: whisper-large-v3-turbo-q8_0
   - id: local
@@ -856,23 +856,33 @@ models:
      `$HOME/.config/pumice/transcribe.yml`
    - Windows: `%APPDATA%\pumice\transcribe.yml`
 
-A missing per-user file is fine; the CLI then works from flags only. A missing
-explicit `--config` file is an error.
+A missing file is an error for the commands that read settings (`file`,
+`serve`, `check-config`, `models list`); `models catalog`, `models download`,
+`models verify` and `backends --backend MODE` also run without one (models
+then live in the per-user directory). A one-off `file --model-file PATH`
+also runs without one, from its flags and their defaults (see
+[`file`](#file)). A missing explicit `--config` file is always an error, and
+a file that exists must be complete for every command.
 
-See [`transcribe.example.yml`](../transcribe.example.yml) for the full schema.
-The short form:
+Every setting must be written: an omitted one is an error with the file and
+line (line 1 for a top-level setting, the `server:` mapping for
+`server.port`). There are no built-in defaults; start from
+[`transcribe.example.yml`](../transcribe.example.yml), which writes them
+all. The short form:
 
 ```yaml
 schema_version: 1
-default_model: tiny      # optional; must name an entry in models
-language: pt             # optional default language hint
-threads: 8               # optional default thread count (1-32)
-backend: cpu             # optional: cpu (default), auto or gpu
-models_dir: /absolute/path/to/models  # optional; where `catalog:` files live
-                                      # (see "Downloading models" for the
-                                      # default). `~` is NOT expanded here —
-                                      # use an absolute path, or a relative
-                                      # one (resolved against this file)
+default_model: tiny      # must name an entry in models; null: none
+language: pt             # language hint; null: detect
+threads: 8               # 1-32, or auto (available parallelism, capped at 32)
+backend: cpu             # cpu, auto or gpu
+server:
+  port: 17568            # for `serve`; null: `serve` needs --port
+models_dir: null         # where `catalog:` files live; null: the per-user
+                         # directory (see "Downloading models"). A path
+                         # overrides it; `~` is NOT expanded here — use an
+                         # absolute path, or a relative one (resolved
+                         # against this file)
 models:                  # explicit list; nothing is enabled implicitly
   - id: turbo
     catalog: whisper-large-v3-turbo-q8_0   # downloaded catalog model
@@ -887,8 +897,8 @@ must be nonempty. Model ids
 must match `[a-z0-9][a-z0-9._-]*`. A model entry has exactly one of `path`
 (a local GGUF file) or `catalog` (a built-in catalog id, see "Downloading
 models"). Duplicate ids, dangling `default_model`, unknown catalog ids,
-unknown keys, an unknown `backend` and invalid `schema_version` are
-rejected with a file:line:column message.
+unknown keys, an unknown `backend`, an invalid `threads`, a missing setting
+and invalid `schema_version` are rejected with a file:line:column message.
 
 Validate a file without loading a model:
 
@@ -905,7 +915,7 @@ pumice-transcribe check-config --config /path/to/transcribe.yml --json
 # Use a configured model id
 pumice-transcribe file audio.wav --model tiny
 
-# Use a direct GGUF path (no config needed)
+# Use a direct GGUF path (no models entry needed, and no config file either)
 pumice-transcribe file audio.wav --model-file /path/to/whisper-tiny-Q8_0.gguf
 
 # Use the configured default_model
@@ -924,6 +934,21 @@ With `--json`, `result.compute` is the
 `--model ID` and `--model-file PATH` are mutually exclusive. If neither is
 given, the configured `default_model` is used; if there is none, the command
 fails.
+
+A one-off `file --model-file PATH` also runs when there is no configuration
+file (no `--config` and no per-user `transcribe.yml`). Its settings then come
+from the flags, with these defaults:
+
+| Flag | Default without a configuration file |
+| --- | --- |
+| `--language xx` | detect the language |
+| `--threads N` | the available parallelism, capped at 32 |
+| `--backend MODE` | `cpu` |
+
+When a configuration file exists (`--config FILE` or the per-user file), it
+is read and must be complete, as for every other command; the flags override
+its `language`, `threads` and `backend`. `--model ID` and `default_model`
+always need the file.
 
 ### `models list`
 
@@ -1229,12 +1254,18 @@ status 1 after a native engine failure that retires a GPU process.
 ## Common errors
 
 - **"no model selected; use --model ID, --model-file PATH, or set
-default_model"**: you did not pass `--model` or `--model-file`, and there is
-no `default_model` in the config.
+default_model"**: you did not pass `--model` or `--model-file`, and the
+config has `default_model: null`.
+- **"... is missing; every setting must be written"**: the config leaves a
+setting out. Every setting is required; copy it from
+`transcribe.example.yml`.
+- **"the transcription configuration file does not exist"**: there is no
+`--config` file and no per-user `transcribe.yml`; create one (a one-off
+`file --model-file PATH` runs without it).
 - **"unknown model id ...; configured ids: ..."**: the id passed to `--model`
 is not in the config `models` list.
-- **"schema_version is required"**: the config file is missing `schema_version:
-1`.
+- **"schema_version must be 1"**: the config file has another
+`schema_version`.
 - **"unknown setting `foo`"**: the config contains a key that is not part of
 the schema. Check the file line in the error message.
 - **"model file not found"**: the resolved model path does not point to a

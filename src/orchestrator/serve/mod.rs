@@ -247,8 +247,8 @@ fn check_snapshots(
             loaded
                 .config
                 .serve
-                .as_ref()
-                .and_then(|serve| serve.transcription_flows.get(published))
+                .transcription_flows
+                .get(published)
                 .and_then(|entry| entry.at),
             format!(
                 "serve.transcription_flows publishes more than GET /v1/models can list in \

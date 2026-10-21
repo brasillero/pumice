@@ -84,13 +84,17 @@ fn setup() -> Setup {
     fs::write(
         dir.path().join("relay.yml"),
         format!(
-            "providers:\n  - id: claude\n    enabled: true\n    model: haiku-test\n    binary: '{}'\n",
+            "port: 7567\ntotal_timeout_secs: 30\nmax_parallel: 4\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku-test\n    binary: '{}'\n    timeout_secs: 30\ndebug_log:\n  enabled: false\n  path: pumice-debug.jsonl\n",
             fake.display()
         ),
     )
     .unwrap();
-    fs::write(dir.path().join("transcribe.yml"), "schema_version: 1\n").unwrap();
-    fs::write(dir.path().join("formatter.yml"), "schema_version: 1\n").unwrap();
+    fs::write(dir.path().join("transcribe.yml"), "schema_version: 1\ndefault_model: null\nlanguage: null\nthreads: auto\nbackend: cpu\nserver:\n  port: null\nmodels_dir: null\nmodels: []\n").unwrap();
+    fs::write(
+        dir.path().join("formatter.yml"),
+        "schema_version: 1\nformatters: []\ndefault: null\n",
+    )
+    .unwrap();
     fs::write(
         dir.path().join("orchestrator.yml"),
         "schema_version: 1
@@ -108,18 +112,38 @@ flows:
     transcription_model: turbo
     formatter: null
     relay_route: claude
+    budgets_ms:
+      total: 180000
+      transcription: 120000
+      formatter: 1000
+      relay: 60000
   - id: raw
     enabled: true
     transcription_model: turbo
     formatter: null
     relay_route: passthrough
+    budgets_ms:
+      total: 180000
+      transcription: 120000
+      formatter: 1000
+      relay: 60000
   - id: clean
     enabled: true
     transcription_model: turbo
     formatter: builtin:clean
     relay_route: claude
     budgets_ms:
+      total: 180000
+      transcription: 120000
       formatter: 50
+      relay: 60000
+serve:
+  enabled: true
+  port: 0
+  transcription_model: turbo
+  startup_timeout_ms: 5000
+  transcription_flows: [raw, clean]
+  allowed_origins: []
 ",
     )
     .unwrap();

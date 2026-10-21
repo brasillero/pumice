@@ -29,7 +29,9 @@ pumice-format check-config
 ```
 
 Formatters are one YAML file each (`schema_version`, `id`, `description`,
-`system`) registered in `formatter.yml`. See
+`system`) registered in `formatter.yml`, which `apply` and `check-config`
+need and where every setting (`schema_version`, `formatters`, `default`) must
+be written. See
 [`docs/formatter.md`](../../docs/formatter.md) for the definition format,
 the conflict policy (`reject` by default, `append` keeps existing
 instructions), `--json` envelopes and exit codes.

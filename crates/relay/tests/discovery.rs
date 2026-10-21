@@ -29,7 +29,7 @@ fn descriptor(id: &str) -> ProviderDescriptor {
 fn load(yaml: &str) -> Config {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join("relay.yml");
-    std::fs::write(&path, yaml).expect("write config");
+    std::fs::write(&path, support::relay_config(yaml)).expect("write config");
     config::load_with_env(Some(&path), |_| None)
         .expect("config loads")
         .config
@@ -39,7 +39,7 @@ fn load(yaml: &str) -> Config {
 /// other setting default).
 fn claude_at(path: &Path) -> Config {
     load(&format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n",
         path.display()
     ))
 }
@@ -133,7 +133,7 @@ async fn detection_covers_every_registered_provider_enabled_or_not() {
     let kimi = FakeCli::new(json!({"stdout": "2.1.1"}));
     let kiro = FakeCli::new(json!({"stdout": "2.29.0"}));
     let config = load(&format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{0}'\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{1}'\n  - id: kimi\n    enabled: false\n    binary: '{2}'\n  - id: kiro\n    enabled: false\n    binary: '{3}'\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{0}'\n    timeout_secs: 30\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{1}'\n    timeout_secs: 30\n  - id: kimi\n    enabled: false\n    binary: '{2}'\n    model: null\n    timeout_secs: 30\n  - id: kiro\n    enabled: false\n    binary: '{3}'\n    model: null\n    timeout_secs: 30\n",
         claude.path().display(),
         codex.path().display(),
         kimi.path().display(),
@@ -178,8 +178,12 @@ fn registry_probe_metadata_is_consistent() {
 /// Validates `yaml` against `descriptors` alone, so archived (unregistered)
 /// providers keep their detection guarantees tested.
 fn load_with(yaml: &str, descriptors: &[ProviderDescriptor]) -> Config {
-    config::validate_text_with_descriptors(yaml, Path::new("relay.yml"), descriptors)
-        .expect("config validates")
+    config::validate_text_with_descriptors(
+        &support::relay_config(yaml),
+        Path::new("relay.yml"),
+        descriptors,
+    )
+    .expect("config validates")
 }
 
 #[tokio::test]
@@ -188,7 +192,7 @@ async fn archived_antigravity_is_resolved_but_never_spawned() {
     let descriptors = [providers::antigravity::DESCRIPTOR];
     let config = load_with(
         &format!(
-            "providers:\n  - id: antigravity\n    enabled: false\n    binary: '{}'\n",
+            "providers:\n  - id: antigravity\n    enabled: false\n    binary: '{}'\n    model: null\n    timeout_secs: 30\n",
             fake.path().display()
         ),
         &descriptors,
@@ -216,7 +220,7 @@ async fn archived_generic_is_never_resolved_or_spawned() {
     let descriptors = [providers::generic::DESCRIPTOR];
     let config = load_with(
         &format!(
-            "providers:\n  - id: generic\n    enabled: false\n    binary: '{}'\n",
+            "providers:\n  - id: generic\n    enabled: false\n    binary: '{}'\n    model: null\n    timeout_secs: 30\n",
             fake.path().display()
         ),
         &descriptors,

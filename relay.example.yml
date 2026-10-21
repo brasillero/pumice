@@ -6,12 +6,13 @@
 # are logged into. Each CLI keeps its own configuration (login, gateway,
 # routing); Pumice inherits it and adds none of its own.
 #
-# Pumice assumes nothing: no provider is enabled by default and no model is
-# built in. Copy this to your own relay.yml, list the providers you want,
-# and keep only what you change. Without a file (or with an empty one) the
-# service starts with no providers: every AI request gets an error, and the
-# app keeps its own transcript (the built-in `passthrough` and `inspect` still
-# work).
+# Pumice assumes nothing: every setting below must be written, and leaving
+# one out is a startup error that names the file and line. There are no
+# built-in defaults: the values in this file are the starting configuration.
+# Copy it to your own relay.yml and change what you need. No provider is
+# enabled unless its entry says `enabled: true`; with none enabled every AI
+# request gets an error, and the app keeps its own transcript (the built-in
+# `passthrough` and `inspect` still work).
 #
 # The client picks the provider: the app sends the `model` the user chose
 # (a provider id such as `claude`), and Pumice runs exactly that provider. A
@@ -24,7 +25,8 @@
 #   2. the per-user file: ~/.config/pumice/relay.yml on Linux and macOS
 #      ($XDG_CONFIG_HOME/pumice/relay.yml when XDG_CONFIG_HOME is set), and
 #      %APPDATA%\pumice\relay.yml on Windows,
-#   otherwise no file is used.
+#   and a missing file is an error (only `pumice relay doctor` runs without
+#   one).
 #
 # Validate a file with: pumice relay check-config --config <path>
 #
@@ -46,35 +48,39 @@ max_parallel: 4
 # shows: the enabled entries are listed in this order. There is NO fallback:
 # a request runs exactly one provider — the one its model names.
 #
-# Every entry needs `id` and `enabled` (true or false, never defaulted).
-# `model` is required when enabled. `timeout_secs` and `binary` are
-# optional. The removed keys `default`, `prompts`, `env` and `options` are
-# rejected with a message saying what replaced them.
+# Every entry writes all five keys: `id`, `enabled` (true or false),
+# `model` (`null` only on a disabled entry), `binary` and `timeout_secs`.
+# The removed keys `default`, `prompts`, `env` and `options` are rejected
+# with a message saying what replaced them.
 providers:
   # Claude Code, enabled.
   - id: claude
     enabled: true
     # Any alias `claude --model` accepts; there is no built-in default.
     model: haiku
+    # A bare command name (no slash) is looked up on PATH; a relative path
+    # with a slash resolves against this file's directory, an absolute path
+    # is used as-is.
+    binary: claude
     # Per-call cap, also limited by the remaining total budget.
     timeout_secs: 30
-    # null looks up "claude" on PATH, and so does any bare command name
-    # (no slash); a relative path with a slash resolves against this file's
-    # directory, an absolute path is used as-is.
-    binary: null
 
   # Codex CLI, off. A disabled entry is kept out of the model list and
-  # never runs; `model` may be omitted.
+  # never runs; its `model` may be null.
   - id: codex
     enabled: false
-    # model: gpt-6.1-sol
+    model: null # e.g. gpt-6.1-sol
+    binary: codex
+    timeout_secs: 30
 
   # Kimi Code CLI, off. The dictation travels in the command line, so very
   # long dictations are refused (an error; the app keeps its text). Any alias
   # from `kimi provider list` works.
   - id: kimi
     enabled: false
-    # model: kimi-k2.7-code-highspeed
+    model: null # e.g. kimi-k2.7-code-highspeed
+    binary: kimi
+    timeout_secs: 30
 
   # Kiro CLI, off. Pumice writes a one-off no-tools agent file into the
   # call's empty temporary directory to carry the app's system prompt; your
@@ -82,7 +88,9 @@ providers:
   # shows the model ids.
   - id: kiro
     enabled: false
-    # model: claude-haiku-4.5
+    model: null # e.g. claude-haiku-4.5
+    binary: kiro-cli
+    timeout_secs: 30
 
   # Antigravity and the generic local-server adapter are archived for now,
   # and OpenCode support was removed: listing any of them is an error.
@@ -90,5 +98,6 @@ providers:
 # Dictated text is written to a log only when debug logging is enabled.
 debug_log:
   enabled: false
-  # Relative paths resolve against this file's directory.
+  # Written even while disabled. Relative paths resolve against this
+  # file's directory.
   path: pumice-debug.jsonl

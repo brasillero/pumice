@@ -30,7 +30,7 @@ use tokio::net::TcpStream;
 
 /// Minimal YAML configuring `claude` with its binary at the fake CLI and
 /// `codex` disabled. `{binary}` is replaced by the fake's path.
-const CLAUDE_AT_FAKE: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n  - id: codex\n    enabled: false\n";
+const CLAUDE_AT_FAKE: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n  - id: codex\n    enabled: false\n    model: null\n    binary: codex\n    timeout_secs: 30\n";
 
 /// Captured metadata lines, one per completion request.
 #[derive(Default)]
@@ -68,7 +68,7 @@ async fn start_server(yaml: &str, scenario: Value) -> TestServer {
     let yaml = yaml.replace("{binary}", &fake.path().display().to_string());
     let config_dir = TempDir::new().expect("temp dir");
     let config_path = config_dir.path().join("relay.yml");
-    fs::write(&config_path, yaml).expect("write config");
+    fs::write(&config_path, support::relay_config(&yaml)).expect("write config");
     let config = config::load_with_env(Some(&config_path), |_| None)
         .expect("config loads")
         .config;
@@ -463,7 +463,7 @@ async fn debug_log_records_one_redacted_line_when_enabled() {
 fn write_config(yaml: &str) -> (TempDir, PathBuf) {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join("relay.yml");
-    fs::write(&path, yaml).expect("write config");
+    fs::write(&path, support::relay_config(yaml)).expect("write config");
     (dir, path)
 }
 
@@ -482,7 +482,7 @@ fn hermetic_serve_yaml(port: u16, debug_log: &str) -> (Vec<FakeCli>, String) {
     ] {
         let fake = FakeCli::new(json!({}));
         yaml.push_str(&format!(
-            "  - id: {id}\n    enabled: true\n    model: {model}\n    binary: '{}'\n",
+            "  - id: {id}\n    enabled: true\n    model: {model}\n    binary: '{}'\n    timeout_secs: 30\n",
             fake.path().display()
         ));
         fakes.push(fake);
@@ -506,7 +506,7 @@ fn serve_exits_1_when_the_debug_log_path_is_unopenable() {
         "debug_log:\n  enabled: true\n  path: '{}'\n",
         debug_path.display()
     ));
-    fs::write(&config_path, yaml).expect("write config");
+    fs::write(&config_path, support::relay_config(&yaml)).expect("write config");
 
     let output = Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
         .arg("serve")
@@ -581,7 +581,10 @@ fn spawn_serve_stderr(config_path: &Path) -> (Child, mpsc::Receiver<Option<Strin
 fn serve_warns_when_the_debug_log_is_enabled() {
     for attempt in 1..=3 {
         let port = grab_free_port();
-        let (_fakes, yaml) = hermetic_serve_yaml(port, "debug_log:\n  enabled: true\n");
+        let (_fakes, yaml) = hermetic_serve_yaml(
+            port,
+            "debug_log:\n  enabled: true\n  path: pumice-debug.jsonl\n",
+        );
         let (_dir, config_path) = write_config(&yaml);
         let (mut child, lines_rx) = spawn_serve_stderr(&config_path);
 

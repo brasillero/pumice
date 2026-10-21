@@ -1307,20 +1307,41 @@ jobs:
           # serve --managed with backend: auto from its configuration: the
           # `ready` record and the child's own /ready carry the snapshot.
           mkdir -p d2-cfg
+          # Every setting is written (p17-serve-model-names/D3); the values
+          # not under test are the example files' ones.
           {
             echo 'schema_version: 1'
             echo 'default_model: tiny'
+            echo 'language: null'
+            echo 'threads: auto'
             echo 'backend: auto'
+            echo 'server:'
+            echo '  port: null'
+            echo 'models_dir: null'
             echo 'models:'
             echo '  - id: tiny'
             echo "    path: '$model'"
           } > d2-cfg/transcribe.yml
-          printf 'providers:\n  - id: claude\n    enabled: false\n' > d2-cfg/relay.yml
+          {
+            echo 'port: 7567'
+            echo 'total_timeout_secs: 30'
+            echo 'max_parallel: 4'
+            echo 'providers:'
+            echo '  - id: claude'
+            echo '    enabled: false'
+            echo '    model: null'
+            echo '    binary: claude'
+            echo '    timeout_secs: 30'
+            echo 'debug_log:'
+            echo '  enabled: false'
+            echo '  path: pumice-debug.jsonl'
+          } > d2-cfg/relay.yml
           {
             echo 'schema_version: 1'
             echo 'modules:'
             echo '  transcription:'
             echo '    config: ./transcribe.yml'
+            echo '  formatter: null'
             echo '  relay:'
             echo '    location: in_process'
             echo '    config: ./relay.yml'
@@ -1330,10 +1351,19 @@ jobs:
             echo '    transcription_model: tiny'
             echo '    formatter: null'
             echo '    relay_route: passthrough'
+            echo '    budgets_ms:'
+            echo '      total: 180000'
+            echo '      transcription: 120000'
+            echo '      formatter: 1000'
+            echo '      relay: 60000'
             echo 'serve:'
             echo '  enabled: true'
             echo '  port: 0'
             echo '  transcription_model: tiny'
+            echo '  startup_timeout_ms: 60000'
+            echo '  transcription_flows:'
+            echo '    - raw'
+            echo '  allowed_origins: []'
           } > d2-cfg/orchestrator.yml
           with_alarm 120 python3 - "$d2" "$RUNNER_TEMP/d2-cfg" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json

@@ -5,22 +5,32 @@
 #   2. the per-user file: ~/.config/pumice/transcribe.yml on Linux and macOS
 #      ($XDG_CONFIG_HOME/pumice/transcribe.yml when XDG_CONFIG_HOME is absolute),
 #      and %APPDATA%\pumice\transcribe.yml on Windows,
-#   otherwise no file is used; select a model with --model-file.
+#   and a missing file is an error. Only `models catalog`, `models
+#   download`, `models verify`, `backends --backend MODE` and a one-off
+#   `file --model-file PATH` (from its flags) run without one.
+#
+# Every setting below must be written: leaving one out is an error that
+# names the file and line. There are no built-in defaults; this file is the
+# starting configuration. `null` is valid where its comment says what it
+# means.
 #
 # Validate a file with: pumice-transcribe check-config --config <path>
 
 schema_version: 1
 
-# Optional default model id. When set it must name an entry in models below.
+# The model used when a command names none; it must name an entry in models
+# below. null: every command must pass --model or --model-file.
 default_model: tiny
 
-# Optional default language hint (ISO-639-1 two-letter code, e.g. pt, en).
+# Language hint (ISO-639-1 two-letter code, e.g. pt, en). null: the engine
+# detects the language.
 language: pt
 
-# Optional default thread count for inference (1-32).
+# Thread count for inference: 1-32, or auto (the available parallelism,
+# capped at 32). --threads overrides it for one `file` run.
 threads: 8
 
-# Optional compute backend (default: cpu):
+# Compute backend:
 #   cpu  - the CPU only; a GPU module is never loaded
 #   auto - a GPU it can identify as discrete hardware, else the CPU (the
 #          reported compute snapshot says why). Integrated, software and
@@ -30,21 +40,21 @@ threads: 8
 #          error (never the CPU)
 # Only the Vulkan preview bundles (Windows, Linux) have a GPU module.
 # Override for one run with --backend on file and serve.
-# backend: auto
+backend: cpu
 
-# Optional HTTP server settings. Only used by `pumice-transcribe serve`.
+# HTTP server settings, used by `pumice-transcribe serve`.
 server:
   # Port to listen on. The server always binds 127.0.0.1 only.
   # Override with: pumice-transcribe serve --port PORT
+  # null: `serve` needs --port (`pumice serve` always passes one).
   port: 17568
 
-# Optional override for where downloaded catalog models are stored.
-# Relative paths resolve against this file's directory; `~` is NOT expanded
-# — write an absolute path. The default is the per-user data directory
-# ($XDG_DATA_HOME/pumice/models or ~/.local/share/pumice/models on Linux,
-# ~/Library/Application Support on macOS, %LOCALAPPDATA%\pumice\models on
-# Windows).
-# models_dir: /absolute/path/to/models
+# Where downloaded catalog models are stored. null: the per-user data
+# directory ($XDG_DATA_HOME/pumice/models or ~/.local/share/pumice/models on
+# Linux, ~/Library/Application Support on macOS, %LOCALAPPDATA%\pumice\models
+# on Windows). A path overrides it: relative paths resolve against this
+# file's directory, and `~` is NOT expanded — write an absolute path.
+models_dir: null
 
 # Explicit model list. Nothing is enabled implicitly.
 models:

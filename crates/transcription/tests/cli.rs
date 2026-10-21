@@ -9,12 +9,54 @@ use pumice_transcription::{
 use std::io::Cursor;
 use std::process::Command;
 
+/// Every top-level `transcribe.yml` setting, keyed by its name, with the
+/// value that was the built-in default before every setting had to be
+/// written. [`complete`] appends the ones a test does not write.
+const SETTINGS: [(&str, &str); 8] = [
+    ("schema_version", "schema_version: 1\n"),
+    ("default_model", "default_model: null\n"),
+    ("language", "language: null\n"),
+    ("threads", "threads: auto\n"),
+    ("backend", "backend: cpu\n"),
+    ("server", "server:\n  port: null\n"),
+    ("models_dir", "models_dir: null\n"),
+    ("models", "models: []\n"),
+];
+
+/// `text`, then every top-level setting it does not write itself.
+/// Appending keeps the line numbers in `text` unchanged.
+fn complete(text: &str) -> String {
+    let mut yaml = text.to_owned();
+    for (key, line) in SETTINGS {
+        let prefix = format!("{key}:");
+        if !text.lines().any(|written| written.starts_with(&prefix)) {
+            yaml.push_str(line);
+        }
+    }
+    yaml
+}
+
+/// Writes `text`, completed by [`complete`], to `path`.
+fn write_complete(path: impl AsRef<std::path::Path>, text: &str) -> std::io::Result<()> {
+    std::fs::write(path, complete(text))
+}
+
 fn isolated_command(bin: &str) -> Command {
     let mut command = Command::new(bin);
     command
         .env_remove("HOME")
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("APPDATA");
+    command
+}
+
+/// [`isolated_command`] with `--config` naming a complete configuration
+/// written into `dir`, for runs whose subject is not the configuration.
+fn configured_command(bin: &str, dir: &std::path::Path) -> Command {
+    let config = dir.join("transcribe.yml");
+    write_complete(&config, "").unwrap();
+    let mut command = isolated_command(bin);
+    command.arg("--config").arg(config);
     command
 }
 
@@ -26,7 +68,7 @@ fn run_with_engine(
     let temp = tempfile::tempdir().unwrap();
     if !args.iter().any(|arg| arg == "--config") {
         let config = temp.path().join("transcribe.yml");
-        std::fs::write(&config, "schema_version: 1\n").unwrap();
+        write_complete(&config, "").unwrap();
         args.insert(1, "--config".into());
         args.insert(2, config.into());
     }
@@ -383,7 +425,7 @@ fn fifo_without_writer_returns_invalid_input_with_timeout() {
     assert!(status.success(), "mkfifo failed");
 
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let mut child = isolated_command(bin)
+    let mut child = configured_command(bin, tmp.path())
         .args([
             "file",
             fifo_path.to_str().unwrap(),
@@ -831,8 +873,9 @@ fn threads_validation_rejects_too_large() {
 
 #[test]
 fn json_parse_error_missing_model_with_json() {
+    let tmp = tempfile::tempdir().unwrap();
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let out = isolated_command(bin)
+    let out = configured_command(bin, tmp.path())
         .args(["file", "audio.wav", "--json"])
         .output()
         .unwrap();
@@ -1133,7 +1176,7 @@ fn chained_ogg_returns_unsupported_format_json() {
     bytes.extend(std::fs::read(fixture_path("sample-pt.ogg")).unwrap());
     std::fs::write(&path, bytes).unwrap();
 
-    let out = isolated_command(env!("CARGO_BIN_EXE_pumice-transcribe"))
+    let out = configured_command(env!("CARGO_BIN_EXE_pumice-transcribe"), tmp.path())
         .args([
             "file",
             path.to_str().unwrap(),
@@ -1169,8 +1212,9 @@ fn long_compressed_audio_returns_audio_too_long() {
 #[cfg(not(feature = "opus"))]
 #[test]
 fn json_error_envelope_for_unsupported_format() {
+    let tmp = tempfile::tempdir().unwrap();
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let out = isolated_command(bin)
+    let out = configured_command(bin, tmp.path())
         .args([
             "file",
             fixture_path("sample-pt.opus").to_str().unwrap(),
@@ -1192,8 +1236,9 @@ fn json_error_envelope_for_unsupported_format() {
 
 #[test]
 fn json_error_envelope_for_audio_too_long() {
+    let tmp = tempfile::tempdir().unwrap();
     let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let out = isolated_command(bin)
+    let out = configured_command(bin, tmp.path())
         .args([
             "file",
             fixture_path("long-silence.mp3").to_str().unwrap(),
@@ -1213,9 +1258,10 @@ fn json_error_envelope_for_audio_too_long() {
     assert_eq!(json["error"]["code"], "audio_too_long");
 }
 
+/// Writes `text`, completed by [`complete`], as `transcribe.yml`.
 fn write_config(tmp: &tempfile::TempDir, text: &str) -> std::path::PathBuf {
     let path = tmp.path().join("transcribe.yml");
-    std::fs::write(&path, text).unwrap();
+    write_complete(&path, text).unwrap();
     path
 }
 
@@ -1254,7 +1300,7 @@ models:
 }
 
 #[test]
-fn model_file_flag_works_without_config() {
+fn model_file_flag_needs_no_configured_model() {
     let tmp = tempfile::tempdir().unwrap();
     let audio_path = tmp.path().join("audio.wav");
     std::fs::write(&audio_path, write_silence_wav(1.0, 16_000, 1)).unwrap();
@@ -1548,25 +1594,170 @@ models:
     assert!(stdout.contains(config_path.to_str().unwrap()));
 }
 
-#[test]
-fn check_config_json_success_with_no_file() {
-    let tmp = tempfile::tempdir().unwrap();
-    // No config in this temp home, and no explicit file.
-    let bin = env!("CARGO_BIN_EXE_pumice-transcribe");
-    let out = isolated_command(bin)
-        .args(["check-config", "--json"])
-        .env("HOME", tmp.path())
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("APPDATA")
+/// Runs the binary with `args` and no configuration file anywhere: an
+/// empty temporary home, and models stored under it.
+fn run_without_config(home: &std::path::Path, args: &[&str]) -> std::process::Output {
+    isolated_command(env!("CARGO_BIN_EXE_pumice-transcribe"))
+        .args(args)
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env("APPDATA", home.join("config"))
+        .env("XDG_DATA_HOME", home.join("data"))
+        .env("LOCALAPPDATA", home.join("data"))
         .output()
-        .unwrap();
+        .unwrap()
+}
 
-    assert!(out.status.success());
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-    assert_eq!(json["schema_version"], 1);
-    assert_eq!(json["ok"], true);
-    assert!(json["result"]["file"].is_null());
+#[test]
+fn commands_that_read_settings_fail_without_a_config_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wav = tmp.path().join("clip.wav");
+    std::fs::write(&wav, write_silence_wav(0.05, 16_000, 1)).unwrap();
+    let model = tmp.path().join("model.gguf");
+    std::fs::write(&model, b"").unwrap();
+    let expected = tmp
+        .path()
+        .join("config")
+        .join("pumice")
+        .join("transcribe.yml");
+    for args in [
+        &["check-config", "--json"][..],
+        &["models", "list", "--json"],
+        // `--model ID` and `default_model` come from the file; only a
+        // one-off `--model-file` runs without one.
+        &["file", wav.to_str().unwrap(), "--model", "tiny", "--json"],
+        &["file", wav.to_str().unwrap(), "--json"],
+        &["serve", "--model", "tiny", "--port", "0"],
+    ] {
+        let out = run_without_config(tmp.path(), args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            text.contains("the transcription configuration file does not exist"),
+            "{args:?}: {text}"
+        );
+    }
+    let out = run_without_config(tmp.path(), &["check-config", "--json"]);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "invalid_config");
+    assert_eq!(
+        json["error"]["location"]["file"],
+        expected.to_str().unwrap()
+    );
+}
+
+#[test]
+fn a_one_off_model_file_runs_without_a_config_file() {
+    // The real engine cannot load the empty model (or is not built in):
+    // reaching it shows the missing configuration was not an error. The
+    // fake-engine run is in tests/managed.rs.
+    let tmp = tempfile::tempdir().unwrap();
+    let wav = tmp.path().join("clip.wav");
+    std::fs::write(&wav, write_silence_wav(0.05, 16_000, 1)).unwrap();
+    let model = tmp.path().join("model.gguf");
+    std::fs::write(&model, b"").unwrap();
+    let args = [
+        "file",
+        wav.to_str().unwrap(),
+        "--model-file",
+        model.to_str().unwrap(),
+        "--json",
+    ];
+    let out = run_without_config(tmp.path(), &args);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    // Which engine error depends on the build (the Metal build reports
+    // `engine_failed` for the empty model).
+    let code = json["error"]["code"].as_str().unwrap();
+    assert!(
+        ["model_load_failed", "engine_not_available", "engine_failed"].contains(&code),
+        "{json}"
+    );
+
+    // A per-user file that exists must still be complete.
+    let per_user = tmp.path().join("config").join("pumice");
+    std::fs::create_dir_all(&per_user).unwrap();
+    std::fs::write(per_user.join("transcribe.yml"), "schema_version: 1\n").unwrap();
+    let out = run_without_config(tmp.path(), &args);
+    assert_eq!(out.status.code(), Some(2));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["error"]["code"], "invalid_config", "{json}");
+}
+
+#[test]
+fn catalog_and_backends_run_without_a_config_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = run_without_config(tmp.path(), &["models", "catalog", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let entries = json["result"].as_array().unwrap();
+    assert!(!entries.is_empty());
+    assert!(entries.iter().all(|entry| entry["installed"] == false));
+
+    // `models verify` looks in the per-user models directory: nothing is
+    // installed there, so the failure is about the file, not the config.
+    let out = run_without_config(
+        tmp.path(),
+        &["models", "verify", "whisper-tiny-q8_0", "--json"],
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_ne!(json["error"]["code"], "invalid_config", "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(&tmp.path().join("data").display().to_string()),
+        "{json}"
+    );
+
+    // `backends` needs a mode: from --backend, or from a configuration.
+    let out = run_without_config(tmp.path(), &["backends", "--json"]);
+    assert_eq!(out.status.code(), Some(2));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no backend mode: pass --backend MODE"),
+        "{json}"
+    );
+    let out = run_without_config(tmp.path(), &["backends", "--backend", "cpu", "--json"]);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_ne!(json["error"]["code"], "invalid_arguments", "{json}");
+    assert_ne!(json["error"]["code"], "invalid_config", "{json}");
+}
+
+#[test]
+fn an_incomplete_config_file_fails_even_for_commands_that_need_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("transcribe.yml");
+    std::fs::write(&config, "schema_version: 1\nmodels: []\n").unwrap();
+    for args in [
+        &["models", "catalog", "--json"][..],
+        &["backends", "--backend", "cpu", "--json"],
+    ] {
+        let mut argv = vec!["--config", config.to_str().unwrap()];
+        argv.extend(args);
+        let out = run_without_config(tmp.path(), &argv);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(json["error"]["code"], "invalid_config", "{args:?}");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("\"default_model\" is missing"),
+            "{json}"
+        );
+    }
 }
 
 #[test]
@@ -1713,7 +1904,7 @@ fn relative_config_path_resolves_model_against_config_directory() {
     let tmp = tempfile::tempdir().unwrap();
     let config_dir = tmp.path().join("config");
     std::fs::create_dir(&config_dir).unwrap();
-    std::fs::write(
+    write_complete(
         config_dir.join("transcribe.yml"),
         "schema_version: 1\nmodels:\n  - id: tiny\n    path: models/tiny.gguf\n",
     )
@@ -1748,7 +1939,17 @@ fn relative_config_path_resolves_model_against_config_directory() {
 fn example_config_file_parses() {
     let example =
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../transcribe.example.yml");
-    config::load(Some(&example)).unwrap();
+    let config = config::load(Some(&example)).unwrap().config;
+    // The example writes every setting the way it documented them before
+    // they had to be written.
+    assert_eq!(config.default_model.as_deref(), Some("tiny"));
+    assert_eq!(config.language.as_deref(), Some("pt"));
+    assert_eq!(config.threads, config::Threads::Count(8));
+    assert_eq!(config.backend, BackendMode::Cpu);
+    assert_eq!(config.server_port, Some(17568));
+    assert_eq!(config.models_dir, None);
+    let ids: Vec<&str> = config.models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["turbo", "tiny"]);
 }
 
 #[test]
@@ -1763,7 +1964,7 @@ fn per_user_config_lookup_via_env() {
     let config_dir = base.join("pumice");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("transcribe.yml");
-    std::fs::write(
+    write_complete(
         &config_path,
         r#"schema_version: 1
 models:
@@ -1844,7 +2045,7 @@ fn help_mentions_config_and_model_flags() {
 fn serve_missing_catalog_model_names_the_download_command() {
     let tmp = tempfile::tempdir().unwrap();
     let config = tmp.path().join("transcribe.yml");
-    std::fs::write(
+    write_complete(
         &config,
         "schema_version: 1\nmodels_dir: models\nmodels:\n  - id: tiny\n    catalog: whisper-tiny-q8_0\n",
     )
@@ -1879,7 +2080,7 @@ fn serve_missing_catalog_model_names_the_download_command() {
 fn file_missing_catalog_model_names_the_download_command() {
     let tmp = tempfile::tempdir().unwrap();
     let config = tmp.path().join("transcribe.yml");
-    std::fs::write(
+    write_complete(
         &config,
         "schema_version: 1\nmodels_dir: models\nmodels:\n  - id: tiny\n    catalog: whisper-tiny-q8_0\n",
     )
@@ -1915,7 +2116,7 @@ fn file_missing_catalog_model_names_the_download_command() {
 fn file_missing_path_model_keeps_the_plain_error() {
     let tmp = tempfile::tempdir().unwrap();
     let config = tmp.path().join("transcribe.yml");
-    std::fs::write(
+    write_complete(
         &config,
         "schema_version: 1\nmodels:\n  - id: local\n    path: absent.gguf\n",
     )

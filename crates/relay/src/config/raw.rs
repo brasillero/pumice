@@ -1,34 +1,38 @@
 //! YAML structures retaining source positions for precise validation errors.
 //!
-//! Every value that can fail semantic validation is wrapped in
-//! [`Spanned`]. Removed keys are parsed through [`removed_key`] so even an
-//! explicit `null` reaches validation and fails at its line. `providers` is
-//! a sequence, parsed by
-//! [`provider_list`], so the removed mapping form can fail with a migration
-//! message instead of a generic type error. Keeping spans through to
-//! semantic validation is what lets an error point at the exact value or key
-//! that was rejected.
+//! Every setting is a [`Setting`], which keeps an omitted key apart from an
+//! explicit `null` and carries the value's position, so semantic validation
+//! can require each key (p17-serve-model-names/D3) and point at the exact
+//! value, or at the mapping a missing key belongs in. Removed keys are parsed
+//! through [`removed_key`] so even an explicit `null` reaches validation and
+//! fails at its line. `providers` is a sequence, parsed by [`ProviderList`],
+//! so the removed mapping form can fail with a migration message instead of a
+//! generic type error.
 
 use std::fmt;
 use std::path::PathBuf;
 
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
-use serde_saphyr::Spanned;
+use serde_saphyr::{Location, Spanned};
+
+use super::ConfigError;
 
 /// Shown when a removed setting or the removed mapping form of `providers`
 /// is used; points at the list form that replaces it.
-pub(crate) const PROVIDERS_LIST_FORM: &str =
-    "providers:\n  - id: claude\n    enabled: true\n    model: haiku";
+pub(crate) const PROVIDERS_LIST_FORM: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: claude\n    timeout_secs: 30";
 
-/// The configuration file before defaults and validation.
-///
-/// Every field is optional; an empty or absent document means "everything
-/// defaults" — which since 0.2 includes no providers at all.
+/// The commented reference configuration every missing-setting error points
+/// at.
+const EXAMPLE_FILE: &str = "relay.example.yml";
+
+/// The configuration file before validation. Every setting is required;
+/// an empty document is a file with every setting missing.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawConfig {
-    pub port: Option<Spanned<u16>>,
+    #[serde(default)]
+    pub port: Setting<u16>,
     /// Removed in 0.2; parsed only so the error can point at the key and
     /// show the list form that replaced it.
     #[serde(default, deserialize_with = "removed_key")]
@@ -38,11 +42,13 @@ pub(crate) struct RawConfig {
     /// Parsed only so the error can point at the key.
     #[serde(default, deserialize_with = "removed_key")]
     pub default: Option<Spanned<serde::de::IgnoredAny>>,
-    pub total_timeout_secs: Option<Spanned<u64>>,
+    #[serde(default)]
+    pub total_timeout_secs: Setting<u64>,
     /// How many provider calls may run at the same time.
-    pub max_parallel: Option<Spanned<u64>>,
-    #[serde(default, deserialize_with = "provider_list")]
-    pub providers: Vec<Spanned<RawProviderEntry>>,
+    #[serde(default)]
+    pub max_parallel: Setting<u64>,
+    #[serde(default)]
+    pub providers: Setting<ProviderList>,
     /// Removed in 0.2; parsed only so the error can point at the key.
     #[serde(default, deserialize_with = "removed_key")]
     pub fallback_order: Option<Spanned<serde::de::IgnoredAny>>,
@@ -51,21 +57,26 @@ pub(crate) struct RawConfig {
     /// the key.
     #[serde(default, deserialize_with = "removed_key")]
     pub prompts: Option<Spanned<serde::de::IgnoredAny>>,
-    pub debug_log: Option<RawDebugLog>,
+    #[serde(default)]
+    pub debug_log: Setting<RawDebugLog>,
 }
 
-/// One entry of the `providers:` list. `id` and `enabled` are required by
-/// semantic validation (so the error can name the entry and point at it);
-/// `model` is required when `enabled` is `true`.
+/// One entry of the `providers:` list. Every key is required by semantic
+/// validation (so the error can name the entry and point at it); `model`
+/// may be `null` only on a disabled entry.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawProviderEntry {
-    pub id: Option<Spanned<String>>,
-    pub enabled: Option<Spanned<bool>>,
-    /// `binary: null` (or omitted) keeps the command-name default.
-    pub binary: Option<Spanned<PathBuf>>,
-    pub model: Option<Spanned<String>>,
-    pub timeout_secs: Option<Spanned<u64>>,
+    #[serde(default)]
+    pub id: Setting<String>,
+    #[serde(default)]
+    pub enabled: Setting<bool>,
+    #[serde(default)]
+    pub binary: Setting<PathBuf>,
+    #[serde(default)]
+    pub model: Setting<String>,
+    #[serde(default)]
+    pub timeout_secs: Setting<u64>,
     /// Removed (owner decision 2026-10-08): each CLI keeps its own
     /// configuration. Parsed only so the error can point at the key.
     #[serde(default, deserialize_with = "removed_key")]
@@ -78,8 +89,95 @@ pub(crate) struct RawProviderEntry {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawDebugLog {
-    pub enabled: Option<Spanned<bool>>,
-    pub path: Option<Spanned<PathBuf>>,
+    #[serde(default)]
+    pub enabled: Setting<bool>,
+    #[serde(default)]
+    pub path: Setting<PathBuf>,
+}
+
+/// One setting as written: omitted, an explicit `null` (also `~` or no
+/// value), or a value. `Option<Spanned<T>>` cannot tell the first two apart:
+/// serde-saphyr maps an explicit `null` to `None` before the field type runs.
+/// Every field of this type needs `#[serde(default)]`.
+#[derive(Debug, Default)]
+pub(crate) enum Setting<T> {
+    #[default]
+    Missing,
+    Null(Location),
+    Value(Spanned<T>),
+}
+
+/// Where a missing setting is reported: the mapping it belongs in.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Within {
+    /// The top level of the file, reported at line 1.
+    Root,
+    /// A nested mapping or list entry, reported at its first key.
+    Mapping(Location),
+}
+
+impl<T> Setting<T> {
+    /// The written value; an omitted key or an explicit `null` is an error.
+    /// `name` is the setting as error messages show it, e.g. `"port"`.
+    pub(crate) fn required(&self, within: Within, name: &str) -> Result<&Spanned<T>, ConfigError> {
+        match self {
+            Setting::Value(value) => Ok(value),
+            Setting::Null(location) => Err(ConfigError::at(
+                *location,
+                format!("{name} must not be null; write a value"),
+            )),
+            Setting::Missing => Err(missing(within, name)),
+        }
+    }
+
+    /// The written value, or `None` for an explicit `null`; an omitted key
+    /// is an error.
+    pub(crate) fn nullable(
+        &self,
+        within: Within,
+        name: &str,
+    ) -> Result<Option<&Spanned<T>>, ConfigError> {
+        match self {
+            Setting::Missing => Err(missing(within, name)),
+            Setting::Null(_) => Ok(None),
+            Setting::Value(value) => Ok(Some(value)),
+        }
+    }
+
+    /// The position of a written value or `null`.
+    pub(crate) fn location(&self) -> Option<Location> {
+        match self {
+            Setting::Missing => None,
+            Setting::Null(location) => Some(*location),
+            Setting::Value(value) => Some(value.referenced),
+        }
+    }
+}
+
+/// The error for a setting the file does not write.
+pub(crate) fn missing(within: Within, name: &str) -> ConfigError {
+    let message = format!("{name} is missing; every setting must be written (see {EXAMPLE_FILE})");
+    match within {
+        Within::Root => ConfigError::at_line(1, 1, message),
+        Within::Mapping(location) => ConfigError::at(location, message),
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Setting<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let spanned = Spanned::<Option<T>>::deserialize(deserializer)?;
+        Ok(match spanned.value {
+            None => Setting::Null(spanned.referenced),
+            Some(value) => Setting::Value(Spanned {
+                value,
+                referenced: spanned.referenced,
+                defined: spanned.defined,
+            }),
+        })
+    }
 }
 
 /// Records that a removed key is present, whatever its value. A plain
@@ -91,43 +189,43 @@ where
     Spanned::<serde::de::IgnoredAny>::deserialize(deserializer).map(Some)
 }
 
-/// Deserializes the `providers:` sequence into located entries. The mapping
-/// form (`providers: {claude: ...}` or `providers: {}`) was removed in 0.2:
-/// it fails here with the list form that replaces it. An explicit `null`
-/// (or an omitted field, through `default`) yields an empty list.
-fn provider_list<'de, D>(deserializer: D) -> Result<Vec<Spanned<RawProviderEntry>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    struct List;
+/// The `providers:` sequence as located entries. The mapping form
+/// (`providers: {claude: ...}` or `providers: {}`) was removed in 0.2: it
+/// fails here with the list form that replaces it.
+#[derive(Debug, Default)]
+pub(crate) struct ProviderList(pub Vec<Spanned<RawProviderEntry>>);
 
-    impl<'de> Visitor<'de> for List {
-        type Value = Vec<Spanned<RawProviderEntry>>;
+impl<'de> Deserialize<'de> for ProviderList {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct List;
 
-        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            f.write_str("a sequence of provider entries (- id: <provider>)")
-        }
+        impl<'de> Visitor<'de> for List {
+            type Value = ProviderList;
 
-        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-            let mut entries = Vec::new();
-            while let Some(entry) = seq.next_element::<Spanned<RawProviderEntry>>()? {
-                entries.push(entry);
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a sequence of provider entries (- id: <provider>)")
             }
-            Ok(entries)
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut entries = Vec::new();
+                while let Some(entry) = seq.next_element::<Spanned<RawProviderEntry>>()? {
+                    entries.push(entry);
+                }
+                Ok(ProviderList(entries))
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, _map: A) -> Result<Self::Value, A::Error> {
+                // One-line example: serde renders custom errors with escaped
+                // newlines, unlike the semantic errors below.
+                Err(serde::de::Error::custom(
+                    "the mapping form of \"providers\" was removed in 0.2; use an ordered list instead, e.g. providers: [{id: claude, enabled: true, model: haiku, binary: claude, timeout_secs: 30}]",
+                ))
+            }
         }
 
-        fn visit_map<A: MapAccess<'de>>(self, _map: A) -> Result<Self::Value, A::Error> {
-            // One-line example: serde renders custom errors with escaped
-            // newlines, unlike the semantic errors below.
-            Err(serde::de::Error::custom(
-                "the mapping form of \"providers\" was removed in 0.2; use an ordered list instead, e.g. providers: [{id: claude, enabled: true, model: haiku}]",
-            ))
-        }
-
-        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-            Ok(Vec::new())
-        }
+        deserializer.deserialize_any(List)
     }
-
-    deserializer.deserialize_any(List)
 }
