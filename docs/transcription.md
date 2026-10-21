@@ -740,9 +740,9 @@ Each file's **model id**:
 - Any other `.gguf` file takes its exact file name without `.gguf`, with no
   lowercasing or other changes: `My Model v2.gguf` is `My Model v2`. Ids
   are compared exactly, so `--model my model v2` does not match.
-- A file is never given a catalog id from its name alone: a file named
-  after a catalog id (`whisper-tiny-q8_0.gguf`) without that model's bytes
-  is an error. A file under a catalog *file name*
+- A custom file named after a catalog id (`whisper-tiny-q8_0.gguf`)
+  keeps its stem but is marked `catalog: false`: only matching bytes
+  establish catalog provenance. A file under a catalog *file name*
   (`whisper-tiny-Q8_0.gguf`) with other bytes keeps its file name as its
   id and gets a warning (it may be corrupt; `models verify` checks it).
 
@@ -767,8 +767,7 @@ names the files):
   differing only in letter case cannot exist together; on Linux `A.gguf`
   and `a.gguf` are two models, `A` and `a`;
 - a file name that gives an empty, non-UTF-8, control-character or
-  over-512-byte id;
-- a file named after a catalog id without its bytes (above).
+  over-512-byte id.
 
 An empty folder, or a folder that does not exist yet, has no models; it
 never blocks `models catalog`, `models download` or `models verify`, and

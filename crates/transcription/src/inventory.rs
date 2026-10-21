@@ -16,8 +16,8 @@
 //! - A file whose size and SHA-256 match a catalog entry takes the catalog
 //!   id, whatever its file name; only files whose size matches an entry are
 //!   hashed. Any other file takes its exact file stem: no lowercasing, no
-//!   slugifying. A file is never given a catalog id from its name alone: a
-//!   stem equal to a catalog id without the catalog's bytes is an error.
+//!   slugifying. A custom file whose stem equals a catalog id still has
+//!   `catalog: false`; only matching bytes establish catalog provenance.
 //! - Ids are compared exactly (case-sensitively). An empty, non-UTF-8,
 //!   control-character or over-512-byte id is an error, and so are two files
 //!   with the same id (two copies of one catalog model included): the error
@@ -294,14 +294,6 @@ fn name(
             id.len()
         )));
     }
-    if let Some(entry) = catalog.iter().find(|entry| entry.id == id) {
-        return Err(inventory_error(format!(
-            "the model file {} is named after the catalog model `{}` but does not match its size \
-             and SHA-256; a file never takes a catalog id from its name alone, so rename it",
-            path.display(),
-            entry.id
-        )));
-    }
     let file_name = path.file_name().unwrap_or_default();
     if let Some(entry) = catalog
         .iter()
@@ -452,15 +444,24 @@ mod tests {
     }
 
     #[test]
-    fn a_file_named_after_a_catalog_id_must_have_its_bytes() {
+    fn a_custom_file_named_after_a_catalog_id_keeps_its_stem() {
         let tmp = tempfile::tempdir().unwrap();
         write(tmp.path(), "fake-tiny-q8_0.gguf", b"not the catalog bytes");
+        let inventory = discover_with(tmp.path(), &catalog()).unwrap();
+        assert_eq!(ids(&inventory), ["fake-tiny-q8_0"]);
+        assert!(!inventory.models[0].catalog);
+        let (one_off, _) =
+            name_file_with(&tmp.path().join("fake-tiny-q8_0.gguf"), &catalog()).unwrap();
+        assert_eq!(one_off.id, "fake-tiny-q8_0");
+        assert!(!one_off.catalog);
+
+        // A genuine catalog copy and the custom file still collide by id.
+        write(tmp.path(), "verified.gguf", TINY);
         let error = discover_with(tmp.path(), &catalog()).unwrap_err();
-        assert_eq!(error.code, ErrorCode::InvalidConfig);
         assert!(
-            error
-                .message
-                .contains("named after the catalog model `fake-tiny-q8_0`"),
+            error.message.contains("two files")
+                && error.message.contains("fake-tiny-q8_0.gguf")
+                && error.message.contains("verified.gguf"),
             "{}",
             error.message
         );

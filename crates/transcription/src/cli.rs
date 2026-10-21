@@ -63,7 +63,12 @@ pub struct FileArgs {
 
     /// Model id: a model in the models folder (its catalog id or file
     /// name without `.gguf`). Defaults to the configured `default_model`.
-    #[arg(long, value_name = "ID", group = "model_source")]
+    #[arg(
+        long,
+        value_name = "ID",
+        group = "model_source",
+        allow_hyphen_values = true
+    )]
     model: Option<String>,
 
     /// Direct path to a GGUF model file, named by the models folder's rule
@@ -119,7 +124,7 @@ pub struct CheckConfigArgs {
 pub struct ServeArgs {
     /// Model id to serve, from the models folder. Defaults to the configured
     /// `default_model`.
-    #[arg(long, value_name = "ID")]
+    #[arg(long, value_name = "ID", allow_hyphen_values = true)]
     model: Option<String>,
 
     /// Port to listen on. Overrides `server.port` in the configuration file.
@@ -1769,6 +1774,28 @@ mod tests {
             );
             let (result, _) = requested_backend("backend: cpu\n", &with(Some("auto")));
             assert_eq!(result.unwrap_err().code, ErrorCode::ModelLoadFailed);
+        }
+    }
+
+    #[test]
+    fn model_ids_starting_with_hyphens_are_values_for_file_and_serve() {
+        for id in ["-voice", "--json", "--help"] {
+            for command in ["file", "serve"] {
+                let mut argv = vec!["pumice-transcribe", command];
+                if command == "file" {
+                    argv.push("audio.wav");
+                }
+                argv.extend(["--model", id]);
+                let args = Args::try_parse_from(argv).unwrap();
+                match args.command {
+                    Command::File(file) => {
+                        assert_eq!(file.model.as_deref(), Some(id));
+                        assert!(!file.json);
+                    }
+                    Command::Serve(serve) => assert_eq!(serve.model.as_deref(), Some(id)),
+                    _ => unreachable!(),
+                }
+            }
         }
     }
 

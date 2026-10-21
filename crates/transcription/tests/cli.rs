@@ -1307,6 +1307,35 @@ fn model_id_resolves_from_config() {
 }
 
 #[test]
+fn hyphen_prefixed_model_ids_reach_the_engine_as_data() {
+    let tmp = tempfile::tempdir().unwrap();
+    let audio = tmp.path().join("audio.wav");
+    std::fs::write(&audio, write_silence_wav(0.1, 16_000, 1)).unwrap();
+    let config = write_config_with_models(
+        &tmp,
+        "schema_version: 1\n",
+        &[("-voice.gguf", b""), ("--json.gguf", b"")],
+    );
+    for id in ["-voice", "--json"] {
+        let result = run_with_engine(
+            vec![
+                "pumice-transcribe",
+                "--config",
+                config.to_str().unwrap(),
+                "file",
+                audio.to_str().unwrap(),
+                "--model",
+                id,
+            ],
+            Box::new(FakeEngine::new("hello", None::<String>)),
+        )
+        .unwrap();
+        assert_eq!(result.model, id);
+        assert_eq!(result.text, "hello");
+    }
+}
+
+#[test]
 fn model_file_flag_needs_no_configured_model() {
     let tmp = tempfile::tempdir().unwrap();
     let audio_path = tmp.path().join("audio.wav");
