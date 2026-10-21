@@ -30,7 +30,7 @@
 - [x] Owner: which models folder (D7).
 - [ ] Design the YAML (expansion options, default relay and preset, global relay timeout) with Codex.
 - [ ] Accept percent-encoded ids in `GET /v1/models/{id}`.
-- [ ] Update AGENTS.md's built-in defaults sentence (D3).
+- [x] Update AGENTS.md's built-in defaults sentence (D3; done in p17.1-explicit-config).
 
 **Where in the code.**
 - `src/orchestrator/config.rs`, `src/orchestrator/flow.rs`, `src/orchestrator/serve/`
