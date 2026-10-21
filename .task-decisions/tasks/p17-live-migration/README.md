@@ -3,7 +3,7 @@ title: Deploy P17 explicit settings and model names on server-1
 state: Done
 ticket: —
 branch: p17-live-migration
-mr: —
+mr: PR #126
 start: 2026-10-21
 end: 2026-10-21
 ---
