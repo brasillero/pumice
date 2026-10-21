@@ -37,11 +37,12 @@ self-contained. It binds to `127.0.0.1` only and makes no outbound
 external connections of its own. The optional generic adapter connects only
 to local services. Stop it with Ctrl-C.
 
-## Configuration (optional)
+## Configuration
 
-Every setting has a built-in default, so a config file is not required. To
-customize, copy `relay.example.yml` to the per-user config location and
-edit it:
+The service needs a config file in which every setting is written (there
+are no built-in defaults; a missing setting is reported with its file and
+line). Copy `relay.example.yml` to the per-user config location and edit
+it:
 
 - Windows: `%APPDATA%\pumice\relay.yml`
 - Linux and macOS: `~/.config/pumice/relay.yml`
@@ -62,4 +63,5 @@ In Handy, set the post-processing endpoint to `http://127.0.0.1:7567/v1`
 - `THIRD_PARTY_NOTICES.md` — license notices for the third-party code and
   content in the executable (its Rust dependencies, the C runtime it links
   and the Handy-derived built-in formatter prompt)
-- `relay.example.yml` — commented reference configuration (optional)
+- `relay.example.yml` — commented reference configuration with every
+  setting; copy it to start

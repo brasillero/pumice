@@ -25,15 +25,17 @@ on Linux and macOS, `%APPDATA%\pumice` on Windows). These bases must be
 nonempty absolute paths: a relative `XDG_CONFIG_HOME` is ignored in favour
 of `~/.config`, and with no usable base the lookup is unavailable and
 `--config` is required. There is no built-in default; a missing file is an
-error. The file names the module
-configurations and the flows:
+error, and so is a setting the file leaves out: every setting is written,
+and an omitted one is reported with the file and the line of the mapping it
+belongs in (line 1 for a top-level one). The file names the module
+configurations, the flows and the `pumice serve` section:
 
 ```yaml
 schema_version: 1
 modules:
   transcription:
     config: ./transcribe.yml
-  formatter:
+  formatter:                  # or `formatter: null` when no flow uses one
     config: ./formatter.yml
   relay:
     location: in_process
@@ -44,13 +46,25 @@ flows:
     transcription_model: turbo
     formatter: builtin:clean
     relay_route: claude
+    budgets_ms:
+      total: 180000
+      transcription: 120000
+      formatter: 1000
+      relay: 60000
+serve:
+  enabled: false              # pumice serve stays off
+  port: 17570
+  transcription_model: null   # null only while serve is disabled
+  startup_timeout_ms: 60000
+  transcription_flows: []
+  allowed_origins: []
 ```
 
 Relative module paths resolve against the orchestrator file's directory.
 Module settings (model files, provider binaries, timeouts, language) live in
-the module files and are never copied here. `modules.formatter` is required
-once any enabled flow selects a formatter — even a built-in (an empty
-registry file is enough). `modules.relay.location` must be `in_process`;
+the module files and are never copied here. `modules.formatter` names a
+file once any enabled flow selects a formatter — even a built-in (an empty
+registry file is enough); otherwise it may be `null`. `modules.relay.location` must be `in_process`;
 external relays are a later option. See
 [`orchestrator.example.yml`](../orchestrator.example.yml) for the full
 schema.
@@ -59,8 +73,9 @@ schema.
 
 A flow is a named, explicit combination: which transcription model, which
 formatter (or an explicit `formatter: null` for none), which relay route.
-Nothing is chosen implicitly: `enabled` defaults to false, and a missing
-`formatter` key is an error rather than a silent choice.
+Nothing is chosen implicitly: every flow writes `enabled` (true or false)
+and its four `budgets_ms`, and a missing `formatter` key is an error rather
+than a silent choice.
 
 - A flow with `formatter: null` adds no instructions; combine it with
   `relay_route: passthrough` for a raw-only flow that never calls an AI.
@@ -78,10 +93,11 @@ misconfiguration fails fast, before any inference and before any paid call.
 
 ## Budgets and cancellation
 
-One overall clock runs from command start (`budgets_ms.total`, default
-180000). Each stage's deadline is the earlier of the remaining overall
-budget and its own cap (`transcription` 120000, `formatter` 1000, `relay`
-60000 ms by default); the budget never resets at a stage boundary, and the
+One overall clock runs from command start (`budgets_ms.total`; the example
+writes 180000). Each stage's deadline is the earlier of the remaining
+overall budget and its own cap (`transcription`, `formatter` and `relay`;
+the example writes 120000, 1000 and 60000 ms); the budget never resets at a
+stage boundary, and the
 last 2500 ms are reserved for cleanup and output. Module limits (the relay's
 own timeouts) can only shorten a stage further. A spent overall budget is
 `flow_timeout`; a spent stage cap is `<stage>_timeout`.
@@ -183,19 +199,19 @@ pumice serve                          # per-user orchestrator.yml, port 17570
 pumice serve --config ./orchestrator.yml --port 0 --json
 ```
 
-It needs a `serve:` section in the orchestrator file; files without one stay
-valid for `pumice run`:
+It runs from the `serve:` section of the orchestrator file, which every
+file writes in full (`enabled: false` keeps it off for `pumice run`):
 
 ```yaml
 serve:
-  enabled: true               # default false: nothing starts implicitly
-  port: 17570                 # optional; 7567 is refused; 0 picks a free port
-  transcription_model: turbo  # required when enabled
-  startup_timeout_ms: 60000   # optional, 1000 to 300000
-  transcription_flows:        # optional, default empty: the OpenAI models
+  enabled: true               # nothing starts implicitly
+  port: 17570                 # 7567 is refused; 0 picks a free port
+  transcription_model: turbo  # null only while serve is disabled
+  startup_timeout_ms: 60000   # 1000 to 300000
+  transcription_flows:        # the OpenAI models; [] publishes none
     - clean
     - raw
-  allowed_origins: []         # optional, default empty: see "Reaching pumice serve over Tailscale"
+  allowed_origins: []         # [] accepts none besides 127.0.0.1; see "Reaching pumice serve over Tailscale"
 ```
 
 - Every **enabled** flow must use `serve.transcription_model` (one model is
@@ -645,6 +661,7 @@ another device use the microphone.
 
    ```yaml
    serve:
+     # …the section's other keys…
      allowed_origins:
        - https://server-1.example-tailnet.ts.net:17570
    ```

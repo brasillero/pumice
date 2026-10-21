@@ -69,27 +69,30 @@ pumice format show builtin:clean > ~/.config/pumice/clean.yml
 
 ## Configuration: formatter.yml
 
-The module config registers definition files and an optional default. It is
-looked up like every other module config: the `--config FILE` flag wins;
+The module config registers definition files and the default formatter. It
+is looked up like every other module config: the `--config FILE` flag wins;
 otherwise the per-user file `~/.config/pumice/formatter.yml` on Linux and
 macOS (`$XDG_CONFIG_HOME/pumice/formatter.yml` when `XDG_CONFIG_HOME` is
-absolute) and `%APPDATA%\pumice\formatter.yml` on Windows. A missing
-per-user file is fine — only `builtin:clean` is available then.
+absolute) and `%APPDATA%\pumice\formatter.yml` on Windows. `apply`,
+`check-config` and `show` of a registered id need the file; `list` (then
+only the built-ins) and `show builtin:clean` run without one. Every setting
+must be written: an omitted one is an error at line 1.
 
 ```yaml
 schema_version: 1
 
 # Definition files to load; relative paths resolve against this file.
+# `formatters: []` registers none.
 formatters:
   - path: clean.yml
 
-# Optional default used by `apply` when --formatter is omitted; must be one
-# of the ids above or builtin:clean.
+# The formatter `apply` uses when --formatter is omitted: one of the ids
+# above or builtin:clean. null: none (`apply` then needs --formatter).
 default: clean
 ```
 
-Validation is strict and reports `file:line:column`: unknown keys, missing
-or unreadable definition files (reported at the `path:` entry here), ids
+Validation is strict and reports `file:line:column`: missing settings,
+unknown keys, missing or unreadable definition files (reported at the `path:` entry here), ids
 that are invalid, duplicated across files, or that use the reserved
 `builtin:` namespace (reported inside the definition file), and a `default`
 that names nothing. See [`formatter.example.yml`](../formatter.example.yml)

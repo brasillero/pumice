@@ -62,9 +62,12 @@ This is a documented limitation. Runtime CPU variants on Windows are built only 
 pumice-transcribe file audio.wav --model-file model.gguf --language pt --json
 ```
 
-`--model-file` takes a direct GGUF path. You can also use `--model ID` to
-select a model configured in `transcribe.yml`, or omit both flags to use the
-configured `default_model`.
+`file` reads its settings from `transcribe.yml` (`--config` or the per-user
+file), where every setting must be written; start from
+[`transcribe.example.yml`](../../transcribe.example.yml). `--model-file`
+takes a direct GGUF path. You can also use `--model ID` to select a model
+configured in `transcribe.yml`, or omit both flags to use the configured
+`default_model`.
 
 See [`docs/transcription.md`](../../docs/transcription.md) for the full guide:
 configuration schema, model download recipes, JSON output, exit codes, and

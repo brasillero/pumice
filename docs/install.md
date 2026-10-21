@@ -183,39 +183,53 @@ No Handy changes are needed beyond this Custom provider configuration.
 
 ## Configuration
 
-Without a config file Pumice starts with no providers: every AI request
-gets an error and the app keeps its own transcript (the built-in `passthrough`
-and `inspect` still work). To format dictations, create the per-user config
-and list the providers you want:
+The relay needs a config file, and every setting in it must be written:
+an omitted one stops the relay with an error that names the file and line.
+There are no built-in defaults; start from
+[`relay.example.yml`](../relay.example.yml), which writes every setting and
+shows every supported provider, and copy it to the per-user location:
 
 - Windows: `%APPDATA%\pumice\relay.yml`
 - Linux and macOS: `~/.config/pumice/relay.yml`
   (or `$XDG_CONFIG_HOME/pumice/relay.yml`)
 
 ```yaml
+port: 7567
+total_timeout_secs: 30
+max_parallel: 4
 providers:                 # the client's model picks the entry; there is no
   - id: claude             # fallback: a failure, or no model, is an error
     enabled: true          # and the app keeps its own transcript
-    model: haiku           # required when enabled
+    model: haiku
+    binary: claude         # a bare name is looked up on PATH
+    timeout_secs: 30
   - id: codex
     enabled: false         # kept in the file, not offered, never run
+    model: null            # null only on a disabled entry
+    binary: codex
+    timeout_secs: 30
+debug_log:
+  enabled: false
+  path: pumice-debug.jsonl
 ```
 
 The client picks the provider: Handy sends the `model` the user chose, and
 Pumice runs exactly that provider. A request without a model, or any
 failure, is answered with an HTTP error, and the app keeps its own
-transcript. Every entry needs `id` and `enabled`; `model` is required
-on enabled entries; `timeout_secs` and `binary` are optional and
-documented in [`relay.example.yml`](../relay.example.yml), which shows
-every supported provider. Gateways, routing and logins are configured in
-each CLI itself; Pumice inherits them. Validate the file with `pumice relay check-config`. The
-config lives outside the install folder, so upgrading never touches it.
-A `pumice setup` wizard that writes this file is planned (paused for now).
+transcript. Every provider entry writes `id`, `enabled`, `model`, `binary`
+and `timeout_secs`. With no provider enabled every AI request gets an
+error and the app keeps its own transcript (the built-in `passthrough` and
+`inspect` still work). Gateways, routing and logins are configured in each
+CLI itself; Pumice inherits them. Validate the file with
+`pumice relay check-config`; `pumice relay doctor` also runs before the
+file exists. The config lives outside the install folder, so upgrading
+never touches it. A `pumice setup` wizard that writes this file is planned
+(paused for now).
 
-`max_parallel` (default 4, at most 32) sets how many requests may run their
-provider at the same time. Extra requests wait in line, first come first
-served; a request still waiting when its `total_timeout_secs` budget runs
-out gets HTTP 503.
+`max_parallel` (1 to 32) sets how many requests may run their provider at
+the same time. Extra requests wait in line, first come first served; a
+request still waiting when its `total_timeout_secs` budget runs out gets
+HTTP 503.
 
 Which providers are available today:
 
@@ -236,7 +250,10 @@ service starts with `pumice relay serve` (or `pumice relay serve --plain`).
 The old `pumice.yaml` configuration file is no longer read, with no
 fallback: rename it to `relay.yml` in the same directory
 (`~/.config/pumice/relay.yml` on Linux and macOS,
-`%APPDATA%\pumice\relay.yml` on Windows) and keep its contents unchanged.
+`%APPDATA%\pumice\relay.yml` on Windows), then add every setting it leaves
+out, since none has a built-in default anymore (see
+[Configuration](#configuration); `pumice relay check-config` names each
+missing one).
 Handy's base URL and port 7567 are exactly the same, so no Handy changes
 are needed. The standalone `pumice-relay` binary keeps its old arguments
 if you run it directly.
