@@ -6,8 +6,8 @@ standalone CLI; it does not talk to the relay or to any AI provider.
 
 When the transcription program is installed next to the `pumice`
 executable, every command below also works through the dispatcher with a
-`pumice transcribe` prefix — for example `pumice transcribe file audio.wav
---model tiny` — with arguments, output and exit status passed through
+`pumice transcribe` prefix — for example `pumice transcribe --config
+./transcribe.yml file audio.wav --model whisper-tiny-q8_0` — with arguments, output and exit status passed through
 unchanged. The dispatcher never searches `PATH` or the working directory;
 it only runs the `pumice-transcribe` sitting in the real `pumice`
 executable's own install directory (a symlinked `pumice` still resolves to
@@ -27,6 +27,12 @@ process: while the transcription program handles the event and shuts down,
 > also have `pumice` only; with those, or from source, install both programs
 > into the same directory, for example `cargo install --path . --locked` and
 > `cargo install --path crates/transcription --features engine --locked`.
+
+Before transcribing, copy [`transcribe.example.yml`](../transcribe.example.yml)
+to your own `transcribe.yml` and edit the settings. Every `file` invocation,
+including `--model-file`, needs a complete configuration. Pumice does not
+create it automatically. Pass `--config /path/to/transcribe.yml` or put it
+at the [per-user configuration path](#configuration).
 
 ## Building from source
 
@@ -572,7 +578,9 @@ they would at startup.
 The owner's check of a preview artifact on a Windows machine with a GPU. Use
 the same model, audio and language for every run (for example
 `whisper-tiny-q8_0`, then Turbo, and the repository's `sample-pt.wav` with
-`--language pt`). Nothing is installed; only the extracted folder is used.
+`--language pt`). Copy `transcribe.example.yml` to a complete settings
+file, edit it, and set `$config` to its absolute path. Nothing is installed;
+only the extracted folder is used.
 
 1. Extract the artifact to a new folder (try a path with a space). Open a
    PowerShell terminal in a separate, new and empty working directory
@@ -597,7 +605,7 @@ the same model, audio and language for every run (for example
    `"software"`, note its `description` and `type`, and whether
    `--backend gpu` (step 4) works on it. Run with `--backend cpu` too:
    `gpu_module` `not_requested`, only the CPU.
-3. CPU baseline: `& $exe file sample-pt.wav --model-file
+3. CPU baseline: `& $exe --config $config file sample-pt.wav --model-file
    MODEL --language pt --backend cpu --json`, three times; note the text,
    `model_load_ms`, `transcription_ms` and `compute`.
 4. Required GPU: the same with `--backend gpu`. It must succeed with
@@ -610,8 +618,8 @@ the same model, audio and language for every run (for example
    machine with only an integrated GPU, `auto` runs on the CPU with
    `fallback_reason: "gpu_integrated_only"` by design; step 4 then measures
    the integrated GPU, which needs `backend: gpu`.
-6. `& $exe serve --backend gpu --port 17568`: the startup line shows the GPU
-   snapshot; send a few requests, stop it with Ctrl-C.
+6. `& $exe --config $config serve --backend gpu --port 17568`: the startup
+   line shows the GPU snapshot; send a few requests, stop it with Ctrl-C.
 7. Without a usable GPU (disable the GPU in Device Manager, or a machine or
    VM without a Vulkan driver): `--backend auto` runs on the CPU with
    `fallback_reason: "gpu_unavailable"`, `--backend gpu` fails with
@@ -649,7 +657,9 @@ the same model, audio and language for every run (for example
 The owner's check of the macOS preview artifact on an Apple Silicon Mac
 (p14.4-macos-metal#1). Use the same model, audio and language for every run
 (`whisper-tiny-q8_0`, then Turbo, with `sample-pt.wav` and `--language pt`).
-Nothing is installed; only the extracted folder is used.
+Copy `transcribe.example.yml` to a complete settings file, edit it, and set
+`config` to its absolute path. Nothing is installed; only the extracted
+folder is used.
 
 1. Download the artifact, check `SHA256SUMS` and extract it to a new folder
    (try a path with a space), then remove the quarantine attribute as
@@ -671,8 +681,8 @@ Nothing is installed; only the extracted folder is used.
    `gpu_module` `not_requested`, only the CPU. Time both (`time "$exe"
    backends …`), twice each: the first `auto` diagnostic includes the Metal
    shader compilation, the second may reuse the system's shader cache.
-3. CPU baseline: `"$exe" file sample-pt.wav --model-file MODEL --language pt
-   --backend cpu --json`, three times; note the text, `model_load_ms`,
+3. CPU baseline: `"$exe" --config "$config" file sample-pt.wav --model-file
+   MODEL --language pt --backend cpu --json`, three times; note the text, `model_load_ms`,
    `transcription_ms` and `compute` (`cpu_variant: "arm64"`).
 4. Metal: the same with `--backend gpu`, three times. It must succeed with
    `compute.backend` `metal` and `compute.device` `MTL0` with your chip as
@@ -685,8 +695,8 @@ Nothing is installed; only the extracted folder is used.
    a new folder (it never loads Metal, D2). If Turbo is clearly faster on
    Metal than on the CPU (warm and cold), say so: that is the evidence D1
    waits for before `auto` may pick Metal.
-6. `"$exe" serve --backend gpu --port 17568`: the startup line shows the
-   Metal snapshot; send a few requests, stop it with Ctrl-C. While it runs,
+6. `"$exe" --config "$config" serve --backend gpu --port 17568`: the startup
+   line shows the Metal snapshot; send a few requests, stop it with Ctrl-C. While it runs,
    Activity Monitor (Window → GPU History) should show GPU activity during a
    request.
 7. Relocation and loads: copy the folder elsewhere and run step 2 from the
@@ -716,7 +726,65 @@ and `whisper-large-v3-turbo` is MIT, per their Hugging Face model cards.
 `tiny` is fast and rough; `turbo` is slower and usually more accurate.
 
 Models from outside the catalog stay supported: download them any way you
-like, verify the bytes yourself and register a local `path:` entry.
+like, verify the bytes yourself and put the `.gguf` file in the
+[models folder](#the-models-folder).
+
+## The models folder
+
+The transcription models available are the `.gguf` files in one folder:
+`models_dir` in `transcribe.yml`, or with `models_dir: null` the per-user
+data directory (see [Where downloaded files go](#where-downloaded-files-go)).
+Nothing else lists them: putting a file there makes it available, removing
+it makes it unavailable (p17-serve-model-names/D4, D7). Every command that
+needs a model reads the folder once when it starts (a snapshot; nothing
+watches the folder afterwards, so restart `serve` after changing it).
+
+Each file's **model id**:
+
+- A file whose byte size and SHA-256 match a [catalog](#getting-models)
+  entry takes the catalog id, whatever its file name: a downloaded
+  `whisper-large-v3-turbo-Q8_0.gguf`, or the same bytes renamed to
+  `turbo.gguf`, are both `whisper-large-v3-turbo-q8_0` (D8). Only files
+  with a catalog model's size are hashed; hashing a large model takes a
+  few seconds, each time a command reads the folder.
+- Any other `.gguf` file takes its exact file name without `.gguf`, with no
+  lowercasing or other changes: `My Model v2.gguf` is `My Model v2`. Ids
+  are compared exactly, so `--model my model v2` does not match.
+- A custom file named after a catalog id (`whisper-tiny-q8_0.gguf`)
+  keeps its stem but is marked `catalog: false`: only matching bytes
+  establish catalog provenance. A file under a catalog *file name*
+  (`whisper-tiny-Q8_0.gguf`) with other bytes keeps its file name as its
+  id and gets a warning (it may be corrupt; `models verify` checks it).
+
+What counts:
+
+- Only the folder's own files, not subfolders. The `.gguf` extension is
+  matched in any letter case (`Model.GGUF` is `Model`).
+- Ignored: names starting with `.` (hidden files, macOS `._*` files),
+  folders, partial downloads (`*.gguf.part`), download locks
+  (`*.gguf.lock`), `SHA256SUMS` and every other extension.
+- A symbolic link to a file counts, with the target's bytes (the id comes
+  from the link's name, or the target's catalog match). A link to a folder
+  is not followed. A broken `.gguf` link, or one to something that is not a
+  file, is skipped with a warning.
+
+Errors (the folder cannot be used until they are fixed, and the message
+names the files):
+
+- two files with the same id — never resolved by directory order. This
+  includes two copies of one catalog model, and on Linux `a.gguf` next to
+  `a.GGUF`. On Windows and macOS (case-insensitive by default) two names
+  differing only in letter case cannot exist together; on Linux `A.gguf`
+  and `a.gguf` are two models, `A` and `a`;
+- a file name that gives an empty, non-UTF-8, control-character or
+  over-512-byte id.
+
+An empty folder, or a folder that does not exist yet, has no models; it
+never blocks `models catalog`, `models download` or `models verify`, and
+neither does a `default_model` that is not there. The selected model is
+checked when a command uses it, before any audio is transcribed.
+
+`pumice-transcribe models list` shows the folder's models and warnings.
 
 ## Downloading models
 
@@ -768,8 +836,10 @@ is refused before any byte is stored, and redirects are followed manually —
 at most 5, HTTPS targets only. Two concurrent downloads of the same model
 fail fast (the second reports "already in progress").
 
-When the file is already installed and verifies, `models download` reports
-`already installed` (exit 0) without touching the network. When a file
+When the model is already installed and verifies, `models download` reports
+`already installed` (exit 0) without touching the network. That includes a
+copy under another name: any `.gguf` file in the folder with the catalog
+size and SHA-256 is the model, and a second copy would give its id twice. When a file
 exists but fails verification (corrupt or modified), the command reports it
 and requires `--force` to replace it.
 
@@ -814,8 +884,10 @@ emitted.
 
 ### Where downloaded files go
 
-By default, downloaded models live in the per-user data directory (decision
-D2 — downloads never edit the config and never enable a model):
+Downloads go into the [models folder](#the-models-folder), under the
+catalog's file name, so a downloaded model is available under its catalog
+id; downloads never edit the config. By default the folder is the per-user
+data directory:
 
 - Linux: `$XDG_DATA_HOME/pumice/models`, else `~/.local/share/pumice/models`
 - macOS: absolute `$XDG_DATA_HOME/pumice/models` when set, else
@@ -829,23 +901,6 @@ directory is created mode 0700, and a download refuses an existing directory
 that group or others can write — see
 [Downloading models](#downloading-models).
 
-### Registering a catalog model
-
-A model entry can use `catalog: <catalog id>` instead of `path:`; exactly one
-of the two is required. The entry resolves to the catalog file inside the
-models directory:
-
-```yaml
-models:                 # the file's other settings are left out here
-  - id: turbo
-    catalog: whisper-large-v3-turbo-q8_0
-  - id: local
-    path: /opt/models/my-model.gguf
-```
-
-`check-config` validates catalog ids; `models list` shows which entries use
-`catalog:` and whether the file is present.
-
 ## Configuration
 
 `pumice-transcribe` reads one configuration file:
@@ -858,53 +913,66 @@ models:                 # the file's other settings are left out here
 
 A missing file is an error for the commands that read settings (`file`,
 `serve`, `check-config`, `models list`); `models catalog`, `models download`,
-`models verify` and `backends --backend MODE` also run without one (models
-then live in the per-user directory). A one-off `file --model-file PATH`
-also runs without one, from its flags and their defaults (see
-[`file`](#file)). A missing explicit `--config` file is always an error, and
-a file that exists must be complete for every command.
+`models verify` and `backends --backend MODE` also run without one (the
+models folder is then the per-user directory). `file` always needs the
+configuration, including with `--model-file PATH`. A missing explicit
+`--config` file is always an error, and a file that exists must be complete
+for every command.
 
 Every setting must be written: an omitted one is an error with the file and
 line (line 1 for a top-level setting, the `server:` mapping for
 `server.port`). There are no built-in defaults; start from
 [`transcribe.example.yml`](../transcribe.example.yml), which writes them
-all. The short form:
+all. Copy the example to a file you own and edit it before use; Pumice does
+not create the configuration automatically. From a repository checkout:
+
+```bash
+cp transcribe.example.yml transcribe.yml
+# Edit transcribe.yml, then pass --config ./transcribe.yml to each command.
+```
+
+In PowerShell, use `Copy-Item transcribe.example.yml transcribe.yml`. You
+can instead copy it to the per-user path above and omit `--config`. The
+complete schema is:
 
 ```yaml
 schema_version: 1
-default_model: tiny      # must name an entry in models; null: none
+default_model: whisper-large-v3-turbo-q8_0  # a model id in the folder; null: none
 language: pt             # language hint; null: detect
 threads: 8               # 1-32, or auto (available parallelism, capped at 32)
 backend: cpu             # cpu, auto or gpu
 server:
   port: 17568            # for `serve`; null: `serve` needs --port
-models_dir: null         # where `catalog:` files live; null: the per-user
-                         # directory (see "Downloading models"). A path
+models_dir: null         # the models folder; null: the per-user directory
+                         # (see "Where downloaded files go"). A path
                          # overrides it; `~` is NOT expanded here — use an
                          # absolute path, or a relative one (resolved
                          # against this file)
-models:                  # explicit list; nothing is enabled implicitly
-  - id: turbo
-    catalog: whisper-large-v3-turbo-q8_0   # downloaded catalog model
-  - id: tiny
-    path: whisper-tiny-Q8_0.gguf           # local file
 ```
 
-Relative `path` values and a relative `models_dir` resolve against the
-directory that contains the config file. A leading `~` is not expanded by
-YAML or by this module — write an absolute path or a relative one. Paths
-must be nonempty. Model ids
-must match `[a-z0-9][a-z0-9._-]*`. A model entry has exactly one of `path`
-(a local GGUF file) or `catalog` (a built-in catalog id, see "Downloading
-models"). Duplicate ids, dangling `default_model`, unknown catalog ids,
-unknown keys, an unknown `backend`, an invalid `threads`, a missing setting
-and invalid `schema_version` are rejected with a file:line:column message.
+A relative `models_dir` resolves against the directory that contains the
+config file. A leading `~` is not expanded by YAML or by this module —
+write an absolute path or a relative one; it must be nonempty.
+`default_model` is a model id from the [models folder](#the-models-folder);
+it is checked against the folder when a command uses it (`file` or `serve`
+without `--model`, and `check-config`), where a missing one is an error at
+its line. Unknown keys, an unknown `backend`, an invalid `threads`, a
+missing setting and an invalid `schema_version` are rejected with a
+file:line:column message.
 
-Validate a file without loading a model:
+The `models:` list of earlier versions is gone: the folder replaces it, and
+a file that still has `models:` is rejected with a message saying so. To
+migrate, move (or link) each listed model file into the models folder, give
+non-catalog files the name you want as their id, remove `models:`, and
+change `default_model` (and any orchestrator `transcription_model`) to the
+ids `models list` shows — a catalog file's catalog id, for example
+`whisper-large-v3-turbo-q8_0` instead of `turbo`.
+
+Validate a file and the models folder without loading a model:
 
 ```bash
-pumice-transcribe check-config
-pumice-transcribe check-config --config /path/to/transcribe.yml --json
+pumice-transcribe --config ./transcribe.yml check-config
+pumice-transcribe --config /path/to/transcribe.yml check-config --json
 ```
 
 ## Commands
@@ -912,43 +980,37 @@ pumice-transcribe check-config --config /path/to/transcribe.yml --json
 ### `file`
 
 ```bash
-# Use a configured model id
-pumice-transcribe file audio.wav --model tiny
+# Use a model id from the models folder
+pumice-transcribe --config ./transcribe.yml file audio.wav --model whisper-tiny-q8_0
 
-# Use a direct GGUF path (no models entry needed, and no config file either)
-pumice-transcribe file audio.wav --model-file /path/to/whisper-tiny-Q8_0.gguf
+# Use a GGUF file anywhere, with the same complete configuration
+pumice-transcribe --config ./transcribe.yml file audio.wav --model-file /path/to/whisper-tiny-Q8_0.gguf
 
 # Use the configured default_model
-pumice-transcribe file audio.wav
+pumice-transcribe --config ./transcribe.yml file audio.wav
 
 # Override config values for one call
-pumice-transcribe file audio.wav --model turbo --language en --threads 4 --json
+pumice-transcribe --config ./transcribe.yml file audio.wav --model whisper-large-v3-turbo-q8_0 --language en --threads 4 --json
 
 # Choose the compute backend for one call
-pumice-transcribe file audio.wav --backend auto --json
+pumice-transcribe --config ./transcribe.yml file audio.wav --backend auto --json
 ```
 
-With `--json`, `result.compute` is the
-[compute snapshot](#compute-backend-cpu-auto-gpu) of the loaded model.
+With `--json`, `result.model` is the model id and `result.compute` the
+[compute snapshot](#compute-backend-cpu-auto-gpu) of the loaded model. For
+`--model-file`, the id follows the [models folder's rule](#the-models-folder)
+(the catalog id for a catalog model's bytes, else the file name without its
+extension), so the file is hashed when it has a catalog model's size.
 
 `--model ID` and `--model-file PATH` are mutually exclusive. If neither is
 given, the configured `default_model` is used; if there is none, the command
 fails.
 
-A one-off `file --model-file PATH` also runs when there is no configuration
-file (no `--config` and no per-user `transcribe.yml`). Its settings then come
-from the flags, with these defaults:
-
-| Flag | Default without a configuration file |
-| --- | --- |
-| `--language xx` | detect the language |
-| `--threads N` | the available parallelism, capped at 32 |
-| `--backend MODE` | `cpu` |
-
-When a configuration file exists (`--config FILE` or the per-user file), it
-is read and must be complete, as for every other command; the flags override
-its `language`, `threads` and `backend`. `--model ID` and `default_model`
-always need the file.
+Every `file` call reads a complete configuration (`--config FILE` or the
+per-user file), even with `--model-file PATH`. The flags override its
+`language`, `threads` and `backend` for that call; they do not replace the
+configuration. `--model-file` chooses only the model file. You can set
+`default_model: null` when selecting a model explicitly for every run.
 
 ### `models list`
 
@@ -957,12 +1019,24 @@ pumice-transcribe models list
 pumice-transcribe models list --json
 ```
 
-Lists configured models with their resolved path, whether it is a regular
-file, its size in bytes when it is a regular file, and which model is the
-default. Entries that use `catalog:` instead of `path` show the catalog id
-in the `catalog` field (JSON) and resolve their path inside the models
-directory. Missing paths and directories have `exists: false` and no `size`
-field in JSON. No hashing or network access is performed.
+Lists the [models folder](#the-models-folder): its path, then each model's
+id, size in bytes, whether it matched a catalog entry, whether it is the
+`default_model`, and its file; warnings (skipped links, a mismatched
+catalog file name, a folder that does not exist yet, a `default_model` not
+in the folder) go to stderr. Files with a catalog model's size are hashed;
+there is no network access. Problems that make the folder unusable
+(duplicate or invalid ids) are errors.
+
+```json
+{"schema_version":1,"ok":true,"result":{
+  "models_dir":"/home/me/.local/share/pumice/models",
+  "models":[
+    {"id":"My Model","file":"/home/me/.local/share/pumice/models/My Model.gguf","size":147951465,"catalog":false,"default":false},
+    {"id":"whisper-large-v3-turbo-q8_0","file":"/home/me/.local/share/pumice/models/whisper-large-v3-turbo-Q8_0.gguf","size":886381760,"catalog":true,"default":true}],
+  "diagnostics":[]}}
+```
+
+Models are sorted by id. Each diagnostic is `{"file": ..., "message": ...}`.
 
 ### `models catalog`, `models download`, `models verify`
 
@@ -976,15 +1050,16 @@ These manage the built-in pinned model catalog; see
 [Downloading models](#downloading-models) for the full behavior (where files
 go, verification, progress output, network rules).
 
-In `models catalog`, `installed: yes` means a regular file with the expected
-size is present — presence and size only, not integrity (any right-sized
-file counts, even with different content). Use `models verify` to re-hash
-the installed file against the catalog SHA-256.
+In `models catalog`, `installed: yes` means a `.gguf` file with the expected
+size is in the models folder, under any name — presence and size only, not
+integrity (any right-sized file counts, even with different content). Use
+`models list` or `models verify` to hash it. `models verify` checks the
+catalog file name, or a copy under another name when that file is absent.
 
 ### `serve`
 
 ```bash
-pumice-transcribe serve --config ./transcribe.yml --model turbo --port 17568
+pumice-transcribe serve --config ./transcribe.yml --model whisper-large-v3-turbo-q8_0 --port 17568
 ```
 
 Runs an OpenAI-compatible HTTP server on `127.0.0.1:PORT`. The bind address is
@@ -993,7 +1068,8 @@ always `127.0.0.1` and is not configurable. The port can also be set as
 and the actual bound address is printed on startup.
 
 `serve` loads one model at startup and keeps it in memory. The model is
-selected with `--model ID`; if omitted, the configured `default_model` is used.
+selected with `--model ID` from the models folder, read once at startup; if
+omitted, the configured `default_model` is used.
 `--backend` overrides `backend:` in `transcribe.yml`; the startup line on
 stderr shows the [compute snapshot](#compute-backend-cpu-auto-gpu). Startup
 load failure exits non-zero before the server starts listening. On a GPU, a
@@ -1024,7 +1100,7 @@ the server busy for 26 to 32 seconds, and a shutdown waited as long.
   {
     "object": "list",
     "data": [
-      { "id": "turbo", "object": "model", "created": 0, "owned_by": "pumice" }
+      { "id": "whisper-large-v3-turbo-q8_0", "object": "model", "created": 0, "owned_by": "pumice" }
     ]
   }
   ```
@@ -1093,11 +1169,11 @@ the server busy for 26 to 32 seconds, and a shutdown waited as long.
 ```bash
 curl --fail-with-body --max-time 130 \
   http://127.0.0.1:17568/v1/audio/transcriptions \
-  -F 'file=@clip.wav' -F 'model=turbo' -F 'language=pt'
+  -F 'file=@clip.wav' -F 'model=whisper-large-v3-turbo-q8_0' -F 'language=pt'
 
 curl --fail-with-body --max-time 130 \
   http://127.0.0.1:17568/v1/audio/transcriptions \
-  -F 'file=@clip.wav' -F 'model=turbo' -F 'response_format=text'
+  -F 'file=@clip.wav' -F 'model=whisper-large-v3-turbo-q8_0' -F 'response_format=text'
 
 curl --fail http://127.0.0.1:17568/v1/models
 curl --fail http://127.0.0.1:17568/health
@@ -1111,7 +1187,7 @@ Internal protocol, version 2 (version 2 added the compute snapshot and the
 the protocol version.
 
 ```bash
-pumice-transcribe --config ./transcribe.yml serve --model turbo --port 0 \
+pumice-transcribe --config ./transcribe.yml serve --model whisper-large-v3-turbo-q8_0 --port 0 \
   --managed --instance-id gen-1
 ```
 
@@ -1260,19 +1336,27 @@ config has `default_model: null`.
 setting out. Every setting is required; copy it from
 `transcribe.example.yml`.
 - **"the transcription configuration file does not exist"**: there is no
-`--config` file and no per-user `transcribe.yml`; create one (a one-off
-`file --model-file PATH` runs without it).
-- **"unknown model id ...; configured ids: ..."**: the id passed to `--model`
-is not in the config `models` list.
+`--config` file and no per-user `transcribe.yml`; copy
+`transcribe.example.yml`, edit it and pass its path with `--config`. This
+also applies to `file --model-file PATH`.
+- **"model `ID` is not in the models folder ... (models there: ...)"**
+(`model_not_found`): no file in the [models folder](#the-models-folder) has
+that id. For a catalog id the error names the download command, e.g.
+`pumice-transcribe --config FILE models download whisper-tiny-q8_0`
+(`--config` is kept when you passed one, because a `models_dir` override
+only applies through that config file). With a `default_model:` prefix it
+is a configuration error at the `default_model` line.
+- **"models is no longer a setting"**: the config still has the `models:`
+list of earlier versions; see the migration note in
+[Configuration](#configuration).
+- **"two files in the models folder have the model id ..."**: remove or
+rename one of the two files named.
 - **"schema_version must be 1"**: the config file has another
 `schema_version`.
 - **"unknown setting `foo`"**: the config contains a key that is not part of
 the schema. Check the file line in the error message.
-- **"model file not found"**: the resolved model path does not point to a
-regular file. For a `catalog:` entry the error names the fixing command,
-e.g. `pumice-transcribe --config FILE models download whisper-tiny-q8_0`
-(`--config` is kept when you passed one, because a `models_dir` override
-only applies through that config file).
+- **"model file not found"**: the `--model-file` path is not a regular
+file, or a selected model's file was removed after the folder was read.
 - **"backend must be one of cpu, auto, gpu"**: the config's `backend` is not
   one of the three modes.
 - **"backend gpu needs a GPU build ..." / "backend gpu found no GPU module
@@ -1283,9 +1367,9 @@ only applies through that config file).
   retried on the CPU ..."** (`model_load_failed`): the model could not be
   loaded (for example not enough GPU memory, or a damaged model file). Try
   `backend: cpu`.
-- **"unknown catalog model ..."**: the id passed to `models download`,
-  `models verify` or a config `catalog:` entry is not in the built-in
-  catalog; run `pumice-transcribe models catalog`.
+- **"unknown catalog model ..."**: the id passed to `models download` or
+  `models verify` is not in the built-in catalog; run
+  `pumice-transcribe models catalog`.
 - **"... does not match the catalog entry (corrupt or modified); re-run with
   --force"**: a file is already installed under the catalog's file name but
   its size or SHA-256 differs. The file is left untouched; pass `--force` to

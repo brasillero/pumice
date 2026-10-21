@@ -41,10 +41,10 @@ pub struct TranscriptOutput {
     pub transcription_ms: Option<u64>,
 }
 
-/// One entry of `models list --json`.
+/// One model of `models list --json`: a file in the transcription models
+/// folder, under its model id (p17-serve-model-names/D4).
 pub struct ModelEntry {
     pub id: String,
-    pub exists: bool,
 }
 
 /// How a call into the transcription sibling failed. Child error *messages*
@@ -86,7 +86,9 @@ impl Transcribe {
         Transcribe { binary, config }
     }
 
-    /// `pumice-transcribe --config <FILE> models list --json`.
+    /// `pumice-transcribe --config <FILE> models list --json`: the models in
+    /// the transcription models folder. The child hashes files whose size
+    /// matches a catalog model, so `deadline` should be an explicit budget.
     pub async fn models_list(
         &self,
         deadline: Instant,
@@ -113,13 +115,11 @@ impl Transcribe {
                         "the transcription module reported success but exited nonzero",
                     ));
                 }
-                let entries: Vec<RawModelEntry> = parse_result(envelope.result)?;
-                Ok(entries
+                let list: RawModelsList = parse_result(envelope.result)?;
+                Ok(list
+                    .models
                     .into_iter()
-                    .map(|entry| ModelEntry {
-                        id: entry.id,
-                        exists: entry.exists,
-                    })
+                    .map(|entry| ModelEntry { id: entry.id })
                     .collect())
             }
             false => self.module_error(envelope, status),
@@ -433,9 +433,13 @@ struct EnvelopeLocation {
 }
 
 #[derive(Debug, Deserialize)]
+struct RawModelsList {
+    models: Vec<RawModelEntry>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RawModelEntry {
     id: String,
-    exists: bool,
 }
 
 #[derive(Debug, Deserialize)]

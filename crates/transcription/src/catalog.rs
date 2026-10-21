@@ -11,13 +11,15 @@
 /// One downloadable model in the built-in catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CatalogEntry {
-    /// Stable catalog id, also accepted as `catalog:` in `transcribe.yml`.
+    /// Stable catalog id: the model id of a file in the models folder with
+    /// this entry's size and SHA-256, whatever its file name.
     pub id: &'static str,
     /// One-line human description for listings.
     pub description: &'static str,
     /// Download URL pinned to a full repository revision (HTTPS only).
     pub url: &'static str,
-    /// File name the verified bytes are stored under in the models directory.
+    /// File name `models download` stores the verified bytes under in the
+    /// models folder.
     pub file_name: &'static str,
     /// Exact expected file size in bytes.
     pub size_bytes: u64,
@@ -83,10 +85,22 @@ mod tests {
         assert!(find("whisper-base").is_none());
     }
 
+    /// Catalog ids stay plain: `[a-z0-9][a-z0-9._-]*`.
+    fn is_plain_id(id: &str) -> bool {
+        let mut bytes = id.bytes();
+        match bytes.next() {
+            Some(b) if b.is_ascii_lowercase() || b.is_ascii_digit() => {}
+            _ => return false,
+        }
+        bytes.all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'_' || b == b'-'
+        })
+    }
+
     #[test]
-    fn ids_are_unique_and_valid_config_ids() {
+    fn ids_are_unique_and_plain() {
         for entry in CATALOG {
-            assert!(crate::config::is_valid_id(entry.id));
+            assert!(is_plain_id(entry.id));
         }
         let mut ids: Vec<&str> = CATALOG.iter().map(|entry| entry.id).collect();
         ids.sort_unstable();

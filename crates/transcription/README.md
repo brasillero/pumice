@@ -58,18 +58,26 @@ This is a documented limitation. Runtime CPU variants on Windows are built only 
 
 ## Usage
 
+Copy [`transcribe.example.yml`](../../transcribe.example.yml) to your own
+`transcribe.yml` and edit its settings before transcribing. From the
+repository root:
+
 ```bash
-pumice-transcribe file audio.wav --model-file model.gguf --language pt --json
+cp transcribe.example.yml transcribe.yml
+pumice-transcribe --config ./transcribe.yml file audio.wav --model-file model.gguf --language pt --json
 ```
 
-`--model-file` takes a direct GGUF path; this one-off form also runs without
-a configuration file, from its flags (`--language`, default: detect;
-`--threads`, default: the available parallelism, capped at 32; `--backend`,
-default: `cpu`). You can also use `--model ID` to select a model configured
-in `transcribe.yml`, or omit both flags to use the configured
-`default_model`; both need the file. `transcribe.yml` (`--config` or the
-per-user file) must be complete whenever it exists; start from
-[`transcribe.example.yml`](../../transcribe.example.yml).
+Every `file` invocation needs a complete configuration, including when
+`--model-file` selects a direct GGUF path. Pumice does not create the file
+automatically. `--config` selects it explicitly; otherwise the per-user
+`transcribe.yml` is used. The flags override the configured language,
+threads and backend for that call.
+
+You can also use `--model ID` to select a file from the models folder
+(`~/.local/share/pumice/models` on Linux, overridden by `models_dir` in
+`transcribe.yml`), or omit both flags to use the configured `default_model`.
+Catalog files are named by size and SHA-256; other `.gguf` files use their
+file name without the extension. Run `models list` to see the available ids.
 
 See [`docs/transcription.md`](../../docs/transcription.md) for the full guide:
 configuration schema, model download recipes, JSON output, exit codes, and

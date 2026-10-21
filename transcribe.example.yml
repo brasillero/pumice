@@ -6,8 +6,11 @@
 #      ($XDG_CONFIG_HOME/pumice/transcribe.yml when XDG_CONFIG_HOME is absolute),
 #      and %APPDATA%\pumice\transcribe.yml on Windows,
 #   and a missing file is an error. Only `models catalog`, `models
-#   download`, `models verify`, `backends --backend MODE` and a one-off
-#   `file --model-file PATH` (from its flags) run without one.
+#   download`, `models verify` and `backends --backend MODE` run without
+#   one. `file` always needs this file, including with --model-file.
+#
+# Copy this example to transcribe.yml before transcribing; Pumice does not
+# create it automatically. Pass --config <path> or use the per-user path.
 #
 # Every setting below must be written: leaving one out is an error that
 # names the file and line. There are no built-in defaults; this file is the
@@ -18,9 +21,12 @@
 
 schema_version: 1
 
-# The model used when a command names none; it must name an entry in models
-# below. null: every command must pass --model or --model-file.
-default_model: tiny
+# The model used when a command names none: a model id from the models
+# folder below (a catalog model's catalog id, any other file's name without
+# .gguf). It is checked when a command uses it, so an empty folder does not
+# block `models catalog` or `models download`. null: every command must pass
+# --model or --model-file.
+default_model: whisper-large-v3-turbo-q8_0
 
 # Language hint (ISO-639-1 two-letter code, e.g. pt, en). null: the engine
 # detects the language.
@@ -49,21 +55,19 @@ server:
   # null: `serve` needs --port (`pumice serve` always passes one).
   port: 17568
 
-# Where downloaded catalog models are stored. null: the per-user data
-# directory ($XDG_DATA_HOME/pumice/models or ~/.local/share/pumice/models on
-# Linux, ~/Library/Application Support on macOS, %LOCALAPPDATA%\pumice\models
-# on Windows). A path overrides it: relative paths resolve against this
-# file's directory, and `~` is NOT expanded — write an absolute path.
+# The models folder. Its .gguf files are the available models; nothing else
+# lists them. A file whose size and SHA-256 match a catalog model takes the
+# catalog id (whisper-large-v3-turbo-q8_0), whatever its file name; any other
+# .gguf file takes its exact file name without .gguf (My Model.gguf is
+# "My Model"). Only the folder's own files count (no subfolders); a link to
+# a file counts. The folder is read once, when a command starts.
+# `pumice-transcribe models list` shows what it holds; `models download ID`
+# saves a catalog model there:
+#   pumice-transcribe models download whisper-large-v3-turbo-q8_0
+#
+# null: the per-user data directory ($XDG_DATA_HOME/pumice/models or
+# ~/.local/share/pumice/models on Linux, ~/Library/Application
+# Support/pumice/models on macOS, %LOCALAPPDATA%\pumice\models on Windows).
+# A path overrides it: relative paths resolve against this file's directory,
+# and `~` is NOT expanded — write an absolute path.
 models_dir: null
-
-# Explicit model list. Nothing is enabled implicitly.
-models:
-  # A model from the built-in catalog. Download it explicitly with:
-  #   pumice-transcribe models download whisper-large-v3-turbo-q8_0
-  # An entry has exactly one of `catalog:` or `path:`.
-  - id: turbo
-    catalog: whisper-large-v3-turbo-q8_0
-
-  # A local GGUF file. Relative paths resolve against this file's directory.
-  - id: tiny
-    path: whisper-tiny-Q8_0.gguf

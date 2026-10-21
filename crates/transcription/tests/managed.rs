@@ -206,8 +206,8 @@ fn main() -> ExitCode {
             startup_failures_are_one_error_record,
         ),
         (
-            "a_model_id_too_long_to_announce_is_refused_before_loading",
-            a_model_id_too_long_to_announce_is_refused_before_loading,
+            "a_model_id_not_in_the_folder_is_refused_before_loading",
+            a_model_id_not_in_the_folder_is_refused_before_loading,
         ),
         (
             "normal_mode_ignores_stdin_and_keeps_stdout_empty",
@@ -219,8 +219,8 @@ fn main() -> ExitCode {
             sigterm_stops_a_managed_child_cleanly,
         ),
         (
-            "a_one_off_file_runs_without_a_config_file",
-            a_one_off_file_runs_without_a_config_file,
+            "a_one_off_file_runs_with_a_config_file",
+            a_one_off_file_runs_with_a_config_file,
         ),
         (
             "a_one_off_file_still_needs_a_complete_config_file",
@@ -272,15 +272,19 @@ fn setup(model_present: bool) -> Setup {
 
 fn setup_with_model_id(model_present: bool, model: &str) -> Setup {
     let dir = tempfile::tempdir().unwrap();
+    // The models folder: the model's id is its file name without .gguf.
+    std::fs::create_dir(dir.path().join("models")).unwrap();
     if model_present {
-        std::fs::write(dir.path().join("model.gguf"), b"not a real model").unwrap();
+        std::fs::write(
+            dir.path().join("models").join(format!("{model}.gguf")),
+            b"not a real model",
+        )
+        .unwrap();
     }
     let config = dir.path().join("transcribe.yml");
     std::fs::write(
         &config,
-        format!(
-            "schema_version: 1\ndefault_model: null\nlanguage: null\nthreads: auto\nbackend: cpu\nserver:\n  port: null\nmodels_dir: null\nmodels:\n  - id: {model}\n    path: model.gguf\n"
-        ),
+        "schema_version: 1\ndefault_model: null\nlanguage: null\nthreads: auto\nbackend: cpu\nserver:\n  port: null\nmodels_dir: models\n",
     )
     .unwrap();
     let started_file = dir.path().join("started");
@@ -980,16 +984,18 @@ fn startup_failures_are_one_error_record() {
     }
 }
 
-fn a_model_id_too_long_to_announce_is_refused_before_loading() {
+fn a_model_id_not_in_the_folder_is_refused_before_loading() {
+    // No file name can give this id (ids are at most 512 bytes, names
+    // usually 255): it is never in the folder.
     let long_id = "m".repeat(600);
-    let setup = setup_with_model_id(true, &long_id);
+    let setup = setup_with_model_id(false, &long_id);
     // A load would fail with `model_load_failed`; it never starts.
     let mut child = spawn(&setup, "fail-load", 0, &managed_args());
     let status = child.wait(PROMPT);
     assert_eq!(status.code(), Some(2), "stderr: {}", child.stderr());
     let records = child.all_records();
     assert_eq!(events(&records), ["error"]);
-    assert_eq!(records[0]["code"], "invalid_config");
+    assert_eq!(records[0]["code"], "model_not_found");
     assert_eq!(records[0]["instance_id"], INSTANCE);
 }
 
@@ -1040,8 +1046,7 @@ fn sigterm_stops_a_managed_child_cleanly() {
 // --- One-off `file` ----------------------------------------------------------
 //
 // The same child, as `pumice-transcribe file`: a one-off `file --model-file`
-// runs from its flags without a configuration file, but a file that exists
-// must be complete.
+// requires a complete configuration file. Flags override its settings.
 
 /// Runs `args` in the child with `home` as the only per-user location.
 fn run_file_child(home: &Path, args: &[OsString]) -> std::process::Output {
@@ -1073,12 +1078,19 @@ fn one_off_file_args(wav: &Path, model: &Path) -> Vec<OsString> {
     ]
 }
 
-fn a_one_off_file_runs_without_a_config_file() {
+fn a_one_off_file_runs_with_a_config_file() {
     let dir = tempfile::tempdir().unwrap();
     let wav_path = dir.path().join("clip.wav");
     std::fs::write(&wav_path, wav(0.5)).unwrap();
     let model = dir.path().join("model.gguf");
     std::fs::write(&model, b"not a real model").unwrap();
+
+    let per_user = dir.path().join("config").join("pumice");
+    std::fs::create_dir_all(&per_user).unwrap();
+    std::fs::write(
+        per_user.join("transcribe.yml"),
+        "schema_version: 1\ndefault_model: null\nlanguage: en\nthreads: 2\nbackend: auto\nserver:\n  port: null\nmodels_dir: null\n",
+    ).unwrap();
 
     let out = run_file_child(dir.path(), &one_off_file_args(&wav_path, &model));
     assert_eq!(
@@ -1091,31 +1103,19 @@ fn a_one_off_file_runs_without_a_config_file() {
     let json: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(json["ok"], true, "{json}");
     assert_eq!(json["result"]["text"], "fake words", "{json}");
-    // Without a configuration the backend is the flag default, cpu.
-    assert_eq!(json["result"]["compute"]["requested"], "cpu", "{json}");
+    // Named by the models folder's rule: the file name without .gguf.
+    assert_eq!(json["result"]["model"], "model", "{json}");
+    // The configuration supplies the backend and language.
+    assert_eq!(json["result"]["compute"]["requested"], "auto", "{json}");
+    assert_eq!(json["result"]["language"], "en", "{json}");
 
     // The flags still apply.
     let mut args = one_off_file_args(&wav_path, &model);
-    args.extend(["--backend", "auto", "--language", "pt"].map(OsString::from));
+    args.extend(["--backend", "cpu", "--language", "pt"].map(OsString::from));
     let out = run_file_child(dir.path(), &args);
     let json: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(json["result"]["compute"]["requested"], "auto", "{json}");
+    assert_eq!(json["result"]["compute"]["requested"], "cpu", "{json}");
     assert_eq!(json["result"]["language"], "pt", "{json}");
-
-    // A model id needs the configuration file.
-    let out = run_file_child(
-        dir.path(),
-        &[
-            "file".into(),
-            wav_path.clone().into(),
-            "--model".into(),
-            MODEL.into(),
-            "--json".into(),
-        ],
-    );
-    assert_eq!(out.status.code(), Some(2));
-    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(json["error"]["code"], "invalid_config", "{json}");
 }
 
 fn a_one_off_file_still_needs_a_complete_config_file() {
@@ -1124,7 +1124,20 @@ fn a_one_off_file_still_needs_a_complete_config_file() {
     std::fs::write(&wav_path, wav(0.5)).unwrap();
     let model = dir.path().join("model.gguf");
     std::fs::write(&model, b"not a real model").unwrap();
-    let incomplete = "schema_version: 1\nmodels: []\n";
+    let incomplete = "schema_version: 1\n";
+
+    // A direct model path still requires the settings file before inference.
+    let out = run_file_child(dir.path(), &one_off_file_args(&wav_path, &model));
+    assert_eq!(out.status.code(), Some(2));
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["error"]["code"], "invalid_config", "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not exist"),
+        "{json}"
+    );
 
     // The per-user file.
     let per_user = dir.path().join("config").join("pumice");

@@ -9,6 +9,7 @@ on:
       - 'Cargo.toml'
       - '.cargo/config.toml'
       - '.github/workflows/transcription.yml'
+      - '.github/fixtures/transcribe-smoke.yml'
       - '.github/actions/**'
   pull_request:
     paths:
@@ -17,6 +18,7 @@ on:
       - 'Cargo.toml'
       - '.cargo/config.toml'
       - '.github/workflows/transcription.yml'
+      - '.github/fixtures/transcribe-smoke.yml'
       - '.github/actions/**'
   workflow_dispatch:
 
@@ -24,6 +26,7 @@ permissions:
   contents: read
 
 env:
+  TRANSCRIBE_SMOKE_CONFIG: ${{ github.workspace }}/.github/fixtures/transcribe-smoke.yml
   MODEL_URL: https://huggingface.co/handy-computer/whisper-tiny-gguf/resolve/6687f30c99641ee265df421e582354adbc8848fc/whisper-tiny-Q8_0.gguf
   MODEL_SHA256: 325b9c7997cd1eff81ef709d55766565e71be696130cc3a3d444713798706834
   MODEL_DIR: ${{ github.workspace }}/.pumice-models
@@ -77,7 +80,7 @@ jobs:
           bin="target/release/pumice-transcribe"
           for fixture in sample-pt.wav chrome-mediarecorder.webm; do
             out_file="${RUNNER_TEMP}/transcribe-${fixture}.json"
-            "$bin" file "crates/transcription/tests/fixtures/$fixture" \
+            "$bin" --config "$TRANSCRIBE_SMOKE_CONFIG" file "crates/transcription/tests/fixtures/$fixture" \
               --model-file "$MODEL_DIR/whisper-tiny-Q8_0.gguf" --json > "$out_file"
             python3 - "$out_file" "$fixture" <<'PY'
           import json
@@ -102,9 +105,9 @@ jobs:
           bin="target/release/pumice-transcribe"
           model="$MODEL_DIR/whisper-tiny-Q8_0.gguf"
           audio=crates/transcription/tests/fixtures/sample-pt.wav
-          "$bin" file "$audio" --model-file "$model" --backend auto --json > "$RUNNER_TEMP/auto.json"
+          "$bin" --config "$TRANSCRIBE_SMOKE_CONFIG" file "$audio" --model-file "$model" --backend auto --json > "$RUNNER_TEMP/auto.json"
           set +e
-          "$bin" file "$audio" --model-file "$model" --backend gpu --json > "$RUNNER_TEMP/gpu.json"
+          "$bin" --config "$TRANSCRIBE_SMOKE_CONFIG" file "$audio" --model-file "$model" --backend gpu --json > "$RUNNER_TEMP/gpu.json"
           code=$?
           set -e
           test "$code" -eq 1
@@ -188,7 +191,7 @@ jobs:
         run: |
           bin="target/cpu-variants/stage/pumice-transcribe"
           out_file="${RUNNER_TEMP}/transcribe-cpu-variants-out.json"
-          "$bin" file crates/transcription/tests/fixtures/sample-pt.wav \
+          "$bin" --config "$TRANSCRIBE_SMOKE_CONFIG" file crates/transcription/tests/fixtures/sample-pt.wav \
             --model-file "$MODEL_DIR/whisper-tiny-Q8_0.gguf" --json > "$out_file"
           python3 - "$out_file" <<'PY'
           import json
@@ -208,11 +211,11 @@ jobs:
           PY
           # No GPU module in the Linux build: auto runs on the CPU and says
           # why; gpu refuses with the fixed error.
-          "$bin" file crates/transcription/tests/fixtures/sample-pt.wav \
+          "$bin" --config "$TRANSCRIBE_SMOKE_CONFIG" file crates/transcription/tests/fixtures/sample-pt.wav \
             --model-file "$MODEL_DIR/whisper-tiny-Q8_0.gguf" --backend auto --json > "$out_file"
           python3 -c 'import json,sys; c=json.load(open(sys.argv[1]))["result"]["compute"]; assert c["backend"]=="cpu" and c["fallback_reason"]=="gpu_not_built", c; print("auto ok")' "$out_file"
           set +e
-          "$bin" file crates/transcription/tests/fixtures/sample-pt.wav \
+          "$bin" --config "$TRANSCRIBE_SMOKE_CONFIG" file crates/transcription/tests/fixtures/sample-pt.wav \
             --model-file "$MODEL_DIR/whisper-tiny-Q8_0.gguf" --backend gpu --json > "$out_file"
           code=$?
           set -e
@@ -456,7 +459,7 @@ jobs:
           )
           $summary = @('### Compute snapshots (hosted runner, no GPU)', '')
           foreach ($run in $runs) {
-            $out = & $exe file (Join-Path $fixtures $run.fixture) --model-file $model --backend $run.mode --json
+            $out = & $exe --config $env:TRANSCRIBE_SMOKE_CONFIG file (Join-Path $fixtures $run.fixture) --model-file $model --backend $run.mode --json
             $code = $LASTEXITCODE
             if ($code -ne 0) { throw "$($run.fixture) ($($run.mode)) exited with $code" }
             $data = $out | ConvertFrom-Json
@@ -475,7 +478,7 @@ jobs:
           # backend gpu never falls back: the fixed error, before any audio
           # is transcribed.
           $ErrorActionPreference = 'Continue'
-          $out = & $exe file (Join-Path $fixtures 'sample-pt.wav') --model-file $model --backend gpu --json 2>$null
+          $out = & $exe --config $env:TRANSCRIBE_SMOKE_CONFIG file (Join-Path $fixtures 'sample-pt.wav') --model-file $model --backend gpu --json 2>$null
           $code = $LASTEXITCODE
           $ErrorActionPreference = 'Stop'
           if ($code -ne 1) { throw "backend gpu exited with $code" }
@@ -497,6 +500,7 @@ jobs:
       - name: DLL search order (decoy DLLs in the current directory and on PATH)
         run: |
           crates/transcription/scripts/test-windows-dll-search.ps1 -Stage $env:STAGE `
+            -Config $env:TRANSCRIBE_SMOKE_CONFIG `
             -Model (Join-Path $env:MODEL_DIR 'whisper-tiny-Q8_0.gguf') `
             -Audio (Join-Path $env:GITHUB_WORKSPACE 'crates\transcription\tests\fixtures\sample-pt.wav') `
             -WorkDir (Join-Path $env:RUNNER_TEMP 'dll-search')
@@ -754,7 +758,7 @@ jobs:
           for run in sample-pt.wav:auto:gpu_unavailable chrome-mediarecorder.webm:auto:gpu_unavailable \
             sample-pt.wav:cpu:; do
             IFS=: read -r fixture mode reason <<< "$run"
-            "$bin" file "$fixtures/$fixture" --model-file "$model" --backend "$mode" --json > smoke.json
+            "$bin" --config "$TRANSCRIBE_SMOKE_CONFIG" file "$fixtures/$fixture" --model-file "$model" --backend "$mode" --json > smoke.json
             python3 - smoke.json "$fixture" "$mode" "$reason" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json
           import re
@@ -776,7 +780,7 @@ jobs:
           # backend gpu never falls back: the fixed error, before any audio
           # is transcribed.
           code=0
-          "$bin" file "$fixtures/sample-pt.wav" --model-file "$model" --backend gpu --json > gpu.json 2> /dev/null || code=$?
+          "$bin" --config "$TRANSCRIBE_SMOKE_CONFIG" file "$fixtures/sample-pt.wav" --model-file "$model" --backend gpu --json > gpu.json 2> /dev/null || code=$?
           test "$code" -eq 1
           jq -e '.ok == false and .error.code == "gpu_unavailable" and (.error.message | contains("backend: cpu"))' gpu.json
           echo "- \`gpu\`: $(jq -r '.error.code + ": " + .error.message' gpu.json)" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -790,6 +794,7 @@ jobs:
           mkdir -p "$out"
           docker run --rm --network none \
             -v "$STAGE:/opt/pumice:ro" -v "$MODEL_DIR:/models:ro" \
+            -v "$TRANSCRIBE_SMOKE_CONFIG:/config/transcribe.yml:ro" \
             -v "$GITHUB_WORKSPACE/crates/transcription/tests/fixtures:/fixtures:ro" \
             -v "$out:/out" -w /tmp "$FLOOR_IMAGE" bash -c '
               set -eu
@@ -804,10 +809,10 @@ jobs:
               for mode in cpu auto gpu; do
                 /opt/pumice/pumice-transcribe backends --backend "$mode" --json > "/out/backends-$mode.json"
               done
-              /opt/pumice/pumice-transcribe file /fixtures/sample-pt.wav \
+              /opt/pumice/pumice-transcribe --config /config/transcribe.yml file /fixtures/sample-pt.wav \
                 --model-file /models/whisper-tiny-Q8_0.gguf --backend auto --json > /out/file-auto.json
               code=0
-              /opt/pumice/pumice-transcribe file /fixtures/sample-pt.wav \
+              /opt/pumice/pumice-transcribe --config /config/transcribe.yml file /fixtures/sample-pt.wav \
                 --model-file /models/whisper-tiny-Q8_0.gguf --backend gpu --json > /out/file-gpu.json || code=$?
               echo "$code" > /out/file-gpu.code
             '
@@ -856,7 +861,7 @@ jobs:
             "[d['gpu_class'] for d in r['devices'] if d['kind'] == 'vulkan'] == ['software']"
           backends lavapipe-gpu gpu
           expect lavapipe-gpu "r['gpu_devices'] == 1" "r['fallback_reason'] is None"
-          timeout 900 "$STAGE/pumice-transcribe" file \
+          timeout 900 "$STAGE/pumice-transcribe" --config "$TRANSCRIBE_SMOKE_CONFIG" file \
             "$GITHUB_WORKSPACE/crates/transcription/tests/fixtures/sample-pt.wav" \
             --model-file "$MODEL_DIR/whisper-tiny-Q8_0.gguf" --backend auto --json > lavapipe-auto.json
           python3 - lavapipe-auto.json <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
@@ -870,7 +875,7 @@ jobs:
           assert compute["fallback_reason"] == "gpu_software_only", data
           print(f"- lavapipe forced, `auto`: `{json.dumps(compute)}`")
           PY
-          timeout 900 "$STAGE/pumice-transcribe" file \
+          timeout 900 "$STAGE/pumice-transcribe" --config "$TRANSCRIBE_SMOKE_CONFIG" file \
             "$GITHUB_WORKSPACE/crates/transcription/tests/fixtures/sample-pt.wav" \
             --model-file "$MODEL_DIR/whisper-tiny-Q8_0.gguf" --backend gpu --json > lavapipe.json
           python3 - lavapipe.json <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
@@ -1197,7 +1202,7 @@ jobs:
           for run in sample-pt.wav:cpu: sample-pt.wav:auto:$auto_reason \
             chrome-mediarecorder.webm:auto:$auto_reason; do
             IFS=: read -r fixture mode reason <<< "$run"
-            "$bin" file "$fixtures/$fixture" --model-file "$model" --backend "$mode" --json > smoke.json
+            "$bin" --config "$TRANSCRIBE_SMOKE_CONFIG" file "$fixtures/$fixture" --model-file "$model" --backend "$mode" --json > smoke.json
             python3 - smoke.json "$fixture" "$mode" "$reason" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json
           import sys
@@ -1215,14 +1220,14 @@ jobs:
           print(f"- `{mode}` {fixture}: `{json.dumps(compute)}`, {data['result']['transcription_ms']} ms")
           PY
           done
-          cpu_text="$("$bin" file "$fixtures/sample-pt.wav" --model-file "$model" --backend cpu --json | jq -r .result.text)"
+          cpu_text="$("$bin" --config "$TRANSCRIBE_SMOKE_CONFIG" file "$fixtures/sample-pt.wav" --model-file "$model" --backend cpu --json | jq -r .result.text)"
           # backend gpu never falls back, and the VM's paravirtual Metal
           # device does run the model: gpu must report metal. Its text is
           # only recorded: on this device it is slow and degenerate, so it
           # proves the module loads and executes, not that Metal is right
           # (p14.4-macos-metal#1).
           code=0
-          with_alarm 900 "$bin" file "$fixtures/sample-pt.wav" --model-file "$model" --backend gpu --json \
+          with_alarm 900 "$bin" --config "$TRANSCRIBE_SMOKE_CONFIG" file "$fixtures/sample-pt.wav" --model-file "$model" --backend gpu --json \
             > gpu.json 2> gpu.err || code=$?
           sed 's/^/  [gpu] /' gpu.err | tail -n 40
           echo "  [gpu] exit $code: $(cat gpu.json)"
@@ -1275,7 +1280,7 @@ jobs:
           # file: auto first, in the fresh folder, then cpu for comparison.
           for mode in auto cpu; do
             started="$(now_ms)"
-            with_alarm 300 "$d2/pumice-transcribe" file "$wav" --model-file "$model" --backend "$mode" --json \
+            with_alarm 300 "$d2/pumice-transcribe" --config "$TRANSCRIBE_SMOKE_CONFIG" file "$wav" --model-file "$model" --backend "$mode" --json \
               > "d2-$mode.json" 2> "d2-$mode.err"
             echo "$(( $(now_ms) - started ))" > "d2-$mode.ms"
             sed "s/^/  [d2 $mode] /" "d2-$mode.err"
@@ -1311,16 +1316,13 @@ jobs:
           # not under test are the example files' ones.
           {
             echo 'schema_version: 1'
-            echo 'default_model: tiny'
+            echo 'default_model: whisper-tiny-q8_0'
             echo 'language: null'
             echo 'threads: auto'
             echo 'backend: auto'
             echo 'server:'
             echo '  port: null'
-            echo 'models_dir: null'
-            echo 'models:'
-            echo '  - id: tiny'
-            echo "    path: '$model'"
+            echo "models_dir: '$MODEL_DIR'"
           } > d2-cfg/transcribe.yml
           {
             echo 'port: 7567'
@@ -1348,7 +1350,7 @@ jobs:
             echo 'flows:'
             echo '  - id: raw'
             echo '    enabled: true'
-            echo '    transcription_model: tiny'
+            echo '    transcription_model: whisper-tiny-q8_0'
             echo '    formatter: null'
             echo '    relay_route: passthrough'
             echo '    budgets_ms:'
@@ -1359,7 +1361,7 @@ jobs:
             echo 'serve:'
             echo '  enabled: true'
             echo '  port: 0'
-            echo '  transcription_model: tiny'
+            echo '  transcription_model: whisper-tiny-q8_0'
             echo '  startup_timeout_ms: 60000'
             echo '  transcription_flows:'
             echo '    - raw'
@@ -1447,10 +1449,10 @@ jobs:
           code=0
           env -u TRANSCRIBE_FORCE_FLASH TRANSCRIBE_NO_FLASH=1 \
             perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 900 \
-            "$bin" file "$wav" --model-file "$model" --backend gpu --json > noflash.json 2> noflash.err || code=$?
+            "$bin" --config "$TRANSCRIBE_SMOKE_CONFIG" file "$wav" --model-file "$model" --backend gpu --json > noflash.json 2> noflash.err || code=$?
           sed 's/^/  [gpu no-flash] /' noflash.err | tail -n 40
           echo "  [gpu no-flash] exit $code: $(cat noflash.json)"
-          cpu_text="$("$bin" file "$wav" --model-file "$model" --backend cpu --json | jq -r .result.text)" || true
+          cpu_text="$("$bin" --config "$TRANSCRIBE_SMOKE_CONFIG" file "$wav" --model-file "$model" --backend cpu --json | jq -r .result.text)" || true
           python3 - noflash.json "$code" "$cpu_text" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json
           import sys

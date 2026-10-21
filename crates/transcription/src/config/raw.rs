@@ -8,7 +8,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use serde::de::Visitor;
+use serde::de::{IgnoredAny, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_saphyr::{Location, Spanned};
 
@@ -35,12 +35,13 @@ pub(crate) struct RawConfig {
     pub backend: Setting<String>,
     #[serde(default)]
     pub server: Setting<RawServerConfig>,
-    /// The models directory for `catalog:` entries; `null` is the per-user
-    /// data directory.
+    /// The models folder; `null` is the per-user data directory.
     #[serde(default)]
     pub models_dir: Setting<PathBuf>,
+    /// The removed model list, read only to reject it with a migration
+    /// message (p17-serve-model-names/D4).
     #[serde(default)]
-    pub models: Setting<Vec<Spanned<RawModelEntry>>>,
+    pub models: Setting<IgnoredAny>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -48,17 +49,6 @@ pub(crate) struct RawConfig {
 pub(crate) struct RawServerConfig {
     #[serde(default)]
     pub port: Setting<u16>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawModelEntry {
-    pub id: Option<Spanned<String>>,
-    /// Local GGUF file; mutually exclusive with `catalog`.
-    pub path: Option<Spanned<PathBuf>>,
-    /// Built-in catalog id; the entry resolves to the catalog file inside the
-    /// models directory. Mutually exclusive with `path`.
-    pub catalog: Option<Spanned<String>>,
 }
 
 /// `threads:` as written: a number, or text (`auto` is the only valid one).
@@ -124,6 +114,15 @@ pub(crate) enum Within {
 }
 
 impl<T> Setting<T> {
+    /// Where the key's value is written; `None` when the key is omitted.
+    pub(crate) fn location(&self) -> Option<Location> {
+        match self {
+            Setting::Missing => None,
+            Setting::Null(location) => Some(*location),
+            Setting::Value(value) => Some(value.referenced),
+        }
+    }
+
     /// The written value; an omitted key or an explicit `null` is an error.
     /// `name` is the setting as error messages show it, e.g. `"backend"`.
     pub(crate) fn required(&self, within: Within, name: &str) -> Result<&Spanned<T>, ConfigError> {

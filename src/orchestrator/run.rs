@@ -34,10 +34,6 @@ use crate::orchestrator::transcription::Transcribe;
 /// crate (arch-modules/D13).
 const MAX_AUDIO_BYTES: u64 = 25_000_000;
 
-/// The `models list` preflight subprocess never takes longer than this
-/// (within the remaining overall budget).
-const MODELS_LIST_CAP: Duration = Duration::from_secs(5);
-
 /// What a run is asked to do; already parsed and validated arguments.
 pub struct RunParams {
     pub audio: PathBuf,
@@ -178,7 +174,10 @@ async fn prepare(params: &RunParams, operation: &Operation<'_>) -> Result<Prepar
     let runtime = Runtime::build(&loaded, Arc::new(CleanupScope::new()))?;
 
     // The transcription sibling (never PATH) and its model list, which
-    // also validates the transcription configuration.
+    // also validates the transcription configuration. Listing hashes the
+    // models folder's catalog-sized files, which can take seconds for large
+    // models: it runs within the flow's explicit total budget, never a
+    // hidden cap.
     let binary = dispatch::sibling_transcribe().map_err(|_| {
         StageError::new(
             stage::PREPARE,
@@ -188,12 +187,7 @@ async fn prepare(params: &RunParams, operation: &Operation<'_>) -> Result<Prepar
         )
     })?;
     let stt = Transcribe::new(binary, loaded.config.modules.transcription.config.clone());
-    let models_deadline = work_deadline.min(
-        Instant::now()
-            .checked_add(MODELS_LIST_CAP)
-            .unwrap_or(work_deadline),
-    );
-    let entries = match stt.models_list(models_deadline, operation.cancel()).await {
+    let entries = match stt.models_list(work_deadline, operation.cancel()).await {
         Ok(entries) => entries,
         Err(failure) => {
             return Err(flow::map_stt_failure(
@@ -204,42 +198,26 @@ async fn prepare(params: &RunParams, operation: &Operation<'_>) -> Result<Prepar
         }
     };
     let selected = &prepared_flow.flow;
-    match entries
+    if !entries
         .iter()
-        .find(|entry| entry.id == selected.transcription_model)
+        .any(|entry| entry.id == selected.transcription_model)
     {
-        None => {
-            let mut error = StageError::new(
-                stage::PREPARE,
-                "transcription_model_not_found",
-                format!(
-                    "flow \"{}\" names a transcription model that is not in the transcription configuration",
-                    selected.id
-                ),
-                2,
-            );
-            set_reference_location(
-                &mut error,
-                &loaded.path,
-                selected.references.transcription_model,
-            );
-            return Err(error);
-        }
-        Some(entry) if !entry.exists => {
-            let mut error = StageError::new(
-                stage::PREPARE,
-                "transcription_model_not_found",
-                "the transcription model file is missing; install or download it first",
-                2,
-            );
-            set_reference_location(
-                &mut error,
-                &loaded.path,
-                selected.references.transcription_model,
-            );
-            return Err(error);
-        }
-        Some(_) => {}
+        let mut error = StageError::new(
+            stage::PREPARE,
+            "transcription_model_not_found",
+            format!(
+                "flow \"{}\" names a transcription model that is not in the transcription \
+                 models folder; put its file there or download it first",
+                selected.id
+            ),
+            2,
+        );
+        set_reference_location(
+            &mut error,
+            &loaded.path,
+            selected.references.transcription_model,
+        );
+        return Err(error);
     }
 
     Ok(Prepared {

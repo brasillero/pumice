@@ -12,7 +12,7 @@
 # Whisper Large v3 Turbo Q8_0 on the 14.19 s Portuguese sample.
 #
 # Usage:
-#   crates/transcription/scripts/bench.sh [--bin PATH] [--model PATH]
+#   crates/transcription/scripts/bench.sh --config PATH [--bin PATH] [--model PATH]
 #       [--sample PATH] [--runs N] [--threads "8 12 16 20"] [--cold]
 #
 # --cold drops the page caches before each run when permitted (needs write
@@ -21,6 +21,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
+config=""
 bin="$repo_root/target/release/pumice-transcribe"
 model="${HOME}/pumice-models/whisper-large-v3-turbo-Q8_0.gguf"
 sample="$repo_root/crates/transcription/tests/fixtures/sample-pt.wav"
@@ -30,6 +31,7 @@ cold=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --config) config="$2"; shift 2 ;;
         --bin) bin="$2"; shift 2 ;;
         --model) model="$2"; shift 2 ;;
         --sample) sample="$2"; shift 2 ;;
@@ -40,7 +42,12 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-for path in "$bin" "$model" "$sample"; do
+if [ -z "$config" ]; then
+    echo "--config PATH is required; copy transcribe.example.yml and fill in every setting" >&2
+    exit 2
+fi
+
+for path in "$config" "$bin" "$model" "$sample"; do
     if [ ! -f "$path" ]; then
         echo "missing file: $path" >&2
         exit 2
@@ -77,7 +84,7 @@ echo -e "threads\trun\tmodel_load_ms\ttranscription_ms\ttext_match"
 for threads in $threads_list; do
     for run in $(seq 1 "$runs"); do
         drop_caches
-        out="$(timeout 300 "$bin" file "$sample" --model-file "$model" \
+        out="$(timeout 300 "$bin" --config "$config" file "$sample" --model-file "$model" \
             --threads "$threads" --json)"
         THREADS="$threads" RUN="$run" EXPECTED="$expected" OUT="$out" python3 - <<'PY'
 import json, os, sys

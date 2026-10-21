@@ -198,7 +198,11 @@ fn rig(config: &str, generations: Value) -> Rig {
     let models = json!({
         "schema_version": 1,
         "ok": true,
-        "result": [{"id": "turbo", "path": "/models/turbo.gguf", "exists": true, "size": 1, "default": true}]
+        "result": {
+            "models_dir": "/models",
+            "models": [{"id": "turbo", "file": "/models/turbo.gguf", "size": 1, "catalog": false, "default": true}],
+            "diagnostics": []
+        }
     });
     // Every generation also writes the form it received.
     let mut generations = generations;
@@ -232,7 +236,7 @@ fn rig(config: &str, generations: Value) -> Rig {
         "schema_version: 1\nformatters: []\ndefault: null\n",
     )
     .unwrap();
-    fs::write(cfg.join("transcribe.yml"), "schema_version: 1\ndefault_model: null\nlanguage: null\nthreads: auto\nbackend: cpu\nserver:\n  port: null\nmodels_dir: null\nmodels: []\n").unwrap();
+    fs::write(cfg.join("transcribe.yml"), "schema_version: 1\ndefault_model: null\nlanguage: null\nthreads: auto\nbackend: cpu\nserver:\n  port: null\nmodels_dir: null\n").unwrap();
     fs::write(
         cfg.join("orchestrator.yml"),
         format!(

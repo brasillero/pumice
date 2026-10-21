@@ -1,0 +1,10 @@
+# Complete settings for CI inference; file commands select their own model.
+# Keep this separate from per-user settings and the user-facing example.
+schema_version: 1
+default_model: null
+language: null
+threads: auto
+backend: cpu
+server:
+  port: null
+models_dir: null
