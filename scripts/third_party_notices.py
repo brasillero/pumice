@@ -60,7 +60,7 @@ FORMATTER_NOTICES = REPO_ROOT / "crates" / "formatter" / "THIRD_PARTY_NOTICES.md
 CORE_PACKAGE = "pumice"
 TRANSCRIPTION_PACKAGE = "pumice-transcription"
 WORKSPACE_PACKAGES = frozenset(
-    {"pumice", "pumice-relay", "pumice-formatter", "pumice-transcription"}
+    {"pumice", "pumice-relay", "pumice-formatter", "pumice-settings", "pumice-transcription"}
 )
 
 LICENSE_FILE = re.compile(

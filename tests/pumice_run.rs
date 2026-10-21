@@ -908,7 +908,8 @@ fn per_user_orchestrator_yml_is_the_default_config() {
         stderr_text(&output)
     );
 
-    // And its absence is an error naming the expected path.
+    // Without a file, the starting examples are created. No model is
+    // downloaded, so the fake child's inventory cannot satisfy that model.
     let rig = make_rig(&Script::default());
     let output = Command::new(rig.pumice())
         .arg("run")
@@ -917,19 +918,19 @@ fn per_user_orchestrator_yml_is_the_default_config() {
         .env("XDG_CONFIG_HOME", &rig.xdg)
         .env("APPDATA", &rig.xdg)
         .env("HOME", rig.keep.path())
+        .env("PATH", &rig.install)
         .stdin(Stdio::null())
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     let envelope = one_json_document(&output);
-    assert_eq!(envelope["error"]["code"], "invalid_config");
-    assert!(
-        envelope["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("orchestrator.yml"),
+    assert_eq!(
+        envelope["error"]["code"], "transcription_model_not_found",
         "{envelope}"
     );
+    assert!(rig.xdg.join("pumice/orchestrator.yml").is_file());
+    assert!(rig.xdg.join("pumice/transcribe.yml").is_file());
+    assert_eq!(rig.fake_calls(), 0);
 }
 
 // --- The sibling lookup -----------------------------------------------------

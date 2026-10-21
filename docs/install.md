@@ -76,11 +76,11 @@ carries `THIRD_PARTY_NOTICES.md` with the licenses of everything it ships.
   distributions such as **Alpine, which is not supported**, the package
   manager skips it and `pumice` says the platform package is missing. Use
   the portable archive there (it has `pumice` only).
-- **Transcription needs its own complete configuration.** Copy
-  [`transcribe.example.yml`](../transcribe.example.yml), edit it and pass
-  `--config /path/to/transcribe.yml` to `pumice transcribe`, or save it at
-  the [per-user path](transcription.md#configuration). Pumice does not
-  create it automatically; even `file --model-file PATH` requires it.
+- **Transcription reads a complete settings file.** Its first command that
+  reads settings creates missing [per-user settings](transcription.md#configuration)
+  from the supplied examples. Edit `transcribe.yml` there, or pass an
+  existing file with `--config`. Even `file --model-file PATH` reads it;
+  creating settings never downloads models.
   The example chooses `backend: cpu`. The GPU modules are only
   loaded with `backend: gpu` (or `auto` where it applies); they need a GPU
   driver with Vulkan (Windows, Linux) or an Apple Silicon Mac. See
@@ -190,9 +190,9 @@ No Handy changes are needed beyond this Custom provider configuration.
 
 The relay needs a config file, and every setting in it must be written:
 an omitted one stops the relay with an error that names the file and line.
-There are no built-in defaults; start from
-[`relay.example.yml`](../relay.example.yml), which writes every setting and
-shows every supported provider, and copy it to the per-user location:
+The first command that needs settings creates missing per-user files from
+the supplied examples, including [`relay.example.yml`](../relay.example.yml).
+Existing files are never overwritten or filled in. Edit the relay file at:
 
 - Windows: `%APPDATA%\pumice\relay.yml`
 - Linux and macOS: `~/.config/pumice/relay.yml`
@@ -228,8 +228,9 @@ error and the app keeps its own transcript (the built-in `passthrough` and
 CLI itself; Pumice inherits them. Validate the file with
 `pumice relay check-config`; `pumice relay doctor` also runs before the
 file exists. The config lives outside the install folder, so upgrading
-never touches it. A `pumice setup` wizard that writes this file is planned
-(paused for now).
+never replaces it. Automatic creation writes all four module files and the
+sample formatter definition. An explicit `--config` path must already exist;
+help, version and optional diagnostic commands do not create files.
 
 `max_parallel` (1 to 32) sets how many requests may run their provider at
 the same time. Extra requests wait in line, first come first served; a

@@ -14,6 +14,7 @@ name = "pumice-format"
 path = "src/main.rs"
 
 [dependencies]
+pumice-settings = { path = "../settings" }
 clap = { workspace = true }
 serde = { workspace = true }
 # serialize: `show` renders definitions back to YAML with the same crate

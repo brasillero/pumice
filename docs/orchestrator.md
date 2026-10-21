@@ -24,9 +24,11 @@ the per-user `orchestrator.yml` (`$XDG_CONFIG_HOME/pumice` or `~/.config/pumice`
 on Linux and macOS, `%APPDATA%\pumice` on Windows). These bases must be
 nonempty absolute paths: a relative `XDG_CONFIG_HOME` is ignored in favour
 of `~/.config`, and with no usable base the lookup is unavailable and
-`--config` is required. There is no built-in default; a missing file is an
-error, and so is a setting the file leaves out: every setting is written,
-and an omitted one is reported with the file and the line of the mapping it
+`--config` is required. Without that flag, missing per-user settings are
+created from the supplied examples before validation, including the three
+module files and sample formatter definition. Existing files are preserved;
+a missing explicit file or a setting the file leaves out is an error. Every
+setting is written, and an omitted one is reported with the file and the line of the mapping it
 belongs in (line 1 for a top-level one). The file names the module
 configurations, the flows and the `pumice serve` section:
 

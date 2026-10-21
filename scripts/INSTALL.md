@@ -41,8 +41,8 @@ to local services. Stop it with Ctrl-C.
 
 The service needs a config file in which every setting is written (there
 are no built-in defaults; a missing setting is reported with its file and
-line). Copy `relay.example.yml` to the per-user config location and edit
-it:
+line). The first command that needs settings creates missing per-user
+files from the supplied examples, including `relay.yml`. Edit it at:
 
 - Windows: `%APPDATA%\pumice\relay.yml`
 - Linux and macOS: `~/.config/pumice/relay.yml`
@@ -64,4 +64,4 @@ In Handy, set the post-processing endpoint to `http://127.0.0.1:7567/v1`
   content in the executable (its Rust dependencies, the C runtime it links
   and the Handy-derived built-in formatter prompt)
 - `relay.example.yml` — commented reference configuration with every
-  setting; copy it to start
+  setting; the executable creates initial per-user files automatically

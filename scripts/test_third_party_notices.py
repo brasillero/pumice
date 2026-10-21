@@ -57,8 +57,9 @@ class NoticesTests(unittest.TestCase):
         self.crates = self.root / "crates"
         self.packages = []
         self.nodes = []
-        self.add("pumice", deps=[("serde", None), ("tempfile", "dev"), ("cc", "build"), ("pumice-relay", None)])
+        self.add("pumice", deps=[("serde", None), ("tempfile", "dev"), ("cc", "build"), ("pumice-relay", None), ("pumice-settings", None)])
         self.add("pumice-relay", deps=[("serde", None)])
+        self.add("pumice-settings")
         self.add(
             "pumice-transcription",
             deps=[("transcribe-cpp-sys", None), ("opusic-sys", None), ("ebml", None), ("serde", None)],
@@ -140,6 +141,7 @@ class NoticesTests(unittest.TestCase):
         self.assertNotIn("| tempfile |", text)
         self.assertNotIn("| cc |", text)
         self.assertNotIn("| pumice-relay |", text)
+        self.assertNotIn("| pumice-settings |", text)
         self.assertNotIn("dev only", text)
         self.assertNotIn("build only", text)
 

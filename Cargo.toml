@@ -1,6 +1,6 @@
 [workspace]
-members = [".", "crates/formatter", "crates/relay", "crates/transcription"]
-default-members = [".", "crates/formatter", "crates/relay", "crates/transcription"]
+members = [".", "crates/formatter", "crates/relay", "crates/settings", "crates/transcription"]
+default-members = [".", "crates/formatter", "crates/relay", "crates/settings", "crates/transcription"]
 resolver = "3"
 
 [workspace.package]
@@ -89,6 +89,7 @@ test-helpers = []
 [dependencies]
 pumice-formatter = { path = "crates/formatter" }
 pumice-relay = { path = "crates/relay" }
+pumice-settings = { path = "crates/settings" }
 # `pumice serve`'s loopback frontend and its client for the managed child's
 # `/ready`: the same hyper stack the relay already builds into this binary.
 bytes = { workspace = true }

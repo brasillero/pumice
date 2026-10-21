@@ -3,7 +3,8 @@
 //! One YAML file configures the relay ([`load`]); each CLI keeps its own
 //! login, routing and settings. Every setting must be written in the file:
 //! an omitted one is an error, never a built-in default
-//! (p17-serve-model-names/D3), and so is a missing file. Providers are an
+//! (p17-serve-model-names/D3). Missing initial per-user files are created
+//! before validation (auto-initial-settings/D1). Providers are an
 //! explicit, ordered list and nothing is enabled unless the file says so.
 //! Validation rejects problems with a `file:line:column` position and the
 //! setting path; a missing setting is reported at the mapping it belongs in
@@ -71,7 +72,8 @@ pub struct LoadedConfig {
 }
 
 /// Loads the configuration: an explicit `--config` path when given, else the
-/// per-user configuration file. A missing file is an error.
+/// per-user configuration file, creating missing initial per-user files first.
+/// A missing explicit file is an error.
 pub fn load(explicit: Option<&Path>) -> Result<LoadedConfig, ConfigError> {
     load_with_env(explicit, |key| std::env::var_os(key))
 }
@@ -83,6 +85,12 @@ pub fn load_with_env(
     explicit: Option<&Path>,
     get_env: impl Fn(&str) -> Option<OsString>,
 ) -> Result<LoadedConfig, ConfigError> {
+    if explicit.is_none()
+        && let Some(candidate) = per_user_config_path(&get_env)
+    {
+        pumice_settings::initialize(&candidate)
+            .map_err(|error| ConfigError::file(error.path(), error.to_string()))?;
+    }
     match locate(explicit, &get_env)? {
         Located::File(path) => load_file(path),
         Located::Absent(Some(candidate)) => Err(ConfigError::file(

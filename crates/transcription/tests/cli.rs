@@ -1593,55 +1593,54 @@ fn run_without_config(home: &std::path::Path, args: &[&str]) -> std::process::Ou
 }
 
 #[test]
-fn commands_that_read_settings_fail_without_a_config_file() {
+fn commands_that_read_settings_create_initial_files() {
     let tmp = tempfile::tempdir().unwrap();
-    let wav = tmp.path().join("clip.wav");
-    std::fs::write(&wav, write_silence_wav(0.05, 16_000, 1)).unwrap();
-    let model = tmp.path().join("model.gguf");
-    std::fs::write(&model, b"").unwrap();
-    let expected = tmp
-        .path()
-        .join("config")
-        .join("pumice")
-        .join("transcribe.yml");
-    for args in [
-        &["check-config", "--json"][..],
-        &["models", "list", "--json"],
-        &["file", wav.to_str().unwrap(), "--model", "tiny", "--json"],
+    let out = run_without_config(tmp.path(), &["models", "list", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["ok"], true);
+    let directory = tmp.path().join("config/pumice");
+    for name in [
+        "relay.yml",
+        "transcribe.yml",
+        "formatter.yml",
+        "orchestrator.yml",
+        "example-formatter.clean.yml",
+    ] {
+        assert!(directory.join(name).is_file(), "{name}");
+    }
+    // Creating settings never downloads the chosen model.
+    assert!(
+        !tmp.path()
+            .join("data/pumice/models/whisper-large-v3-turbo-Q8_0.gguf")
+            .exists()
+    );
+
+    let other = tempfile::tempdir().unwrap();
+    let missing = other.path().join("explicit.yml");
+    let out = run_without_config(
+        other.path(),
         &[
-            "file",
-            wav.to_str().unwrap(),
-            "--model-file",
-            model.to_str().unwrap(),
+            "--config",
+            missing.to_str().unwrap(),
+            "models",
+            "list",
             "--json",
         ],
-        &["file", wav.to_str().unwrap(), "--json"],
-        &["serve", "--model", "tiny", "--port", "0"],
-    ] {
-        let out = run_without_config(tmp.path(), args);
-        assert_eq!(out.status.code(), Some(2), "{args:?}");
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(
-            text.contains("the transcription configuration file does not exist"),
-            "{args:?}: {text}"
-        );
-    }
-    let out = run_without_config(tmp.path(), &["check-config", "--json"]);
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(json["ok"], false);
-    assert_eq!(json["error"]["code"], "invalid_config");
-    assert_eq!(
-        json["error"]["location"]["file"],
-        expected.to_str().unwrap()
     );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(json["error"]["code"], "invalid_config");
+    assert!(!missing.exists());
+    assert!(!other.path().join("config/pumice").exists());
 }
 
 #[test]
-fn a_one_off_model_file_requires_a_complete_config_file() {
+fn a_one_off_model_file_creates_settings_and_requires_them_to_stay_complete() {
     let tmp = tempfile::tempdir().unwrap();
     let wav = tmp.path().join("clip.wav");
     std::fs::write(&wav, write_silence_wav(0.05, 16_000, 1)).unwrap();
@@ -1656,25 +1655,20 @@ fn a_one_off_model_file_requires_a_complete_config_file() {
     ];
     let out = run_without_config(tmp.path(), &args);
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(out.status.code(), Some(2));
-    assert_eq!(json["error"]["code"], "invalid_config", "{json}");
-    assert!(
-        json["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("does not exist"),
-        "{json}"
-    );
-    assert!(!tmp.path().join("config/pumice/transcribe.yml").exists());
+    assert_ne!(json["error"]["code"], "invalid_config", "{json}");
+    let file = tmp.path().join("config/pumice/transcribe.yml");
+    assert!(file.is_file());
 
-    // A per-user file that exists must still be complete.
-    let per_user = tmp.path().join("config").join("pumice");
-    std::fs::create_dir_all(&per_user).unwrap();
-    std::fs::write(per_user.join("transcribe.yml"), "schema_version: 1\n").unwrap();
+    // An existing incomplete file remains an error, never filled in.
+    std::fs::write(&file, "schema_version: 1\n").unwrap();
     let out = run_without_config(tmp.path(), &args);
     assert_eq!(out.status.code(), Some(2));
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(json["error"]["code"], "invalid_config", "{json}");
+    assert_eq!(
+        std::fs::read_to_string(file).unwrap(),
+        "schema_version: 1\n"
+    );
 }
 
 #[test]

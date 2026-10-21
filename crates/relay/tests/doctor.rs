@@ -202,17 +202,21 @@ fn the_report_runs_without_a_configuration_file() {
         "output: {text}"
     );
 
-    // The login check needs the provider's settings, so it needs the file.
+    assert!(
+        !home.path().join("pumice").exists(),
+        "the report creates no settings"
+    );
+
+    // A requested login check initializes settings, but this isolated PATH
+    // has no Claude executable and must never run a real provider.
     let output = run_without_config(
         home.path(),
         &["doctor", "--login-check", "--provider", "claude"],
     );
     let text = combined(&output);
-    assert_eq!(output.status.code(), Some(2), "output: {text}");
-    assert!(
-        text.contains("the relay configuration file does not exist"),
-        "output: {text}"
-    );
+    assert_eq!(output.status.code(), Some(1), "output: {text}");
+    assert!(text.contains("not installed"), "output: {text}");
+    assert!(home.path().join("pumice/relay.yml").is_file());
 }
 
 #[test]

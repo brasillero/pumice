@@ -768,21 +768,18 @@ fn per_user_config_is_used_when_present() {
     let optional = config::load_optional_with_env(None, env).expect("per-user config loads");
     assert_eq!(optional.map(|loaded| loaded.path), Some(file.clone()));
 
-    // A missing per-user file is an error naming it, never built-in
-    // defaults; only the optional loader (doctor) runs without it.
+    // Optional diagnostic reads remain read-only; a required load creates
+    // complete starting files rather than filling settings into a document.
     fs::remove_file(&file).expect("remove config");
-    let error = config::load_with_env(None, env)
-        .expect_err("no file")
-        .to_string();
-    assert!(error.contains(&file.display().to_string()), "{error}");
-    assert!(
-        error.contains("the relay configuration file does not exist; pass --config <path>"),
-        "{error}"
-    );
-    assert_eq!(
-        config::load_optional_with_env(None, env).expect("no file"),
-        None
-    );
+    assert_eq!(config::load_optional_with_env(None, env).unwrap(), None);
+    assert!(!file.exists());
+    let loaded = config::load_with_env(None, env).expect("initial config loads");
+    assert_eq!(loaded.path, file);
+    assert_eq!(loaded.config.port, 7567);
+    assert!(pumice_dir.join("transcribe.yml").is_file());
+    fs::write(&file, "port: 9123\n").unwrap();
+    assert!(config::load_with_env(None, env).is_err());
+    assert_eq!(fs::read_to_string(file).unwrap(), "port: 9123\n");
 }
 
 #[cfg(not(windows))]
@@ -1025,7 +1022,7 @@ fn check_config_missing_file_exits_2() {
 }
 
 #[test]
-fn check_config_without_any_file_exits_2_naming_the_per_user_path() {
+fn check_config_creates_the_missing_per_user_settings() {
     let dir = TempDir::new().expect("temp dir");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
         .arg("check-config")
@@ -1034,15 +1031,10 @@ fn check_config_without_any_file_exits_2_naming_the_per_user_path() {
         .env("APPDATA", dir.path())
         .output()
         .expect("pumice runs");
-    assert_eq!(output.status.code(), Some(2), "stdout: {}", stdout(&output));
-    assert!(stdout(&output).is_empty());
-    let stderr = stderr(&output);
+    assert!(output.status.success(), "{}", stderr(&output));
     let expected = dir.path().join("pumice").join(CONFIG_NAME);
-    assert!(stderr.contains(&expected.display().to_string()), "{stderr}");
-    assert!(
-        stderr.contains("the relay configuration file does not exist"),
-        "{stderr}"
-    );
+    assert!(stdout(&output).contains(&expected.display().to_string()));
+    assert!(expected.is_file());
 }
 
 #[test]

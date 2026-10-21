@@ -1126,18 +1126,16 @@ fn a_one_off_file_still_needs_a_complete_config_file() {
     std::fs::write(&model, b"not a real model").unwrap();
     let incomplete = "schema_version: 1\n";
 
-    // A direct model path still requires the settings file before inference.
+    // A direct model path first creates and reads the starting settings.
+    // This harness injects a fake engine; no real model inference is run.
     let out = run_file_child(dir.path(), &one_off_file_args(&wav_path, &model));
-    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(out.status.code(), Some(0));
     let json: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(json["error"]["code"], "invalid_config", "{json}");
-    assert!(
-        json["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("does not exist"),
-        "{json}"
-    );
+    assert_eq!(json["ok"], true, "{json}");
+    assert_eq!(json["result"]["text"], "fake words", "{json}");
+    assert_eq!(json["result"]["compute"]["requested"], "cpu", "{json}");
+    assert_eq!(json["result"]["language"], "pt", "{json}");
+    assert!(dir.path().join("config/pumice/transcribe.yml").is_file());
 
     // The per-user file.
     let per_user = dir.path().join("config").join("pumice");

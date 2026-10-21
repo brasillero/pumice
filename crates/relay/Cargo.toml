@@ -27,6 +27,7 @@ bench = false
 test-helpers = []
 
 [dependencies]
+pumice-settings = { path = "../settings" }
 axum = { workspace = true }
 process-wrap = { workspace = true }
 hyper = { workspace = true }

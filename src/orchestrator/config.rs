@@ -325,8 +325,9 @@ impl LoadedConfig {
 }
 
 /// Loads the orchestrator configuration: the explicit `--config` path when
-/// given, else the per-user `orchestrator.yml`. A missing file — explicit or
-/// per-user — is an error (D6).
+/// given, else the per-user `orchestrator.yml`. Missing per-user files are
+/// created from the initial examples before validation; a missing explicit
+/// file remains an error (auto-initial-settings/D1).
 pub fn load(explicit: Option<&Path>) -> Result<LoadedConfig, ConfigError> {
     load_with_env(explicit, |key| std::env::var_os(key))
 }
@@ -351,6 +352,12 @@ fn load_mode(
     get_env: impl Fn(&str) -> Option<OsString>,
     serving: bool,
 ) -> Result<LoadedConfig, ConfigError> {
+    if explicit.is_none()
+        && let Some(candidate) = per_user_config_path(&get_env)
+    {
+        pumice_settings::initialize(&candidate)
+            .map_err(|error| ConfigError::file(error.path(), error.to_string()))?;
+    }
     let path = match explicit {
         Some(path) => {
             if !path.exists() {
@@ -1881,7 +1888,7 @@ serve:
     }
 
     #[test]
-    fn per_user_lookup_and_its_absence_are_errors() {
+    fn per_user_lookup_creates_initial_files_and_preserves_existing_settings() {
         let tmp = tempfile::tempdir().unwrap();
         let xdg = tmp.path().join("xdg");
         let xdg_value = xdg.clone().into_os_string();
@@ -1893,21 +1900,20 @@ serve:
             "XDG_CONFIG_HOME"
         };
 
-        // Without a per-user file the lookup names the missing file.
-        let err = load_with_env(None, |key: &str| {
+        let loaded = load_with_env(None, |key: &str| {
             (key == base_key).then(|| xdg_value.clone())
         })
-        .unwrap_err()
-        .to_string();
-        assert!(
-            err.contains(
-                &xdg.join("pumice")
-                    .join("orchestrator.yml")
-                    .display()
-                    .to_string()
-            ),
-            "names the per-user path: {err}"
-        );
+        .unwrap();
+        assert_eq!(loaded.path, xdg.join("pumice/orchestrator.yml"));
+        assert!(!loaded.config.serve.enabled);
+        for name in [
+            "relay.yml",
+            "transcribe.yml",
+            "formatter.yml",
+            "example-formatter.clean.yml",
+        ] {
+            assert!(xdg.join("pumice").join(name).is_file(), "{name}");
+        }
 
         // With the file present it loads.
         let dir = xdg.join("pumice");

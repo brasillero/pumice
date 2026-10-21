@@ -2,8 +2,9 @@
 //!
 //! Explicit `--config FILE` wins; otherwise the per-user file is looked up.
 //! Every setting must be written in the file: an omitted one is an error,
-//! never a built-in default (p17-serve-model-names/D3). [`load`] needs the
-//! file; [`load_optional`] serves the commands that also run without one
+//! never a built-in default (p17-serve-model-names/D3). [`load`] creates
+//! missing initial per-user files before validation (auto-initial-settings/D1);
+//! [`load_optional`] serves the commands that also run without one
 //! (catalog listing, downloads, `backends`).
 
 mod error;
@@ -80,7 +81,8 @@ impl LoadedConfig {
 }
 
 /// Loads the configuration: an explicit `--config` path when given, else the
-/// per-user configuration file. A missing file is an error.
+/// per-user configuration file, creating missing initial per-user files first.
+/// A missing explicit file is an error.
 pub fn load(explicit: Option<&Path>) -> Result<LoadedConfig, ConfigError> {
     load_with_env(explicit, |key| std::env::var_os(key))
 }
@@ -92,6 +94,12 @@ pub fn load_with_env(
     explicit: Option<&Path>,
     get_env: impl Fn(&str) -> Option<OsString>,
 ) -> Result<LoadedConfig, ConfigError> {
+    if explicit.is_none()
+        && let Some(candidate) = per_user_config_path(&get_env)
+    {
+        pumice_settings::initialize(&candidate)
+            .map_err(|error| ConfigError::file(error.path(), error.to_string()))?;
+    }
     match locate(explicit, &get_env)? {
         Located::File(path) => load_file(path),
         Located::Absent(Some(candidate)) => Err(ConfigError::file(
@@ -644,20 +652,20 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_per_user_file_is_an_error_unless_optional() {
+    fn required_load_creates_settings_but_optional_load_stays_read_only() {
         let tmp = tempfile::tempdir().unwrap();
         let base = tmp.path().to_path_buf().into_os_string();
         let env =
             |key: &str| matches!(key, "XDG_CONFIG_HOME" | "HOME" | "APPDATA").then(|| base.clone());
         let expected = per_user_config_path(&env).unwrap();
-        let err = load_with_env(None, env).unwrap_err();
-        assert_eq!(err.path(), Some(expected.as_path()));
-        assert!(
-            err.message()
-                .contains("the transcription configuration file does not exist"),
-            "{err}"
-        );
         assert_eq!(load_optional_with_env(None, env).unwrap(), None);
+        assert!(!expected.exists());
+        let loaded = load_with_env(None, env).unwrap();
+        assert_eq!(loaded.path, expected);
+        assert_eq!(
+            loaded.config.default_model.as_deref(),
+            Some("whisper-large-v3-turbo-q8_0")
+        );
 
         std::fs::create_dir_all(expected.parent().unwrap()).unwrap();
         std::fs::write(&expected, complete("")).unwrap();
