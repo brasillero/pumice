@@ -22,22 +22,6 @@
 - `crates/relay/src/providers/mod.rs` (`ProviderDescriptor::defaults`, `ProviderSettings::binary`)
 - `crates/relay/src/providers/claude.rs`, `codex.rs`, `kimi.rs`, `kiro.rs` (`defaults`, `build`)
 
-### #2 · Deferred · Fix the stale relay rename clause in AGENTS.md
-- type: Alignment
-- area: docs
-- origin: p17-serve-model-names/D3
-- ticket: —
-- created: 2026-10-20
-- reason: AGENTS.md is edited only by the owner; proposed in this pull request's description, until the owner edits it
-
-**Context.** While changing the authorized sentence in AGENTS.md's Configuration rule, the same rule still says "the relay still reads `pumice.yaml` until the rename lands". The rename has landed: the relay reads only `relay.yml` (CHANGELOG Unreleased, `docs/install.md` "Upgrading from 0.2").
-
-**To do.**
-- [ ] Owner: drop "; the relay still reads `pumice.yaml` until the rename lands" from AGENTS.md.
-
-**Where in the code.**
-- `AGENTS.md` (Stack and constraints → Configuration)
-
 ### #3 · Deferred · Complete the owner's live configs before deploying
 - type: Task
 - area: config
@@ -77,3 +61,20 @@
 - `docs/transcription.md` (`file`)
 
 ## Closed
+
+### #2 · Done · Fix the stale relay rename clause in AGENTS.md
+- type: Alignment
+- area: docs
+- origin: p17-serve-model-names/D3
+- ticket: —
+- created: 2026-10-20
+- closed: 2026-10-20
+- outcome: authorized by the owner in conversation and removed in `e6b6664`
+
+**Context.** While changing the authorized sentence in AGENTS.md's Configuration rule, the same rule still says "the relay still reads `pumice.yaml` until the rename lands". The rename has landed: the relay reads only `relay.yml` (CHANGELOG Unreleased, `docs/install.md` "Upgrading from 0.2").
+
+**To do.**
+- [x] Owner: drop "; the relay still reads `pumice.yaml` until the rename lands" from AGENTS.md.
+
+**Where in the code.**
+- `AGENTS.md` (Stack and constraints → Configuration)
