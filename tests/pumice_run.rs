@@ -120,6 +120,59 @@ fn stub_scenario(models: Value, file: Value) -> Value {
     })
 }
 
+/// Every flow budget with the example's value (the old built-in defaults).
+const BUDGETS: [(&str, u64); 4] = [
+    ("total", 180_000),
+    ("transcription", 120_000),
+    ("formatter", 1_000),
+    ("relay", 60_000),
+];
+
+/// `flows` with each entry's `budgets_ms` completed: the keys a test does
+/// not write get [`BUDGETS`]'s values (every setting is required). A test
+/// writes `budgets_ms` last in an entry, so the completion follows it.
+fn with_budgets(flows: &str) -> String {
+    fn flush(entry: &mut Vec<&str>, out: &mut String) {
+        if entry.is_empty() {
+            return;
+        }
+        for line in entry.iter() {
+            out.push_str(line);
+            out.push('\n');
+        }
+        if !entry.iter().any(|line| line.trim() == "budgets_ms:") {
+            out.push_str("    budgets_ms:\n");
+        }
+        for (key, value) in BUDGETS {
+            let written = format!("      {key}:");
+            if !entry.iter().any(|line| line.starts_with(&written)) {
+                out.push_str(&format!("{written} {value}\n"));
+            }
+        }
+        entry.clear();
+    }
+    let mut out = String::new();
+    let mut entry: Vec<&str> = Vec::new();
+    for line in flows.lines() {
+        if line.starts_with("  - ") {
+            flush(&mut entry, &mut out);
+        }
+        entry.push(line);
+    }
+    flush(&mut entry, &mut out);
+    out
+}
+
+/// `pumice serve` stays off: `pumice run` does not use it.
+const SERVE_OFF: &str = "serve:
+  enabled: false
+  port: 17570
+  transcription_model: null
+  startup_timeout_ms: 60000
+  transcription_flows: []
+  allowed_origins: []
+";
+
 fn exe(name: &str) -> String {
     format!("{name}{}", std::env::consts::EXE_SUFFIX)
 }
@@ -186,13 +239,13 @@ fn make_rig(script: &Script) -> Rig {
     let formatter_module = if script.formatter_module {
         "  formatter:\n    config: ./formatter.yml\n"
     } else {
-        ""
+        "  formatter: null\n"
     };
     fs::write(
         cfg.join("orchestrator.yml"),
         format!(
-            "schema_version: 1\nmodules:\n  transcription:\n    config: ./transcribe.yml\n{formatter_module}  relay:\n    location: in_process\n    config: ./relay.yml\nflows:\n{}",
-            script.flows
+            "schema_version: 1\nmodules:\n  transcription:\n    config: ./transcribe.yml\n{formatter_module}  relay:\n    location: in_process\n    config: ./relay.yml\nflows:\n{}{SERVE_OFF}",
+            with_budgets(&script.flows)
         ),
     )
     .expect("write orchestrator.yml");

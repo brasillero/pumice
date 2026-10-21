@@ -26,8 +26,8 @@ or a host in serve.allowed_origins.
 
   --config <FILE>  the orchestrator configuration file
                    (default: the per-user orchestrator.yml)
-  --port <PORT>    the frontend port, overriding serve.port (default 17570;
-                   7567 is refused; 0 picks a free port and announces it)
+  --port <PORT>    the frontend port, overriding serve.port (7567 is
+                   refused; 0 picks a free port and announces it)
   --json           lifecycle records as JSON lines on stdout, metadata-only
                    events on stderr
   --help           print this help

@@ -30,11 +30,21 @@ const FLOWS: &str = "flows:
     transcription_model: turbo
     formatter: null
     relay_route: passthrough
+    budgets_ms:
+      total: 180000
+      transcription: 120000
+      formatter: 1000
+      relay: 60000
   - id: other
     enabled: false
     transcription_model: small
     formatter: null
     relay_route: passthrough
+    budgets_ms:
+      total: 180000
+      transcription: 120000
+      formatter: 1000
+      relay: 60000
 ";
 
 const SERVE: &str = "serve:
@@ -42,6 +52,34 @@ const SERVE: &str = "serve:
   port: 0
   transcription_model: turbo
 ";
+
+/// The `serve:` keys a test does not write, with the example's values.
+const SERVE_KEYS: [(&str, &str); 6] = [
+    ("enabled", "  enabled: false\n"),
+    ("port", "  port: 17570\n"),
+    ("transcription_model", "  transcription_model: null\n"),
+    ("startup_timeout_ms", "  startup_timeout_ms: 60000\n"),
+    ("transcription_flows", "  transcription_flows: []\n"),
+    ("allowed_origins", "  allowed_origins: []\n"),
+];
+
+/// `serve` (a `serve:` section with the keys under test, or empty for no
+/// section at all) completed with every key it does not write.
+fn complete_serve(serve: &str) -> String {
+    if serve.is_empty() {
+        return String::new();
+    }
+    let mut section = serve.to_owned();
+    for (key, line) in SERVE_KEYS {
+        if !serve
+            .lines()
+            .any(|written| written.starts_with(&format!("  {key}:")))
+        {
+            section.push_str(line);
+        }
+    }
+    section
+}
 
 fn exe(name: &str) -> String {
     format!("{name}{}", std::env::consts::EXE_SUFFIX)
@@ -104,7 +142,8 @@ fn rig(serve: &str, generations: Value) -> Rig {
     fs::write(
         cfg.join("orchestrator.yml"),
         format!(
-            "schema_version: 1\nmodules:\n  transcription:\n    config: ./transcribe.yml\n  relay:\n    location: in_process\n    config: ./relay.yml\n{FLOWS}{serve}"
+            "schema_version: 1\nmodules:\n  transcription:\n    config: ./transcribe.yml\n  formatter: null\n  relay:\n    location: in_process\n    config: ./relay.yml\n{FLOWS}{}",
+            complete_serve(serve)
         ),
     )
     .unwrap();
@@ -604,7 +643,7 @@ fn configuration_errors_exit_2_before_any_child() {
     let mismatch = "serve:\n  enabled: true\n  port: 0\n  transcription_model: small\n";
     let missing_model = "serve:\n  enabled: true\n  port: 0\n  transcription_model: absent\n";
     for (serve, expect) in [
-        ("", "\"serve\" is not configured"),
+        ("", "\"serve\" is missing; every setting must be written"),
         (disabled, "serve is not enabled"),
         (reserved, "port 7567 is reserved"),
         (

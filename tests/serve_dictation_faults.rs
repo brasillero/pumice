@@ -112,18 +112,38 @@ flows:
     transcription_model: turbo
     formatter: null
     relay_route: claude
+    budgets_ms:
+      total: 180000
+      transcription: 120000
+      formatter: 1000
+      relay: 60000
   - id: raw
     enabled: true
     transcription_model: turbo
     formatter: null
     relay_route: passthrough
+    budgets_ms:
+      total: 180000
+      transcription: 120000
+      formatter: 1000
+      relay: 60000
   - id: clean
     enabled: true
     transcription_model: turbo
     formatter: builtin:clean
     relay_route: claude
     budgets_ms:
+      total: 180000
+      transcription: 120000
       formatter: 50
+      relay: 60000
+serve:
+  enabled: true
+  port: 0
+  transcription_model: turbo
+  startup_timeout_ms: 5000
+  transcription_flows: [raw, clean]
+  allowed_origins: []
 ",
     )
     .unwrap();

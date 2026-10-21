@@ -20,33 +20,32 @@
 //!     transcription_model: turbo
 //!     formatter: builtin:clean      # an id, or an explicit null
 //!     relay_route: claude
-//!     budgets_ms:                   # optional; every key has a default (D5)
+//!     budgets_ms:
 //!       total: 180000
 //!       transcription: 120000
 //!       formatter: 1000
 //!       relay: 60000
-//! ```
-//!
-//! Nothing is enabled implicitly: `enabled` defaults to false, `formatter`
-//! must be present even as an explicit null, and `relay_route` is always
-//! explicit (D4). Validation reports `file:line:column` like the other
-//! modules; relative module paths resolve against this file's directory.
-//!
-//! An optional `serve:` section configures `pumice serve`
-//! (p13.1-flow-seam/D3); files without it stay valid for `pumice run`:
-//!
-//! ```yaml
 //! serve:
-//!   enabled: true                # default false
-//!   port: 17570                  # optional; 7567 is refused, 0 picks a free port
-//!   transcription_model: turbo   # required when enabled
-//!   startup_timeout_ms: 60000    # optional, 1000..=300000
-//!   transcription_flows: [clean] # optional, default empty (p15/D5)
-//!   allowed_origins: []          # optional, default empty: browser origins
-//!                                # besides 127.0.0.1, e.g. a tailnet name
+//!   enabled: true                # false keeps pumice serve off
+//!   port: 17570                  # 7567 is refused, 0 picks a free port
+//!   transcription_model: turbo   # null only while serve is disabled
+//!   startup_timeout_ms: 60000    # 1000..=300000
+//!   transcription_flows: [clean] # may be empty (p15/D5)
+//!   allowed_origins: []          # browser origins besides 127.0.0.1, e.g.
+//!                                # a tailnet name; may be empty
 //! ```
 //!
-//! The section's own shape is checked at load (published ids are public
+//! Every setting must be written: an omitted one is an error, never a
+//! built-in default (p17-serve-model-names/D3), reported at the mapping it
+//! belongs in (line 1 for a top-level one). Nothing is enabled implicitly:
+//! `enabled` is written on every flow and on `serve`, and `formatter` and
+//! `modules.formatter` are written even as an explicit null (D4).
+//! Validation reports `file:line:column` like the other modules; relative
+//! module paths resolve against this file's directory.
+//!
+//! The `serve:` section (p13.1-flow-seam/D3) is written even when `pumice
+//! serve` is not used: `enabled: false` keeps it off. Its own shape is
+//! checked at load (published ids are public
 //! model ids: `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`, each listed once); the
 //! rules that tie it to the flows (every enabled flow uses the served model,
 //! a published flow exists, is enabled and is either off or a complete AI
@@ -68,18 +67,13 @@ pub const TEARDOWN_RESERVE: Duration = Duration::from_millis(2_500);
 /// Upper bound for every budget value: one hour in milliseconds.
 const MAX_BUDGET_MS: u64 = 3_600_000;
 
-const DEFAULT_TOTAL_MS: u64 = 180_000;
-const DEFAULT_TRANSCRIPTION_MS: u64 = 120_000;
-const DEFAULT_FORMATTER_MS: u64 = 1_000;
-const DEFAULT_RELAY_MS: u64 = 60_000;
-
 const PER_USER_FILE: &str = "orchestrator.yml";
+/// The commented reference configuration every missing-setting error points
+/// at.
+const EXAMPLE_FILE: &str = "orchestrator.example.yml";
 
-/// `pumice serve`'s default frontend port (p13.1-flow-seam/D3).
-pub const DEFAULT_SERVE_PORT: u16 = 17570;
 /// The live relay's port: never accepted for `pumice serve` (D3).
 pub const RESERVED_RELAY_PORT: u16 = 7567;
-const DEFAULT_STARTUP_TIMEOUT_MS: u64 = 60_000;
 const MIN_STARTUP_TIMEOUT_MS: u64 = 1_000;
 const MAX_STARTUP_TIMEOUT_MS: u64 = 300_000;
 /// The managed transcription child announces model ids of at most this many
@@ -97,8 +91,8 @@ pub struct Config {
     pub modules: Modules,
     /// Every flow in file (list) order, enabled or not.
     pub flows: Vec<Flow>,
-    /// The `serve:` section, when the file has one.
-    pub serve: Option<Serve>,
+    /// The `serve:` section.
+    pub serve: Serve,
 }
 
 /// The `serve:` section, with its shape already checked.
@@ -106,7 +100,8 @@ pub struct Config {
 pub struct Serve {
     pub enabled: bool,
     pub port: u16,
-    /// Required when `enabled`; checked at load.
+    /// `None` is `transcription_model: null`, valid only while serve is
+    /// disabled; checked at load.
     pub transcription_model: Option<String>,
     pub startup_timeout: Duration,
     /// The flows published as OpenAI transcription models, in file order;
@@ -247,8 +242,8 @@ pub struct ServeSettings {
     pub allowed_origins: Vec<AllowedOrigin>,
 }
 
-/// The module references. `formatter` is optional only when no enabled flow
-/// selects a formatter (validated at load).
+/// The module references. `formatter` may be `null` only when no enabled
+/// flow selects a formatter (validated at load).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Modules {
     pub transcription: ModuleRef,
@@ -298,24 +293,14 @@ fn position(location: serde_saphyr::Location) -> Option<(u64, u64)> {
 }
 
 /// Per-flow budgets; the stage deadlines can only shorten the overall one
-/// (D2). Defaults per D5.
+/// (D2). Every one is written in the file (the values D5 chose are the
+/// example's).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Budgets {
     pub total: Duration,
     pub transcription: Duration,
     pub formatter: Duration,
     pub relay: Duration,
-}
-
-impl Default for Budgets {
-    fn default() -> Budgets {
-        Budgets {
-            total: Duration::from_millis(DEFAULT_TOTAL_MS),
-            transcription: Duration::from_millis(DEFAULT_TRANSCRIPTION_MS),
-            formatter: Duration::from_millis(DEFAULT_FORMATTER_MS),
-            relay: Duration::from_millis(DEFAULT_RELAY_MS),
-        }
-    }
 }
 
 /// The effective configuration and the file it came from.
@@ -421,32 +406,24 @@ fn resolve_against(path: &Path, config_dir: &Path) -> PathBuf {
 }
 
 fn validate(raw: RawConfig, config_dir: &Path) -> Result<Config, ConfigError> {
-    match &raw.schema_version {
-        None => {
-            return Err(ConfigError::general(
-                "schema_version is required (must be 1)",
-            ));
-        }
-        Some(span) if span.value != 1 => {
-            return Err(ConfigError::at(
-                span.referenced,
-                format!("schema_version must be 1, got {}", span.value),
-            ));
-        }
-        _ => {}
+    let schema_version = raw
+        .schema_version
+        .required(Within::Root, "\"schema_version\"")?;
+    if schema_version.value != 1 {
+        return Err(ConfigError::at(
+            schema_version.referenced,
+            format!("schema_version must be 1, got {}", schema_version.value),
+        ));
     }
 
-    let modules = validate_modules(raw.modules, config_dir)?;
+    let modules = validate_modules(&raw.modules, config_dir)?;
 
+    let entries = raw.flows.required(Within::Root, "\"flows\"")?;
     let mut flows: Vec<Flow> = Vec::new();
-    for entry in &raw.flows {
+    for entry in &entries.value {
         let flow = validate_flow(entry)?;
         if flows.iter().any(|existing| existing.id == flow.id) {
-            let duplicate = entry
-                .value
-                .id
-                .as_ref()
-                .map_or(entry.referenced, |id| id.referenced);
+            let duplicate = entry.value.id.location().unwrap_or(entry.referenced);
             return Err(ConfigError::at(
                 duplicate,
                 format!("duplicate flow id \"{}\" in \"flows\"", flow.id),
@@ -459,8 +436,8 @@ fn validate(raw: RawConfig, config_dir: &Path) -> Result<Config, ConfigError> {
     // a built-in (an empty registry file is enough). Disabled flows and
     // explicit nulls need no formatter module (design §2).
     if modules.formatter.is_none()
-        && let Some((entry, flow)) = raw
-            .flows
+        && let Some((entry, flow)) = entries
+            .value
             .iter()
             .zip(&flows)
             .find(|(_, flow)| flow.enabled && flow.formatter.is_some())
@@ -469,13 +446,13 @@ fn validate(raw: RawConfig, config_dir: &Path) -> Result<Config, ConfigError> {
         return Err(ConfigError::at(
             span,
             format!(
-                "flow \"{}\" selects a formatter but \"modules.formatter\" is not configured",
+                "flow \"{}\" selects a formatter but \"modules.formatter\" is null",
                 flow.id
             ),
         ));
     }
 
-    let serve = raw.serve.map(validate_serve).transpose()?;
+    let serve = validate_serve(raw.serve.required(Within::Root, "\"serve\"")?)?;
 
     Ok(Config {
         modules,
@@ -484,19 +461,21 @@ fn validate(raw: RawConfig, config_dir: &Path) -> Result<Config, ConfigError> {
     })
 }
 
-fn validate_serve(raw: Spanned<RawServe>) -> Result<Serve, ConfigError> {
+fn validate_serve(raw: &Spanned<RawServe>) -> Result<Serve, ConfigError> {
     let section = raw.referenced;
-    let serve = raw.value;
-    let enabled = serve.enabled.as_ref().is_some_and(|span| span.value);
-    let port = match &serve.port {
-        None => DEFAULT_SERVE_PORT,
-        Some(span) => check_serve_port(span.value)
-            .map_err(|message| ConfigError::at(span.referenced, message))?,
-    };
-    let transcription_model = match &serve.transcription_model {
-        None if enabled => {
+    let within = Within::Mapping(section);
+    let serve = &raw.value;
+    let enabled = serve.enabled.required(within, "\"serve.enabled\"")?;
+    let port = serve.port.required(within, "\"serve.port\"")?;
+    let port = check_serve_port(port.value)
+        .map_err(|message| ConfigError::at(port.referenced, message))?;
+    let transcription_model = match serve
+        .transcription_model
+        .nullable(within, "\"serve.transcription_model\"")?
+    {
+        None if enabled.value => {
             return Err(ConfigError::at(
-                section,
+                serve.transcription_model.location().unwrap_or(section),
                 "\"serve.transcription_model\" is required when serve is enabled; \
                  name the model every enabled flow uses",
             ));
@@ -516,24 +495,23 @@ fn validate_serve(raw: Spanned<RawServe>) -> Result<Serve, ConfigError> {
         }
         Some(span) => Some(span.value.clone()),
     };
-    let startup_timeout = match &serve.startup_timeout_ms {
-        None => Duration::from_millis(DEFAULT_STARTUP_TIMEOUT_MS),
-        Some(span) if !(MIN_STARTUP_TIMEOUT_MS..=MAX_STARTUP_TIMEOUT_MS).contains(&span.value) => {
-            return Err(ConfigError::at(
-                span.referenced,
-                format!(
-                    "serve.startup_timeout_ms must be between {MIN_STARTUP_TIMEOUT_MS} and {MAX_STARTUP_TIMEOUT_MS}"
-                ),
-            ));
-        }
-        Some(span) => Duration::from_millis(span.value),
-    };
-    let mut transcription_flows: Vec<PublishedFlow> = Vec::new();
-    for entry in serve
+    let startup_timeout = serve
+        .startup_timeout_ms
+        .required(within, "\"serve.startup_timeout_ms\"")?;
+    if !(MIN_STARTUP_TIMEOUT_MS..=MAX_STARTUP_TIMEOUT_MS).contains(&startup_timeout.value) {
+        return Err(ConfigError::at(
+            startup_timeout.referenced,
+            format!(
+                "serve.startup_timeout_ms must be between {MIN_STARTUP_TIMEOUT_MS} and {MAX_STARTUP_TIMEOUT_MS}"
+            ),
+        ));
+    }
+    let startup_timeout = Duration::from_millis(startup_timeout.value);
+    let published = serve
         .transcription_flows
-        .as_ref()
-        .map_or(&[][..], |list| &list.value[..])
-    {
+        .required(within, "\"serve.transcription_flows\"")?;
+    let mut transcription_flows: Vec<PublishedFlow> = Vec::new();
+    for entry in &published.value {
         if !is_public_model_id(&entry.value) {
             return Err(ConfigError::at(
                 entry.referenced,
@@ -561,12 +539,11 @@ fn validate_serve(raw: Spanned<RawServe>) -> Result<Serve, ConfigError> {
             at: position(entry.referenced),
         });
     }
-    let mut allowed_origins: Vec<AllowedOrigin> = Vec::new();
-    for entry in serve
+    let origins = serve
         .allowed_origins
-        .as_ref()
-        .map_or(&[][..], |list| &list.value[..])
-    {
+        .required(within, "\"serve.allowed_origins\"")?;
+    let mut allowed_origins: Vec<AllowedOrigin> = Vec::new();
+    for entry in &origins.value {
         let origin = AllowedOrigin::parse(&entry.value).map_err(|problem| {
             ConfigError::at(
                 entry.referenced,
@@ -582,7 +559,7 @@ fn validate_serve(raw: Spanned<RawServe>) -> Result<Serve, ConfigError> {
         allowed_origins.push(origin);
     }
     Ok(Serve {
-        enabled,
+        enabled: enabled.value,
         port,
         transcription_model,
         startup_timeout,
@@ -590,14 +567,8 @@ fn validate_serve(raw: Spanned<RawServe>) -> Result<Serve, ConfigError> {
         allowed_origins,
         spans: ServeSpans {
             section: position(section),
-            enabled: serve
-                .enabled
-                .as_ref()
-                .and_then(|span| position(span.referenced)),
-            transcription_model: serve
-                .transcription_model
-                .as_ref()
-                .and_then(|span| position(span.referenced)),
+            enabled: position(enabled.referenced),
+            transcription_model: serve.transcription_model.location().and_then(position),
         },
     })
 }
@@ -621,14 +592,14 @@ pub fn check_serve_port(port: u16) -> Result<u16, String> {
     if port == RESERVED_RELAY_PORT {
         return Err(format!(
             "port {RESERVED_RELAY_PORT} is reserved for the relay service; pumice serve \
-             uses another port (default {DEFAULT_SERVE_PORT})"
+             uses another port"
         ));
     }
     Ok(port)
 }
 
-/// The settings `pumice serve` runs with: the section must be present and
-/// enabled, and every enabled flow must use the served transcription model
+/// The settings `pumice serve` runs with: the section must be enabled, and
+/// every enabled flow must use the served transcription model
 /// (p13.1-flow-seam/D4), with at most [`MAX_SERVED_FLOWS`] enabled flows
 /// whose ids fit [`MAX_SERVED_FLOW_ID_BYTES`]. Each published flow must be
 /// a configured, enabled flow that is either off (`formatter: null` with
@@ -646,13 +617,7 @@ pub fn serve_settings(loaded: &LoadedConfig) -> Result<ServeSettings, ConfigErro
             message,
         )
     };
-    let Some(serve) = &loaded.config.serve else {
-        return Err(ConfigError::file(
-            path,
-            "\"serve\" is not configured; add a \"serve:\" section with \"enabled: true\" \
-             and \"transcription_model\" to run pumice serve",
-        ));
-    };
+    let serve = &loaded.config.serve;
     if !serve.enabled {
         return Err(located(
             serve.spans.enabled.or(serve.spans.section),
@@ -747,67 +712,72 @@ pub fn is_passthrough(route: &str) -> bool {
     route.eq_ignore_ascii_case("passthrough")
 }
 
-fn validate_modules(
-    raw: Option<Spanned<RawModules>>,
-    config_dir: &Path,
-) -> Result<Modules, ConfigError> {
-    let Some(modules) = raw else {
-        return Err(ConfigError::general(
-            "\"modules\" is required: it names the transcription, formatter and relay configuration files",
-        ));
-    };
+fn validate_modules(raw: &Setting<RawModules>, config_dir: &Path) -> Result<Modules, ConfigError> {
+    let modules = raw.required(Within::Root, "\"modules\"")?;
     let modules_span = modules.referenced;
-    let modules = modules.value;
+    let within = Within::Mapping(modules_span);
+    let modules = &modules.value;
 
-    let transcription = match modules.transcription {
-        Some(entry) => module_ref(
-            entry.referenced,
-            entry.value.config,
-            "transcription",
-            config_dir,
-        )?,
-        None => {
+    let transcription = match &modules.transcription {
+        Setting::Missing => {
             return Err(ConfigError::at(
                 modules_span,
                 "\"modules.transcription\" is required, with its \"config\" file",
             ));
         }
+        entry => {
+            let entry = entry.required(within, "\"modules.transcription\"")?;
+            module_ref(
+                entry.referenced,
+                &entry.value.config,
+                "transcription",
+                config_dir,
+            )?
+        }
     };
-    let formatter = match modules.formatter {
+    // `null` is "no formatter module", for configurations whose enabled
+    // flows select none (checked by the caller).
+    let formatter = match modules
+        .formatter
+        .nullable(within, "\"modules.formatter\"")?
+    {
         Some(entry) => Some(module_ref(
             entry.referenced,
-            entry.value.config,
+            &entry.value.config,
             "formatter",
             config_dir,
         )?),
         None => None,
     };
-    let relay = match modules.relay {
-        Some(entry) => {
+    let relay = match &modules.relay {
+        Setting::Missing => {
+            return Err(ConfigError::at(
+                modules_span,
+                "\"modules.relay\" is required, with \"location: in_process\" and its \"config\" file",
+            ));
+        }
+        entry => {
+            let entry = entry.required(within, "\"modules.relay\"")?;
             let entry_span = entry.referenced;
-            let relay = entry.value;
-            match &relay.location {
-                None => {
+            let relay = &entry.value;
+            let location = match &relay.location {
+                Setting::Missing => {
                     return Err(ConfigError::at(
                         entry_span,
                         "\"modules.relay.location\" is required (only \"in_process\" is supported)",
                     ));
                 }
-                Some(location) if location.value != "in_process" => {
-                    return Err(ConfigError::at(
-                        location.referenced,
-                        "modules.relay.location must be \"in_process\"; external relays are not supported yet",
-                    ));
+                location => {
+                    location.required(Within::Mapping(entry_span), "\"modules.relay.location\"")?
                 }
-                _ => {}
+            };
+            if location.value != "in_process" {
+                return Err(ConfigError::at(
+                    location.referenced,
+                    "modules.relay.location must be \"in_process\"; external relays are not supported yet",
+                ));
             }
-            module_ref(entry_span, relay.config, "relay", config_dir)?
-        }
-        None => {
-            return Err(ConfigError::at(
-                modules_span,
-                "\"modules.relay\" is required, with \"location: in_process\" and its \"config\" file",
-            ));
+            module_ref(entry_span, &relay.config, "relay", config_dir)?
         }
     };
 
@@ -822,15 +792,21 @@ fn validate_modules(
 /// file's directory.
 fn module_ref(
     entry_span: serde_saphyr::Location,
-    config: Option<Spanned<PathBuf>>,
+    config: &Setting<PathBuf>,
     name: &str,
     config_dir: &Path,
 ) -> Result<ModuleRef, ConfigError> {
-    let Some(config) = config else {
-        return Err(ConfigError::at(
-            entry_span,
-            format!("\"modules.{name}.config\" is required"),
-        ));
+    let config = match config {
+        Setting::Missing => {
+            return Err(ConfigError::at(
+                entry_span,
+                format!("\"modules.{name}.config\" is required"),
+            ));
+        }
+        config => config.required(
+            Within::Mapping(entry_span),
+            &format!("\"modules.{name}.config\""),
+        )?,
     };
     if config.value.as_os_str().is_empty() {
         return Err(ConfigError::at(
@@ -845,11 +821,12 @@ fn module_ref(
 
 fn validate_flow(entry: &Spanned<RawFlow>) -> Result<Flow, ConfigError> {
     let entry_location = entry.referenced;
+    let within = Within::Mapping(entry_location);
     let flow = &entry.value;
 
-    let Some(id) = &flow.id else {
+    let Setting::Value(id) = &flow.id else {
         return Err(ConfigError::at(
-            entry_location,
+            flow.id.location().unwrap_or(entry_location),
             "a flows entry has no \"id\"; every entry starts with \"- id: <name>\"",
         ));
     };
@@ -861,15 +838,17 @@ fn validate_flow(entry: &Spanned<RawFlow>) -> Result<Flow, ConfigError> {
 
     let enabled = flow
         .enabled
-        .as_ref()
-        .map(|span| span.value)
-        .unwrap_or(false);
+        .required(within, &format!("flow \"{id}\".enabled"))?
+        .value;
 
-    let Some(transcription_model) = &flow.transcription_model else {
-        return Err(ConfigError::at(
-            id_span,
-            format!("flow \"{id}\" has no \"transcription_model\""),
-        ));
+    let transcription_model = match &flow.transcription_model {
+        Setting::Missing => {
+            return Err(ConfigError::at(
+                id_span,
+                format!("flow \"{id}\" has no \"transcription_model\""),
+            ));
+        }
+        model => model.required(within, &format!("flow \"{id}\".transcription_model"))?,
     };
     if transcription_model.value.trim().is_empty() {
         return Err(ConfigError::at(
@@ -880,9 +859,8 @@ fn validate_flow(entry: &Spanned<RawFlow>) -> Result<Flow, ConfigError> {
 
     // `formatter` must be written explicitly: an id or YAML null. A missing
     // key is an error — never an implicit choice (D4).
-    let formatter_span = flow.formatter.location();
     let formatter = match &flow.formatter {
-        FormatterField::Missing => {
+        Setting::Missing => {
             return Err(ConfigError::at(
                 id_span,
                 format!(
@@ -890,21 +868,24 @@ fn validate_flow(entry: &Spanned<RawFlow>) -> Result<Flow, ConfigError> {
                 ),
             ));
         }
-        FormatterField::Null(_) => None,
-        FormatterField::Id(value, location) if value.trim().is_empty() => {
+        Setting::Null(_) => None,
+        Setting::Value(value) if value.value.trim().is_empty() => {
             return Err(ConfigError::at(
-                *location,
+                value.referenced,
                 format!("flow \"{id}\" formatter id must not be empty (or null)"),
             ));
         }
-        FormatterField::Id(value, _) => Some(value.clone()),
+        Setting::Value(value) => Some(value.value.clone()),
     };
 
-    let Some(relay_route) = &flow.relay_route else {
-        return Err(ConfigError::at(
-            id_span,
-            format!("flow \"{id}\" has no \"relay_route\""),
-        ));
+    let relay_route = match &flow.relay_route {
+        Setting::Missing => {
+            return Err(ConfigError::at(
+                id_span,
+                format!("flow \"{id}\" has no \"relay_route\""),
+            ));
+        }
+        route => route.required(within, &format!("flow \"{id}\".relay_route"))?,
     };
     if relay_route.value.trim().is_empty() {
         return Err(ConfigError::at(
@@ -930,7 +911,10 @@ fn validate_flow(entry: &Spanned<RawFlow>) -> Result<Flow, ConfigError> {
         ));
     }
 
-    let budgets = validate_budgets(flow.budgets_ms.as_ref())?;
+    let budgets = flow
+        .budgets_ms
+        .required(within, &format!("flow \"{id}\".budgets_ms"))?;
+    let budgets = validate_budgets(budgets, id)?;
 
     Ok(Flow {
         id: id.clone(),
@@ -942,42 +926,35 @@ fn validate_flow(entry: &Spanned<RawFlow>) -> Result<Flow, ConfigError> {
         references: ReferenceSpans {
             id: position(id_span),
             transcription_model: position(transcription_model.referenced),
-            formatter: formatter_span.and_then(position),
+            formatter: flow.formatter.location().and_then(position),
             relay_route: position(relay_route.referenced),
         },
     })
 }
 
-fn validate_budgets(raw: Option<&Spanned<RawBudgets>>) -> Result<Budgets, ConfigError> {
-    let defaults = Budgets::default();
-    let Some(raw) = raw else { return Ok(defaults) };
-    let budget = |span: &Option<Spanned<u64>>, name: &str, default: Duration| match span {
-        None => Ok(default),
-        Some(span) => {
-            if span.value == 0 {
-                return Err(ConfigError::at(
-                    span.referenced,
-                    format!("budgets_ms.{name} must be greater than zero"),
-                ));
-            }
-            if span.value > MAX_BUDGET_MS {
-                return Err(ConfigError::at(
-                    span.referenced,
-                    format!("budgets_ms.{name} must be at most {MAX_BUDGET_MS}"),
-                ));
-            }
-            Ok(Duration::from_millis(span.value))
+fn validate_budgets(raw: &Spanned<RawBudgets>, flow: &str) -> Result<Budgets, ConfigError> {
+    let within = Within::Mapping(raw.referenced);
+    let budget = |setting: &Setting<u64>, name: &str| {
+        let span = setting.required(within, &format!("flow \"{flow}\".budgets_ms.{name}"))?;
+        if span.value == 0 {
+            return Err(ConfigError::at(
+                span.referenced,
+                format!("budgets_ms.{name} must be greater than zero"),
+            ));
         }
+        if span.value > MAX_BUDGET_MS {
+            return Err(ConfigError::at(
+                span.referenced,
+                format!("budgets_ms.{name} must be at most {MAX_BUDGET_MS}"),
+            ));
+        }
+        Ok(Duration::from_millis(span.value))
     };
     let budgets = Budgets {
-        total: budget(&raw.value.total, "total", defaults.total)?,
-        transcription: budget(
-            &raw.value.transcription,
-            "transcription",
-            defaults.transcription,
-        )?,
-        formatter: budget(&raw.value.formatter, "formatter", defaults.formatter)?,
-        relay: budget(&raw.value.relay, "relay", defaults.relay)?,
+        total: budget(&raw.value.total, "total")?,
+        transcription: budget(&raw.value.transcription, "transcription")?,
+        formatter: budget(&raw.value.formatter, "formatter")?,
+        relay: budget(&raw.value.relay, "relay")?,
     };
     if budgets.total <= TEARDOWN_RESERVE {
         return Err(ConfigError::at(
@@ -1094,139 +1071,171 @@ fn is_absolute_for(value: &OsStr, windows: bool) -> bool {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
-    schema_version: Option<Spanned<u32>>,
-    modules: Option<Spanned<RawModules>>,
     #[serde(default)]
-    flows: Vec<Spanned<RawFlow>>,
-    serve: Option<Spanned<RawServe>>,
+    schema_version: Setting<u32>,
+    #[serde(default)]
+    modules: Setting<RawModules>,
+    #[serde(default)]
+    flows: Setting<Vec<Spanned<RawFlow>>>,
+    #[serde(default)]
+    serve: Setting<RawServe>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawServe {
-    enabled: Option<Spanned<bool>>,
-    port: Option<Spanned<u16>>,
-    transcription_model: Option<Spanned<String>>,
-    startup_timeout_ms: Option<Spanned<u64>>,
-    transcription_flows: Option<Spanned<Vec<Spanned<String>>>>,
-    allowed_origins: Option<Spanned<Vec<Spanned<String>>>>,
+    #[serde(default)]
+    enabled: Setting<bool>,
+    #[serde(default)]
+    port: Setting<u16>,
+    #[serde(default)]
+    transcription_model: Setting<String>,
+    #[serde(default)]
+    startup_timeout_ms: Setting<u64>,
+    #[serde(default)]
+    transcription_flows: Setting<Vec<Spanned<String>>>,
+    #[serde(default)]
+    allowed_origins: Setting<Vec<Spanned<String>>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawModules {
-    transcription: Option<Spanned<RawModuleRef>>,
-    formatter: Option<Spanned<RawModuleRef>>,
-    relay: Option<Spanned<RawRelayModule>>,
+    #[serde(default)]
+    transcription: Setting<RawModuleRef>,
+    #[serde(default)]
+    formatter: Setting<RawModuleRef>,
+    #[serde(default)]
+    relay: Setting<RawRelayModule>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawModuleRef {
-    config: Option<Spanned<PathBuf>>,
+    #[serde(default)]
+    config: Setting<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRelayModule {
-    location: Option<Spanned<String>>,
-    config: Option<Spanned<PathBuf>>,
+    #[serde(default)]
+    location: Setting<String>,
+    #[serde(default)]
+    config: Setting<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawFlow {
-    id: Option<Spanned<String>>,
-    enabled: Option<Spanned<bool>>,
-    transcription_model: Option<Spanned<String>>,
-    /// Present-but-null (`formatter: ~`) is `Null`; a missing key is
-    /// `Missing` and is rejected: the choice is never implicit (D4).
-    /// `Option<Spanned<…>>` cannot express this: serde-saphyr maps an
-    /// explicit YAML null to `None` before the field type runs.
     #[serde(default)]
-    formatter: FormatterField,
-    relay_route: Option<Spanned<String>>,
-    budgets_ms: Option<Spanned<RawBudgets>>,
-}
-
-/// The three states of a flow's `formatter` key.
-#[derive(Debug, Default)]
-enum FormatterField {
-    #[default]
-    Missing,
-    Null(serde_saphyr::Location),
-    Id(String, serde_saphyr::Location),
-}
-
-impl FormatterField {
-    /// The source position of a present value (id or null).
-    fn location(&self) -> Option<serde_saphyr::Location> {
-        match self {
-            FormatterField::Missing => None,
-            FormatterField::Null(location) | FormatterField::Id(_, location) => Some(*location),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for FormatterField {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let spanned = Spanned::<FormatterValue>::deserialize(deserializer)?;
-        Ok(match spanned.value {
-            FormatterValue::Null => FormatterField::Null(spanned.referenced),
-            FormatterValue::Id(id) => FormatterField::Id(id, spanned.referenced),
-        })
-    }
-}
-
-/// The value of a present `formatter` key: null or a string id.
-enum FormatterValue {
-    Null,
-    Id(String),
-}
-
-impl<'de> Deserialize<'de> for FormatterValue {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct ValueVisitor;
-        impl serde::de::Visitor<'_> for ValueVisitor {
-            type Value = FormatterValue;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("a formatter id or null")
-            }
-
-            fn visit_unit<E: serde::de::Error>(self) -> Result<FormatterValue, E> {
-                Ok(FormatterValue::Null)
-            }
-
-            fn visit_none<E: serde::de::Error>(self) -> Result<FormatterValue, E> {
-                Ok(FormatterValue::Null)
-            }
-
-            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<FormatterValue, E> {
-                Ok(FormatterValue::Id(value.to_owned()))
-            }
-
-            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<FormatterValue, E> {
-                Ok(FormatterValue::Id(value))
-            }
-        }
-        deserializer.deserialize_any(ValueVisitor)
-    }
+    id: Setting<String>,
+    #[serde(default)]
+    enabled: Setting<bool>,
+    #[serde(default)]
+    transcription_model: Setting<String>,
+    /// Present-but-null (`formatter: ~`) selects no formatter; a missing key
+    /// is rejected: the choice is never implicit (D4).
+    #[serde(default)]
+    formatter: Setting<String>,
+    #[serde(default)]
+    relay_route: Setting<String>,
+    #[serde(default)]
+    budgets_ms: Setting<RawBudgets>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawBudgets {
-    total: Option<Spanned<u64>>,
-    transcription: Option<Spanned<u64>>,
-    formatter: Option<Spanned<u64>>,
-    relay: Option<Spanned<u64>>,
+    #[serde(default)]
+    total: Setting<u64>,
+    #[serde(default)]
+    transcription: Setting<u64>,
+    #[serde(default)]
+    formatter: Setting<u64>,
+    #[serde(default)]
+    relay: Setting<u64>,
+}
+
+/// One setting as written: omitted, an explicit `null` (also `~` or no
+/// value), or a value. `Option<Spanned<T>>` cannot tell the first two apart:
+/// serde-saphyr maps an explicit `null` to `None` before the field type runs.
+/// Every field of this type needs `#[serde(default)]`.
+#[derive(Debug, Default)]
+enum Setting<T> {
+    #[default]
+    Missing,
+    Null(serde_saphyr::Location),
+    Value(Spanned<T>),
+}
+
+/// Where a missing setting is reported: the mapping it belongs in.
+#[derive(Clone, Copy, Debug)]
+enum Within {
+    /// The top level of the file, reported at line 1.
+    Root,
+    /// A nested mapping or list entry, reported at its first key.
+    Mapping(serde_saphyr::Location),
+}
+
+impl<T> Setting<T> {
+    /// The written value; an omitted key or an explicit `null` is an error.
+    /// `name` is the setting as error messages show it, e.g. `"serve.port"`.
+    fn required(&self, within: Within, name: &str) -> Result<&Spanned<T>, ConfigError> {
+        match self {
+            Setting::Value(value) => Ok(value),
+            Setting::Null(location) => Err(ConfigError::at(
+                *location,
+                format!("{name} must not be null; write a value"),
+            )),
+            Setting::Missing => Err(missing(within, name)),
+        }
+    }
+
+    /// The written value, or `None` for an explicit `null`; an omitted key
+    /// is an error.
+    fn nullable(&self, within: Within, name: &str) -> Result<Option<&Spanned<T>>, ConfigError> {
+        match self {
+            Setting::Missing => Err(missing(within, name)),
+            Setting::Null(_) => Ok(None),
+            Setting::Value(value) => Ok(Some(value)),
+        }
+    }
+
+    /// The position of a written value or `null`.
+    fn location(&self) -> Option<serde_saphyr::Location> {
+        match self {
+            Setting::Missing => None,
+            Setting::Null(location) => Some(*location),
+            Setting::Value(value) => Some(value.referenced),
+        }
+    }
+}
+
+/// The error for a setting the file does not write.
+fn missing(within: Within, name: &str) -> ConfigError {
+    let message = format!("{name} is missing; every setting must be written (see {EXAMPLE_FILE})");
+    match within {
+        Within::Root => ConfigError::at_line(1, 1, message),
+        Within::Mapping(location) => ConfigError::at(location, message),
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Setting<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let spanned = Spanned::<Option<T>>::deserialize(deserializer)?;
+        Ok(match spanned.value {
+            None => Setting::Null(spanned.referenced),
+            Some(value) => Setting::Value(Spanned {
+                value,
+                referenced: spanned.referenced,
+                defined: spanned.defined,
+            }),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1244,7 +1253,11 @@ mod tests {
         load(Some(&path))
     }
 
-    const VALID: &str = "\
+    /// The budgets every test flow writes (the example's values).
+    const BUDGETS: &str = "    budgets_ms:\n      total: 180000\n      transcription: 120000\n      formatter: 1000\n      relay: 60000\n";
+
+    /// Everything but the `serve:` section: lines 1-30.
+    const BASE: &str = "\
 schema_version: 1
 modules:
   transcription:
@@ -1260,17 +1273,50 @@ flows:
     transcription_model: turbo
     formatter: builtin:clean
     relay_route: claude
+    budgets_ms:
+      total: 180000
+      transcription: 120000
+      formatter: 1000
+      relay: 60000
   - id: raw
     enabled: false
     transcription_model: turbo
     formatter: null
     relay_route: passthrough
+    budgets_ms:
+      total: 180000
+      transcription: 120000
+      formatter: 1000
+      relay: 60000
 ";
+
+    /// A disabled `serve:` section with every key written.
+    const SERVE_OFF: &str = "\
+serve:
+  enabled: false
+  port: 17570
+  transcription_model: null
+  startup_timeout_ms: 60000
+  transcription_flows: []
+  allowed_origins: []
+";
+
+    /// A complete file: [`BASE`] and [`SERVE_OFF`].
+    fn valid() -> String {
+        format!("{BASE}{SERVE_OFF}")
+    }
+
+    /// The modules and the `flows:` key, for tests that write their own
+    /// flow entries (lines 1-10): `modules.formatter` is null.
+    const MODULES: &str = "schema_version: 1\nmodules:\n  transcription:\n    config: t.yml\n  formatter: null\n  relay:\n    location: in_process\n    config: relay.yml\nflows:\n";
+
+    /// [`MODULES`] with a formatter module (lines 1-10).
+    const WITH_FORMATTER_MODULE: &str = "schema_version: 1\nmodules:\n  transcription:\n    config: t.yml\n  formatter:\n    config: f.yml\n  relay:\n    location: in_process\n    config: relay.yml\nflows:\n";
 
     #[test]
     fn valid_config_loads_with_defaults() {
         let tmp = tempfile::tempdir().unwrap();
-        let loaded = load_text(&tmp, VALID).unwrap();
+        let loaded = load_text(&tmp, &valid()).unwrap();
         assert_eq!(loaded.config.flows.len(), 2);
 
         let clean = loaded.flow("clean").unwrap();
@@ -1278,10 +1324,19 @@ flows:
         assert_eq!(clean.transcription_model, "turbo");
         assert_eq!(clean.formatter.as_deref(), Some("builtin:clean"));
         assert_eq!(clean.relay_route, "claude");
-        assert_eq!(clean.budgets, Budgets::default());
+        // The values that were the built-in defaults (D5), now written.
+        assert_eq!(
+            clean.budgets,
+            Budgets {
+                total: Duration::from_millis(180_000),
+                transcription: Duration::from_millis(120_000),
+                formatter: Duration::from_millis(1_000),
+                relay: Duration::from_millis(60_000),
+            }
+        );
 
         let raw = loaded.flow("raw").unwrap();
-        assert!(!raw.enabled, "enabled defaults to false");
+        assert!(!raw.enabled, "enabled: false is kept");
         assert_eq!(raw.formatter, None, "explicit null selects no formatter");
         assert!(raw.relay_route.eq_ignore_ascii_case("passthrough"));
 
@@ -1298,14 +1353,132 @@ flows:
         assert_eq!(loaded.config.modules.relay.config, dir.join("relay.yml"));
         assert!(loaded.path.is_absolute());
         assert!(loaded.flow("missing").is_none());
+        let serve = &loaded.config.serve;
+        assert!(!serve.enabled);
+        assert_eq!(serve.port, 17570);
+        assert_eq!(serve.transcription_model, None);
+        assert_eq!(serve.startup_timeout, Duration::from_millis(60_000));
     }
 
     #[test]
-    fn explicit_budgets_replace_defaults_per_key() {
+    fn every_top_level_setting_is_required_at_line_1() {
         let tmp = tempfile::tempdir().unwrap();
-        let text = VALID.replace(
-            "relay_route: claude\n",
-            "relay_route: claude\n    budgets_ms:\n      transcription: 5000\n",
+        let text = valid();
+        for (key, start, end) in [
+            ("schema_version", 1, 1),
+            ("modules", 2, 9),
+            ("flows", 10, 30),
+            ("serve", 31, 37),
+        ] {
+            let without: String = text
+                .lines()
+                .enumerate()
+                .filter(|(index, _)| !(start..=end).contains(&(index + 1)))
+                .map(|(_, line)| format!("{line}\n"))
+                .collect();
+            let err = load_text(&tmp, &without).unwrap_err().to_string();
+            assert!(
+                err.contains(&format!(
+                    "orchestrator.yml:1:1: \"{key}\" is missing; every setting must be written (see orchestrator.example.yml)"
+                )),
+                "{key}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_flow_settings_are_reported_at_the_flow_or_its_budgets() {
+        let tmp = tempfile::tempdir().unwrap();
+        // The clean flow starts at line 11, column 5; its budgets at 17:7.
+        for (line, expected) in [
+            (
+                "    enabled: true\n",
+                ":11:5: flow \"clean\".enabled is missing",
+            ),
+            (
+                "    budgets_ms:\n      total: 180000\n      transcription: 120000\n      formatter: 1000\n      relay: 60000\n  - id: raw",
+                ":11:5: flow \"clean\".budgets_ms is missing",
+            ),
+            (
+                "      total: 180000\n",
+                ":17:7: flow \"clean\".budgets_ms.total is missing",
+            ),
+            (
+                "      relay: 60000\n",
+                ":17:7: flow \"clean\".budgets_ms.relay is missing",
+            ),
+        ] {
+            let replacement = if line.ends_with("- id: raw") {
+                "  - id: raw"
+            } else {
+                ""
+            };
+            let text = valid().replacen(line, replacement, 1);
+            let err = load_text(&tmp, &text).unwrap_err().to_string();
+            assert!(err.contains(expected), "{expected}: {err}");
+        }
+        // `enabled: null` is not an omission, but it is not a value either.
+        let text = valid().replacen("    enabled: true\n", "    enabled: null\n", 1);
+        let err = load_text(&tmp, &text).unwrap_err().to_string();
+        assert!(
+            err.contains(":12:14: flow \"clean\".enabled must not be null"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn missing_serve_settings_are_reported_at_the_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        // The section's first key is at line 32, column 3.
+        for key in [
+            "enabled",
+            "port",
+            "transcription_model",
+            "startup_timeout_ms",
+            "transcription_flows",
+            "allowed_origins",
+        ] {
+            let text: String = valid()
+                .lines()
+                .filter(|line| !line.starts_with(&format!("  {key}:")))
+                .map(|line| format!("{line}\n"))
+                .collect();
+            let err = load_text(&tmp, &text).unwrap_err().to_string();
+            // Without `enabled` the section starts at the next key, still
+            // line 32.
+            assert!(
+                err.contains(&format!(":32:3: \"serve.{key}\" is missing")),
+                "{key}: {err}"
+            );
+        }
+        for (from, to, at) in [
+            (
+                "serve:\n  enabled: false\n",
+                "serve:\n  enabled: null\n",
+                ":32:12:",
+            ),
+            ("  port: 17570\n", "  port: ~\n", ":33:9:"),
+            (
+                "  transcription_flows: []\n",
+                "  transcription_flows: null\n",
+                ":36:24:",
+            ),
+        ] {
+            let err = load_text(&tmp, &valid().replace(from, to))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(&format!("{at} \"serve.")), "{to}: {err}");
+            assert!(err.contains("must not be null"), "{to}: {err}");
+        }
+    }
+
+    #[test]
+    fn explicit_budgets_are_used_per_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let text = valid().replacen(
+            "      transcription: 120000\n",
+            "      transcription: 5000\n",
+            1,
         );
         let loaded = load_text(&tmp, &text).unwrap();
         let budgets = loaded.flow("clean").unwrap().budgets;
@@ -1319,7 +1492,7 @@ flows:
     fn schema_version_is_required_and_must_be_1() {
         let tmp = tempfile::tempdir().unwrap();
         let err = load_text(&tmp, "modules: {}\n").unwrap_err().to_string();
-        assert!(err.contains("schema_version is required"), "{err}");
+        assert!(err.contains(":1:1: \"schema_version\" is missing"), "{err}");
 
         let err = load_text(&tmp, "schema_version: 2\n")
             .unwrap_err()
@@ -1363,7 +1536,7 @@ flows:
         let err = load_text(&tmp, "schema_version: 1\n")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("\"modules\" is required"), "{err}");
+        assert!(err.contains(":1:1: \"modules\" is missing"), "{err}");
 
         let err = load_text(&tmp, "schema_version: 1\nmodules:\n  relay:\n    location: in_process\n    config: relay.yml\n")
             .unwrap_err()
@@ -1376,11 +1549,23 @@ flows:
 
         let err = load_text(
             &tmp,
-            "schema_version: 1\nmodules:\n  transcription:\n    config: t.yml\n",
+            "schema_version: 1\nmodules:\n  transcription:\n    config: t.yml\n  formatter: null\n",
         )
         .unwrap_err()
         .to_string();
         assert!(err.contains("\"modules.relay\" is required"), "{err}");
+
+        // `modules.formatter` is written even when no formatter is used.
+        let err = load_text(
+            &tmp,
+            "schema_version: 1\nmodules:\n  transcription:\n    config: t.yml\n  relay:\n    location: in_process\n    config: relay.yml\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains(":3:3: \"modules.formatter\" is missing"),
+            "{err}"
+        );
 
         let err = load_text(
             &tmp,
@@ -1403,7 +1588,7 @@ flows:
     #[test]
     fn relay_location_must_be_in_process() {
         let tmp = tempfile::tempdir().unwrap();
-        let base = "schema_version: 1\nmodules:\n  transcription:\n    config: t.yml\n  relay:\n";
+        let base = "schema_version: 1\nmodules:\n  transcription:\n    config: t.yml\n  formatter: null\n  relay:\n";
 
         let err = load_text(&tmp, &format!("{base}    config: relay.yml\n"))
             .unwrap_err()
@@ -1423,7 +1608,7 @@ flows:
             err.contains("modules.relay.location must be \"in_process\""),
             "{err}"
         );
-        assert!(err.contains(":6:"), "the location value's line: {err}");
+        assert!(err.contains(":7:"), "the location value's line: {err}");
         // Never quotes the configured value.
         assert!(!err.contains("7567"), "{err}");
     }
@@ -1431,7 +1616,7 @@ flows:
     #[test]
     fn flow_id_is_required_nonempty_and_unique() {
         let tmp = tempfile::tempdir().unwrap();
-        let modules = "schema_version: 1\nmodules:\n  transcription:\n    config: t.yml\n  relay:\n    location: in_process\n    config: relay.yml\nflows:\n";
+        let modules = MODULES;
 
         let err = load_text(
             &tmp,
@@ -1450,11 +1635,11 @@ flows:
         assert!(err.contains("flow id must not be empty"), "{err}");
 
         let dup = format!(
-            "{modules}  - id: a\n    transcription_model: t\n    formatter: null\n    relay_route: passthrough\n  - id: a\n    transcription_model: t\n    formatter: null\n    relay_route: passthrough\n"
+            "{modules}  - id: a\n    enabled: false\n    transcription_model: t\n    formatter: null\n    relay_route: passthrough\n{BUDGETS}  - id: a\n    enabled: false\n    transcription_model: t\n    formatter: null\n    relay_route: passthrough\n{BUDGETS}"
         );
         let err = load_text(&tmp, &dup).unwrap_err().to_string();
         assert!(err.contains("duplicate flow id \"a\""), "{err}");
-        let second_id_line = dup.lines().count() as u64 - 3;
+        let second_id_line = dup.lines().count() as u64 - 9;
         assert!(
             err.contains(&format!(":{second_id_line}:")),
             "the second entry's line: {err}"
@@ -1464,11 +1649,13 @@ flows:
     #[test]
     fn flow_references_and_formatter_key_are_explicit() {
         let tmp = tempfile::tempdir().unwrap();
-        let modules = "schema_version: 1\nmodules:\n  transcription:\n    config: t.yml\n  relay:\n    location: in_process\n    config: relay.yml\nflows:\n";
+        let modules = MODULES;
 
         let err = load_text(
             &tmp,
-            &format!("{modules}  - id: a\n    formatter: null\n    relay_route: passthrough\n"),
+            &format!(
+                "{modules}  - id: a\n    enabled: false\n    formatter: null\n    relay_route: passthrough\n"
+            ),
         )
         .unwrap_err()
         .to_string();
@@ -1481,7 +1668,7 @@ flows:
         let err = load_text(
             &tmp,
             &format!(
-                "{modules}  - id: a\n    transcription_model: t\n    relay_route: passthrough\n"
+                "{modules}  - id: a\n    enabled: false\n    transcription_model: t\n    relay_route: passthrough\n"
             ),
         )
         .unwrap_err()
@@ -1491,7 +1678,9 @@ flows:
 
         let err = load_text(
             &tmp,
-            &format!("{modules}  - id: a\n    transcription_model: t\n    formatter: null\n"),
+            &format!(
+                "{modules}  - id: a\n    enabled: false\n    transcription_model: t\n    formatter: null\n"
+            ),
         )
         .unwrap_err()
         .to_string();
@@ -1499,7 +1688,7 @@ flows:
 
         let loaded = load_text(
             &tmp,
-            &format!("{modules}  - id: a\n    transcription_model: t\n    formatter: ~\n    relay_route: passthrough\n"),
+            &format!("{modules}  - id: a\n    enabled: false\n    transcription_model: t\n    formatter: ~\n    relay_route: passthrough\n{BUDGETS}{SERVE_OFF}"),
         )
         .unwrap();
         assert_eq!(loaded.flow("a").unwrap().formatter, None, "`~` is null too");
@@ -1508,11 +1697,11 @@ flows:
     #[test]
     fn inspect_and_formatter_passthrough_routes_are_rejected() {
         let tmp = tempfile::tempdir().unwrap();
-        let with_formatter_module = "schema_version: 1\nmodules:\n  transcription:\n    config: t.yml\n  formatter:\n    config: f.yml\n  relay:\n    location: in_process\n    config: relay.yml\nflows:\n";
+        let with_formatter_module = WITH_FORMATTER_MODULE;
 
         let err = load_text(
             &tmp,
-            &format!("{with_formatter_module}  - id: a\n    transcription_model: t\n    formatter: null\n    relay_route: inspect\n"),
+            &format!("{with_formatter_module}  - id: a\n    enabled: false\n    transcription_model: t\n    formatter: null\n    relay_route: inspect\n"),
         )
         .unwrap_err()
         .to_string();
@@ -1520,7 +1709,7 @@ flows:
 
         let err = load_text(
             &tmp,
-            &format!("{with_formatter_module}  - id: a\n    transcription_model: t\n    formatter: builtin:clean\n    relay_route: passthrough\n"),
+            &format!("{with_formatter_module}  - id: a\n    enabled: false\n    transcription_model: t\n    formatter: builtin:clean\n    relay_route: passthrough\n"),
         )
         .unwrap_err()
         .to_string();
@@ -1532,7 +1721,7 @@ flows:
         // formatter: null + passthrough is the raw-only flow and loads fine.
         load_text(
             &tmp,
-            &format!("{with_formatter_module}  - id: a\n    transcription_model: t\n    formatter: null\n    relay_route: passthrough\n"),
+            &format!("{with_formatter_module}  - id: a\n    enabled: false\n    transcription_model: t\n    formatter: null\n    relay_route: passthrough\n{BUDGETS}{SERVE_OFF}"),
         )
         .unwrap();
     }
@@ -1540,23 +1729,23 @@ flows:
     #[test]
     fn formatter_module_is_required_only_for_enabled_flows_with_a_formatter() {
         let tmp = tempfile::tempdir().unwrap();
-        let no_formatter_module = "schema_version: 1\nmodules:\n  transcription:\n    config: t.yml\n  relay:\n    location: in_process\n    config: relay.yml\nflows:\n";
+        let no_formatter_module = MODULES;
 
         // Enabled flow with a formatter but no formatter module: rejected at
         // the flow's formatter line.
         let text = format!(
-            "{no_formatter_module}  - id: a\n    enabled: true\n    transcription_model: t\n    formatter: builtin:clean\n    relay_route: claude\n"
+            "{no_formatter_module}  - id: a\n    enabled: true\n    transcription_model: t\n    formatter: builtin:clean\n    relay_route: claude\n{BUDGETS}{SERVE_OFF}"
         );
         let err = load_text(&tmp, &text).unwrap_err().to_string();
         assert!(
-            err.contains("selects a formatter but \"modules.formatter\" is not configured"),
+            err.contains("selects a formatter but \"modules.formatter\" is null"),
             "{err}"
         );
-        assert!(err.contains(":12:"), "the formatter line: {err}");
+        assert!(err.contains(":13:"), "the formatter line: {err}");
 
         // The same flow disabled is fine, and so is an enabled null flow.
         let text = format!(
-            "{no_formatter_module}  - id: a\n    enabled: false\n    transcription_model: t\n    formatter: builtin:clean\n    relay_route: claude\n  - id: b\n    enabled: true\n    transcription_model: t\n    formatter: null\n    relay_route: claude\n"
+            "{no_formatter_module}  - id: a\n    enabled: false\n    transcription_model: t\n    formatter: builtin:clean\n    relay_route: claude\n{BUDGETS}  - id: b\n    enabled: true\n    transcription_model: t\n    formatter: null\n    relay_route: claude\n{BUDGETS}{SERVE_OFF}"
         );
         load_text(&tmp, &text).unwrap();
     }
@@ -1564,9 +1753,22 @@ flows:
     #[test]
     fn budgets_are_positive_bounded_and_cover_the_teardown_reserve() {
         let tmp = tempfile::tempdir().unwrap();
+        // `budgets` lists the keys under test; the others keep the
+        // example's values.
         let flow = |budgets: &str| {
+            let mut keys = budgets.to_owned();
+            for (key, value) in [
+                ("total", 180000),
+                ("transcription", 120000),
+                ("formatter", 1000),
+                ("relay", 60000),
+            ] {
+                if !budgets.contains(&format!(" {key}:")) {
+                    keys.push_str(&format!("      {key}: {value}\n"));
+                }
+            }
             format!(
-                "schema_version: 1\nmodules:\n  transcription:\n    config: t.yml\n  relay:\n    location: in_process\n    config: relay.yml\nflows:\n  - id: a\n    transcription_model: t\n    formatter: null\n    relay_route: passthrough\n    budgets_ms:\n{budgets}"
+                "{MODULES}  - id: a\n    enabled: false\n    transcription_model: t\n    formatter: null\n    relay_route: passthrough\n    budgets_ms:\n{keys}{SERVE_OFF}"
             )
         };
 
@@ -1645,7 +1847,7 @@ flows:
         // With the file present it loads.
         let dir = xdg.join("pumice");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("orchestrator.yml"), VALID).unwrap();
+        std::fs::write(dir.join("orchestrator.yml"), valid()).unwrap();
         let loaded = load_with_env(None, |key: &str| {
             (key == base_key).then(|| xdg_value.clone())
         })
@@ -1787,32 +1989,49 @@ flows:
         assert!(err.contains("--config"), "{err}");
     }
 
-    /// [`VALID`] with a `serve:` section appended.
+    /// The `serve:` keys with [`SERVE_OFF`]'s values, keyed by name.
+    const SERVE_KEYS: [(&str, &str); 6] = [
+        ("enabled", "  enabled: false\n"),
+        ("port", "  port: 17570\n"),
+        ("transcription_model", "  transcription_model: null\n"),
+        ("startup_timeout_ms", "  startup_timeout_ms: 60000\n"),
+        ("transcription_flows", "  transcription_flows: []\n"),
+        ("allowed_origins", "  allowed_origins: []\n"),
+    ];
+
+    /// `serve` (the section's keys under test), then every `serve:` key it
+    /// does not write, with [`SERVE_OFF`]'s values. Appending keeps the line
+    /// numbers in `serve` unchanged.
+    fn serve_section(serve: &str) -> String {
+        let mut section = format!("serve:\n{serve}");
+        for (key, line) in SERVE_KEYS {
+            if !serve
+                .lines()
+                .any(|written| written.starts_with(&format!("  {key}:")))
+            {
+                section.push_str(line);
+            }
+        }
+        section
+    }
+
+    /// [`BASE`] with a `serve:` section from [`serve_section`]: the
+    /// section starts at line 31.
     fn with_serve(serve: &str) -> String {
-        format!("{VALID}serve:\n{serve}")
+        format!("{BASE}{}", serve_section(serve))
     }
 
     #[test]
-    fn files_without_serve_stay_valid_and_serve_settings_need_the_section() {
-        let tmp = tempfile::tempdir().unwrap();
-        let loaded = load_text(&tmp, VALID).unwrap();
-        assert_eq!(loaded.config.serve, None);
-        let err = serve_settings(&loaded).unwrap_err().to_string();
-        assert!(err.contains("\"serve\" is not configured"), "{err}");
-        assert!(err.contains("orchestrator.yml"), "names the file: {err}");
-    }
-
-    #[test]
-    fn serve_section_defaults_and_settings() {
+    fn serve_section_settings() {
         let tmp = tempfile::tempdir().unwrap();
         let loaded = load_text(
             &tmp,
             &with_serve("  enabled: true\n  transcription_model: turbo\n"),
         )
         .unwrap();
-        let serve = loaded.config.serve.as_ref().unwrap();
+        let serve = &loaded.config.serve;
         assert!(serve.enabled);
-        assert_eq!(serve.port, DEFAULT_SERVE_PORT);
+        assert_eq!(serve.port, 17570);
         assert_eq!(serve.startup_timeout, Duration::from_millis(60_000));
         let settings = serve_settings(&loaded).unwrap();
         assert_eq!(
@@ -1821,7 +2040,7 @@ flows:
                 port: 17570,
                 transcription_model: "turbo".to_owned(),
                 startup_timeout: Duration::from_millis(60_000),
-                transcription_model_at: Some((23, 24)),
+                transcription_model_at: Some((33, 24)),
                 transcription_flows: Vec::new(),
                 allowed_origins: Vec::new(),
             }
@@ -1841,23 +2060,24 @@ flows:
     }
 
     #[test]
-    fn serve_disabled_or_unset_is_a_located_error_for_serve_only() {
+    fn serve_disabled_is_a_located_error_for_serve_only() {
         let tmp = tempfile::tempdir().unwrap();
         // A disabled section loads (pumice run keeps working) but cannot serve.
-        let text = with_serve("  enabled: false\n");
-        let loaded = load_text(&tmp, &text).unwrap();
+        let loaded = load_text(&tmp, &valid()).unwrap();
         let err = serve_settings(&loaded).unwrap_err().to_string();
         assert!(err.contains("serve is not enabled"), "{err}");
-        let line = text.lines().count();
-        assert!(
-            err.contains(&format!(":{line}:")),
-            "the enabled line: {err}"
-        );
+        assert!(err.contains(":32:"), "the enabled line: {err}");
 
-        // `enabled` missing: false, located at the section.
-        let loaded = load_text(&tmp, &with_serve("  port: 18000\n")).unwrap();
-        let err = serve_settings(&loaded).unwrap_err().to_string();
-        assert!(err.contains("serve is not enabled"), "{err}");
+        // A disabled section may still name the model it would serve.
+        let loaded = load_text(
+            &tmp,
+            &with_serve("  enabled: false\n  transcription_model: turbo\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            loaded.config.serve.transcription_model.as_deref(),
+            Some("turbo")
+        );
     }
 
     #[test]
@@ -1866,8 +2086,7 @@ flows:
         let text = with_serve("  enabled: true\n  port: 7567\n  transcription_model: turbo\n");
         let err = load_text(&tmp, &text).unwrap_err().to_string();
         assert!(err.contains("port 7567 is reserved"), "{err}");
-        let line = text.lines().count() - 1;
-        assert!(err.contains(&format!(":{line}:")), "the port line: {err}");
+        assert!(err.contains(":33:"), "the port line: {err}");
         // Even a disabled section may not name it.
         let err = load_text(&tmp, &with_serve("  enabled: false\n  port: 7567\n"))
             .unwrap_err()
@@ -1918,6 +2137,7 @@ flows:
             err.contains("\"serve.transcription_model\" is required"),
             "{err}"
         );
+        assert!(err.contains(":34:24:"), "the null value: {err}");
         let err = load_text(
             &tmp,
             &with_serve("  enabled: true\n  transcription_model: \" \"\n"),
@@ -1941,13 +2161,16 @@ flows:
         );
 
         // A disabled flow may use another model.
-        let text = VALID.replace(
+        let text = BASE.replace(
             "    enabled: false\n    transcription_model: turbo",
             "    enabled: false\n    transcription_model: small",
         );
         let loaded = load_text(
             &tmp,
-            &format!("{text}serve:\n  enabled: true\n  transcription_model: turbo\n"),
+            &format!(
+                "{text}{}",
+                serve_section("  enabled: true\n  transcription_model: turbo\n")
+            ),
         )
         .unwrap();
         serve_settings(&loaded).unwrap();
@@ -1958,8 +2181,9 @@ flows:
         let tmp = tempfile::tempdir().unwrap();
         let long = "x".repeat(MAX_SERVED_FLOW_ID_BYTES + 1);
         let text = format!(
-            "{}serve:\n  enabled: true\n  transcription_model: turbo\n",
-            VALID.replace("- id: clean", &format!("- id: {long}"))
+            "{}{}",
+            BASE.replace("- id: clean", &format!("- id: {long}")),
+            serve_section("  enabled: true\n  transcription_model: turbo\n")
         );
         let loaded = load_text(&tmp, &text).unwrap();
         let err = serve_settings(&loaded).unwrap_err().to_string();
@@ -1968,7 +2192,7 @@ flows:
         assert!(!err.contains(&long), "the id is not echoed: {err}");
     }
 
-    /// [`VALID`] with `raw` enabled, an AI flow without a formatter and a
+    /// [`BASE`] with `raw` enabled, an AI flow without a formatter and a
     /// disabled flow, served with `turbo` and publishing `published`.
     fn publishing(published: &str) -> String {
         format!(
@@ -1977,17 +2201,16 @@ flows:
     transcription_model: turbo
     formatter: null
     relay_route: claude
-  - id: later
+{BUDGETS}  - id: later
     enabled: false
     transcription_model: turbo
     formatter: null
     relay_route: passthrough
-serve:
-  enabled: true
-  transcription_model: turbo
-  transcription_flows: {published}
-",
-            VALID.replace("    enabled: false\n", "    enabled: true\n")
+{BUDGETS}{}",
+            BASE.replace("    enabled: false\n", "    enabled: true\n"),
+            serve_section(&format!(
+                "  enabled: true\n  transcription_model: turbo\n  transcription_flows: {published}\n"
+            ))
         )
     }
 
@@ -2000,7 +2223,7 @@ serve:
     fn published_flows_are_listed_in_order() {
         let tmp = tempfile::tempdir().unwrap();
         let loaded = load_text(&tmp, &publishing("[raw, clean]")).unwrap();
-        let serve = loaded.config.serve.as_ref().unwrap();
+        let serve = &loaded.config.serve;
         assert_eq!(
             serve
                 .transcription_flows
@@ -2130,7 +2353,13 @@ serve:
             let err = load_text(&tmp, &text).unwrap_err().to_string();
             assert!(err.contains(problem), "{err}");
             assert!(err.contains("serve.allowed_origins"), "{err}");
-            let line = text.lines().count();
+            // The last entry written, before the keys `with_serve` appends.
+            let lines: Vec<&str> = text.lines().collect();
+            let line = lines
+                .iter()
+                .rposition(|line| line.starts_with("    - "))
+                .unwrap()
+                + 1;
             assert!(err.contains(&format!("orchestrator.yml:{line}:")), "{err}");
         }
         let err = load_text(
@@ -2180,7 +2409,12 @@ serve:
             err.contains("flow \"clean\" is listed twice in serve.transcription_flows"),
             "{err}"
         );
-        let line = text.lines().count();
+        let lines: Vec<&str> = text.lines().collect();
+        let line = lines
+            .iter()
+            .rposition(|line| *line == "    - clean")
+            .unwrap()
+            + 1;
         assert!(err.contains(&format!("orchestrator.yml:{line}:")), "{err}");
 
         // Not a list of strings.
@@ -2214,7 +2448,7 @@ serve:
             ),
             (
                 "\n    - bare",
-                "relay_route: claude\n  - id: later",
+                "relay_route: claude\n    budgets_ms:\n      total: 180000\n      transcription: 120000\n      formatter: 1000\n      relay: 60000\n  - id: later",
                 "flow \"bare\" is published but sends the transcript to an AI route without a formatter",
             ),
         ] {
@@ -2250,6 +2484,40 @@ serve:
             "{err}"
         );
         assert!(err.contains("orchestrator.yml:13:"), "{err}");
+    }
+
+    #[test]
+    fn the_example_writes_every_setting_with_the_old_defaults() {
+        let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("orchestrator.example.yml");
+        let loaded = load(Some(&example)).unwrap();
+        let ids: Vec<&str> = loaded
+            .config
+            .flows
+            .iter()
+            .map(|flow| flow.id.as_str())
+            .collect();
+        assert_eq!(ids, ["clean", "raw"]);
+        for flow in &loaded.config.flows {
+            assert!(flow.enabled, "{}", flow.id);
+            assert_eq!(
+                flow.budgets,
+                Budgets {
+                    total: Duration::from_millis(180_000),
+                    transcription: Duration::from_millis(120_000),
+                    formatter: Duration::from_millis(1_000),
+                    relay: Duration::from_millis(60_000),
+                },
+                "{}",
+                flow.id
+            );
+        }
+        assert!(loaded.config.modules.formatter.is_some());
+        // `pumice serve` stays off, as it was without a section.
+        let serve = &loaded.config.serve;
+        assert!(!serve.enabled);
+        assert_eq!(serve.port, 17570);
+        assert_eq!(serve.startup_timeout, Duration::from_millis(60_000));
+        assert!(serve.allowed_origins.is_empty());
     }
 
     #[test]

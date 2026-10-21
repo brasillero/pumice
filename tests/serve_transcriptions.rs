@@ -105,7 +105,76 @@ fn scenario_path(exe_path: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// Every flow budget with the example's value (the old built-in defaults).
+const BUDGETS: [(&str, u64); 4] = [
+    ("total", 180_000),
+    ("transcription", 120_000),
+    ("formatter", 1_000),
+    ("relay", 60_000),
+];
+
+/// The `serve:` keys with the example's values.
+const SERVE_KEYS: [(&str, &str); 6] = [
+    ("enabled", "  enabled: false"),
+    ("port", "  port: 17570"),
+    ("transcription_model", "  transcription_model: null"),
+    ("startup_timeout_ms", "  startup_timeout_ms: 60000"),
+    ("transcription_flows", "  transcription_flows: []"),
+    ("allowed_origins", "  allowed_origins: []"),
+];
+
+/// `config` (a `flows:` list, then a `serve:` section, both with the keys
+/// under test) with every setting it does not write: each flow's budgets
+/// and the section's keys get the example's values (every setting is
+/// required). A test writes `budgets_ms` last in a flow.
+fn complete(config: &str) -> String {
+    let (flows, serve) = config.split_once("serve:\n").expect("a serve section");
+    let mut out = String::new();
+    let mut entry: Vec<&str> = Vec::new();
+    let mut flush = |entry: &mut Vec<&str>| {
+        if entry.is_empty() {
+            return;
+        }
+        for line in entry.iter() {
+            out.push_str(line);
+            out.push('\n');
+        }
+        if entry[0].starts_with("  - ") {
+            if !entry.iter().any(|line| line.trim() == "budgets_ms:") {
+                out.push_str("    budgets_ms:\n");
+            }
+            for (key, value) in BUDGETS {
+                let written = format!("      {key}:");
+                if !entry.iter().any(|line| line.starts_with(&written)) {
+                    out.push_str(&format!("{written} {value}\n"));
+                }
+            }
+        }
+        entry.clear();
+    };
+    for line in flows.lines() {
+        if line.starts_with("  - ") {
+            flush(&mut entry);
+        }
+        entry.push(line);
+    }
+    flush(&mut entry);
+    out.push_str("serve:\n");
+    out.push_str(serve);
+    for (key, line) in SERVE_KEYS {
+        if !serve
+            .lines()
+            .any(|written| written.starts_with(&format!("  {key}:")))
+        {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 fn rig(config: &str, generations: Value) -> Rig {
+    let config = &complete(config);
     let dir = TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp dir");
     let install = dir.path().join("bin");
     let cfg = dir.path().join("cfg");

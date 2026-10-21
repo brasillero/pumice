@@ -31,7 +31,7 @@ usage:
   pumice run <AUDIO> --flow <ID> [--config <path>] [--json]
                                                transcribe, format and relay one audio file
   pumice serve [--config <path>] [--port <port>] [--json]
-                                               run the local stack on 127.0.0.1 (default port 17570)
+                                               run the local stack on 127.0.0.1 (port: serve.port)
   pumice --help                                print this help
   pumice --version                             print the version
 

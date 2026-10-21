@@ -42,21 +42,41 @@ const FLOWS: &str = "  - id: raw
     transcription_model: turbo
     formatter: null
     relay_route: passthrough
+    budgets_ms:
+      total: 180000
+      transcription: 120000
+      formatter: 1000
+      relay: 60000
   - id: clean
     enabled: true
     transcription_model: turbo
     formatter: builtin:clean
     relay_route: claude
+    budgets_ms:
+      total: 180000
+      transcription: 120000
+      formatter: 1000
+      relay: 60000
   - id: plain
     enabled: true
     transcription_model: turbo
     formatter: null
     relay_route: claude
+    budgets_ms:
+      total: 180000
+      transcription: 120000
+      formatter: 1000
+      relay: 60000
   - id: house
     enabled: true
     transcription_model: turbo
     formatter: house
     relay_route: claude
+    budgets_ms:
+      total: 180000
+      transcription: 120000
+      formatter: 1000
+      relay: 60000
   - id: tight
     enabled: true
     transcription_model: turbo
@@ -64,6 +84,19 @@ const FLOWS: &str = "  - id: raw
     relay_route: passthrough
     budgets_ms:
       total: 4000
+      transcription: 120000
+      formatter: 1000
+      relay: 60000
+";
+
+/// `pumice serve` stays off: these tests drive the flow seam directly.
+const SERVE_OFF: &str = "serve:
+  enabled: false
+  port: 17570
+  transcription_model: null
+  startup_timeout_ms: 60000
+  transcription_flows: []
+  allowed_origins: []
 ";
 
 /// An in-memory transcription transport. It records the deadline it was
@@ -207,7 +240,7 @@ fn rig(fake: Value) -> Rig {
     fs::write(
         root.join("orchestrator.yml"),
         format!(
-            "schema_version: 1\nmodules:\n  transcription:\n    config: ./transcribe.yml\n  formatter:\n    config: ./formatter.yml\n  relay:\n    location: in_process\n    config: ./relay.yml\nflows:\n{FLOWS}"
+            "schema_version: 1\nmodules:\n  transcription:\n    config: ./transcribe.yml\n  formatter:\n    config: ./formatter.yml\n  relay:\n    location: in_process\n    config: ./relay.yml\nflows:\n{FLOWS}{SERVE_OFF}"
         ),
     )
     .expect("write orchestrator.yml");

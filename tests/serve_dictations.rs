@@ -44,7 +44,7 @@ fn exe(name: &str) -> String {
 /// flow, with the given budgets.
 fn flows(total_ms: u64, transcription_ms: u64, relay_ms: u64) -> String {
     let budgets = format!(
-        "    budgets_ms:\n      total: {total_ms}\n      transcription: {transcription_ms}\n      relay: {relay_ms}\n"
+        "    budgets_ms:\n      total: {total_ms}\n      transcription: {transcription_ms}\n      formatter: 1000\n      relay: {relay_ms}\n"
     );
     format!(
         "flows:
@@ -63,7 +63,7 @@ fn flows(total_ms: u64, transcription_ms: u64, relay_ms: u64) -> String {
     transcription_model: small
     formatter: null
     relay_route: passthrough
-"
+{budgets}"
     )
 }
 
@@ -140,7 +140,7 @@ fn rig(flows: &str, generations: Value) -> Rig {
     fs::write(
         cfg.join("orchestrator.yml"),
         format!(
-            "schema_version: 1\nmodules:\n  transcription:\n    config: ./transcribe.yml\n  formatter:\n    config: ./formatter.yml\n  relay:\n    location: in_process\n    config: ./relay.yml\n{flows}serve:\n  enabled: true\n  port: 0\n  transcription_model: turbo\n"
+            "schema_version: 1\nmodules:\n  transcription:\n    config: ./transcribe.yml\n  formatter:\n    config: ./formatter.yml\n  relay:\n    location: in_process\n    config: ./relay.yml\n{flows}serve:\n  enabled: true\n  port: 0\n  transcription_model: turbo\n  startup_timeout_ms: 60000\n  transcription_flows: []\n  allowed_origins: []\n"
         ),
     )
     .unwrap();
