@@ -5,8 +5,12 @@
 #   2. the per-user file: ~/.config/pumice/formatter.yml on Linux and macOS
 #      ($XDG_CONFIG_HOME/pumice/formatter.yml when XDG_CONFIG_HOME is absolute),
 #      and %APPDATA%\pumice\formatter.yml on Windows,
-#   otherwise no file is used; select formatters explicitly with
-#   --formatter builtin:clean.
+#   and a missing file is an error. Only `list` (the built-ins) and
+#   `show builtin:clean` run without one.
+#
+# Every setting below must be written: leaving one out is an error that
+# names the file and line. There are no built-in defaults; this file is the
+# starting configuration.
 #
 # Validate a file with: pumice-format check-config --config <path>
 # Full guide: docs/formatter.md
@@ -15,10 +19,12 @@ schema_version: 1
 
 # Registered formatter definition files. Relative paths resolve against
 # this file; absolute paths are used as given. Nothing is enabled
-# implicitly: only the built-ins exist until a file is registered here.
+# implicitly: only the built-ins exist until a file is registered here
+# (`formatters: []` registers none).
 formatters:
   - path: example-formatter.clean.yml
 
-# Optional default formatter, used by `apply` when --formatter is omitted.
-# Must be one of the registered ids above or builtin:clean.
+# The formatter `apply` uses when --formatter is omitted: one of the
+# registered ids above or builtin:clean. null: none (`apply` then needs
+# --formatter).
 default: clean-example

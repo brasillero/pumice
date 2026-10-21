@@ -200,7 +200,7 @@ fn rig(fake: Value) -> Rig {
     .expect("write house.yml");
     fs::write(
         root.join("formatter.yml"),
-        "schema_version: 1\nformatters:\n  - path: house.yml\n",
+        "schema_version: 1\nformatters:\n  - path: house.yml\ndefault: null\n",
     )
     .expect("write formatter.yml");
     fs::write(root.join("transcribe.yml"), "schema_version: 1\ndefault_model: null\nlanguage: null\nthreads: auto\nbackend: cpu\nserver:\n  port: null\nmodels_dir: null\nmodels: []\n").expect("write transcribe.yml");

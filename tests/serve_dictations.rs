@@ -131,7 +131,11 @@ fn rig(flows: &str, generations: Value) -> Rig {
         ),
     )
     .unwrap();
-    fs::write(cfg.join("formatter.yml"), "schema_version: 1\n").unwrap();
+    fs::write(
+        cfg.join("formatter.yml"),
+        "schema_version: 1\nformatters: []\ndefault: null\n",
+    )
+    .unwrap();
     fs::write(cfg.join("transcribe.yml"), "schema_version: 1\ndefault_model: null\nlanguage: null\nthreads: auto\nbackend: cpu\nserver:\n  port: null\nmodels_dir: null\nmodels: []\n").unwrap();
     fs::write(
         cfg.join("orchestrator.yml"),

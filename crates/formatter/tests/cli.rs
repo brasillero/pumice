@@ -39,6 +39,19 @@ impl HermeticHome {
         command
     }
 
+    /// Writes a complete formatter.yml that registers nothing and selects
+    /// no default: the values that were built-in defaults before every
+    /// setting had to be written.
+    fn write_empty_config(&self) {
+        let dir = self.pumice_dir();
+        fs::create_dir_all(&dir).expect("create per-user config dir");
+        fs::write(
+            dir.join("formatter.yml"),
+            "schema_version: 1\nformatters: []\ndefault: null\n",
+        )
+        .expect("write formatter.yml");
+    }
+
     /// Writes a formatter.yml plus one definition file into the config dir.
     fn write_config(&self, formatter_id: &str, default: Option<&str>) {
         let dir = self.pumice_dir();
@@ -50,9 +63,7 @@ impl HermeticHome {
             ),
         )
         .expect("write definition");
-        let default_line = default
-            .map(|id| format!("default: {id}\n"))
-            .unwrap_or_default();
+        let default_line = format!("default: {}\n", default.unwrap_or("null"));
         fs::write(
             dir.join("formatter.yml"),
             format!("schema_version: 1\nformatters:\n  - path: {formatter_id}.yml\n{default_line}"),
@@ -192,7 +203,7 @@ fn show_output_reloads_to_the_exact_same_system_text() {
         .expect("write definition");
         fs::write(
             dir.join("formatter.yml"),
-            format!("schema_version: 1\nformatters:\n  - path: {id}.yml\n"),
+            format!("schema_version: 1\nformatters:\n  - path: {id}.yml\ndefault: null\n"),
         )
         .expect("write formatter.yml");
 
@@ -247,6 +258,7 @@ fn show_json_describes_the_builtin() {
 #[test]
 fn show_unknown_id_fails_with_2_and_a_safe_json_error() {
     let home = HermeticHome::new();
+    home.write_empty_config();
     let output = run(&mut home.command(&["show", "nope", "--json"]));
     assert_eq!(output.status.code(), Some(2));
     let envelope = envelope(&output);
@@ -257,6 +269,7 @@ fn show_unknown_id_fails_with_2_and_a_safe_json_error() {
 #[test]
 fn apply_transforms_a_request_from_stdin() {
     let home = HermeticHome::new();
+    home.write_empty_config();
     let request = serde_json::to_vec(&user_request()).unwrap();
     let output = run_with_stdin(
         &mut home.command(&["apply", "--formatter", "builtin:clean"]),
@@ -284,6 +297,7 @@ fn apply_uses_the_configured_default() {
 #[test]
 fn apply_without_a_formatter_and_default_fails_with_2() {
     let home = HermeticHome::new();
+    home.write_empty_config();
     let request = serde_json::to_vec(&user_request()).unwrap();
     let output = run_with_stdin(&mut home.command(&["apply"]), &request);
     assert_eq!(output.status.code(), Some(2));
@@ -297,6 +311,7 @@ fn apply_without_a_formatter_and_default_fails_with_2() {
 #[test]
 fn apply_json_wraps_the_transformed_request() {
     let home = HermeticHome::new();
+    home.write_empty_config();
     let request = serde_json::to_vec(&user_request()).unwrap();
     let output = run_with_stdin(
         &mut home.command(&["apply", "--formatter", "builtin:clean", "--json"]),
@@ -311,6 +326,7 @@ fn apply_json_wraps_the_transformed_request() {
 #[test]
 fn apply_rejects_existing_instructions_and_append_places_after_them() {
     let home = HermeticHome::new();
+    home.write_empty_config();
     let mut request = user_request();
     request["messages"] = serde_json::json!([
         {"role": "system", "content": "app rules"},
@@ -368,6 +384,7 @@ fn apply_rejects_existing_instructions_and_append_places_after_them() {
 #[test]
 fn apply_rejects_invalid_json_and_shape_with_2() {
     let home = HermeticHome::new();
+    home.write_empty_config();
     let bad = run_with_stdin(
         &mut home.command(&["apply", "--formatter", "builtin:clean"]),
         b"{not json",
@@ -401,6 +418,7 @@ fn apply_rejects_invalid_json_and_shape_with_2() {
 #[test]
 fn apply_bounds_the_request_to_1_mib() {
     let home = HermeticHome::new();
+    home.write_empty_config();
     // A valid prefix, then padding past the limit; it must never parse or
     // transform.
     let mut input = br#"{"messages": [{"role": "user", "content": ""#.to_vec();
@@ -416,6 +434,7 @@ fn apply_bounds_the_request_to_1_mib() {
 #[test]
 fn apply_reads_the_request_from_a_file() {
     let home = HermeticHome::new();
+    home.write_empty_config();
     let tmp = TempDir::new().expect("temp dir");
     let path = tmp.path().join("request.json");
     fs::write(&path, serde_json::to_vec(&user_request()).unwrap()).unwrap();
@@ -463,25 +482,56 @@ fn check_config_reports_config_errors_with_location() {
     fs::create_dir_all(&dir).expect("create per-user config dir");
     fs::write(
         dir.join("formatter.yml"),
-        "schema_version: 1\ndefault: gone\n",
+        "schema_version: 1\nformatters: []\ndefault: gone\n",
     )
     .unwrap();
     let output = run(&mut home.command(&["check-config"]));
     assert_eq!(output.status.code(), Some(2));
     let stderr = stderr(&output);
     assert!(stderr.contains("does not name a formatter"), "{stderr}");
-    assert!(stderr.contains(":2:"), "line reported: {stderr}");
+    assert!(stderr.contains(":3:"), "line reported: {stderr}");
 }
 
 #[test]
-fn check_config_without_a_file_is_ok() {
+fn operational_commands_fail_without_a_config_file() {
     let home = HermeticHome::new();
-    let output = run(&mut home.command(&["check-config"]));
+    let expected = home.pumice_dir().join("formatter.yml");
+    let request = serde_json::to_vec(&user_request()).unwrap();
+    for args in [
+        &["check-config"][..],
+        &["apply", "--formatter", "builtin:clean"],
+        &["show", "mine"],
+    ] {
+        let output = run_with_stdin(&mut home.command(args), &request);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        let stderr = stderr(&output);
+        assert!(
+            stderr.contains(&expected.display().to_string())
+                && stderr.contains("the formatter configuration file does not exist"),
+            "{args:?}: {stderr}"
+        );
+    }
+    // `list` and `show builtin:clean` only report built-ins.
+    let output = run(&mut home.command(&["show", "builtin:clean"]));
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+}
+
+#[test]
+fn an_incomplete_config_file_fails_even_for_list() {
+    let home = HermeticHome::new();
+    let dir = home.pumice_dir();
+    fs::create_dir_all(&dir).expect("create per-user config dir");
+    fs::write(
+        dir.join("formatter.yml"),
+        "schema_version: 1\nformatters: []\n",
+    )
+    .unwrap();
+    let output = run(&mut home.command(&["list"]));
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = stderr(&output);
     assert!(
-        stdout(&output).contains("no per-user file found"),
-        "{}",
-        stdout(&output)
+        stderr.contains(":1:1: \"default\" is missing; every setting must be written"),
+        "{stderr}"
     );
 }
 
@@ -510,6 +560,7 @@ fn help_names_the_program_and_lists_the_commands() {
 #[test]
 fn apply_preserves_big_integers_and_long_decimals_in_unknown_fields() {
     let home = HermeticHome::new();
+    home.write_empty_config();
     // A u64-overflowing integer and a decimal longer than f64 precision:
     // both must pass through byte-exact (raw pass-through, no Value
     // round-trip).
@@ -534,6 +585,7 @@ fn apply_preserves_big_integers_and_long_decimals_in_unknown_fields() {
 #[test]
 fn apply_preserves_nested_key_order_in_unknown_fields() {
     let home = HermeticHome::new();
+    home.write_empty_config();
     // OpenAI Structured Outputs follow schema key order, so the formatter
     // must not reorder nested object keys (serde_json preserve_order).
     let request = br#"{"model":"claude","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_schema","json_schema":{"schema":{"properties":{"z":{"type":"string"},"a":{"type":"integer"}}}}}}"#;
@@ -560,6 +612,7 @@ fn apply_preserves_nested_key_order_in_unknown_fields() {
 #[test]
 fn apply_preserves_odd_keys_byte_for_byte() {
     let home = HermeticHome::new();
+    home.write_empty_config();
     // serde_json's internal number marker is a legitimate client key: it
     // must come out untouched, not decoded into a number.
     let request = br#"{"messages":[{"role":"user","content":"hi"}],"metadata":{"$serde_json::private::Number":"123"}}"#;
@@ -578,6 +631,7 @@ fn apply_preserves_odd_keys_byte_for_byte() {
 #[test]
 fn apply_json_keeps_the_transformed_request_byte_exact() {
     let home = HermeticHome::new();
+    home.write_empty_config();
     // The --json envelope embeds the transformed request raw, so precision
     // and key order survive there too.
     let request = br#"{"messages":[{"role":"user","content":"hi"}],"big":18446744073709551617}"#;
@@ -597,6 +651,7 @@ fn errors_never_echo_request_text_in_plain_or_json_mode() {
     // request, neither stdout nor stderr may contain it (AGENTS.md rule 5).
     const SENTINEL: &str = "PRIVATE_DICTATION_9f3b7c";
     let home = HermeticHome::new();
+    home.write_empty_config();
     let cases = [
         // duplicate top-level member named with the sentinel
         format!(r#"{{"messages":[],"{SENTINEL}":1,"{SENTINEL}":2}}"#),
@@ -639,6 +694,7 @@ fn a_transformed_handy_like_request_is_accepted_by_the_relay() {
     // is that prompt's new home). The transformed request must still parse
     // as the relay's ChatCompletionRequest and extract cleanly.
     let home = HermeticHome::new();
+    home.write_empty_config();
     let mut request = user_request();
     request["model"] = Value::String("pumice-echo".to_owned());
     request["reasoning_effort"] = Value::String("none".to_owned());
@@ -666,4 +722,18 @@ fn a_transformed_handy_like_request_is_accepted_by_the_relay() {
     assert_eq!(transformed["model"], "pumice-echo");
     assert_eq!(transformed["reasoning_effort"], "none");
     assert_eq!(transformed["stream"], false);
+}
+
+#[test]
+fn the_example_config_writes_every_setting() {
+    let example = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../formatter.example.yml");
+    let loaded = pumice_formatter::load(Some(&example)).expect("the example loads");
+    let ids: Vec<&str> = loaded
+        .config
+        .formatters
+        .iter()
+        .map(|entry| entry.definition.id.as_str())
+        .collect();
+    assert_eq!(ids, ["clean-example"]);
+    assert_eq!(loaded.config.default.as_deref(), Some("clean-example"));
 }

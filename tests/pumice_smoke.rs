@@ -201,7 +201,7 @@ fn format_show_output_reloads_to_the_exact_same_definition() {
     .expect("write definition");
     fs::write(
         dir.join("formatter.yml"),
-        "schema_version: 1\nformatters:\n  - path: notes.yml\n",
+        "schema_version: 1\nformatters:\n  - path: notes.yml\ndefault: null\n",
     )
     .expect("write formatter.yml");
 
@@ -219,6 +219,13 @@ fn format_show_output_reloads_to_the_exact_same_definition() {
 #[test]
 fn format_apply_transforms_a_request_and_names_the_program_in_errors() {
     let home = HermeticHome::new();
+    let dir = home.pumice_dir();
+    fs::create_dir_all(&dir).expect("create per-user config dir");
+    fs::write(
+        dir.join("formatter.yml"),
+        "schema_version: 1\nformatters: []\ndefault: null\n",
+    )
+    .expect("write formatter.yml");
     let request =
         br#"{"model":"claude","messages":[{"role":"user","content":"hi"}],"stream":false}"#;
     let output = run_with_stdin(

@@ -176,7 +176,11 @@ fn make_rig(script: &Script) -> Rig {
         ),
     )
     .expect("write relay.yml");
-    fs::write(cfg.join("formatter.yml"), "schema_version: 1\n").expect("write formatter.yml");
+    fs::write(
+        cfg.join("formatter.yml"),
+        "schema_version: 1\nformatters: []\ndefault: null\n",
+    )
+    .expect("write formatter.yml");
     fs::write(cfg.join("transcribe.yml"), "schema_version: 1\ndefault_model: null\nlanguage: null\nthreads: auto\nbackend: cpu\nserver:\n  port: null\nmodels_dir: null\nmodels: []\n").expect("write transcribe.yml");
 
     let formatter_module = if script.formatter_module {

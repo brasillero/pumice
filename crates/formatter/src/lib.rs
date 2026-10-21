@@ -18,7 +18,8 @@ pub mod transform;
 
 pub use builtins::{BUILTIN_CLEAN, builtin_clean};
 pub use config::{
-    Config, ConfigError, ConfigSource, FormatterEntry, LoadedConfig, load, load_with_env,
+    Config, ConfigError, FormatterEntry, LoadedConfig, load, load_optional, load_optional_with_env,
+    load_with_env,
 };
 pub use definition::{FormatterDefinition, load_definition_file};
 pub use error::{Error, ErrorCode, JsonError};

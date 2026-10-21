@@ -1,15 +1,17 @@
 //! Validated `formatter.yml` configuration.
 //!
-//! Explicit `--config FILE` wins and a missing explicit file is an error.
-//! Otherwise the per-user file is looked up (`formatter.yml` next to the
-//! other module configs). A missing per-user file is fine: the CLI then only
-//! knows the built-in formatters.
+//! Explicit `--config FILE` wins; otherwise the per-user file is looked up
+//! (`formatter.yml` next to the other module configs). Every setting must
+//! be written in the file: an omitted one is an error, never a built-in
+//! default (p17-serve-model-names/D3). [`load`] needs the file;
+//! [`load_optional`] serves the commands that also run without one (`list`
+//! then knows only the built-in formatters).
 //!
 //! The config registers formatter definition files (paths relative to the
-//! config file) and an optional `default`. Definition files are validated
-//! with `file:line:column`; an error inside a definition file points into
-//! that file, while a missing or unregistered file is reported at the
-//! `path:` entry in `formatter.yml`.
+//! config file) and the `default` formatter (or `null` for none).
+//! Definition files are validated with `file:line:column`; an error inside a
+//! definition file points into that file, while a missing or unregistered
+//! file is reported at the `path:` entry in `formatter.yml`.
 
 mod error;
 mod raw;
@@ -26,12 +28,13 @@ use crate::definition::{self, FormatterDefinition};
 
 const PER_USER_FILE: &str = "formatter.yml";
 
-/// Validated configuration settings.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Validated configuration settings, every one written in the file.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// Registered formatters, in config order.
     pub formatters: Vec<FormatterEntry>,
-    /// Optional default formatter id (a registered id or `builtin:clean`).
+    /// Default formatter id (a registered id or `builtin:clean`); `None` is
+    /// `default: null` (`apply` then needs `--formatter`).
     pub default: Option<String>,
 }
 
@@ -53,22 +56,15 @@ impl Config {
     }
 }
 
-/// Where the effective configuration came from.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ConfigSource {
-    File(PathBuf),
-    NoFile,
-}
-
-/// The effective configuration and the file it came from, if any.
+/// The effective configuration and the file it came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoadedConfig {
     pub config: Config,
-    pub source: ConfigSource,
+    pub path: PathBuf,
 }
 
 /// Loads the configuration: an explicit `--config` path when given, else the
-/// per-user configuration file, else an empty config.
+/// per-user configuration file. A missing file is an error.
 pub fn load(explicit: Option<&Path>) -> Result<LoadedConfig, ConfigError> {
     load_with_env(explicit, |key| std::env::var_os(key))
 }
@@ -80,46 +76,84 @@ pub fn load_with_env(
     explicit: Option<&Path>,
     get_env: impl Fn(&str) -> Option<OsString>,
 ) -> Result<LoadedConfig, ConfigError> {
-    let source = match explicit {
-        Some(path) => {
-            if !path.exists() {
-                return Err(ConfigError::file(
-                    path,
-                    "the configuration file does not exist",
-                ));
-            }
-            ConfigSource::File(path.to_path_buf())
-        }
-        None => match per_user_config_path(&get_env) {
-            Some(candidate) => match std::fs::symlink_metadata(&candidate) {
-                Ok(_) => ConfigSource::File(candidate),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => ConfigSource::NoFile,
-                Err(error) => {
-                    return Err(ConfigError::file(
-                        candidate,
-                        format!("cannot inspect configuration file: {error}"),
-                    ));
-                }
-            },
-            None => ConfigSource::NoFile,
-        },
-    };
-    let config = match &source {
-        ConfigSource::File(path) => load_file(path)?,
-        ConfigSource::NoFile => Config::default(),
-    };
-    Ok(LoadedConfig { config, source })
+    match locate(explicit, &get_env)? {
+        Located::File(path) => load_file(path),
+        Located::Absent(Some(candidate)) => Err(ConfigError::file(
+            candidate,
+            "the formatter configuration file does not exist; pass --config FILE or create \
+             it (formatter.example.yml has every setting)",
+        )),
+        Located::Absent(None) => Err(ConfigError::general(
+            "no per-user configuration directory found (XDG_CONFIG_HOME, HOME or APPDATA); \
+             pass --config FILE",
+        )),
+    }
 }
 
-fn load_file(path: &Path) -> Result<Config, ConfigError> {
-    let text = std::fs::read_to_string(path).map_err(|error| {
-        ConfigError::file(path, format!("cannot read configuration file: {error}"))
+/// [`load`] for the commands that also run without a configuration file:
+/// `None` when no `--config` is given and the per-user file does not exist.
+/// A missing explicit file is still an error, and a file that exists must be
+/// complete.
+pub fn load_optional(explicit: Option<&Path>) -> Result<Option<LoadedConfig>, ConfigError> {
+    load_optional_with_env(explicit, |key| std::env::var_os(key))
+}
+
+/// [`load_optional`] with an injectable environment reader.
+pub fn load_optional_with_env(
+    explicit: Option<&Path>,
+    get_env: impl Fn(&str) -> Option<OsString>,
+) -> Result<Option<LoadedConfig>, ConfigError> {
+    match locate(explicit, &get_env)? {
+        Located::File(path) => load_file(path).map(Some),
+        Located::Absent(_) => Ok(None),
+    }
+}
+
+/// Where the configuration file is, or the per-user path it was looked for
+/// at (`None` when the platform places none).
+enum Located {
+    File(PathBuf),
+    Absent(Option<PathBuf>),
+}
+
+fn locate(
+    explicit: Option<&Path>,
+    get_env: &dyn Fn(&str) -> Option<OsString>,
+) -> Result<Located, ConfigError> {
+    if let Some(path) = explicit {
+        if !path.exists() {
+            return Err(ConfigError::file(
+                path,
+                "the configuration file does not exist",
+            ));
+        }
+        return Ok(Located::File(path.to_path_buf()));
+    }
+    let Some(candidate) = per_user_config_path(get_env) else {
+        return Ok(Located::Absent(None));
+    };
+    match std::fs::symlink_metadata(&candidate) {
+        Ok(_) => Ok(Located::File(candidate)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(Located::Absent(Some(candidate)))
+        }
+        Err(error) => Err(ConfigError::file(
+            candidate,
+            format!("cannot inspect configuration file: {error}"),
+        )),
+    }
+}
+
+fn load_file(path: PathBuf) -> Result<LoadedConfig, ConfigError> {
+    let text = std::fs::read_to_string(&path).map_err(|error| {
+        ConfigError::file(&path, format!("cannot read configuration file: {error}"))
     })?;
-    let config_dir = config_dir_of(path);
+    let config_dir = config_dir_of(&path);
     let raw = serde_saphyr::from_str_with_options::<Option<RawConfig>>(&text, saphyr_options())
-        .map_err(|error| parse_error(path, &error))?;
-    validate(raw.unwrap_or_default(), path, Some(&config_dir))
-        .map_err(|error| error.with_file(path))
+        .map_err(|error| parse_error(&path, &error))?;
+    let config = validate(raw.unwrap_or_default(), &path, Some(&config_dir))
+        .map_err(|error| error.with_file(&path))?;
+    Ok(LoadedConfig { config, path })
 }
 
 fn validate(
@@ -127,23 +161,20 @@ fn validate(
     config_path: &Path,
     config_dir: Option<&Path>,
 ) -> Result<Config, ConfigError> {
-    match &raw.schema_version {
-        None => {
-            return Err(ConfigError::general(
-                "schema_version is required (must be 1)",
-            ));
-        }
-        Some(span) if span.value != 1 => {
-            return Err(ConfigError::at(
-                span.referenced,
-                format!("schema_version must be 1, got {}", span.value),
-            ));
-        }
-        _ => {}
+    let schema_version = raw.schema_version.required("\"schema_version\"")?;
+    if schema_version.value != 1 {
+        return Err(ConfigError::at(
+            schema_version.referenced,
+            format!("schema_version must be 1, got {}", schema_version.value),
+        ));
     }
 
+    let entries = raw.formatters.required("\"formatters\"")?;
+    // Checked against the formatters below; required here, in file order.
+    let default = raw.default.nullable("\"default\"")?;
+
     let mut formatters: Vec<FormatterEntry> = Vec::new();
-    for entry in &raw.formatters {
+    for entry in &entries.value {
         let entry_location = entry.referenced;
         let entry = &entry.value;
         let path = match &entry.path {
@@ -192,7 +223,7 @@ fn validate(
         });
     }
 
-    let default = match &raw.default {
+    let default = match default {
         Some(span) => {
             let known = span.value == BUILTIN_CLEAN
                 || formatters
@@ -360,7 +391,7 @@ mod tests {
             "schema_version: 1\nformatters:\n  - path: clean.yml\ndefault: clean\n",
         );
         let loaded = load(Some(&path)).unwrap();
-        assert_eq!(loaded.source, ConfigSource::File(path));
+        assert_eq!(loaded.path, path);
         assert_eq!(loaded.config.formatters.len(), 1);
         assert_eq!(loaded.config.formatters[0].definition.id, "clean");
         assert_eq!(
@@ -373,7 +404,10 @@ mod tests {
     #[test]
     fn builtin_default_is_valid_without_registered_formatters() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = write_config(tmp.path(), "schema_version: 1\ndefault: builtin:clean\n");
+        let path = write_config(
+            tmp.path(),
+            "schema_version: 1\nformatters: []\ndefault: builtin:clean\n",
+        );
         let loaded = load(Some(&path)).unwrap();
         assert!(loaded.config.formatters.is_empty());
         assert_eq!(loaded.config.default.as_deref(), Some("builtin:clean"));
@@ -384,7 +418,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = write_config(
             tmp.path(),
-            "schema_version: 1\nformatters:\n  - path: gone.yml\n",
+            "schema_version: 1\nformatters:\n  - path: gone.yml\ndefault: null\n",
         );
         let err = load(Some(&path)).unwrap_err();
         let err = err.to_string();
@@ -403,7 +437,7 @@ mod tests {
         write_definition(tmp.path(), "b.yml", "clean");
         let path = write_config(
             tmp.path(),
-            "schema_version: 1\nformatters:\n  - path: a.yml\n  - path: b.yml\n",
+            "schema_version: 1\nformatters:\n  - path: a.yml\n  - path: b.yml\ndefault: null\n",
         );
         let err = load(Some(&path)).unwrap_err();
         let err = err.to_string();
@@ -425,7 +459,7 @@ mod tests {
         .unwrap();
         let path = write_config(
             tmp.path(),
-            "schema_version: 1\nformatters:\n  - path: bad.yml\n",
+            "schema_version: 1\nformatters:\n  - path: bad.yml\ndefault: null\n",
         );
         let err = load(Some(&path)).unwrap_err();
         let err = err.to_string();
@@ -474,11 +508,83 @@ mod tests {
     }
 
     #[test]
-    fn no_file_gives_an_empty_config() {
-        let loaded = load_with_env(None, no_env).unwrap();
-        assert_eq!(loaded.source, ConfigSource::NoFile);
-        assert!(loaded.config.formatters.is_empty());
-        assert!(loaded.config.default.is_none());
+    fn every_setting_is_required_and_reported_at_line_1() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lines = [
+            ("schema_version", "schema_version: 1\n"),
+            ("formatters", "formatters: []\n"),
+            ("default", "default: null\n"),
+        ];
+        for (key, _) in lines {
+            let text: String = lines
+                .iter()
+                .filter(|(other, _)| *other != key)
+                .map(|(_, line)| *line)
+                .collect();
+            let err = load(Some(&write_config(tmp.path(), &text))).unwrap_err();
+            assert_eq!(
+                err.message(),
+                format!(
+                    "\"{key}\" is missing; every setting must be written (see formatter.example.yml)"
+                ),
+                "{key}"
+            );
+            assert_eq!((err.line(), err.column()), (Some(1), Some(1)), "{key}");
+        }
+        let err = load(Some(&write_config(tmp.path(), ""))).unwrap_err();
+        assert!(err.message().contains("\"schema_version\" is missing"));
+    }
+
+    #[test]
+    fn null_default_means_none_and_null_elsewhere_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        // The values that were the built-in defaults, written out.
+        let path = write_config(
+            tmp.path(),
+            "schema_version: 1\nformatters: []\ndefault: null\n",
+        );
+        let config = load(Some(&path)).unwrap().config;
+        assert!(config.formatters.is_empty());
+        assert_eq!(config.default, None);
+
+        for (text, line, column) in [
+            ("schema_version: ~\nformatters: []\ndefault: null\n", 1, 17),
+            (
+                "schema_version: 1\nformatters: null\ndefault: null\n",
+                2,
+                13,
+            ),
+        ] {
+            let err = load(Some(&write_config(tmp.path(), text))).unwrap_err();
+            assert!(err.message().contains("must not be null"), "{err}");
+            assert_eq!((err.line(), err.column()), (Some(line), Some(column)));
+        }
+    }
+
+    #[test]
+    fn a_missing_per_user_file_is_an_error_unless_optional() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().to_path_buf().into_os_string();
+        let env =
+            |key: &str| matches!(key, "XDG_CONFIG_HOME" | "HOME" | "APPDATA").then(|| base.clone());
+        let expected = per_user_config_path(&env).unwrap();
+        let err = load_with_env(None, env).unwrap_err();
+        assert_eq!(err.path(), Some(expected.as_path()));
+        assert!(
+            err.message()
+                .contains("the formatter configuration file does not exist"),
+            "{err}"
+        );
+        assert_eq!(load_optional_with_env(None, env).unwrap(), None);
+
+        let err = load_with_env(None, no_env).unwrap_err();
+        assert!(
+            err.message()
+                .contains("no per-user configuration directory")
+        );
+        assert_eq!(load_optional_with_env(None, no_env).unwrap(), None);
+        let missing = tmp.path().join("missing.yml");
+        assert!(load_optional(Some(&missing)).is_err());
     }
 
     #[test]

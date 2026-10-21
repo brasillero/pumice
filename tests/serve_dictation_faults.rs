@@ -90,7 +90,11 @@ fn setup() -> Setup {
     )
     .unwrap();
     fs::write(dir.path().join("transcribe.yml"), "schema_version: 1\ndefault_model: null\nlanguage: null\nthreads: auto\nbackend: cpu\nserver:\n  port: null\nmodels_dir: null\nmodels: []\n").unwrap();
-    fs::write(dir.path().join("formatter.yml"), "schema_version: 1\n").unwrap();
+    fs::write(
+        dir.path().join("formatter.yml"),
+        "schema_version: 1\nformatters: []\ndefault: null\n",
+    )
+    .unwrap();
     fs::write(
         dir.path().join("orchestrator.yml"),
         "schema_version: 1

@@ -16,7 +16,7 @@ use clap::{Args as ClapArgs, CommandFactory, FromArgMatches, Parser, Subcommand}
 use serde::Serialize;
 
 use crate::builtins::{BUILTIN_CLEAN, HANDY_MIT_NOTICE, builtin_clean};
-use crate::config::{self, Config, ConfigSource, LoadedConfig};
+use crate::config::{self, Config, LoadedConfig};
 use crate::definition::FormatterDefinition;
 use crate::error::{Error, ErrorCode, JsonError};
 use crate::transform::{self, ConflictPolicy};
@@ -122,7 +122,7 @@ enum CommandOutput {
         json_result: serde_json::Value,
     },
     Apply(String),
-    CheckConfig(Option<PathBuf>),
+    CheckConfig(PathBuf),
 }
 
 pub fn run() -> ExitCode {
@@ -211,7 +211,7 @@ pub fn run_with(name: &str, args: impl IntoIterator<Item = OsString>) -> ExitCod
             }
         }
         Ok(CommandOutput::CheckConfig(file)) => {
-            match print_check_config(file.as_deref(), json, &mut stdout) {
+            match print_check_config(&file, json, &mut stdout) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(_) => write_failure(&mut stderr),
             }
@@ -269,9 +269,13 @@ fn handle_clap_error(err: clap::Error, wants_json: bool) -> ExitCode {
 
 fn run_command(args: Args) -> Result<CommandOutput, Error> {
     match args.command {
+        // A listing: before a configuration exists it shows the built-ins.
         Command::List(_) => {
-            let loaded = load_config(args.config.as_deref())?;
-            Ok(CommandOutput::List(build_list(&loaded.config)))
+            let loaded =
+                config::load_optional(args.config.as_deref()).map_err(Error::invalid_config)?;
+            Ok(CommandOutput::List(build_list(
+                loaded.as_ref().map(|loaded| &loaded.config),
+            )))
         }
         Command::Show(show_args) => {
             if show_args.id == BUILTIN_CLEAN {
@@ -304,16 +308,7 @@ fn run_command(args: Args) -> Result<CommandOutput, Error> {
             Ok(CommandOutput::Apply(transformed))
         }
         Command::CheckConfig(_) => Ok(CommandOutput::CheckConfig(
-            match load_config(args.config.as_deref())? {
-                LoadedConfig {
-                    source: ConfigSource::File(path),
-                    ..
-                } => Some(path),
-                LoadedConfig {
-                    source: ConfigSource::NoFile,
-                    ..
-                } => None,
-            },
+            load_config(args.config.as_deref())?.path,
         )),
     }
 }
@@ -396,21 +391,29 @@ fn show_json_result(
     .unwrap()
 }
 
-fn build_list(config: &Config) -> Vec<ListEntry> {
+/// The built-ins, then the configured formatters (none without a
+/// configuration file).
+fn build_list(config: Option<&Config>) -> Vec<ListEntry> {
+    let default = config.and_then(|config| config.default.as_deref());
     let mut entries = vec![ListEntry {
         id: BUILTIN_CLEAN.to_owned(),
         description: builtin_clean().description,
         builtin: true,
         path: None,
-        default: config.default.as_deref() == Some(BUILTIN_CLEAN),
+        default: default == Some(BUILTIN_CLEAN),
     }];
-    entries.extend(config.formatters.iter().map(|entry| ListEntry {
-        id: entry.definition.id.clone(),
-        description: entry.definition.description.clone(),
-        builtin: false,
-        path: Some(entry.path.clone()),
-        default: config.default.as_deref() == Some(entry.definition.id.as_str()),
-    }));
+    entries.extend(
+        config
+            .into_iter()
+            .flat_map(|config| &config.formatters)
+            .map(|entry| ListEntry {
+                id: entry.definition.id.clone(),
+                description: entry.definition.description.clone(),
+                builtin: false,
+                path: Some(entry.path.clone()),
+                default: default == Some(entry.definition.id.as_str()),
+            }),
+    );
     entries
 }
 
@@ -529,7 +532,7 @@ fn print_list(entries: &[ListEntry], json: bool, stdout: &mut dyn Write) -> io::
     Ok(())
 }
 
-fn print_check_config(file: Option<&Path>, json: bool, stdout: &mut dyn Write) -> io::Result<()> {
+fn print_check_config(file: &Path, json: bool, stdout: &mut dyn Write) -> io::Result<()> {
     if json {
         let envelope = Envelope {
             schema_version: 1,
@@ -541,10 +544,7 @@ fn print_check_config(file: Option<&Path>, json: bool, stdout: &mut dyn Write) -
         };
         return writeln!(stdout, "{}", serde_json::to_string(&envelope).unwrap());
     }
-    match file {
-        Some(path) => writeln!(stdout, "config ok: {}", path.display()),
-        None => writeln!(stdout, "config ok: no per-user file found"),
-    }
+    writeln!(stdout, "config ok: {}", file.display())
 }
 
 fn print_error(
