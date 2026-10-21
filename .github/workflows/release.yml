@@ -15,6 +15,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
+      - .github/fixtures/transcribe-smoke.yml
       - .github/actions/**
       - scripts/package_release.py
       - scripts/package_npm.py
@@ -45,6 +46,7 @@ defaults:
     shell: bash
 
 env:
+  TRANSCRIBE_SMOKE_CONFIG: ${{ github.workspace }}/.github/fixtures/transcribe-smoke.yml
   # The tiny model the transcription workflow pins, for the CPU smoke of the
   # installed packages.
   MODEL_URL: https://huggingface.co/handy-computer/whisper-tiny-gguf/resolve/6687f30c99641ee265df421e582354adbc8848fc/whisper-tiny-Q8_0.gguf
@@ -628,7 +630,7 @@ jobs:
           PY
           mkdir -p "audio dir"
           cp "$GITHUB_WORKSPACE/crates/transcription/tests/fixtures/sample-pt.wav" "audio dir/sample pt.wav"
-          "$PUMICE_BIN" transcribe file "audio dir/sample pt.wav" \
+          "$PUMICE_BIN" transcribe --config "$TRANSCRIBE_SMOKE_CONFIG" file "audio dir/sample pt.wav" \
             --model-file "$RUNNER_TEMP/models/whisper-tiny-Q8_0.gguf" --json > file.json
           python3 - file.json <<'PY'
           import json

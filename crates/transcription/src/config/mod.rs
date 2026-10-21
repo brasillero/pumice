@@ -4,7 +4,7 @@
 //! Every setting must be written in the file: an omitted one is an error,
 //! never a built-in default (p17-serve-model-names/D3). [`load`] needs the
 //! file; [`load_optional`] serves the commands that also run without one
-//! (catalog listing, downloads, `backends`, a one-off `file --model-file`).
+//! (catalog listing, downloads, `backends`).
 
 mod error;
 mod raw;

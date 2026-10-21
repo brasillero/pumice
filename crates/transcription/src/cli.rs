@@ -1,6 +1,6 @@
 use crate::catalog;
 use crate::compute::{BackendMode, Compute};
-use crate::config::{self, Config, LoadedConfig, Threads};
+use crate::config::{self, Config, LoadedConfig};
 use crate::download::{self, DownloadSpec, Downloader, FetchResult};
 use crate::engine::{CancelToken, Engine, EngineRequest};
 use crate::inventory::{self, Diagnostic, Inventory};
@@ -38,8 +38,7 @@ pub struct Args {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Transcribe an audio file. With --model-file it also runs without a
-    /// configuration file, from its flags and their defaults.
+    /// Transcribe an audio file using the module configuration file.
     File(FileArgs),
     /// Serve the HTTP API.
     Serve(ServeArgs),
@@ -72,27 +71,22 @@ pub struct FileArgs {
     model: Option<String>,
 
     /// Direct path to a GGUF model file, named by the models folder's rule
-    /// in the result. With it, `file` also runs without a configuration
-    /// file: the other settings then come from the flags and their
-    /// defaults. A configuration file that exists must be complete.
+    /// in the result. A complete configuration file is required.
     #[arg(long, value_name = "PATH.gguf", group = "model_source")]
     model_file: Option<PathBuf>,
 
     /// Optional language hint (ISO-639-1 two-letter code). Overrides
-    /// `language` in the configuration file; without one, the language is
-    /// detected. When given, this value is reported in the result; otherwise
-    /// the engine-detected language is reported.
+    /// `language` in the configuration file. The chosen hint is reported
+    /// in the result; with `language: null`, the engine detects it.
     #[arg(long, value_name = "xx")]
     language: Option<String>,
 
     /// Number of threads to use for inference (1-32). Overrides `threads` in
-    /// the configuration file; without one, the available parallelism,
-    /// capped at 32.
+    /// the configuration file.
     #[arg(long, value_name = "N")]
     threads: Option<usize>,
 
-    /// Compute backend. Overrides `backend` in the configuration file;
-    /// without one, cpu.
+    /// Compute backend. Overrides `backend` in the configuration file.
     #[arg(long, value_name = "MODE")]
     backend: Option<BackendMode>,
 
@@ -480,8 +474,8 @@ where
     let config_arg = args.config.as_deref();
     match args.command {
         Command::File(file_args) => {
-            let loaded = file_config(&file_args, config_arg)?;
-            run_file(file_args, loaded.as_ref(), config_arg, |_| Ok(engine))
+            let loaded = load_config(config_arg)?;
+            run_file(file_args, &loaded, config_arg, |_| Ok(engine))
         }
         _ => Err(Error::invalid_arguments(
             "run_with_engine only supports the file subcommand",
@@ -496,8 +490,8 @@ where
     let config_arg = args.config.as_deref();
     match args.command {
         Command::File(file_args) => {
-            let loaded = file_config(&file_args, config_arg)?;
-            let output = run_file(file_args, loaded.as_ref(), config_arg, make_engine)?;
+            let loaded = load_config(config_arg)?;
+            let output = run_file(file_args, &loaded, config_arg, make_engine)?;
             Ok(CommandOutput::Transcription(output))
         }
         Command::Serve(serve_args) => {
@@ -1037,58 +1031,26 @@ fn load_optional_config(config_arg: Option<&Path>) -> Result<Option<LoadedConfig
     config::load_optional(config_arg).map_err(Error::invalid_config)
 }
 
-/// The configuration for `file`. A one-off `file --model-file PATH` also
-/// runs without a configuration file (`None`), from its flags and their
-/// defaults ([`flag_defaults`]); D3 governs the YAML settings, so a file
-/// that exists must still be complete. `--model ID` and `default_model`
-/// need the file.
-fn file_config(
-    file_args: &FileArgs,
-    config_arg: Option<&Path>,
-) -> Result<Option<LoadedConfig>, Error> {
-    if file_args.model_file.is_none() {
-        return load_config(config_arg).map(Some);
-    }
-    load_optional_config(config_arg)
-}
-
-/// What the `file` flags fall back to without a configuration file:
-/// language detection, `auto` threads (the available parallelism, capped at
-/// 32) and the cpu backend.
-fn flag_defaults() -> Config {
-    Config {
-        default_model: None,
-        default_model_at: None,
-        language: None,
-        threads: Threads::Auto,
-        backend: BackendMode::Cpu,
-        server_port: None,
-        models_dir: None,
-    }
-}
-
-/// `file`: `loaded` is `None` only for a one-off `--model-file` without a
-/// configuration file.
+/// `file`: the module configuration is required even with `--model-file`.
 fn run_file<F>(
     file_args: FileArgs,
-    loaded: Option<&LoadedConfig>,
+    loaded: &LoadedConfig,
     config_arg: Option<&Path>,
     make_engine: F,
 ) -> Result<SuccessOutput, Error>
 where
     F: FnOnce(EngineRequest<'_>) -> Result<Box<dyn Engine>, Error>,
 {
-    let defaults = flag_defaults();
-    let config = loaded.map_or(&defaults, |loaded| &loaded.config);
+    let config = &loaded.config;
     let language = normalize_language(file_args.language.or_else(|| config.language.clone()))?;
     let threads = normalize_threads(file_args.threads.or(config.threads.count()))?;
     let backend = file_args.backend.unwrap_or(config.backend);
 
     // A model from the folder is selected before the audio is read; a
     // one-off file is named after it, where its existence is checked.
-    let selected = match (&file_args.model_file, loaded) {
-        (Some(_), _) => None,
-        (None, Some(loaded)) => {
+    let selected = match &file_args.model_file {
+        Some(_) => None,
+        None => {
             let inventory = discover(config)?;
             warn(&inventory.diagnostics);
             Some(select_model(
@@ -1098,7 +1060,6 @@ where
                 config_arg,
             )?)
         }
-        (None, None) => unreachable!("file_config loads the file without --model-file"),
     };
 
     let file = open_regular_file(&file_args.audio)?;
@@ -1900,8 +1861,15 @@ mod tests {
 
     #[test]
     fn build_model_list_marks_the_default_and_reports_a_missing_one() {
-        let mut config = flag_defaults();
-        config.default_model = Some("whisper-tiny-q8_0".to_string());
+        let mut config = Config {
+            default_model: Some("whisper-tiny-q8_0".to_string()),
+            default_model_at: None,
+            language: None,
+            threads: crate::config::Threads::Auto,
+            backend: BackendMode::Cpu,
+            server_port: None,
+            models_dir: None,
+        };
         let folder = tempfile::tempdir().unwrap();
         let inventory = Inventory {
             dir: folder.path().to_path_buf(),

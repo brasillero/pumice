@@ -76,7 +76,12 @@ carries `THIRD_PARTY_NOTICES.md` with the licenses of everything it ships.
   distributions such as **Alpine, which is not supported**, the package
   manager skips it and `pumice` says the platform package is missing. Use
   the portable archive there (it has `pumice` only).
-- **Transcription runs on the CPU by default.** The GPU modules are only
+- **Transcription needs its own complete configuration.** Copy
+  [`transcribe.example.yml`](../transcribe.example.yml), edit it and pass
+  `--config /path/to/transcribe.yml` to `pumice transcribe`, or save it at
+  the [per-user path](transcription.md#configuration). Pumice does not
+  create it automatically; even `file --model-file PATH` requires it.
+  The example chooses `backend: cpu`. The GPU modules are only
   loaded with `backend: gpu` (or `auto` where it applies); they need a GPU
   driver with Vulkan (Windows, Linux) or an Apple Silicon Mac. See
   [Compute backend](transcription.md#compute-backend-cpu-auto-gpu) and the

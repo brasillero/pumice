@@ -6,8 +6,8 @@ standalone CLI; it does not talk to the relay or to any AI provider.
 
 When the transcription program is installed next to the `pumice`
 executable, every command below also works through the dispatcher with a
-`pumice transcribe` prefix — for example `pumice transcribe file audio.wav
---model whisper-tiny-q8_0` — with arguments, output and exit status passed through
+`pumice transcribe` prefix — for example `pumice transcribe --config
+./transcribe.yml file audio.wav --model whisper-tiny-q8_0` — with arguments, output and exit status passed through
 unchanged. The dispatcher never searches `PATH` or the working directory;
 it only runs the `pumice-transcribe` sitting in the real `pumice`
 executable's own install directory (a symlinked `pumice` still resolves to
@@ -27,6 +27,12 @@ process: while the transcription program handles the event and shuts down,
 > also have `pumice` only; with those, or from source, install both programs
 > into the same directory, for example `cargo install --path . --locked` and
 > `cargo install --path crates/transcription --features engine --locked`.
+
+Before transcribing, copy [`transcribe.example.yml`](../transcribe.example.yml)
+to your own `transcribe.yml` and edit the settings. Every `file` invocation,
+including `--model-file`, needs a complete configuration. Pumice does not
+create it automatically. Pass `--config /path/to/transcribe.yml` or put it
+at the [per-user configuration path](#configuration).
 
 ## Building from source
 
@@ -572,7 +578,9 @@ they would at startup.
 The owner's check of a preview artifact on a Windows machine with a GPU. Use
 the same model, audio and language for every run (for example
 `whisper-tiny-q8_0`, then Turbo, and the repository's `sample-pt.wav` with
-`--language pt`). Nothing is installed; only the extracted folder is used.
+`--language pt`). Copy `transcribe.example.yml` to a complete settings
+file, edit it, and set `$config` to its absolute path. Nothing is installed;
+only the extracted folder is used.
 
 1. Extract the artifact to a new folder (try a path with a space). Open a
    PowerShell terminal in a separate, new and empty working directory
@@ -597,7 +605,7 @@ the same model, audio and language for every run (for example
    `"software"`, note its `description` and `type`, and whether
    `--backend gpu` (step 4) works on it. Run with `--backend cpu` too:
    `gpu_module` `not_requested`, only the CPU.
-3. CPU baseline: `& $exe file sample-pt.wav --model-file
+3. CPU baseline: `& $exe --config $config file sample-pt.wav --model-file
    MODEL --language pt --backend cpu --json`, three times; note the text,
    `model_load_ms`, `transcription_ms` and `compute`.
 4. Required GPU: the same with `--backend gpu`. It must succeed with
@@ -610,8 +618,8 @@ the same model, audio and language for every run (for example
    machine with only an integrated GPU, `auto` runs on the CPU with
    `fallback_reason: "gpu_integrated_only"` by design; step 4 then measures
    the integrated GPU, which needs `backend: gpu`.
-6. `& $exe serve --backend gpu --port 17568`: the startup line shows the GPU
-   snapshot; send a few requests, stop it with Ctrl-C.
+6. `& $exe --config $config serve --backend gpu --port 17568`: the startup
+   line shows the GPU snapshot; send a few requests, stop it with Ctrl-C.
 7. Without a usable GPU (disable the GPU in Device Manager, or a machine or
    VM without a Vulkan driver): `--backend auto` runs on the CPU with
    `fallback_reason: "gpu_unavailable"`, `--backend gpu` fails with
@@ -649,7 +657,9 @@ the same model, audio and language for every run (for example
 The owner's check of the macOS preview artifact on an Apple Silicon Mac
 (p14.4-macos-metal#1). Use the same model, audio and language for every run
 (`whisper-tiny-q8_0`, then Turbo, with `sample-pt.wav` and `--language pt`).
-Nothing is installed; only the extracted folder is used.
+Copy `transcribe.example.yml` to a complete settings file, edit it, and set
+`config` to its absolute path. Nothing is installed; only the extracted
+folder is used.
 
 1. Download the artifact, check `SHA256SUMS` and extract it to a new folder
    (try a path with a space), then remove the quarantine attribute as
@@ -671,8 +681,8 @@ Nothing is installed; only the extracted folder is used.
    `gpu_module` `not_requested`, only the CPU. Time both (`time "$exe"
    backends …`), twice each: the first `auto` diagnostic includes the Metal
    shader compilation, the second may reuse the system's shader cache.
-3. CPU baseline: `"$exe" file sample-pt.wav --model-file MODEL --language pt
-   --backend cpu --json`, three times; note the text, `model_load_ms`,
+3. CPU baseline: `"$exe" --config "$config" file sample-pt.wav --model-file
+   MODEL --language pt --backend cpu --json`, three times; note the text, `model_load_ms`,
    `transcription_ms` and `compute` (`cpu_variant: "arm64"`).
 4. Metal: the same with `--backend gpu`, three times. It must succeed with
    `compute.backend` `metal` and `compute.device` `MTL0` with your chip as
@@ -685,8 +695,8 @@ Nothing is installed; only the extracted folder is used.
    a new folder (it never loads Metal, D2). If Turbo is clearly faster on
    Metal than on the CPU (warm and cold), say so: that is the evidence D1
    waits for before `auto` may pick Metal.
-6. `"$exe" serve --backend gpu --port 17568`: the startup line shows the
-   Metal snapshot; send a few requests, stop it with Ctrl-C. While it runs,
+6. `"$exe" --config "$config" serve --backend gpu --port 17568`: the startup
+   line shows the Metal snapshot; send a few requests, stop it with Ctrl-C. While it runs,
    Activity Monitor (Window → GPU History) should show GPU activity during a
    request.
 7. Relocation and loads: copy the folder elsewhere and run step 2 from the
@@ -904,16 +914,26 @@ that group or others can write — see
 A missing file is an error for the commands that read settings (`file`,
 `serve`, `check-config`, `models list`); `models catalog`, `models download`,
 `models verify` and `backends --backend MODE` also run without one (the
-models folder is then the per-user directory). A one-off `file --model-file PATH`
-also runs without one, from its flags and their defaults (see
-[`file`](#file)). A missing explicit `--config` file is always an error, and
-a file that exists must be complete for every command.
+models folder is then the per-user directory). `file` always needs the
+configuration, including with `--model-file PATH`. A missing explicit
+`--config` file is always an error, and a file that exists must be complete
+for every command.
 
 Every setting must be written: an omitted one is an error with the file and
 line (line 1 for a top-level setting, the `server:` mapping for
 `server.port`). There are no built-in defaults; start from
 [`transcribe.example.yml`](../transcribe.example.yml), which writes them
-all. The short form:
+all. Copy the example to a file you own and edit it before use; Pumice does
+not create the configuration automatically. From a repository checkout:
+
+```bash
+cp transcribe.example.yml transcribe.yml
+# Edit transcribe.yml, then pass --config ./transcribe.yml to each command.
+```
+
+In PowerShell, use `Copy-Item transcribe.example.yml transcribe.yml`. You
+can instead copy it to the per-user path above and omit `--config`. The
+complete schema is:
 
 ```yaml
 schema_version: 1
@@ -951,8 +971,8 @@ ids `models list` shows — a catalog file's catalog id, for example
 Validate a file and the models folder without loading a model:
 
 ```bash
-pumice-transcribe check-config
-pumice-transcribe check-config --config /path/to/transcribe.yml --json
+pumice-transcribe --config ./transcribe.yml check-config
+pumice-transcribe --config /path/to/transcribe.yml check-config --json
 ```
 
 ## Commands
@@ -961,19 +981,19 @@ pumice-transcribe check-config --config /path/to/transcribe.yml --json
 
 ```bash
 # Use a model id from the models folder
-pumice-transcribe file audio.wav --model whisper-tiny-q8_0
+pumice-transcribe --config ./transcribe.yml file audio.wav --model whisper-tiny-q8_0
 
-# Use a GGUF file anywhere (no config file needed either)
-pumice-transcribe file audio.wav --model-file /path/to/whisper-tiny-Q8_0.gguf
+# Use a GGUF file anywhere, with the same complete configuration
+pumice-transcribe --config ./transcribe.yml file audio.wav --model-file /path/to/whisper-tiny-Q8_0.gguf
 
 # Use the configured default_model
-pumice-transcribe file audio.wav
+pumice-transcribe --config ./transcribe.yml file audio.wav
 
 # Override config values for one call
-pumice-transcribe file audio.wav --model whisper-large-v3-turbo-q8_0 --language en --threads 4 --json
+pumice-transcribe --config ./transcribe.yml file audio.wav --model whisper-large-v3-turbo-q8_0 --language en --threads 4 --json
 
 # Choose the compute backend for one call
-pumice-transcribe file audio.wav --backend auto --json
+pumice-transcribe --config ./transcribe.yml file audio.wav --backend auto --json
 ```
 
 With `--json`, `result.model` is the model id and `result.compute` the
@@ -986,20 +1006,11 @@ extension), so the file is hashed when it has a catalog model's size.
 given, the configured `default_model` is used; if there is none, the command
 fails.
 
-A one-off `file --model-file PATH` also runs when there is no configuration
-file (no `--config` and no per-user `transcribe.yml`). Its settings then come
-from the flags, with these defaults:
-
-| Flag | Default without a configuration file |
-| --- | --- |
-| `--language xx` | detect the language |
-| `--threads N` | the available parallelism, capped at 32 |
-| `--backend MODE` | `cpu` |
-
-When a configuration file exists (`--config FILE` or the per-user file), it
-is read and must be complete, as for every other command; the flags override
-its `language`, `threads` and `backend`. `--model ID` and `default_model`
-always need the file.
+Every `file` call reads a complete configuration (`--config FILE` or the
+per-user file), even with `--model-file PATH`. The flags override its
+`language`, `threads` and `backend` for that call; they do not replace the
+configuration. `--model-file` chooses only the model file. You can set
+`default_model: null` when selecting a model explicitly for every run.
 
 ### `models list`
 
@@ -1325,8 +1336,9 @@ config has `default_model: null`.
 setting out. Every setting is required; copy it from
 `transcribe.example.yml`.
 - **"the transcription configuration file does not exist"**: there is no
-`--config` file and no per-user `transcribe.yml`; create one (a one-off
-`file --model-file PATH` runs without it).
+`--config` file and no per-user `transcribe.yml`; copy
+`transcribe.example.yml`, edit it and pass its path with `--config`. This
+also applies to `file --model-file PATH`.
 - **"model `ID` is not in the models folder ... (models there: ...)"**
 (`model_not_found`): no file in the [models folder](#the-models-folder) has
 that id. For a catalog id the error names the download command, e.g.

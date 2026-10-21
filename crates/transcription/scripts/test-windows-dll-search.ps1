@@ -3,7 +3,7 @@
 # from its own folder and System32, never from the current directory or PATH.
 #
 #   pwsh crates/transcription/scripts/test-windows-dll-search.ps1 `
-#       -Stage DIR -Model FILE.gguf -Audio FILE.wav [-WorkDir DIR]
+#       -Stage DIR -Config FILE.yml -Model FILE.gguf -Audio FILE.wav [-WorkDir DIR]
 #
 # Decoy DLLs (windows-dll-decoy.c) named like the bundle's DLLs and like
 # vulkan-1.dll, each exporting the real DLL's names so a static import binds
@@ -38,6 +38,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$Stage,
+    [Parameter(Mandatory)][string]$Config,
     [Parameter(Mandatory)][string]$Model,
     [Parameter(Mandatory)][string]$Audio,
     [string]$WorkDir
@@ -52,6 +53,7 @@ $decoyNames = @('transcribe.dll', 'ggml.dll', 'ggml-base.dll', 'ggml-vulkan.dll'
 $systemVulkan = Join-Path $env:SystemRoot 'System32\vulkan-1.dll'
 
 $Stage = (Resolve-Path -LiteralPath $Stage).Path
+$Config = (Resolve-Path -LiteralPath $Config).Path
 $Model = (Resolve-Path -LiteralPath $Model).Path
 $Audio = (Resolve-Path -LiteralPath $Audio).Path
 if (-not $WorkDir) {
@@ -255,7 +257,7 @@ function Assert-Refused($Run, [string[]]$Expect) {
 }
 
 $exe = Join-Path $Stage 'pumice-transcribe.exe'
-$fileArgs = @('file', $Audio, '--model-file', $Model, '--json')
+$fileArgs = @('--config', $Config, 'file', $Audio, '--model-file', $Model, '--json')
 
 # 1. Complete bundle.
 foreach ($placement in $placements) {

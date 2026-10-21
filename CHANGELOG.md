@@ -17,6 +17,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Every file transcription requires settings**, including `file --model-file PATH`. Missing or incomplete `transcribe.yml` is an error; flags only override values from the file. CI smoke jobs now supply isolated complete settings files.
+
 - **Transcription models come from the models folder.** Put `.gguf` files in the per-user models folder (`~/.local/share/pumice/models` on Linux), or set `models_dir` in `transcribe.yml`. A file matching a catalog model by size and SHA-256 uses its catalog id even when renamed; other files use their file name without the extension. `models list` reports the files, ids and diagnostics; duplicate ids are errors. The old `models:` list is rejected with a migration message. `default_model`, orchestrator flows and `serve.transcription_model` now select these ids. Preflight discovery uses the explicit startup or flow budget to allow hashing large files.
 
 - **`pumice` is now the module dispatcher.** Bare `pumice` prints the command overview and exits; the relay runs as `pumice relay` / `pumice relay serve` (also in-process: one executable still serves); `pumice transcribe …` runs the `pumice-transcribe` installed next to it — replacing itself with it on Unix, and on Windows waiting out console Ctrl-C and exiting with the child's full exit code. The old `pumice` / `pumice --plain` invocations no longer start the service.

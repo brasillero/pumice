@@ -219,8 +219,8 @@ fn main() -> ExitCode {
             sigterm_stops_a_managed_child_cleanly,
         ),
         (
-            "a_one_off_file_runs_without_a_config_file",
-            a_one_off_file_runs_without_a_config_file,
+            "a_one_off_file_runs_with_a_config_file",
+            a_one_off_file_runs_with_a_config_file,
         ),
         (
             "a_one_off_file_still_needs_a_complete_config_file",
@@ -1046,8 +1046,7 @@ fn sigterm_stops_a_managed_child_cleanly() {
 // --- One-off `file` ----------------------------------------------------------
 //
 // The same child, as `pumice-transcribe file`: a one-off `file --model-file`
-// runs from its flags without a configuration file, but a file that exists
-// must be complete.
+// requires a complete configuration file. Flags override its settings.
 
 /// Runs `args` in the child with `home` as the only per-user location.
 fn run_file_child(home: &Path, args: &[OsString]) -> std::process::Output {
@@ -1079,12 +1078,19 @@ fn one_off_file_args(wav: &Path, model: &Path) -> Vec<OsString> {
     ]
 }
 
-fn a_one_off_file_runs_without_a_config_file() {
+fn a_one_off_file_runs_with_a_config_file() {
     let dir = tempfile::tempdir().unwrap();
     let wav_path = dir.path().join("clip.wav");
     std::fs::write(&wav_path, wav(0.5)).unwrap();
     let model = dir.path().join("model.gguf");
     std::fs::write(&model, b"not a real model").unwrap();
+
+    let per_user = dir.path().join("config").join("pumice");
+    std::fs::create_dir_all(&per_user).unwrap();
+    std::fs::write(
+        per_user.join("transcribe.yml"),
+        "schema_version: 1\ndefault_model: null\nlanguage: en\nthreads: 2\nbackend: auto\nserver:\n  port: null\nmodels_dir: null\n",
+    ).unwrap();
 
     let out = run_file_child(dir.path(), &one_off_file_args(&wav_path, &model));
     assert_eq!(
@@ -1099,31 +1105,17 @@ fn a_one_off_file_runs_without_a_config_file() {
     assert_eq!(json["result"]["text"], "fake words", "{json}");
     // Named by the models folder's rule: the file name without .gguf.
     assert_eq!(json["result"]["model"], "model", "{json}");
-    // Without a configuration the backend is the flag default, cpu.
-    assert_eq!(json["result"]["compute"]["requested"], "cpu", "{json}");
+    // The configuration supplies the backend and language.
+    assert_eq!(json["result"]["compute"]["requested"], "auto", "{json}");
+    assert_eq!(json["result"]["language"], "en", "{json}");
 
     // The flags still apply.
     let mut args = one_off_file_args(&wav_path, &model);
-    args.extend(["--backend", "auto", "--language", "pt"].map(OsString::from));
+    args.extend(["--backend", "cpu", "--language", "pt"].map(OsString::from));
     let out = run_file_child(dir.path(), &args);
     let json: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(json["result"]["compute"]["requested"], "auto", "{json}");
+    assert_eq!(json["result"]["compute"]["requested"], "cpu", "{json}");
     assert_eq!(json["result"]["language"], "pt", "{json}");
-
-    // A model id needs the configuration file.
-    let out = run_file_child(
-        dir.path(),
-        &[
-            "file".into(),
-            wav_path.clone().into(),
-            "--model".into(),
-            MODEL.into(),
-            "--json".into(),
-        ],
-    );
-    assert_eq!(out.status.code(), Some(2));
-    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(json["error"]["code"], "invalid_config", "{json}");
 }
 
 fn a_one_off_file_still_needs_a_complete_config_file() {
@@ -1133,6 +1125,19 @@ fn a_one_off_file_still_needs_a_complete_config_file() {
     let model = dir.path().join("model.gguf");
     std::fs::write(&model, b"not a real model").unwrap();
     let incomplete = "schema_version: 1\n";
+
+    // A direct model path still requires the settings file before inference.
+    let out = run_file_child(dir.path(), &one_off_file_args(&wav_path, &model));
+    assert_eq!(out.status.code(), Some(2));
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["error"]["code"], "invalid_config", "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not exist"),
+        "{json}"
+    );
 
     // The per-user file.
     let per_user = dir.path().join("config").join("pumice");
