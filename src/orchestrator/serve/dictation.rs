@@ -78,23 +78,33 @@ const RECYCLE_LIMIT: Duration = Duration::from_secs(2);
 
 /// What the routes serve: the service's runtime (built once), every
 /// configured flow, so a disabled one is told apart from an unknown one,
-/// and the flows published as OpenAI transcription models
-/// (`serve.transcription_flows`, already checked to be enabled).
+/// and the immutable OpenAI transcription model plans.
 pub struct Dictations {
     pub runtime: Arc<Runtime>,
     pub flows: Vec<Flow>,
-    pub transcription_flows: Vec<String>,
+    pub models: super::models::Models,
 }
 
 impl Dictations {
     /// See [`upload_limit`].
     pub fn upload_limit(&self) -> Duration {
-        upload_limit(&self.flows)
+        upload_limit(&self.flows).min(upload_limit(self.models.plans()))
     }
 
     /// See [`policy`].
     pub fn policy(&self) -> RoutePolicy {
-        policy(&self.flows)
+        let total = self
+            .flows
+            .iter()
+            .chain(self.models.plans())
+            .filter(|flow| flow.enabled)
+            .map(|flow| flow.budgets.total)
+            .max()
+            .unwrap_or_else(|| self.upload_limit());
+        RoutePolicy {
+            connection_limit: total + CONNECTION_MARGIN,
+            max_response_bytes: MAX_RESPONSE_BYTES,
+        }
     }
 }
 
@@ -491,19 +501,32 @@ async fn run(
         operation.stage_done(stage::PREPARE, at, prepared.as_ref().err());
         let outcome = match prepared {
             Ok(admitted) => {
-                operation.set_flow(admitted.flow.flow.id.clone());
+                if admitted.answering.is_none() {
+                    operation.set_flow(admitted.flow.flow.id.clone());
+                }
                 answering = admitted.answering;
                 // The request's options, fixed for the operation.
                 let transcriber =
                     WarmTranscriber::with_options(frontend.supervisor().clone(), admitted.options);
-                let outcome = operation
-                    .run_stages(
-                        &dictations.runtime,
-                        &admitted.flow,
-                        &transcriber,
-                        &admitted.audio,
-                    )
-                    .await;
+                let outcome = if answering.is_some() || !dictations.runtime.relay_enabled() {
+                    operation
+                        .run_served_stages(
+                            &dictations.runtime,
+                            &admitted.flow,
+                            &transcriber,
+                            &admitted.audio,
+                        )
+                        .await
+                } else {
+                    operation
+                        .run_stages(
+                            &dictations.runtime,
+                            &admitted.flow,
+                            &transcriber,
+                            &admitted.audio,
+                        )
+                        .await
+                };
                 abandoned = transcriber.abandoned();
                 outcome
                 // The audio is dropped here, before the cleanup.
@@ -598,6 +621,17 @@ async fn prepare(
         }
         Some(flow) => flow.clone(),
     };
+    if !dictations.runtime.relay_enabled()
+        && (!crate::orchestrator::config::is_passthrough(&flow.relay_route)
+            || flow.formatter.is_some())
+    {
+        return Err(StageError::new(
+            stage::PREPARE,
+            "relay_disabled",
+            "AI processing is disabled for pumice serve",
+            2,
+        ));
+    }
     Ok(Admitted {
         flow: anchor(flow, arrival)?,
         audio: AudioSource::Bytes(form.file),

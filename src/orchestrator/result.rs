@@ -167,7 +167,8 @@ pub fn http_class(error: &StageError) -> HttpClass {
         | "admission_stopped"
         | "transcription_busy"
         | "relay_not_installed"
-        | "relay_not_logged_in" => (503, SERVER),
+        | "relay_not_logged_in"
+        | "relay_disabled" => (503, SERVER),
         "relay_failed" if cause == Some("authentication_rejected") => (503, SERVER),
         "cancelled" => match cause {
             // Nobody reads it: the client is gone. Never a fictional 499.

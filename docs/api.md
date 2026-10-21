@@ -49,7 +49,8 @@ meant for clients. Details: [transcription.md](transcription.md#serve).
 
 The whole flow — transcription with a warm model, the formatter and the
 relay — behind Pumice routes and an OpenAI transcription route whose
-models are the flows listed in `serve.transcription_flows`. There is no
+models are the raw transcription model id and the `model:provider:preset`
+combinations selected by `serve.relay`. There is no
 `/v1/chat/completions` here (`p15-serve-transcriptions/D7`). Every request
 needs the `Host` `127.0.0.1:<port>` or the host of a `serve.allowed_origins`
 entry (for `tailscale serve`); an `Origin` other than that host's own
@@ -62,8 +63,8 @@ document below; the OpenAI routes answer OpenAI's shapes.
 
 | Route | Purpose |
 | --- | --- |
-| `POST /v1/audio/transcriptions` | OpenAI transcription: multipart `file` + `model` (a published flow id) and optional `language`, `prompt`, `temperature` (for the transcription only), `response_format` `json`/`text`, `stream=false`; answers the **final** text |
-| `GET /v1/models`, `GET /v1/models/{id}` | The published flows as OpenAI model objects, each with a `pumice` object (preset, AI route, readiness) |
+| `POST /v1/audio/transcriptions` | OpenAI transcription: multipart `file` + `model` (the raw model id or a `model:provider:preset` combination) and optional `language`, `prompt`, `temperature` (for the transcription only), `response_format` `json`/`text`, `stream=false`; answers the **final** text |
+| `GET /v1/models`, `GET /v1/models/{id}` | The public transcription models as OpenAI model objects, each with a `pumice` object (preset, AI route, readiness) |
 | `POST /pumice/v1/dictations` | Multipart `file` (audio) + `flow` (an enabled flow id); answers the run envelope: the raw `transcript` and the final `result` apart, per-stage status and timings |
 | `GET /pumice/v1/flows` | The enabled flows and whether each can run now |
 | `GET /pumice/v1/status` | Service, transcription child (with its compute snapshot) and dictation admission state (metadata only) |
@@ -81,7 +82,7 @@ saved in `formatter.yml`) and the AI route.
 ```sh
 curl http://127.0.0.1:17570/v1/models
 curl --fail-with-body http://127.0.0.1:17570/v1/audio/transcriptions \
-  -F 'file=@clip.wav' -F 'model=clean' -F 'language=en'
+  -F 'file=@clip.wav' -F 'model=whisper-large-v3-turbo-q8_0:codex:clean' -F 'language=en'
 ```
 
 ```json
@@ -90,7 +91,7 @@ curl --fail-with-body http://127.0.0.1:17570/v1/audio/transcriptions \
 
 ```sh
 curl --fail-with-body http://127.0.0.1:17570/v1/audio/transcriptions \
-  -F 'file=@clip.wav' -F 'model=clean' -F 'response_format=text' -D -
+  -F 'file=@clip.wav' -F 'model=whisper-large-v3-turbo-q8_0:codex:clean' -F 'response_format=text' -D -
 # HTTP/1.1 200 OK
 # content-type: text/plain; charset=utf-8
 # pumice-postprocessing-status: applied

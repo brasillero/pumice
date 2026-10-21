@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- **`pumice serve` answers OpenAI transcription clients.** `POST /v1/audio/transcriptions` and `GET /v1/models` (plus `/v1/models/{id}`) run the flows listed in the new `serve.transcription_flows`: the model id is the flow id, so it picks the audio model, the post-processing preset (off, `builtin:clean` or a preset registered in `formatter.yml`) and the AI route, and `text` is the final text. `json` and `text` responses are supported; `language`, `prompt` and `temperature` go to the transcription only. If the formatter or the AI fails, the answer is still a success with the raw transcript as `text`, and the failure is reported in a `pumice` object and the `Pumice-Postprocessing-Status` header; transcription failures are OpenAI errors. Transcriptions and dictations share one work permit, limits, deadlines and privacy rules. Nothing is published unless listed.
+- **`pumice serve` answers OpenAI transcription clients.** `POST /v1/audio/transcriptions` and `GET /v1/models` (plus `/v1/models/{id}`) use the real transcription model id for raw text or `model:provider:preset` for optional AI processing, and `text` is the final text. `json` and `text` responses are supported; `language`, `prompt` and `temperature` go to the transcription only. If the formatter or the AI fails, the answer is still a success with the raw transcript as `text`, and the failure is reported in a `pumice` object and the `Pumice-Postprocessing-Status` header; transcription failures are OpenAI errors. Transcriptions and dictations share one work permit, limits, deadlines and privacy rules. Provider and preset combinations are selected explicitly in `serve.relay`.
 - **A browser test page on `pumice serve`.** Open `http://127.0.0.1:17570/` to pick a published model (with its preset, AI route and readiness), record from the microphone (WebM/Opus, or WAV) or upload a file, and see the final text with a Copy button, the raw transcript, the post-processing status (a failure highlighted with its reason) and timings; Cancel aborts a request, which also cancels it on the server. The page is built into `pumice`, loads nothing from outside, keeps audio and results in memory only and is served with a strict content security policy behind the usual Host/Origin check. From another machine, use an SSH forward to the same port, or `tailscale serve` with the next item.
 - **`serve.allowed_origins`** lists browser origins that `pumice serve` accepts besides `http://127.0.0.1:<port>`, so a reverse proxy on the same machine such as `tailscale serve` (tailnet-only HTTPS) can reach it while it keeps listening on loopback only. `[]` accepts none; entries are exact origins, checked at load. There is no authentication: whoever can reach the proxy can use the service and your AI subscriptions.
 
@@ -16,6 +16,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Complete third-party notices.** Every npm package and release archive ships a `THIRD_PARTY_NOTICES.md` generated for what it contains: the Rust dependencies of `pumice` (and of `pumice-transcribe` where included) with their license texts, plus the native code built in (transcribe.cpp, ggml, libopus, the Vulkan headers, musl) and the Rust standard library with its separately licensed parts (Unicode tables, compiler-builtins and libm, the crates it links). MPL-licensed crates (Symphonia) are listed with links to their exact, unmodified source.
 
 ### Changed
+
+- `pumice serve` lists the real transcription model for raw text and optional
+  `model:provider:preset` combinations configured by `serve.relay`, with explicit
+  provider/preset expansion and shared `serve.budgets_ms`. The removed
+  `serve.transcription_flows` setting reports a migration error. With the relay
+  disabled, no AI runtime is built and AI dictations report `relay_disabled`.
 
 - **Every file transcription requires settings**, including `file --model-file PATH`. Missing or incomplete `transcribe.yml` is an error; flags only override values from the file. CI smoke jobs now supply isolated complete settings files.
 

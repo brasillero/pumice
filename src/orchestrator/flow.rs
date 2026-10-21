@@ -72,7 +72,7 @@ pub trait Transcriber: Sync {
 
 /// What is prepared once and shared by every operation run against it.
 pub struct Runtime {
-    pipeline: Pipeline,
+    pipeline: Option<Pipeline>,
     scope: Arc<CleanupScope>,
     formatter_config: Option<pumice_formatter::Config>,
     /// The orchestrator file the flows came from, for error locations.
@@ -145,11 +145,39 @@ impl Runtime {
         }
 
         Ok(Runtime {
-            pipeline,
+            pipeline: Some(pipeline),
             scope,
             formatter_config,
             orchestrator_path: loaded.path.clone(),
         })
+    }
+
+    /// Builds only the cleanup/context wrapper, without loading relay or formatter settings.
+    pub fn raw(loaded: &LoadedConfig, scope: Arc<CleanupScope>) -> Runtime {
+        Runtime {
+            pipeline: None,
+            scope,
+            formatter_config: None,
+            orchestrator_path: loaded.path.clone(),
+        }
+    }
+
+    pub fn relay_enabled(&self) -> bool {
+        self.pipeline.is_some()
+    }
+
+    pub fn providers(&self) -> Vec<&str> {
+        self.pipeline.as_ref().map_or_else(Vec::new, |pipeline| {
+            pipeline
+                .model_ids()
+                .into_iter()
+                .filter(|id| !matches!(*id, "passthrough" | "inspect"))
+                .collect()
+        })
+    }
+
+    pub fn has_formatter(&self, id: &str) -> bool {
+        resolve_formatter(id, self.formatter_config.as_ref()).is_some()
     }
 
     /// The scope collecting provider trees a cancellation abandoned. An
@@ -354,9 +382,49 @@ impl<'a> Operation<'a> {
         transcriber: &T,
         audio: &AudioSource,
     ) -> Result<String, StageError> {
+        self.execute_stages(runtime, prepared, transcriber, audio, false)
+            .await
+    }
+
+    /// Serve raw plans finish directly after transcription; run retains its relay stage reports.
+    pub async fn run_served_stages<T: Transcriber>(
+        &mut self,
+        runtime: &Runtime,
+        prepared: &PreparedFlow,
+        transcriber: &T,
+        audio: &AudioSource,
+    ) -> Result<String, StageError> {
+        self.execute_stages(runtime, prepared, transcriber, audio, true)
+            .await
+    }
+
+    async fn execute_stages<T: Transcriber>(
+        &mut self,
+        runtime: &Runtime,
+        prepared: &PreparedFlow,
+        transcriber: &T,
+        audio: &AudioSource,
+        serving: bool,
+    ) -> Result<String, StageError> {
         let raw = self
             .transcription_stage(prepared, transcriber, audio)
             .await?;
+
+        // Raw plans end at transcription and never enter the AI pipeline.
+        if serving
+            && prepared.flow.formatter.is_none()
+            && crate::orchestrator::config::is_passthrough(&prepared.flow.relay_route)
+        {
+            return Ok(raw);
+        }
+        if !runtime.relay_enabled() {
+            return Err(StageError::new(
+                stage::RELAY,
+                "relay_disabled",
+                "AI processing is disabled for pumice serve",
+                2,
+            ));
+        }
 
         // A whitespace-only transcript succeeds without a provider call; the
         // formatter and relay stages are skipped (design §3).
@@ -584,9 +652,15 @@ impl<'a> Operation<'a> {
 
         let request = relay_stage::build_request(&prepared.flow.relay_route, raw, system);
         let mut cancelled = self.cancel.clone();
-        let call = runtime
-            .pipeline
-            .format_until_observed(&request, at, Some(deadline), &());
+        let pipeline = runtime.pipeline.as_ref().ok_or_else(|| {
+            StageError::new(
+                stage::RELAY,
+                "relay_disabled",
+                "AI processing is disabled for pumice serve",
+                2,
+            )
+        })?;
+        let call = pipeline.format_until_observed(&request, at, Some(deadline), &());
         tokio::pin!(call);
         let outcome = tokio::select! {
             biased;

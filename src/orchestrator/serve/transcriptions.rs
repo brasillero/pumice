@@ -2,8 +2,8 @@
 //! `GET /v1/models`, `GET /v1/models/{id}` and
 //! `POST /v1/audio/transcriptions`.
 //!
-//! A model is a flow published in `serve.transcription_flows`; its id is the
-//! flow id. A transcription runs that flow through the dictation route's
+//! A model is the real transcription id or a generated model:provider:preset
+//! plan. A transcription runs that plan through the dictation route's
 //! machinery ([`dictation::admit`]): the same permit (busy 429 with
 //! `Retry-After: 1`, unready 503), the same upload limits, deadlines,
 //! cancellation, cleanup and privacy. `language`, `prompt` and
@@ -69,6 +69,8 @@ pub enum ResponseFormat {
 /// How a transcription answers, known once its request was read.
 pub struct Answering {
     format: ResponseFormat,
+    model: String,
+    transcription_model: String,
     /// The flow's formatter (`None`: none).
     preset: Option<String>,
     relay_route: String,
@@ -91,17 +93,15 @@ pub(crate) async fn prepare(
 ) -> Result<Admitted, StageError> {
     let (body, boundary) = dictation::read_upload(dictations, request, arrival, cancel).await?;
     let form = parse_form(body, boundary).await?;
-    // Exact, case-sensitive; an unpublished flow is no model at all.
     let flow = dictations
-        .transcription_flows
-        .iter()
-        .find(|id| **id == form.model)
-        .and_then(|id| dictations.flows.iter().find(|flow| flow.id == *id))
-        .filter(|flow| flow.enabled)
+        .models
+        .get(&form.model)
         .ok_or_else(model_not_found)?
         .clone();
     let answering = Answering {
         format: form.format,
+        model: form.model,
+        transcription_model: flow.transcription_model.clone(),
         preset: flow.formatter.clone(),
         relay_route: flow.relay_route.clone(),
     };
@@ -483,7 +483,9 @@ fn details(
     json!({
         "schema_version": SCHEMA_VERSION,
         "operation_id": output.operation_id,
-        "flow": output.flow,
+        "flow": null,
+        "model": answering.model,
+        "transcription_model": answering.transcription_model,
         "transcript": output.transcript,
         "post_processing": post_processing,
         "stages": output.stages,
@@ -526,45 +528,33 @@ fn internal_error() -> Response<Full<Bytes>> {
     )
 }
 
-/// `GET /v1/models`: the published flows, in `serve.transcription_flows`
-/// order.
+/// `GET /v1/models`: raw first, then the immutable generated plans.
 pub(crate) fn models(frontend: &Frontend) -> Value {
-    models_body(
-        frontend.flow_infos(),
-        frontend.published(),
-        frontend.unavailable(),
-    )
+    models_body(frontend.model_infos(), frontend.unavailable())
 }
 
 /// The model list for these flows and this state; startup checks its
 /// largest form against the metadata bound (`http::oversized_snapshot`).
-pub(crate) fn models_body(
-    flows: &[FlowInfo],
-    published: &[String],
-    unavailable: Option<&str>,
-) -> Value {
-    let data: Vec<Value> = published
+pub(crate) fn models_body(models: &[FlowInfo], unavailable: Option<&str>) -> Value {
+    let data: Vec<Value> = models
         .iter()
-        .filter_map(|id| flows.iter().find(|flow| &flow.id == id))
         .map(|flow| model_object(flow, unavailable))
         .collect();
     json!({"object": "list", "data": data})
 }
 
-/// `GET /v1/models/{id}`: one published flow as an OpenAI model object,
+/// `GET /v1/models/{id}`: one public plan as an OpenAI model object,
 /// with its Pumice details; `None` for anything else.
 pub(crate) fn model(frontend: &Frontend, id: &str) -> Option<Value> {
-    if !frontend.published().iter().any(|published| published == id) {
-        return None;
-    }
-    let flow = frontend.flow_infos().iter().find(|flow| flow.id == id)?;
+    let flow = frontend.model_infos().iter().find(|flow| flow.id == id)?;
     Some(model_object(flow, frontend.unavailable()))
 }
 
 fn model_object(flow: &FlowInfo, unavailable: Option<&str>) -> Value {
     let mut details = json!({
         "schema_version": SCHEMA_VERSION,
-        "flow": flow.id,
+        "flow": null,
+        "model": flow.id,
         "transcription_model": flow.transcription_model,
         "post_processing": {
             "preset": flow.formatter,
@@ -809,6 +799,8 @@ mod tests {
     fn answering(format: ResponseFormat, preset: Option<&str>, route: &str) -> Answering {
         Answering {
             format,
+            model: "turbo:claude:builtin:clean".to_owned(),
+            transcription_model: "turbo".to_owned(),
             preset: preset.map(str::to_owned),
             relay_route: route.to_owned(),
         }
@@ -859,7 +851,8 @@ mod tests {
         let pumice = &body["pumice"];
         assert_eq!(pumice["schema_version"], 1);
         assert_eq!(pumice["operation_id"], "op-1");
-        assert_eq!(pumice["flow"], "clean");
+        assert!(pumice["flow"].is_null());
+        assert_eq!(pumice["model"], "turbo:claude:builtin:clean");
         assert_eq!(pumice["transcript"]["text"], " raw words");
         assert_eq!(pumice["transcript"]["language"], "en");
         assert_eq!(

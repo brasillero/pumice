@@ -33,8 +33,8 @@ modules:
     config: ./relay.yml
 
 # Named flows; `pumice run <AUDIO> --flow <ID>` runs one of them, and so
-# does a `pumice serve` dictation naming its id (or an OpenAI transcription
-# naming it as `model`, once listed in serve.transcription_flows). Nothing is
+# does a `pumice serve` dictation naming its id. OpenAI transcriptions
+# select their own model:provider:preset from serve.relay. Nothing is
 # enabled implicitly: every flow writes `enabled` (true or false), and
 # `formatter` is an id or null (null adds no instructions; combine it with
 # `relay_route: passthrough` for a raw-only flow).
@@ -91,15 +91,22 @@ serve:
   # seconds for large ones) and, separately, how long each child start may
   # take to read the folder again, load its model and become ready.
   startup_timeout_ms: 60000
-  # The flows published as OpenAI transcription models (`[]` publishes
-  # none): `GET /v1/models` lists them and `POST /v1/audio/transcriptions`
-  # runs the one named by `model`, answering its final text. Ids use only
-  # A-Z a-z 0-9 . _ - (starting with a letter or digit, at most 128). Each
-  # must be an enabled flow that is off (formatter: null + passthrough) or
-  # has a formatter for its AI route.
-  transcription_flows:
-    - clean
-    - raw
+  # The plain model always returns raw text. When relay is enabled, also
+  # offer model:provider:preset. Provider order comes from relay.yml;
+  # preset order comes from this list. Both expansion switches default to
+  # false in this starting file (only the default combination is listed).
+  budgets_ms:
+    total: 180000
+    transcription: 120000
+    formatter: 1000
+    relay: 60000
+  relay:
+    enabled: true
+    default_provider: claude
+    default_preset: builtin:clean
+    presets: [builtin:clean]
+    expand_providers: false
+    expand_presets: false
   # Browser origins accepted besides http://127.0.0.1:<port> (`[]` accepts
   # none), for a reverse proxy on this machine such as `tailscale serve`
   # (pumice serve still listens on 127.0.0.1 only). Exact origins: http or

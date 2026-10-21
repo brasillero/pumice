@@ -70,7 +70,18 @@ serve:
   enabled: true
   port: 0
   transcription_model: turbo
-  transcription_flows: [raw, clean]
+  budgets_ms:
+    total: {total_ms}
+    transcription: 10000
+    formatter: 1000
+    relay: {relay_ms}
+  relay:
+    enabled: true
+    default_provider: claude
+    default_preset: builtin:clean
+    presets: [builtin:clean]
+    expand_providers: false
+    expand_presets: false
 "
     )
 }
@@ -114,12 +125,19 @@ const BUDGETS: [(&str, u64); 4] = [
 ];
 
 /// The `serve:` keys with the example's values.
-const SERVE_KEYS: [(&str, &str); 6] = [
+const SERVE_KEYS: [(&str, &str); 7] = [
     ("enabled", "  enabled: false"),
     ("port", "  port: 17570"),
     ("transcription_model", "  transcription_model: null"),
     ("startup_timeout_ms", "  startup_timeout_ms: 60000"),
-    ("transcription_flows", "  transcription_flows: []"),
+    (
+        "budgets_ms",
+        "  budgets_ms:\n    total: 180000\n    transcription: 120000\n    formatter: 1000\n    relay: 60000",
+    ),
+    (
+        "relay",
+        "  relay:\n    enabled: true\n    default_provider: claude\n    default_preset: builtin:clean\n    presets: [builtin:clean]\n    expand_providers: false\n    expand_presets: false",
+    ),
     ("allowed_origins", "  allowed_origins: []"),
 ];
 
@@ -609,10 +627,107 @@ fn assert_events_metadata_only(stderr: &str) {
     }
 }
 
+#[test]
+fn relay_off_skips_ai_dependencies_and_rejects_ai_dictations_before_transcription() {
+    for null_formatter in [false, true] {
+        let config = config(30_000, 10_000).replace(
+            "  relay:\n    enabled: true",
+            "  relay:\n    enabled: false",
+        );
+        let rig = rig(&config, json!([transcript(RAW)]));
+        // Missing dependencies and invalid AI references cannot prevent raw service.
+        fs::remove_file(rig.cfg.join("relay.yml")).unwrap();
+        fs::write(rig.cfg.join("formatter.yml"), "malformed: [").unwrap();
+        let path = rig.cfg.join("orchestrator.yml");
+        let mut cfg = fs::read_to_string(&path)
+            .unwrap()
+            .replace("relay_route: claude", "relay_route: codex");
+        if null_formatter {
+            cfg = cfg.replace(
+                "  formatter:\n    config: ./formatter.yml",
+                "  formatter: null",
+            );
+        }
+        fs::write(path, cfg).unwrap();
+        let running = rig.start();
+        let (_, models) = running.get("/v1/models");
+        assert_eq!(models["data"].as_array().unwrap().len(), 1);
+        assert_eq!(models["data"][0]["id"], "turbo");
+        let (_, flows) = running.get("/pumice/v1/flows");
+        let listed = flows["flows"].as_array().unwrap();
+        let raw = listed.iter().find(|flow| flow["id"] == "raw").unwrap();
+        assert_eq!(raw["ready"], true);
+        assert!(raw.get("unavailable").is_none());
+        for id in ["clean", "extra"] {
+            let ai = listed.iter().find(|flow| flow["id"] == id).unwrap();
+            assert_eq!(ai["ready"], false);
+            assert_eq!(ai["unavailable"], "relay_disabled");
+        }
+        let response = dictate(running.port, "clean");
+        assert_eq!(response.0, 503);
+        assert_eq!(json_body(&response.2)["error"]["code"], "relay_disabled");
+        assert!(rig.log_events("transcription").is_empty());
+        let response = transcribe_model(running.port, "turbo:claude:builtin:clean");
+        assert_openai_error(&response, 404, "model_not_found", Some("model"));
+        let response = transcribe_model(running.port, "turbo");
+        assert_eq!(response.0, 200);
+        assert_eq!(json_body(&response.2)["text"], RAW);
+        assert_eq!(
+            json_body(&response.2)["pumice"]["stages"]["relay"]["status"],
+            "skipped"
+        );
+        running.wait_idle();
+        let response = dictate(running.port, "raw");
+        assert_eq!(response.0, 200);
+        assert_eq!(rig.fake_calls(), 0);
+        drop(running.stop());
+        rig.assert_children_gone();
+    }
+}
+
+#[test]
+fn raw_models_work_without_any_dictation_flows_and_url_decoding_is_once() {
+    let id = "café +%2F";
+    let config = format!(
+        "flows: []\nserve:\n  enabled: true\n  port: 0\n  transcription_model: '{id}'\n  relay:\n    enabled: false\n    default_provider: claude\n    default_preset: builtin:clean\n    presets: [builtin:clean]\n    expand_providers: false\n    expand_presets: false\n"
+    );
+    let rig = rig(&config, json!([transcript(RAW)]));
+    let scenario = scenario_path(&rig.install.join(exe("pumice-transcribe")));
+    let mut data: Value = serde_json::from_str(&fs::read_to_string(&scenario).unwrap()).unwrap();
+    let mut models: Value =
+        serde_json::from_str(data["models_list"]["stdout"].as_str().unwrap()).unwrap();
+    models["result"]["models"][0]["id"] = json!(id);
+    data["models_list"]["stdout"] = json!(format!("{models}\n"));
+    fs::write(scenario, data.to_string()).unwrap();
+    let running = rig.start();
+    let (status, model) = running.get("/v1/models/caf%C3%A9%20+%252F");
+    assert_eq!(status, 200);
+    assert_eq!(model["id"], id);
+    for path in ["/v1/models/%", "/v1/models/%G0", "/v1/models/%FF"] {
+        let response = request(running.port, b"GET", path, &[], b"");
+        assert_openai_error(&response, 400, "invalid_model", Some("model"));
+    }
+    let response = request(
+        running.port,
+        b"GET",
+        "/v1/models/caf%C3%A9%20+%2F",
+        &[],
+        b"",
+    );
+    assert_openai_error(&response, 404, "model_not_found", Some("model"));
+    let response = transcribe_model(running.port, "caf%C3%A9%20+%252F");
+    assert_openai_error(&response, 404, "model_not_found", Some("model"));
+    let response = transcribe_model(running.port, id);
+    assert_eq!(response.0, 200);
+    assert_eq!(json_body(&response.2)["text"], RAW);
+    drop(running.stop());
+    rig.assert_children_gone();
+}
+
 // --- Models ------------------------------------------------------------------
 
 #[test]
-fn the_models_are_the_published_flows() {
+fn the_models_are_raw_and_configured_provider_preset_combinations() {
     let rig = rig(&config(30_000, 10_000), json!([{}]));
     let running = rig.start();
 
@@ -626,7 +741,8 @@ fn the_models_are_the_published_flows() {
             "owned_by": "pumice",
             "pumice": {
                 "schema_version": 1,
-                "flow": id,
+                "flow": null,
+                "model": id,
                 "transcription_model": "turbo",
                 "post_processing": {"preset": preset, "relay_route": route},
                 "response_formats": ["json", "text"],
@@ -634,18 +750,24 @@ fn the_models_are_the_published_flows() {
             },
         })
     };
-    // In `serve.transcription_flows` order; `extra` (enabled, unpublished)
-    // and `off` (disabled) are not models.
+    // Raw first, then generated combinations. Dictation flow ids are not models.
     assert_eq!(
         body,
         json!({"object": "list", "data": [
-            model("raw", Value::Null, "passthrough"),
-            model("clean", json!("builtin:clean"), "claude"),
+            model("turbo", Value::Null, "passthrough"),
+            model("turbo:claude:builtin:clean", json!("builtin:clean"), "claude"),
         ]})
     );
-    let (status, body) = running.get("/v1/models/clean");
+    let (status, body) = running.get("/v1/models/turbo:claude:builtin:clean");
     assert_eq!(status, 200);
-    assert_eq!(body, model("clean", json!("builtin:clean"), "claude"));
+    assert_eq!(
+        body,
+        model(
+            "turbo:claude:builtin:clean",
+            json!("builtin:clean"),
+            "claude"
+        )
+    );
     for path in ["/v1/models/extra", "/v1/models/off", "/v1/models/CLEAN"] {
         let response = request(running.port, b"GET", path, &[], b"");
         assert_openai_error(&response, 404, "model_not_found", Some("model"));
@@ -671,26 +793,31 @@ fn the_models_are_the_published_flows() {
 
 #[test]
 fn a_model_list_past_its_bound_is_refused_at_startup() {
-    // Every field within its own limit (128 published flows, 128-character
-    // ids, a 512-byte served model), but `/v1/models` in its largest state
-    // would exceed 128 KiB: a located configuration error, before any child.
-    let model = "m".repeat(512);
+    // Each generated id fits 512 bytes, but expanding 128 long presets
+    // makes the complete metadata list exceed 128 KiB.
+    let model = "m".repeat(200);
     let ids: Vec<String> = (0..128)
-        .map(|index| format!("{index:03}{}", "f".repeat(125)))
+        .map(|index| format!("p{index:03}{}", "x".repeat(196)))
         .collect();
-    let mut config = String::from("flows:\n");
-    for id in &ids {
-        config.push_str(&format!(
-            "  - id: {id}\n    enabled: true\n    transcription_model: {model}\n    formatter: null\n    relay_route: passthrough\n"
-        ));
-    }
-    config.push_str(&format!(
-        "serve:\n  enabled: true\n  port: 0\n  transcription_model: {model}\n  transcription_flows:\n"
-    ));
-    for id in &ids {
-        config.push_str(&format!("    - {id}\n"));
-    }
+    let config = format!(
+        "flows: []\nserve:\n  enabled: true\n  port: 0\n  transcription_model: {model}\n  relay:\n    enabled: true\n    default_provider: claude\n    default_preset: {}\n    presets: [{}]\n    expand_providers: false\n    expand_presets: true\n",
+        ids[0],
+        ids.join(", ")
+    );
     let rig = rig(&config, json!([{}]));
+    let mut formatter = String::from("schema_version: 1\ndefault: null\nformatters:\n");
+    for (index, id) in ids.iter().enumerate() {
+        let path = format!("preset-{index}.yml");
+        fs::write(
+            rig.cfg.join(&path),
+            format!(
+                "schema_version: 1\nid: {id}\ndescription: Test preset\nsystem: Test instructions\n"
+            ),
+        )
+        .unwrap();
+        formatter.push_str(&format!("  - path: {path}\n"));
+    }
+    fs::write(rig.cfg.join("formatter.yml"), formatter).unwrap();
     let child = Command::new(rig.install.join(exe("pumice")))
         .arg("serve")
         .arg("--config")
@@ -712,15 +839,11 @@ fn a_model_list_past_its_bound_is_refused_at_startup() {
     assert_eq!(record["code"], "invalid_config", "{record}");
     let message = record["message"].as_str().unwrap();
     assert!(message.contains("GET /v1/models"), "{message}");
-    // Located at a `serve.transcription_flows` entry: `- <id>` on its line.
-    let (location, _) = message.split_once(": ").unwrap();
-    let line: usize = location.rsplit(':').nth(1).unwrap().parse().unwrap();
-    let text = fs::read_to_string(rig.cfg.join("orchestrator.yml")).unwrap();
-    let located = text.lines().nth(line - 1).unwrap();
     assert!(
-        located.trim_start().starts_with("- ") && ids.contains(&located.trim()[2..].to_owned()),
-        "{located}"
+        message.contains("orchestrator.yml:"),
+        "located error: {message}"
     );
+    assert!(message.contains("serve.relay"), "{message}");
     assert!(rig.log_events("spawn").is_empty(), "no child spawned");
 }
 
@@ -741,7 +864,7 @@ fn an_unready_service_lists_its_models_as_unready_and_refuses_work() {
         assert_eq!(model["pumice"]["ready"], false, "{model}");
         assert_eq!(model["pumice"]["unavailable"], "transcription_restarting");
     }
-    let response = transcribe_model(running.port, "clean");
+    let response = transcribe_model(running.port, "turbo:claude:builtin:clean");
     assert_openai_error(&response, 503, "transcription_restarting", None);
     assert!(rig.log_events("transcription").is_empty());
     drop(running.stop());
@@ -759,7 +882,7 @@ fn a_transcription_answers_the_final_text_and_forwards_its_options() {
     let (status, headers, body) = transcribe(
         port,
         &[
-            ("model", None, b"clean"),
+            ("model", None, b"turbo:claude:builtin:clean"),
             ("language", None, b"PT"),
             ("prompt", None, PROMPT.as_bytes()),
             ("temperature", None, b"0.2"),
@@ -780,7 +903,9 @@ fn a_transcription_answers_the_final_text_and_forwards_its_options() {
     let pumice = &body["pumice"];
     assert_eq!(pumice["schema_version"], 1);
     assert!(pumice["operation_id"].is_string());
-    assert_eq!(pumice["flow"], "clean");
+    assert!(pumice["flow"].is_null());
+    assert_eq!(pumice["model"], "turbo:claude:builtin:clean");
+    assert_eq!(pumice["transcription_model"], "turbo");
     assert_eq!(
         pumice["transcript"],
         json!({"text": RAW, "language": "pt", "audio_seconds": 2.5})
@@ -831,7 +956,7 @@ fn a_transcription_answers_the_final_text_and_forwards_its_options() {
         port,
         &[
             ("file", Some("a.wav"), AUDIO),
-            ("model", None, b"clean"),
+            ("model", None, b"turbo:claude:builtin:clean"),
             ("response_format", None, b"text"),
         ],
     );
@@ -893,7 +1018,7 @@ fn a_listed_origin_reaches_every_route_through_a_proxy() {
     assert!(String::from_utf8_lossy(&body).starts_with("<!doctype html>"));
     let (status, _, body) = request(port, b"GET", "/v1/models", &proxied("same-origin"), b"");
     assert_eq!(status, 200);
-    assert_eq!(json_body(&body)["data"][0]["id"], "raw");
+    assert_eq!(json_body(&body)["data"][0]["id"], "turbo");
     let (status, _, body) = request(
         port,
         b"GET",
@@ -910,7 +1035,7 @@ fn a_listed_origin_reaches_every_route_through_a_proxy() {
         b"POST",
         "/v1/audio/transcriptions",
         &headers,
-        &form(&[("file", Some("clip.wav"), AUDIO), ("model", None, b"raw")]),
+        &form(&[("file", Some("clip.wav"), AUDIO), ("model", None, b"turbo")]),
     );
     assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
     assert_eq!(
@@ -961,7 +1086,7 @@ fn a_listed_origin_reaches_every_route_through_a_proxy() {
 fn off_flows_and_silence_never_call_the_ai() {
     let rig = rig(&config(30_000, 10_000), json!([transcript(RAW)]));
     let running = rig.start();
-    let (status, headers, body) = transcribe_model(running.port, "raw");
+    let (status, headers, body) = transcribe_model(running.port, "turbo");
     assert_eq!(status, 200);
     assert_eq!(
         header(&headers, "pumice-postprocessing-status"),
@@ -978,7 +1103,7 @@ fn off_flows_and_silence_never_call_the_ai() {
 
     let rig = self::rig(&config(30_000, 10_000), json!([transcript("  \n\t ")]));
     let running = rig.start();
-    let (status, headers, body) = transcribe_model(running.port, "clean");
+    let (status, headers, body) = transcribe_model(running.port, "turbo:claude:builtin:clean");
     assert_eq!(status, 200);
     assert_eq!(
         header(&headers, "pumice-postprocessing-status"),
@@ -1026,7 +1151,7 @@ fn a_post_processing_failure_answers_the_raw_transcript() {
                 running.port,
                 &[
                     ("file", Some("a.wav"), AUDIO),
-                    ("model", None, b"clean"),
+                    ("model", None, b"turbo:claude:builtin:clean"),
                     ("response_format", None, format.as_bytes()),
                 ],
             );
@@ -1111,7 +1236,7 @@ fn transcription_failures_are_openai_errors() {
             running.port,
             &[
                 ("file", Some("a.wav"), AUDIO),
-                ("model", None, b"clean"),
+                ("model", None, b"turbo:claude:builtin:clean"),
                 ("language", None, b"xx"),
             ],
         );
@@ -1139,13 +1264,24 @@ serve:
   enabled: true
   port: 0
   transcription_model: turbo
-  transcription_flows: [raw]
+  budgets_ms:
+    total: 30000
+    transcription: 1500
+    formatter: 1000
+    relay: 60000
+  relay:
+    enabled: true
+    default_provider: claude
+    default_preset: builtin:clean
+    presets: [builtin:clean]
+    expand_providers: false
+    expand_presets: false
 ",
         json!([child(json!({"hang": true})), {}]),
     );
     let running = rig.start();
     let started = Instant::now();
-    let response = transcribe_model(running.port, "raw");
+    let response = transcribe_model(running.port, "turbo");
     assert_openai_error(&response, 504, "transcription_timeout", None);
     assert!(started.elapsed() < Duration::from_secs(10));
     running.wait_status("generation 2 ready", |status| {
@@ -1153,7 +1289,7 @@ serve:
             && status["transcription"]["state"] == "ready"
             && status["dictations"]["active"] == false
     });
-    let (status, _, body) = transcribe_model(running.port, "raw");
+    let (status, _, body) = transcribe_model(running.port, "turbo");
     assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
     let stderr = running.stop();
     assert!(stderr.contains("child_recycled"), "{stderr}");
@@ -1168,7 +1304,7 @@ fn invalid_requests_are_refused_before_any_work() {
     let running = rig.start();
     let port = running.port;
     let file: Part = ("file", Some("S3NT1NEL-NAME.wav"), AUDIO);
-    let model: Part = ("model", None, b"clean");
+    let model: Part = ("model", None, b"turbo:claude:builtin:clean");
     for (parts, status, code, param) in [
         (vec![model], 400, "missing_file", Some("file")),
         (vec![file], 400, "missing_model", Some("model")),
@@ -1191,7 +1327,7 @@ fn invalid_requests_are_refused_before_any_work() {
             Some("model"),
         ),
         (
-            vec![file, ("model", None, b"turbo")],
+            vec![file, ("model", None, b"raw")],
             404,
             "model_not_found",
             Some("model"),
@@ -1328,7 +1464,7 @@ fn transcribe_partially(port: u16) -> TcpStream {
     stage("partial POST /v1/audio/transcriptions");
     let deadline = Instant::now() + WAIT;
     let body = form(&[
-        ("model", None, b"clean"),
+        ("model", None, b"turbo:claude:builtin:clean"),
         ("file", Some("a.wav"), &[0u8; 100_000]),
     ]);
     let mut stream = connect(port, deadline);
@@ -1379,7 +1515,7 @@ fn dictations_and_transcriptions_share_one_permit() {
     running.wait_idle();
 
     // A transcription runs: a dictation gets its own envelope's 429.
-    let second = std::thread::spawn(move || transcribe_model(port, "raw"));
+    let second = std::thread::spawn(move || transcribe_model(port, "turbo"));
     rig.wait_log("transcription", 2);
     let status = running.get("/pumice/v1/status").1;
     assert_eq!(status["dictations"]["admission"], "busy", "{status}");
@@ -1407,7 +1543,10 @@ fn a_client_gone_during_transcription_recycles_the_child() {
     let running = rig.start();
     stage("held POST /v1/audio/transcriptions");
     let deadline = Instant::now() + WAIT;
-    let body = form(&[("file", Some("a.wav"), AUDIO), ("model", None, b"clean")]);
+    let body = form(&[
+        ("file", Some("a.wav"), AUDIO),
+        ("model", None, b"turbo:claude:builtin:clean"),
+    ]);
     let mut stream = connect(running.port, deadline);
     let mut bytes = head(
         running.port,
@@ -1448,7 +1587,10 @@ fn a_shutdown_during_the_ai_call_answers_the_raw_transcript() {
     let running = rig.start();
     stage("held POST /v1/audio/transcriptions");
     let deadline = Instant::now() + WAIT;
-    let body = form(&[("file", Some("a.wav"), AUDIO), ("model", None, b"clean")]);
+    let body = form(&[
+        ("file", Some("a.wav"), AUDIO),
+        ("model", None, b"turbo:claude:builtin:clean"),
+    ]);
     let mut stream = connect(running.port, deadline);
     let mut bytes = head(
         running.port,
