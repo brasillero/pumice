@@ -1623,13 +1623,10 @@ fn commands_that_read_settings_fail_without_a_config_file() {
     for args in [
         &["check-config", "--json"][..],
         &["models", "list", "--json"],
-        &[
-            "file",
-            wav.to_str().unwrap(),
-            "--model-file",
-            model.to_str().unwrap(),
-            "--json",
-        ],
+        // `--model ID` and `default_model` come from the file; only a
+        // one-off `--model-file` runs without one.
+        &["file", wav.to_str().unwrap(), "--model", "tiny", "--json"],
+        &["file", wav.to_str().unwrap(), "--json"],
         &["serve", "--model", "tiny", "--port", "0"],
     ] {
         let out = run_without_config(tmp.path(), args);
@@ -1652,6 +1649,41 @@ fn commands_that_read_settings_fail_without_a_config_file() {
         json["error"]["location"]["file"],
         expected.to_str().unwrap()
     );
+}
+
+#[test]
+fn a_one_off_model_file_runs_without_a_config_file() {
+    // The real engine cannot load the empty model (or is not built in):
+    // reaching it shows the missing configuration was not an error. The
+    // fake-engine run is in tests/managed.rs.
+    let tmp = tempfile::tempdir().unwrap();
+    let wav = tmp.path().join("clip.wav");
+    std::fs::write(&wav, write_silence_wav(0.05, 16_000, 1)).unwrap();
+    let model = tmp.path().join("model.gguf");
+    std::fs::write(&model, b"").unwrap();
+    let args = [
+        "file",
+        wav.to_str().unwrap(),
+        "--model-file",
+        model.to_str().unwrap(),
+        "--json",
+    ];
+    let out = run_without_config(tmp.path(), &args);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let code = json["error"]["code"].as_str().unwrap();
+    assert!(
+        ["model_load_failed", "engine_not_available"].contains(&code),
+        "{json}"
+    );
+
+    // A per-user file that exists must still be complete.
+    let per_user = tmp.path().join("config").join("pumice");
+    std::fs::create_dir_all(&per_user).unwrap();
+    std::fs::write(per_user.join("transcribe.yml"), "schema_version: 1\n").unwrap();
+    let out = run_without_config(tmp.path(), &args);
+    assert_eq!(out.status.code(), Some(2));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["error"]["code"], "invalid_config", "{json}");
 }
 
 #[test]

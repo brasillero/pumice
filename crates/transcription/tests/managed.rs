@@ -1,6 +1,7 @@
 //! Process-level tests for `pumice-transcribe serve --managed`: the real CLI
 //! entry point with a fake engine, run as a child process, so stdout, stdin
 //! EOF, the exit status and the watchdog are observed as an owner sees them.
+//! The one-off `file` tests at the end reuse the same child.
 //!
 //! This target has `harness = false`: the same executable is the test runner
 //! and, when `PUMICE_MANAGED_TEST_CHILD` is set, the child. libtest would
@@ -13,6 +14,7 @@ use pumice_transcription::{
     CancelToken, Engine, EngineError, Error, Transcript, TranscriptionOptions,
 };
 use serde_json::Value;
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -215,6 +217,14 @@ fn main() -> ExitCode {
         (
             "sigterm_stops_a_managed_child_cleanly",
             sigterm_stops_a_managed_child_cleanly,
+        ),
+        (
+            "a_one_off_file_runs_without_a_config_file",
+            a_one_off_file_runs_without_a_config_file,
+        ),
+        (
+            "a_one_off_file_still_needs_a_complete_config_file",
+            a_one_off_file_still_needs_a_complete_config_file,
         ),
     ];
     let filter = std::env::args().skip(1).find(|arg| !arg.starts_with('-'));
@@ -1025,4 +1035,120 @@ fn sigterm_stops_a_managed_child_cleanly() {
     let records = child.all_records();
     assert_eq!(events(&records), ["ready", "stopping", "stopped"]);
     assert_eq!(records[1]["reason"], "signal");
+}
+
+// --- One-off `file` ----------------------------------------------------------
+//
+// The same child, as `pumice-transcribe file`: a one-off `file --model-file`
+// runs from its flags without a configuration file, but a file that exists
+// must be complete.
+
+/// Runs `args` in the child with `home` as the only per-user location.
+fn run_file_child(home: &Path, args: &[OsString]) -> std::process::Output {
+    Command::new(std::env::current_exe().unwrap())
+        .env(CHILD_ENV, "1")
+        .env(ENGINE_ENV, "ok")
+        .env_remove(COMPUTE_ENV)
+        .env_remove(LOAD_MS_ENV)
+        .env_remove(STARTED_FILE_ENV)
+        .env_remove(LOADING_FILE_ENV)
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env("APPDATA", home.join("config"))
+        .env("XDG_DATA_HOME", home.join("data"))
+        .env("LOCALAPPDATA", home.join("data"))
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+fn one_off_file_args(wav: &Path, model: &Path) -> Vec<OsString> {
+    vec![
+        "file".into(),
+        wav.into(),
+        "--model-file".into(),
+        model.into(),
+        "--json".into(),
+    ]
+}
+
+fn a_one_off_file_runs_without_a_config_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let wav_path = dir.path().join("clip.wav");
+    std::fs::write(&wav_path, wav(0.5)).unwrap();
+    let model = dir.path().join("model.gguf");
+    std::fs::write(&model, b"not a real model").unwrap();
+
+    let out = run_file_child(dir.path(), &one_off_file_args(&wav_path, &model));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["ok"], true, "{json}");
+    assert_eq!(json["result"]["text"], "fake words", "{json}");
+    // Without a configuration the backend is the flag default, cpu.
+    assert_eq!(json["result"]["compute"]["requested"], "cpu", "{json}");
+
+    // The flags still apply.
+    let mut args = one_off_file_args(&wav_path, &model);
+    args.extend(["--backend", "auto", "--language", "pt"].map(OsString::from));
+    let out = run_file_child(dir.path(), &args);
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["result"]["compute"]["requested"], "auto", "{json}");
+    assert_eq!(json["result"]["language"], "pt", "{json}");
+
+    // A model id needs the configuration file.
+    let out = run_file_child(
+        dir.path(),
+        &[
+            "file".into(),
+            wav_path.clone().into(),
+            "--model".into(),
+            MODEL.into(),
+            "--json".into(),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["error"]["code"], "invalid_config", "{json}");
+}
+
+fn a_one_off_file_still_needs_a_complete_config_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let wav_path = dir.path().join("clip.wav");
+    std::fs::write(&wav_path, wav(0.5)).unwrap();
+    let model = dir.path().join("model.gguf");
+    std::fs::write(&model, b"not a real model").unwrap();
+    let incomplete = "schema_version: 1\nmodels: []\n";
+
+    // The per-user file.
+    let per_user = dir.path().join("config").join("pumice");
+    std::fs::create_dir_all(&per_user).unwrap();
+    std::fs::write(per_user.join("transcribe.yml"), incomplete).unwrap();
+    let out = run_file_child(dir.path(), &one_off_file_args(&wav_path, &model));
+    assert_eq!(out.status.code(), Some(2));
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["error"]["code"], "invalid_config", "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("\"default_model\" is missing"),
+        "{json}"
+    );
+
+    // An explicit --config file.
+    let explicit = dir.path().join("explicit.yml");
+    std::fs::write(&explicit, incomplete).unwrap();
+    let mut args: Vec<OsString> = vec!["--config".into(), explicit.into()];
+    args.extend(one_off_file_args(&wav_path, &model));
+    let out = run_file_child(dir.path(), &args);
+    assert_eq!(out.status.code(), Some(2));
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["error"]["code"], "invalid_config", "{json}");
 }

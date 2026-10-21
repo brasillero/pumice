@@ -6,7 +6,8 @@
 #      ($XDG_CONFIG_HOME/pumice/transcribe.yml when XDG_CONFIG_HOME is absolute),
 #      and %APPDATA%\pumice\transcribe.yml on Windows,
 #   and a missing file is an error. Only `models catalog`, `models
-#   download`, `models verify` and `backends --backend MODE` run without one.
+#   download`, `models verify`, `backends --backend MODE` and a one-off
+#   `file --model-file PATH` (from its flags) run without one.
 #
 # Every setting below must be written: leaving one out is an error that
 # names the file and line. There are no built-in defaults; this file is the

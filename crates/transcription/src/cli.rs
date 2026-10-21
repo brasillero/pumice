@@ -1,6 +1,6 @@
 use crate::catalog;
 use crate::compute::{BackendMode, Compute};
-use crate::config::{self, Config, LoadedConfig};
+use crate::config::{self, Config, LoadedConfig, Threads};
 use crate::download::{self, DownloadSpec, Downloader, FetchResult};
 use crate::engine::{CancelToken, Engine, EngineRequest};
 use crate::managed::{self, Lifecycle, StopReason};
@@ -38,7 +38,8 @@ pub struct Args {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Transcribe an audio file.
+    /// Transcribe an audio file. With --model-file it also runs without a
+    /// configuration file, from its flags and their defaults.
     File(FileArgs),
     /// Serve the HTTP API.
     Serve(ServeArgs),
@@ -64,22 +65,27 @@ pub struct FileArgs {
     #[arg(long, value_name = "ID", group = "model_source")]
     model: Option<String>,
 
-    /// Direct path to a GGUF model file.
+    /// Direct path to a GGUF model file. With it, `file` also runs without a
+    /// configuration file: the other settings then come from the flags and
+    /// their defaults. A configuration file that exists must be complete.
     #[arg(long, value_name = "PATH.gguf", group = "model_source")]
     model_file: Option<PathBuf>,
 
-    /// Optional language hint (ISO-639-1 two-letter code). When given, this
-    /// value is reported in the result; otherwise the engine-detected language
-    /// is reported.
+    /// Optional language hint (ISO-639-1 two-letter code). Overrides
+    /// `language` in the configuration file; without one, the language is
+    /// detected. When given, this value is reported in the result; otherwise
+    /// the engine-detected language is reported.
     #[arg(long, value_name = "xx")]
     language: Option<String>,
 
     /// Number of threads to use for inference (1-32). Overrides `threads` in
-    /// the configuration file.
+    /// the configuration file; without one, the available parallelism,
+    /// capped at 32.
     #[arg(long, value_name = "N")]
     threads: Option<usize>,
 
-    /// Compute backend. Overrides `backend` in the configuration file.
+    /// Compute backend. Overrides `backend` in the configuration file;
+    /// without one, cpu.
     #[arg(long, value_name = "MODE")]
     backend: Option<BackendMode>,
 
@@ -454,12 +460,11 @@ where
     T: Into<OsString> + Clone,
 {
     let args = Args::try_parse_from(args).map_err(|e| Error::invalid_arguments(format!("{e}")))?;
-    let loaded = load_config(args.config.as_deref())?;
+    let config_arg = args.config.as_deref();
     match args.command {
         Command::File(file_args) => {
-            run_file(file_args, &loaded.config, args.config.as_deref(), |_| {
-                Ok(engine)
-            })
+            let config = file_config(&file_args, config_arg)?;
+            run_file(file_args, &config, config_arg, |_| Ok(engine))
         }
         _ => Err(Error::invalid_arguments(
             "run_with_engine only supports the file subcommand",
@@ -474,8 +479,8 @@ where
     let config_arg = args.config.as_deref();
     match args.command {
         Command::File(file_args) => {
-            let loaded = load_config(config_arg)?;
-            let output = run_file(file_args, &loaded.config, config_arg, make_engine)?;
+            let config = file_config(&file_args, config_arg)?;
+            let output = run_file(file_args, &config, config_arg, make_engine)?;
             Ok(CommandOutput::Transcription(output))
         }
         Command::Serve(serve_args) => {
@@ -920,6 +925,32 @@ fn load_config(config_arg: Option<&Path>) -> Result<LoadedConfig, Error> {
 /// The configuration file, for a command that also runs without one.
 fn load_optional_config(config_arg: Option<&Path>) -> Result<Option<LoadedConfig>, Error> {
     config::load_optional(config_arg).map_err(Error::invalid_config)
+}
+
+/// The settings for `file`. A one-off `file --model-file PATH` also runs
+/// without a configuration file, from its flags and their defaults
+/// ([`flag_defaults`]); D3 governs the YAML settings, so a file that exists
+/// must still be complete. `--model ID` and `default_model` need the file.
+fn file_config(file_args: &FileArgs, config_arg: Option<&Path>) -> Result<Config, Error> {
+    if file_args.model_file.is_none() {
+        return load_config(config_arg).map(|loaded| loaded.config);
+    }
+    Ok(load_optional_config(config_arg)?.map_or_else(flag_defaults, |loaded| loaded.config))
+}
+
+/// What the `file` flags fall back to without a configuration file:
+/// language detection, `auto` threads (the available parallelism, capped at
+/// 32), the cpu backend and no configured models.
+fn flag_defaults() -> Config {
+    Config {
+        default_model: None,
+        language: None,
+        threads: Threads::Auto,
+        backend: BackendMode::Cpu,
+        server_port: None,
+        models_dir: None,
+        models: Vec::new(),
+    }
 }
 
 fn run_file<F>(

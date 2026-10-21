@@ -588,9 +588,6 @@ the same model, audio and language for every run (for example
    (`Get-CimInstance Win32_VideoController | Select-Object Name,
    DriverVersion`) and the Vulkan loader version
    (`(Get-Item $env:SystemRoot\System32\vulkan-1.dll).VersionInfo.FileVersion`).
-   `file` needs a complete configuration: save a copy of the repository's
-   `transcribe.example.yml` as `transcribe.yml` in the working directory
-   (its `models` entries are not used with `--model-file`).
 2. `& $exe backends --backend auto --json`: `gpu_module`
    `scanned`, `gpu_devices` ≥ 1 and the GPU listed with kind `vulkan`.
    `fallback_reason` depends on the machine: `null` with a dedicated card,
@@ -600,8 +597,8 @@ the same model, audio and language for every run (for example
    `"software"`, note its `description` and `type`, and whether
    `--backend gpu` (step 4) works on it. Run with `--backend cpu` too:
    `gpu_module` `not_requested`, only the CPU.
-3. CPU baseline: `& $exe --config transcribe.yml file sample-pt.wav
-   --model-file MODEL --language pt --backend cpu --json`, three times; note the text,
+3. CPU baseline: `& $exe file sample-pt.wav --model-file
+   MODEL --language pt --backend cpu --json`, three times; note the text,
    `model_load_ms`, `transcription_ms` and `compute`.
 4. Required GPU: the same with `--backend gpu`. It must succeed with
    `compute.backend` `vulkan` and `compute.device` your GPU; compare the text with the CPU run
@@ -666,9 +663,7 @@ Nothing is installed; only the extracted folder is used.
    machdep.cpu.brand_string`) and its GPU cores (`system_profiler
    SPDisplaysDataType`), and whether Xcode or its command line tools are
    installed (`xcode-select -p`; a Mac without them also proves that none is
-   needed). `file` needs a complete configuration: save a copy of the
-   repository's `transcribe.example.yml` as `transcribe.yml` in the working
-   directory (its `models` entries are not used with `--model-file`).
+   needed).
 2. `"$exe" backends --backend auto --json`: `gpu_module` `scanned`,
    `gpu_devices: 1`, the GPU listed with kind `metal`, type `gpu` and
    `gpu_class: "unverified"`, `auto_uses_gpu_module: false` and
@@ -676,8 +671,8 @@ Nothing is installed; only the extracted folder is used.
    `gpu_module` `not_requested`, only the CPU. Time both (`time "$exe"
    backends …`), twice each: the first `auto` diagnostic includes the Metal
    shader compilation, the second may reuse the system's shader cache.
-3. CPU baseline: `"$exe" --config transcribe.yml file sample-pt.wav
-   --model-file MODEL --language pt --backend cpu --json`, three times; note the text, `model_load_ms`,
+3. CPU baseline: `"$exe" file sample-pt.wav --model-file MODEL --language pt
+   --backend cpu --json`, three times; note the text, `model_load_ms`,
    `transcription_ms` and `compute` (`cpu_variant: "arm64"`).
 4. Metal: the same with `--backend gpu`, three times. It must succeed with
    `compute.backend` `metal` and `compute.device` `MTL0` with your chip as
@@ -864,8 +859,10 @@ models:                 # the file's other settings are left out here
 A missing file is an error for the commands that read settings (`file`,
 `serve`, `check-config`, `models list`); `models catalog`, `models download`,
 `models verify` and `backends --backend MODE` also run without one (models
-then live in the per-user directory). A missing explicit `--config` file is
-always an error.
+then live in the per-user directory). A one-off `file --model-file PATH`
+also runs without one, from its flags and their defaults (see
+[`file`](#file)). A missing explicit `--config` file is always an error, and
+a file that exists must be complete for every command.
 
 Every setting must be written: an omitted one is an error with the file and
 line (line 1 for a top-level setting, the `server:` mapping for
@@ -918,8 +915,7 @@ pumice-transcribe check-config --config /path/to/transcribe.yml --json
 # Use a configured model id
 pumice-transcribe file audio.wav --model tiny
 
-# Use a direct GGUF path (no models entry needed; the other settings still
-# come from the config)
+# Use a direct GGUF path (no models entry needed, and no config file either)
 pumice-transcribe file audio.wav --model-file /path/to/whisper-tiny-Q8_0.gguf
 
 # Use the configured default_model
@@ -938,6 +934,21 @@ With `--json`, `result.compute` is the
 `--model ID` and `--model-file PATH` are mutually exclusive. If neither is
 given, the configured `default_model` is used; if there is none, the command
 fails.
+
+A one-off `file --model-file PATH` also runs when there is no configuration
+file (no `--config` and no per-user `transcribe.yml`). Its settings then come
+from the flags, with these defaults:
+
+| Flag | Default without a configuration file |
+| --- | --- |
+| `--language xx` | detect the language |
+| `--threads N` | the available parallelism, capped at 32 |
+| `--backend MODE` | `cpu` |
+
+When a configuration file exists (`--config FILE` or the per-user file), it
+is read and must be complete, as for every other command; the flags override
+its `language`, `threads` and `backend`. `--model ID` and `default_model`
+always need the file.
 
 ### `models list`
 
@@ -1249,7 +1260,8 @@ config has `default_model: null`.
 setting out. Every setting is required; copy it from
 `transcribe.example.yml`.
 - **"the transcription configuration file does not exist"**: there is no
-`--config` file and no per-user `transcribe.yml`; create one.
+`--config` file and no per-user `transcribe.yml`; create one (a one-off
+`file --model-file PATH` runs without it).
 - **"unknown model id ...; configured ids: ..."**: the id passed to `--model`
 is not in the config `models` list.
 - **"schema_version must be 1"**: the config file has another
