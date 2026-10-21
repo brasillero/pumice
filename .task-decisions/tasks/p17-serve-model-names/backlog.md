@@ -14,7 +14,7 @@
 **To do.**
 - [x] Owner: which models folder (D7).
 - [x] Design the YAML (expansion options, default relay and preset, global relay timeout) with Codex.
-- [ ] Accept percent-encoded ids in `GET /v1/models/{id}`.
+- [x] Accept percent-encoded ids in `GET /v1/models/{id}`.
 - [x] Update AGENTS.md's built-in defaults sentence (D3; done in p17.1-explicit-config).
 
 **Where in the code.**
