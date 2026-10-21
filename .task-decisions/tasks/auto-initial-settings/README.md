@@ -3,7 +3,7 @@ title: Create initial settings automatically on first start
 state: Done
 ticket: —
 branch: auto-initial-settings
-mr: —
+mr: PR #127
 start: 2026-10-21
 end: 2026-10-21
 ---
