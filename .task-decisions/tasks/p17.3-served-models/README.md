@@ -3,7 +3,7 @@ title: P17.3: serve model names, provider/preset combinations and relay-off exec
 state: Done
 ticket: —
 branch: p17.3-served-models
-mr: —
+mr: PR #125
 start: 2026-10-21
 end: 2026-10-21
 ---
