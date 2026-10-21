@@ -56,7 +56,18 @@ serve:
   port: 17570
   transcription_model: null   # null only while serve is disabled
   startup_timeout_ms: 60000
-  transcription_flows: []
+  budgets_ms:
+    total: 180000
+    transcription: 120000
+    formatter: 1000
+    relay: 60000
+  relay:
+    enabled: true
+    default_provider: codex
+    default_preset: clean
+    presets: [clean, clean-en]
+    expand_providers: false
+    expand_presets: false
   allowed_origins: []
 ```
 
@@ -194,8 +205,8 @@ loopback frontend and one warm `pumice-transcribe serve --managed` child
 model loaded for the service's lifetime. It takes dictations
 (`POST /pumice/v1/dictations`: audio plus a flow id in, the raw transcript
 and the final text out, through the same flows as `pumice run`), answers
-OpenAI transcription clients for the flows it publishes
-(`POST /v1/audio/transcriptions` with the flow id as `model`, and
+OpenAI transcription clients using the real model id or a
+`model:provider:preset` combination (`POST /v1/audio/transcriptions`, and
 `GET /v1/models`: see [OpenAI transcriptions](#openai-transcriptions)) and
 exposes its health, readiness, status and flow list. There is no
 `/v1/chat/completions` here: chat clients keep using `pumice relay serve`
@@ -215,9 +226,18 @@ serve:
   port: 17570                 # 7567 is refused; 0 picks a free port
   transcription_model: whisper-large-v3-turbo-q8_0  # a models folder id; null only while off
   startup_timeout_ms: 60000   # 1000 to 300000; the models list and each child start
-  transcription_flows:        # the OpenAI models; [] publishes none
-    - clean
-    - raw
+  budgets_ms:
+    total: 180000
+    transcription: 120000
+    formatter: 1000
+    relay: 60000
+  relay:
+    enabled: true
+    default_provider: codex
+    default_preset: clean
+    presets: [clean, clean-en]
+    expand_providers: false
+    expand_presets: false
   allowed_origins: []         # [] accepts none besides 127.0.0.1; see "Reaching pumice serve over Tailscale"
 ```
 
@@ -225,26 +245,32 @@ serve:
   loaded; a flow naming another is a startup error at its
   `transcription_model` line). Disabled flows may use any model. At most 128
   enabled flows, with ids of at most 128 bytes.
-- `transcription_flows` lists the flows published as OpenAI transcription
-  models; nothing is published unless listed. Each entry is a flow id that
-  is also a public model id: 1 to 128 characters from `A–Z a–z 0–9 . _ -`,
-  starting with a letter or digit (checked at load, like duplicates). It
-  must name an enabled flow (so it uses the served model) that is either
-  **off** — `formatter: null` with `relay_route: passthrough`, which returns
-  the raw transcript — or has a formatter for its AI route; a flow that
-  sends the transcript to an AI without a formatter cannot be published.
-  Custom presets are formatter files registered in `formatter.yml`, named
-  by a flow's `formatter` like the built-in ones
-  ([formatter.md](formatter.md)).
-- The routes that list flows must fit their 128 KiB bound in every state:
-  `GET /v1/models` (the published flows) and `GET /pumice/v1/flows` (the
-  enabled ones), each entry with its ids, preset, relay route, served model
-  and an `unavailable` code. A configuration whose list would not fit is a
-  startup error at the first entry that does not (a
-  `transcription_flows` entry or an enabled flow's `id`), even when every
-  field is within its own limit — for example 128 published flows with
-  128-character ids on a 512-byte served model id. Publish fewer flows or
-  shorten their ids, formatter ids, relay routes or the served model id.
+- The real `serve.transcription_model` id is always listed first and returns
+  raw text, independently of `flows:`. With `serve.relay.enabled: true`, the
+  default combination is also listed as `model:provider:preset`. The default
+  provider must be enabled in `relay.yml`; the default preset must be in
+  `serve.relay.presets`. Presets name formatter definitions in `formatter.yml`
+  or the built-in `builtin:clean` (which produces an id such as
+  `whisper-large-v3-turbo-q8_0:codex:builtin:clean`). All keys are required.
+- `expand_providers` lists every enabled provider in `relay.yml` order;
+  `expand_presets` lists every preset in the configured order. Both switches
+  give every combination, providers first. The relay routes `passthrough` and `inspect`
+  are never expanded as providers. Duplicate presets, unregistered references, invalid
+  generated ids and collisions fail before listening. Ids are exact,
+  case-sensitive, at most 512 bytes and contain no control characters.
+- `serve.budgets_ms` supplies the four budgets for every public transcription
+  model. Upload and connection limits include these budgets as well as the
+  dictation flow budgets. `flows:` still selects dictation behavior, and
+  `pumice run` keeps its own flow budgets and behavior.
+- With `serve.relay.enabled: false`, only the raw model is listed. The service
+  loads no relay or formatter runtime or configuration. Raw dictations work;
+  AI dictations fail with 503 `relay_disabled` before transcription. The
+  complete serve settings remain required, including the inactive relay keys.
+- `serve.transcription_flows` was removed. Old files fail with a migration
+  message: replace the list with `serve.budgets_ms` and `serve.relay`.
+- The model list and the enabled flow list must each fit 128 KiB in every
+  state. Excessive expansion fails at startup; disable expansion or shorten
+  the model, provider or preset ids. No entries are silently truncated.
 - `allowed_origins` lists browser origins accepted besides
   `http://127.0.0.1:<port>`, for a reverse proxy on the same machine
   ([below](#reaching-pumice-serve-over-tailscale)); nothing is accepted
@@ -368,7 +394,7 @@ model or a running dictation.
   while no child is ready;
   `last_failure` is a fixed code such as `transcription_exited`,
   `transcription_probe_failed` or `transcription_recycled`.
-  `flows.published` counts `serve.transcription_flows`.
+  `flows.published` counts the public transcription models.
   `dictations.admission` is `open`, `busy` (a dictation or an OpenAI
   transcription is running; they share one permit, and `stage` names its
   current stage: `prepare`, `transcription`, `formatter`, `relay` or
@@ -382,7 +408,7 @@ model or a running dictation.
   ```
   When the service is not ready, each flow has `"ready":false` and an
   `unavailable` code (the same codes as `/ready`).
-- `GET /v1/models`, `GET /v1/models/{id}` — the published flows as OpenAI
+- `GET /v1/models`, `GET /v1/models/{id}` — the public transcription models as OpenAI
   models ([below](#openai-transcriptions)).
 - `GET /`, `GET /page.js`, `GET /page.css` — the [test page](#test-page).
 
@@ -508,30 +534,33 @@ restarted, so no paid call starts over processes that may still run.
 
 ### OpenAI transcriptions
 
-The flows in `serve.transcription_flows` are OpenAI transcription models:
-the model id is the flow id, and the flow decides the audio model, the
-post-processing preset and the AI route, so `text` comes back ready to use
-(p15-serve-transcriptions/D1, D5). A generic client only needs the base URL
-`http://127.0.0.1:17570/v1` and a model id; it needs no API key (any
-`Authorization` header is ignored).
+The real transcription model id returns raw text. With the relay on,
+`model:provider:preset` ids return text processed by that provider and preset.
+A generic client needs only the base URL `http://127.0.0.1:17570/v1` and the
+model id; it needs no API key (any `Authorization` header is ignored).
 
-`GET /v1/models` lists them in `serve.transcription_flows` order, and
-`GET /v1/models/{id}` returns one (404 `model_not_found` with `param`
-`model` otherwise). Each is an OpenAI model object with a `pumice` object
-that standard clients ignore:
+`GET /v1/models` lists raw first, then the configured combinations.
+`GET /v1/models/{id}` looks up the exact id after decoding percent escapes
+once. A literal `+` stays `+`; malformed escapes or invalid UTF-8 give 400
+`invalid_model`. An unknown id gives 404 `model_not_found` with `param: model`.
+Multipart `model` fields are already text and are never URL-decoded.
+Each OpenAI model object includes a `pumice` object standard clients ignore:
 
 ```json
 {"object":"list","data":[
-  {"id":"clean","object":"model","created":0,"owned_by":"pumice",
-   "pumice":{"schema_version":1,"flow":"clean","transcription_model":"turbo",
-     "post_processing":{"preset":"builtin:clean","relay_route":"claude"},
+  {"id":"whisper-large-v3-turbo-q8_0","object":"model","created":0,"owned_by":"pumice",
+   "pumice":{"schema_version":1,"flow":null,"model":"whisper-large-v3-turbo-q8_0","transcription_model":"whisper-large-v3-turbo-q8_0",
+     "post_processing":{"preset":null,"relay_route":"passthrough"},
+     "response_formats":["json","text"],"ready":true}},
+  {"id":"whisper-large-v3-turbo-q8_0:codex:clean","object":"model","created":0,"owned_by":"pumice",
+   "pumice":{"schema_version":1,"flow":null,"model":"whisper-large-v3-turbo-q8_0:codex:clean","transcription_model":"whisper-large-v3-turbo-q8_0",
+     "post_processing":{"preset":"clean","relay_route":"codex"},
      "response_formats":["json","text"],"ready":true}}]}
 ```
 
-`preset` is the flow's formatter (`null` for an off flow). While the
-service is not ready, every model stays listed with `"ready":false` and an
-`unavailable` code (the codes of `/ready`). Listing never waits for the
-child, a provider or a running request.
+`preset` is null and `relay_route` is `passthrough` for raw. While the service
+is unready, every model stays listed with `ready: false` and an `unavailable`
+code. Listing never waits for the child, a provider or a running request.
 
 `POST /v1/audio/transcriptions` takes `multipart/form-data` with these
 parts, in any order, each at most once (OpenAI's subset, D6):
@@ -539,7 +568,7 @@ parts, in any order, each at most once (OpenAI's subset, D6):
 | Part | |
 | --- | --- |
 | `file` | Required. One uploaded, non-empty audio file, handled like a dictation's ([formats and limits](transcription.md#supported-formats-and-limits)) |
-| `model` | Required. A published flow id, matched exactly |
+| `model` | Required. A public transcription model id, matched exactly |
 | `language` | Optional. A two-letter ISO-639-1 code for the transcription (blank: use the transcription default, `transcribe.yml`'s `language`; otherwise detect) |
 | `prompt` | Optional. Whisper's initial prompt for the transcription (empty: none) |
 | `temperature` | Optional. 0 to 1, for the transcription |
@@ -555,20 +584,20 @@ and `stream=true` are refused with 400 before any work.
 
 ```sh
 curl --fail-with-body --max-time 200 http://127.0.0.1:17570/v1/audio/transcriptions \
-  -F 'file=@clip.wav' -F 'model=clean' -F 'language=en'
+  -F 'file=@clip.wav' -F 'model=whisper-large-v3-turbo-q8_0:codex:clean' -F 'language=en'
 ```
 
 With `json`, `text` is the final text, next to a `pumice` object:
 
 ```json
-{"text":"Raw words.","pumice":{"schema_version":1,"operation_id":"…","flow":"clean","transcript":{"text":"raw words","language":"en","audio_seconds":2.1},"post_processing":{"status":"applied","preset":"builtin:clean","relay_route":"claude"},"stages":{"prepare":{"status":"ok","elapsed_ms":2},"transcription":{"status":"ok","elapsed_ms":5900,"inference_ms":5800},"formatter":{"status":"ok","elapsed_ms":0},"relay":{"status":"ok","elapsed_ms":2400}},"timings_ms":{"total":8303}}}
+{"text":"Raw words.","pumice":{"schema_version":1,"operation_id":"…","flow":null,"model":"whisper-large-v3-turbo-q8_0:codex:clean","transcription_model":"whisper-large-v3-turbo-q8_0","transcript":{"text":"raw words","language":"en","audio_seconds":2.1},"post_processing":{"status":"applied","preset":"clean","relay_route":"codex"},"stages":{"prepare":{"status":"ok","elapsed_ms":2},"transcription":{"status":"ok","elapsed_ms":5900,"inference_ms":5800},"formatter":{"status":"ok","elapsed_ms":0},"relay":{"status":"ok","elapsed_ms":2400}},"timings_ms":{"total":8303}}}
 ```
 
 With `text`, the body is exactly the final text (`text/plain;
 charset=utf-8`). Both carry the header `Pumice-Postprocessing-Status` with
 `post_processing.status`:
 
-- `off` — an off flow: `text` is the raw transcript;
+- `off` — the plain model: `text` is the raw transcript;
 - `applied` — the formatter and the AI route ran;
 - `skipped` — a silent (whitespace-only) transcript: no AI call, `text` is
   the transcript unchanged;

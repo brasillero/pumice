@@ -207,17 +207,8 @@ impl Frontend {
         self.dictations.clone()
     }
 
-    /// The enabled flows.
-    pub(crate) fn flow_infos(&self) -> &[FlowInfo] {
-        &self.flows
-    }
-
-    /// The flows published as transcription models; none without the
-    /// dictation route's runtime.
-    pub(crate) fn published(&self) -> &[String] {
-        self.dictations
-            .as_deref()
-            .map_or(&[], |dictations| &dictations.transcription_flows)
+    pub(crate) fn model_infos(&self) -> &[FlowInfo] {
+        self.dictations.as_deref().map_or(&[], |d| d.models.infos())
     }
 
     pub(crate) fn admission(&self) -> &Admission {
@@ -310,7 +301,7 @@ pub(crate) const UNAVAILABLE_CODES: [&str; 5] = [
 /// [`METADATA`] allows, with the first entry that does not fit.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Oversized {
-    /// `GET /v1/models`, from this `serve.transcription_flows` entry on.
+    /// `GET /v1/models`, from this generated model on.
     Models { published: usize },
     /// `GET /pumice/v1/flows`, from this enabled flow on.
     Flows { enabled: usize },
@@ -322,12 +313,16 @@ pub(crate) enum Oversized {
 /// route fail. The per-field limits alone cannot bound them: formatter ids
 /// and relay routes have no length limit, and JSON escaping can grow the
 /// served model id.
-pub(crate) fn oversized_snapshot(flows: &[FlowInfo], published: &[String]) -> Option<Oversized> {
+pub(crate) fn oversized_snapshot(flows: &[FlowInfo], models: &[FlowInfo]) -> Option<Oversized> {
     let fits = |count: usize, body: &dyn Fn(usize, &str) -> Value| {
-        UNAVAILABLE_CODES.iter().all(|code| {
-            serde_json::to_vec(&body(count, code))
-                .is_ok_and(|bytes| bytes.len() <= METADATA.max_response_bytes)
-        })
+        UNAVAILABLE_CODES
+            .iter()
+            .copied()
+            .chain(std::iter::once("relay_disabled"))
+            .all(|code| {
+                serde_json::to_vec(&body(count, code))
+                    .is_ok_and(|bytes| bytes.len() <= METADATA.max_response_bytes)
+            })
     };
     // The whole list first; only when it does not fit, the shortest prefix
     // that does not (a list only grows with its entries), to name its last
@@ -347,13 +342,12 @@ pub(crate) fn oversized_snapshot(flows: &[FlowInfo], published: &[String]) -> Op
         }
         Some(over - 1)
     };
-    let models = |count: usize, code: &str| {
-        transcriptions::models_body(flows, &published[..count], Some(code))
-    };
-    if let Some(published) = first_over(published.len(), &models) {
+    let model_body =
+        |count: usize, code: &str| transcriptions::models_body(&models[..count], Some(code));
+    if let Some(published) = first_over(models.len(), &model_body) {
         return Some(Oversized::Models { published });
     }
-    let listed = |count: usize, code: &str| flows_body(&flows[..count], Some(code));
+    let listed = |count: usize, code: &str| flows_body(&flows[..count], Some(code), false);
     first_over(flows.len(), &listed).map(|enabled| Oversized::Flows { enabled })
 }
 
@@ -715,19 +709,18 @@ fn answer(
         Route::Status => json_response(StatusCode::OK, &status(frontend)),
         Route::Flows => json_response(StatusCode::OK, &flows(frontend)),
         Route::Models => json_response(StatusCode::OK, &transcriptions::models(frontend)),
-        Route::Model(id) => match transcriptions::model(frontend, id) {
-            Some(model) => json_response(StatusCode::OK, &model),
-            None => json_response(
-                StatusCode::NOT_FOUND,
-                &json!({
-                    "error": {
-                        "message": "The requested model does not exist on this server.",
-                        "type": "invalid_request_error",
-                        "param": "model",
-                        "code": "model_not_found",
-                    }
-                }),
+        Route::Model(id) => match super::models::decode_id(id) {
+            Err(message) => json_response(
+                StatusCode::BAD_REQUEST,
+                &json!({"error": { "message": message, "type": "invalid_request_error", "param": "model", "code": "invalid_model" }}),
             ),
+            Ok(id) => match transcriptions::model(frontend, &id) {
+                Some(model) => json_response(StatusCode::OK, &model),
+                None => json_response(
+                    StatusCode::NOT_FOUND,
+                    &json!({"error": { "message": "The requested model does not exist on this server.", "type": "invalid_request_error", "param": "model", "code": "model_not_found" }}),
+                ),
+            },
         },
         Route::Page(content_type, body) => page::response(content_type, body),
     };
@@ -799,7 +792,7 @@ fn status(frontend: &Frontend) -> Value {
         },
         "flows": {
             "enabled": frontend.flows.len(),
-            "published": frontend.published().len(),
+            "published": frontend.model_infos().len(),
         },
         "dictations": {
             "served": frontend.dictations.is_some(),
@@ -814,13 +807,23 @@ fn status(frontend: &Frontend) -> Value {
 /// run now, with a safe code when not. No formatter rules, no paths, no
 /// disabled flows.
 fn flows(frontend: &Frontend) -> Value {
-    flows_body(&frontend.flows, frontend.unavailable())
+    let relay_enabled = frontend
+        .dictations
+        .as_deref()
+        .is_none_or(|dictations| dictations.runtime.relay_enabled());
+    flows_body(&frontend.flows, frontend.unavailable(), relay_enabled)
 }
 
-fn flows_body(flows: &[FlowInfo], unavailable: Option<&str>) -> Value {
+fn flows_body(flows: &[FlowInfo], unavailable: Option<&str>, relay_enabled: bool) -> Value {
     let flows: Vec<Value> = flows
         .iter()
         .map(|flow| {
+            let unavailable = unavailable.or_else(|| {
+                (!relay_enabled
+                    && (flow.formatter.is_some()
+                        || !crate::orchestrator::config::is_passthrough(&flow.relay_route)))
+                .then_some("relay_disabled")
+            });
             let mut entry = json!({
                 "id": flow.id,
                 "transcription_model": flow.transcription_model,
@@ -1448,7 +1451,7 @@ mod tests {
 
     /// `count` enabled off flows with ids of the longest allowed length,
     /// all published, on a served model id of the longest allowed length.
-    fn registry(count: usize) -> (Vec<FlowInfo>, Vec<String>) {
+    fn registry(count: usize) -> (Vec<FlowInfo>, Vec<FlowInfo>) {
         let model = "m".repeat(512);
         let flows: Vec<FlowInfo> = (0..count)
             .map(|index| FlowInfo {
@@ -1458,7 +1461,7 @@ mod tests {
                 relay_route: "passthrough".to_owned(),
             })
             .collect();
-        let published = flows.iter().map(|flow| flow.id.clone()).collect();
+        let published = flows.clone();
         (flows, published)
     }
 
@@ -1494,13 +1497,35 @@ mod tests {
     }
 
     #[test]
+    fn flow_readiness_reports_relay_disabled_after_service_availability() {
+        let mut raw = registry(1).0.pop().unwrap();
+        raw.id = "raw".to_owned();
+        let mut ai = raw.clone();
+        ai.id = "clean".to_owned();
+        ai.formatter = Some("builtin:clean".to_owned());
+        ai.relay_route = "claude".to_owned();
+        let infos = [raw, ai];
+        let body = flows_body(&infos, None, false);
+        assert_eq!(body["flows"][0]["ready"], true);
+        assert!(body["flows"][0].get("unavailable").is_none());
+        assert_eq!(body["flows"][1]["ready"], false);
+        assert_eq!(body["flows"][1]["unavailable"], "relay_disabled");
+        for code in UNAVAILABLE_CODES {
+            let body = flows_body(&infos, Some(code), false);
+            for flow in body["flows"].as_array().unwrap() {
+                assert_eq!(flow["ready"], false);
+                assert_eq!(flow["unavailable"], code);
+            }
+        }
+    }
+
+    #[test]
     fn a_model_list_too_large_for_its_bound_is_refused_at_startup() {
         let limit = METADATA.max_response_bytes;
         // Every field within its own limit, but the list in its largest
         // state (`transcription_restarting`) is past the bound.
         let (flows, published) = registry(128);
-        let largest =
-            transcriptions::models_body(&flows, &published, Some("transcription_restarting"));
+        let largest = transcriptions::models_body(&published, Some("transcription_restarting"));
         assert!(size(&largest) > limit, "{}", size(&largest));
         let Some(Oversized::Models { published: first }) = oversized_snapshot(&flows, &published)
         else {
@@ -1510,7 +1535,6 @@ mod tests {
         let fits = |count: usize| {
             UNAVAILABLE_CODES.iter().all(|code| {
                 size(&transcriptions::models_body(
-                    &flows,
                     &published[..count],
                     Some(code),
                 )) <= limit
@@ -1522,13 +1546,12 @@ mod tests {
         let (flows, published) = registry(first);
         assert_eq!(oversized_snapshot(&flows, &published), None);
         for code in UNAVAILABLE_CODES {
-            let body = transcriptions::models_body(&flows, &published, Some(code));
+            let body = transcriptions::models_body(&published, Some(code));
             assert!(size(&body) <= limit, "{code}");
         }
         assert!(
-            size(&transcriptions::models_body(&flows, &published, None))
+            size(&transcriptions::models_body(&published, None))
                 <= size(&transcriptions::models_body(
-                    &flows,
                     &published,
                     Some("shutting_down")
                 ))

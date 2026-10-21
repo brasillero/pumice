@@ -142,7 +142,18 @@ serve:
   port: 0
   transcription_model: turbo
   startup_timeout_ms: 5000
-  transcription_flows: [raw, clean]
+  budgets_ms:
+    total: 180000
+    transcription: 120000
+    formatter: 50
+    relay: 60000
+  relay:
+    enabled: true
+    default_provider: claude
+    default_preset: builtin:clean
+    presets: [builtin:clean]
+    expand_providers: false
+    expand_presets: false
   allowed_origins: []
 ",
     )
@@ -214,9 +225,14 @@ async fn start(
             })
             .collect(),
         dictations: Some(Dictations {
+            models: pumice::orchestrator::serve::models::Models::build(
+                &loaded,
+                &pumice::orchestrator::config::serve_settings(&loaded).unwrap(),
+                &runtime,
+            )
+            .unwrap(),
             runtime: Arc::new(runtime),
             flows: loaded.config.flows.clone(),
-            transcription_flows: vec!["raw".to_owned(), "clean".to_owned()],
         }),
         scope: Arc::clone(&scope),
         allowed_origins: Vec::new(),
@@ -468,7 +484,7 @@ async fn cleanup_failure_answers_the_raw_transcript(format: &str) {
     let (task, port, signal, _scope) = start(&setup, None, Some(hook)).await;
     wait_ready(port).await;
 
-    let (status, post_processing, body) = transcribe(port, "raw", format).await;
+    let (status, post_processing, body) = transcribe(port, "turbo", format).await;
     assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
     assert_eq!(post_processing.as_deref(), Some("failed"));
     if format == "text" {
@@ -488,7 +504,7 @@ async fn cleanup_failure_answers_the_raw_transcript(format: &str) {
     let (status, body) = send(port, "GET", "/pumice/v1/status", b"").await.unwrap();
     assert_eq!(status, 200);
     assert_eq!(body["dictations"]["admission"], "stopped", "{body}");
-    let (status, _, body) = transcribe(port, "raw", "json").await;
+    let (status, _, body) = transcribe(port, "turbo", "json").await;
     assert_eq!(status, 503);
     let body: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["error"]["code"], "admission_stopped", "{body}");
@@ -527,7 +543,8 @@ async fn a_formatter_past_its_budget_answers_the_raw_transcript_without_the_ai()
     let (task, port, signal, _scope) = start(&setup, Some(hook), None).await;
     wait_ready(port).await;
 
-    let (status, post_processing, body) = transcribe(port, "clean", "json").await;
+    let (status, post_processing, body) =
+        transcribe(port, "turbo:claude:builtin:clean", "json").await;
     assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
     assert_eq!(post_processing.as_deref(), Some("failed"));
     let body: Value = serde_json::from_slice(&body).unwrap();

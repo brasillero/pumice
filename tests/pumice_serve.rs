@@ -54,12 +54,19 @@ const SERVE: &str = "serve:
 ";
 
 /// The `serve:` keys a test does not write, with the example's values.
-const SERVE_KEYS: [(&str, &str); 6] = [
+const SERVE_KEYS: [(&str, &str); 7] = [
     ("enabled", "  enabled: false\n"),
     ("port", "  port: 17570\n"),
     ("transcription_model", "  transcription_model: null\n"),
     ("startup_timeout_ms", "  startup_timeout_ms: 60000\n"),
-    ("transcription_flows", "  transcription_flows: []\n"),
+    (
+        "budgets_ms",
+        "  budgets_ms:\n    total: 180000\n    transcription: 120000\n    formatter: 1000\n    relay: 60000\n",
+    ),
+    (
+        "relay",
+        "  relay:\n    enabled: false\n    default_provider: claude\n    default_preset: builtin:clean\n    presets: [builtin:clean]\n    expand_providers: false\n    expand_presets: false\n",
+    ),
     ("allowed_origins", "  allowed_origins: []\n"),
 ];
 
@@ -431,7 +438,7 @@ fn serves_health_ready_status_and_flows_then_stops() {
             "fallback_reason": null,
         })
     );
-    assert_eq!(body["flows"], json!({"enabled": 1, "published": 0}));
+    assert_eq!(body["flows"], json!({"enabled": 1, "published": 1}));
     let text = body.to_string();
     assert!(
         !text.contains(&rig.dir.path().display().to_string()),
@@ -455,11 +462,12 @@ fn serves_health_ready_status_and_flows_then_stops() {
         })
     );
 
-    // Nothing published: an empty model list, no chat route; JSON errors
+    // Raw model only, no chat route; JSON errors
     // with Allow on 405.
     let (status, body) = get(port, "/v1/models");
     assert_eq!(status, 200);
-    assert_eq!(body, json!({"object": "list", "data": []}));
+    assert_eq!(body["data"].as_array().unwrap().len(), 1);
+    assert_eq!(body["data"][0]["id"], "turbo");
     let (status, body) = get(port, "/v1/chat/completions");
     assert_eq!(status, 404);
     assert_eq!(body["error"]["code"], "not_found");

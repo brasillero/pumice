@@ -144,7 +144,7 @@ fn rig(flows: &str, generations: Value) -> Rig {
     fs::write(
         cfg.join("orchestrator.yml"),
         format!(
-            "schema_version: 1\nmodules:\n  transcription:\n    config: ./transcribe.yml\n  formatter:\n    config: ./formatter.yml\n  relay:\n    location: in_process\n    config: ./relay.yml\n{flows}serve:\n  enabled: true\n  port: 0\n  transcription_model: turbo\n  startup_timeout_ms: 60000\n  transcription_flows: []\n  allowed_origins: []\n"
+            "schema_version: 1\nmodules:\n  transcription:\n    config: ./transcribe.yml\n  formatter:\n    config: ./formatter.yml\n  relay:\n    location: in_process\n    config: ./relay.yml\n{flows}serve:\n  enabled: true\n  port: 0\n  transcription_model: turbo\n  startup_timeout_ms: 60000\n  budgets_ms:\n    total: 180000\n    transcription: 120000\n    formatter: 1000\n    relay: 60000\n  relay:\n    enabled: true\n    default_provider: claude\n    default_preset: builtin:clean\n    presets: [builtin:clean]\n    expand_providers: false\n    expand_presets: false\n  allowed_origins: []\n"
         ),
     )
     .unwrap();

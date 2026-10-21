@@ -95,7 +95,18 @@ const SERVE_OFF: &str = "serve:
   port: 17570
   transcription_model: null
   startup_timeout_ms: 60000
-  transcription_flows: []
+  budgets_ms:
+    total: 180000
+    transcription: 120000
+    formatter: 1000
+    relay: 60000
+  relay:
+    enabled: true
+    default_provider: claude
+    default_preset: builtin:clean
+    presets: [builtin:clean]
+    expand_providers: false
+    expand_presets: false
   allowed_origins: []
 ";
 

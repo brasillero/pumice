@@ -91,7 +91,7 @@ function showModel() {
   const model = models.find(model => model.id === $('model').value);
   if (!model) {
     $('modelInfo').textContent = models.length ? ''
-      : 'Nothing is published: list flows under serve.transcription_flows in orchestrator.yml and restart pumice serve.';
+      : 'No transcription models are available. Check orchestrator.yml and restart pumice serve.';
     return;
   }
   const details = model.pumice ?? {};

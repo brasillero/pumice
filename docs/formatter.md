@@ -100,9 +100,10 @@ and [`example-formatter.clean.yml`](../example-formatter.clean.yml) for a
 complete pair.
 
 A registered definition is a post-processing preset for the orchestrator:
-a flow names it in `formatter:` like `builtin:clean`, and a flow published
-in `pumice serve`'s `serve.transcription_flows` makes it selectable by
-OpenAI transcription clients through the flow id as the model
+a dictation flow names it in `formatter:` like `builtin:clean`. Listing it
+in `serve.relay.presets` makes it selectable by OpenAI transcription clients
+through a `model:provider:preset` id when preset expansion is enabled (or when
+it is the default preset)
 ([orchestrator.md](orchestrator.md#openai-transcriptions)).
 
 ## Commands

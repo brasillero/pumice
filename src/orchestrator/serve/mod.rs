@@ -28,6 +28,7 @@ pub mod child;
 pub mod cli;
 pub mod dictation;
 pub mod http;
+pub mod models;
 pub mod output;
 pub mod page;
 pub mod supervisor;
@@ -130,7 +131,7 @@ pub struct Service {
 async fn serve(params: &ServeParams, reporter: &Reporter, signals: cancel::CancelGuard) -> u8 {
     // The configuration, the served settings and every enabled flow's
     // relay route and formatter.
-    let loaded = match config::load(params.config.as_deref()) {
+    let loaded = match config::load_for_serve(params.config.as_deref()) {
         Ok(loaded) => loaded,
         Err(error) => {
             reporter.error("invalid_config", None, &error.to_string());
@@ -156,17 +157,26 @@ async fn serve(params: &ServeParams, reporter: &Reporter, signals: cancel::Cance
             relay_route: flow.relay_route.clone(),
         })
         .collect();
-    if let Err(error) = check_snapshots(&loaded, &flows, &settings.transcription_flows) {
+    let scope = Arc::new(CleanupScope::new());
+    let runtime = if settings.relay.enabled {
+        match Runtime::build(&loaded, Arc::clone(&scope)) {
+            Ok(runtime) => Arc::new(runtime),
+            Err(error) => return report_stage_error(reporter, &error),
+        }
+    } else {
+        Arc::new(Runtime::raw(&loaded, Arc::clone(&scope)))
+    };
+    let models = match models::Models::build(&loaded, &settings, &runtime) {
+        Ok(models) => models,
+        Err(error) => {
+            reporter.error("invalid_config", None, &error.to_string());
+            return 2;
+        }
+    };
+    if let Err(error) = check_snapshots(&loaded, &flows, models.infos()) {
         reporter.error("invalid_config", None, &error.to_string());
         return 2;
     }
-    let scope = Arc::new(CleanupScope::new());
-    // Built once, for the service's lifetime: every dictation runs on it, so
-    // the relay pipeline's own limits keep applying (design §6).
-    let runtime = match Runtime::build(&loaded, Arc::clone(&scope)) {
-        Ok(runtime) => Arc::new(runtime),
-        Err(error) => return report_stage_error(reporter, &error),
-    };
 
     // The sibling (never PATH) and the served model in its configuration.
     let Ok(binary) = dispatch::sibling_transcribe() else {
@@ -221,7 +231,7 @@ async fn serve(params: &ServeParams, reporter: &Reporter, signals: cancel::Cance
         dictations: Some(Dictations {
             runtime,
             flows: loaded.config.flows.clone(),
-            transcription_flows: settings.transcription_flows,
+            models,
         }),
         allowed_origins: settings.allowed_origins,
         scope,
@@ -237,22 +247,15 @@ async fn serve(params: &ServeParams, reporter: &Reporter, signals: cancel::Cance
 fn check_snapshots(
     loaded: &config::LoadedConfig,
     flows: &[FlowInfo],
-    published: &[String],
+    models: &[FlowInfo],
 ) -> Result<(), ConfigError> {
     let limit = http::METADATA.max_response_bytes;
-    let (at, message) = match http::oversized_snapshot(flows, published) {
+    let (at, message) = match http::oversized_snapshot(flows, models) {
         None => return Ok(()),
-        Some(Oversized::Models { published }) => (
-            loaded
-                .config
-                .serve
-                .transcription_flows
-                .get(published)
-                .and_then(|entry| entry.at),
+        Some(Oversized::Models { .. }) => (
+            loaded.config.serve.relay.at,
             format!(
-                "serve.transcription_flows publishes more than GET /v1/models can list in \
-                 {limit} bytes, from this entry on; publish fewer flows, or shorten their ids, \
-                 formatter ids, relay routes or serve.transcription_model"
+                "serve.relay generates more models than GET /v1/models can list in {limit} bytes; disable expansion or shorten the model, provider and preset ids"
             ),
         ),
         Some(Oversized::Flows { enabled }) => (
