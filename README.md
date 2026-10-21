@@ -29,6 +29,7 @@ With [Rust](https://rustup.rs/) installed:
 
 ```sh
 cargo build --release --locked --bin pumice
+mkdir -p ~/.config/pumice
 cp relay.example.yml ~/.config/pumice/relay.yml   # every setting; edit the providers
 ./target/release/pumice relay check-config   # validates the per-user config (or --config <path>)
 ./target/release/pumice relay doctor         # checks which CLIs are installed
