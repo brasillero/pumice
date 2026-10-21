@@ -131,6 +131,10 @@ fn help_prints_the_overview_on_stdout_and_version_names_pumice() {
             "flag {flag}"
         );
     }
+    assert!(
+        !home.pumice_dir().exists(),
+        "help and version must not create settings"
+    );
 }
 
 #[test]
@@ -323,6 +327,31 @@ fn relay_check_config_reads_the_per_user_relay_yml() {
 }
 
 #[test]
+fn first_start_creates_a_complete_settings_set_and_preserves_edits() {
+    let home = HermeticHome::new();
+    let output = run(&mut home.command(&["relay", "check-config"]));
+    assert!(output.status.success(), "{}", stderr(&output));
+    let directory = home.pumice_dir();
+    for name in [
+        "relay.yml",
+        "transcribe.yml",
+        "formatter.yml",
+        "orchestrator.yml",
+        "example-formatter.clean.yml",
+    ] {
+        assert!(directory.join(name).is_file(), "{name}");
+    }
+    let output = run(&mut home.command(&["format", "check-config"]));
+    assert!(output.status.success(), "{}", stderr(&output));
+    let path = directory.join("relay.yml");
+    fs::write(&path, "port: 17655\n").unwrap();
+    let output = run(&mut home.command(&["relay", "check-config"]));
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("is missing"));
+    assert_eq!(fs::read_to_string(path).unwrap(), "port: 17655\n");
+}
+
+#[test]
 fn relay_check_config_honours_an_explicit_config_path() {
     let home = HermeticHome::new();
     let dir = TempDir::new().expect("temp dir");
@@ -356,21 +385,15 @@ fn legacy_pumice_yaml_in_the_config_dir_is_ignored() {
     let home = HermeticHome::new();
     let dir = home.pumice_dir();
     fs::create_dir_all(&dir).expect("create per-user config dir");
-    // Not just absent but invalid: if the relay still read the old name,
-    // this would fail with a parse error instead of naming relay.yml.
-    fs::write(dir.join("pumice.yaml"), "port: [unclosed\n").expect("write legacy file");
-
+    // An invalid old-name file must not influence the generated relay.yml.
+    fs::write(dir.join("pumice.yaml"), "port: [unclosed\n").unwrap();
     let output = run(&mut home.command(&["relay", "check-config"]));
-    let stderr = stderr(&output);
-    assert_eq!(output.status.code(), Some(2), "{stderr}");
-    assert!(
-        stderr.contains(&dir.join("relay.yml").display().to_string())
-            && stderr.contains("the relay configuration file does not exist"),
-        "only relay.yml is looked for: {stderr}"
-    );
-    assert!(
-        !stderr.contains("pumice.yaml"),
-        "the old file is ignored entirely: {stderr}"
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains(&dir.join("relay.yml").display().to_string()));
+    assert!(!stderr(&output).contains("pumice.yaml"));
+    assert_eq!(
+        fs::read_to_string(dir.join("pumice.yaml")).unwrap(),
+        "port: [unclosed\n"
     );
 }
 

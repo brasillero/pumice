@@ -76,7 +76,11 @@ macOS (`$XDG_CONFIG_HOME/pumice/formatter.yml` when `XDG_CONFIG_HOME` is
 absolute) and `%APPDATA%\pumice\formatter.yml` on Windows. `apply`,
 `check-config` and `show` of a registered id need the file; `list` (then
 only the built-ins) and `show builtin:clean` run without one. Every setting
-must be written: an omitted one is an error at line 1.
+must be written: an omitted one is an error at line 1. Commands that need
+the per-user file create missing initial settings and the sample formatter
+definition before loading it. Existing files are never overwritten. A
+missing explicit `--config` file remains an error; `list` and
+`show builtin:clean` do not create files.
 
 ```yaml
 schema_version: 1

@@ -6,7 +6,9 @@
 #   2. the per-user file: ~/.config/pumice/orchestrator.yml on Linux and macOS
 #      ($XDG_CONFIG_HOME/pumice/orchestrator.yml when XDG_CONFIG_HOME is
 #      absolute), and %APPDATA%\pumice\orchestrator.yml on Windows.
-# There is no built-in default file: without one, `pumice run` fails.
+# Missing per-user files are created from the supplied examples before
+# validation. A missing explicit --config file remains an error. Existing
+# files are never overwritten; missing settings inside them are errors.
 #
 # The orchestrator file refers to the module configurations; it never copies
 # their settings (models, provider binaries and timeouts stay in the module

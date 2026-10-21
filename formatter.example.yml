@@ -5,8 +5,9 @@
 #   2. the per-user file: ~/.config/pumice/formatter.yml on Linux and macOS
 #      ($XDG_CONFIG_HOME/pumice/formatter.yml when XDG_CONFIG_HOME is absolute),
 #      and %APPDATA%\pumice\formatter.yml on Windows,
-#   and a missing file is an error. Only `list` (the built-ins) and
-#   `show builtin:clean` run without one.
+#   and missing per-user files are created from these examples, including
+#   example-formatter.clean.yml. A missing explicit --config file is an
+#   error. list and show builtin:clean do not create settings.
 #
 # Every setting below must be written: leaving one out is an error that
 # names the file and line. There are no built-in defaults; this file is the

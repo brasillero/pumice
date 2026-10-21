@@ -493,27 +493,20 @@ fn check_config_reports_config_errors_with_location() {
 }
 
 #[test]
-fn operational_commands_fail_without_a_config_file() {
+fn operational_commands_create_the_initial_settings() {
     let home = HermeticHome::new();
-    let expected = home.pumice_dir().join("formatter.yml");
     let request = serde_json::to_vec(&user_request()).unwrap();
-    for args in [
-        &["check-config"][..],
-        &["apply", "--formatter", "builtin:clean"],
-        &["show", "mine"],
-    ] {
-        let output = run_with_stdin(&mut home.command(args), &request);
-        assert_eq!(output.status.code(), Some(2), "{args:?}");
-        let stderr = stderr(&output);
-        assert!(
-            stderr.contains(&expected.display().to_string())
-                && stderr.contains("the formatter configuration file does not exist"),
-            "{args:?}: {stderr}"
-        );
-    }
-    // `list` and `show builtin:clean` only report built-ins.
-    let output = run(&mut home.command(&["show", "builtin:clean"]));
-    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let output = run(&mut home.command(&["check-config"]));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        home.pumice_dir()
+            .join("example-formatter.clean.yml")
+            .is_file()
+    );
+    let output = run_with_stdin(&mut home.command(&["apply"]), &request);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let output = run(&mut home.command(&["show", "clean-example"]));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
 }
 
 #[test]

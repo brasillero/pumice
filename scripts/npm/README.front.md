@@ -72,7 +72,9 @@ as JSON. Stop the service with Ctrl-C.
 
 The service needs a config file in which every setting is written (there
 are no built-in defaults; a missing setting is reported with its file and
-line). Create the per-user config:
+line). The first command that needs settings creates missing per-user
+files from the supplied examples. Existing files are never overwritten.
+Edit the relay settings at:
 
 - Windows: `%APPDATA%\pumice\relay.yml`
 - Linux and macOS: `~/.config/pumice/relay.yml`

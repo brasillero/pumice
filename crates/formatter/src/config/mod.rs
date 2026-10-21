@@ -3,7 +3,8 @@
 //! Explicit `--config FILE` wins; otherwise the per-user file is looked up
 //! (`formatter.yml` next to the other module configs). Every setting must
 //! be written in the file: an omitted one is an error, never a built-in
-//! default (p17-serve-model-names/D3). [`load`] needs the file;
+//! default (p17-serve-model-names/D3). [`load`] creates missing initial
+//! per-user files before validation (auto-initial-settings/D1);
 //! [`load_optional`] serves the commands that also run without one (`list`
 //! then knows only the built-in formatters).
 //!
@@ -64,7 +65,8 @@ pub struct LoadedConfig {
 }
 
 /// Loads the configuration: an explicit `--config` path when given, else the
-/// per-user configuration file. A missing file is an error.
+/// per-user configuration file, creating missing initial per-user files first.
+/// A missing explicit file is an error.
 pub fn load(explicit: Option<&Path>) -> Result<LoadedConfig, ConfigError> {
     load_with_env(explicit, |key| std::env::var_os(key))
 }
@@ -76,6 +78,12 @@ pub fn load_with_env(
     explicit: Option<&Path>,
     get_env: impl Fn(&str) -> Option<OsString>,
 ) -> Result<LoadedConfig, ConfigError> {
+    if explicit.is_none()
+        && let Some(candidate) = per_user_config_path(&get_env)
+    {
+        pumice_settings::initialize(&candidate)
+            .map_err(|error| ConfigError::file(error.path(), error.to_string()))?;
+    }
     match locate(explicit, &get_env)? {
         Located::File(path) => load_file(path),
         Located::Absent(Some(candidate)) => Err(ConfigError::file(
@@ -562,20 +570,25 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_per_user_file_is_an_error_unless_optional() {
+    fn required_load_creates_settings_but_optional_load_stays_read_only() {
         let tmp = tempfile::tempdir().unwrap();
         let base = tmp.path().to_path_buf().into_os_string();
         let env =
             |key: &str| matches!(key, "XDG_CONFIG_HOME" | "HOME" | "APPDATA").then(|| base.clone());
         let expected = per_user_config_path(&env).unwrap();
-        let err = load_with_env(None, env).unwrap_err();
-        assert_eq!(err.path(), Some(expected.as_path()));
-        assert!(
-            err.message()
-                .contains("the formatter configuration file does not exist"),
-            "{err}"
-        );
         assert_eq!(load_optional_with_env(None, env).unwrap(), None);
+        assert!(!expected.exists());
+        let loaded = load_with_env(None, env).unwrap();
+        assert_eq!(loaded.path, expected);
+        assert_eq!(loaded.config.default.as_deref(), Some("clean-example"));
+        assert_eq!(loaded.config.formatters.len(), 1);
+        std::fs::write(&expected, "schema_version: 1\n").unwrap();
+        let error = load_with_env(None, env).unwrap_err();
+        assert!(error.message().contains("is missing"));
+        assert_eq!(
+            std::fs::read_to_string(&expected).unwrap(),
+            "schema_version: 1\n"
+        );
 
         let err = load_with_env(None, no_env).unwrap_err();
         assert!(

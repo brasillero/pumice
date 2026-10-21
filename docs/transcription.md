@@ -28,11 +28,11 @@ process: while the transcription program handles the event and shuts down,
 > into the same directory, for example `cargo install --path . --locked` and
 > `cargo install --path crates/transcription --features engine --locked`.
 
-Before transcribing, copy [`transcribe.example.yml`](../transcribe.example.yml)
-to your own `transcribe.yml` and edit the settings. Every `file` invocation,
-including `--model-file`, needs a complete configuration. Pumice does not
-create it automatically. Pass `--config /path/to/transcribe.yml` or put it
-at the [per-user configuration path](#configuration).
+The first command that reads settings creates missing files at the
+[per-user configuration path](#configuration), using the supplied examples.
+Edit `transcribe.yml` there, or pass an existing file with `--config`. Every
+`file` invocation, including `--model-file`, reads a complete settings file.
+Model files are never downloaded automatically.
 
 ## Building from source
 
@@ -911,10 +911,11 @@ that group or others can write — see
      `$HOME/.config/pumice/transcribe.yml`
    - Windows: `%APPDATA%\pumice\transcribe.yml`
 
-A missing file is an error for the commands that read settings (`file`,
-`serve`, `check-config`, `models list`); `models catalog`, `models download`,
-`models verify` and `backends --backend MODE` also run without one (the
-models folder is then the per-user directory). `file` always needs the
+Commands that read settings (`file`, `serve`, `check-config`, `models list`)
+create missing per-user files from the supplied examples before loading them.
+`models catalog`, `models download`, `models verify` and `backends --backend
+MODE` run without creating settings (the models folder is then the per-user
+directory). `file` always needs the
 configuration, including with `--model-file PATH`. A missing explicit
 `--config` file is always an error, and a file that exists must be complete
 for every command.
@@ -923,8 +924,10 @@ Every setting must be written: an omitted one is an error with the file and
 line (line 1 for a top-level setting, the `server:` mapping for
 `server.port`). There are no built-in defaults; start from
 [`transcribe.example.yml`](../transcribe.example.yml), which writes them
-all. Copy the example to a file you own and edit it before use; Pumice does
-not create the configuration automatically. From a repository checkout:
+all. Pumice creates `relay.yml`, `transcribe.yml`, `formatter.yml`,
+`orchestrator.yml` and the sample formatter definition in the per-user
+directory, preserving every existing file. Help and version commands create
+nothing. If you prefer an explicit settings path, from a repository checkout:
 
 ```bash
 cp transcribe.example.yml transcribe.yml
@@ -1335,10 +1338,10 @@ config has `default_model: null`.
 - **"... is missing; every setting must be written"**: the config leaves a
 setting out. Every setting is required; copy it from
 `transcribe.example.yml`.
-- **"the transcription configuration file does not exist"**: there is no
-`--config` file and no per-user `transcribe.yml`; copy
-`transcribe.example.yml`, edit it and pass its path with `--config`. This
-also applies to `file --model-file PATH`.
+- **"the configuration file does not exist"**: the explicit `--config` path
+does not exist. Supply an existing complete file, or omit `--config` to use
+the automatically created per-user settings. If automatic creation fails,
+the error names the destination and the filesystem problem.
 - **"model `ID` is not in the models folder ... (models there: ...)"**
 (`model_not_found`): no file in the [models folder](#the-models-folder) has
 that id. For a catalog id the error names the download command, e.g.

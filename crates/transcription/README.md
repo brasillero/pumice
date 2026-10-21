@@ -58,9 +58,9 @@ This is a documented limitation. Runtime CPU variants on Windows are built only 
 
 ## Usage
 
-Copy [`transcribe.example.yml`](../../transcribe.example.yml) to your own
-`transcribe.yml` and edit its settings before transcribing. From the
-repository root:
+The first command that reads settings creates missing per-user files from
+the supplied examples. Edit `transcribe.yml` there, or use an explicit file. From
+the repository root, an explicit file can be prepared with:
 
 ```bash
 cp transcribe.example.yml transcribe.yml
@@ -68,9 +68,10 @@ pumice-transcribe --config ./transcribe.yml file audio.wav --model-file model.gg
 ```
 
 Every `file` invocation needs a complete configuration, including when
-`--model-file` selects a direct GGUF path. Pumice does not create the file
-automatically. `--config` selects it explicitly; otherwise the per-user
-`transcribe.yml` is used. The flags override the configured language,
+`--model-file` selects a direct GGUF path. `--config` selects an existing
+file explicitly; otherwise the per-user `transcribe.yml` is created when
+absent and then read. Existing files are preserved and must be complete.
+The flags override the configured language,
 threads and backend for that call.
 
 You can also use `--model ID` to select a file from the models folder

@@ -9,7 +9,8 @@
 # Pumice assumes nothing: every setting below must be written, and leaving
 # one out is a startup error that names the file and line. There are no
 # built-in defaults: the values in this file are the starting configuration.
-# Copy it to your own relay.yml and change what you need. No provider is
+# Pumice writes this file to the per-user location on first start when it
+# is missing; edit it there, or pass your own file with --config. No provider is
 # enabled unless its entry says `enabled: true`; with none enabled every AI
 # request gets an error, and the app keeps its own transcript (the built-in
 # `passthrough` and `inspect` still work).
@@ -25,8 +26,8 @@
 #   2. the per-user file: ~/.config/pumice/relay.yml on Linux and macOS
 #      ($XDG_CONFIG_HOME/pumice/relay.yml when XDG_CONFIG_HOME is set), and
 #      %APPDATA%\pumice\relay.yml on Windows,
-#   and a missing file is an error (only `pumice relay doctor` runs without
-#   one).
+#   and missing per-user files are created from these examples. A missing
+#   explicit --config file is an error; doctor does not create settings.
 #
 # Validate a file with: pumice relay check-config --config <path>
 #

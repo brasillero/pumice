@@ -43,6 +43,7 @@ vulkan = ["cpu-variants", "dep:transcribe-cpp-sys"]
 metal = ["cpu-variants", "dep:transcribe-cpp-sys-metal"]
 
 [dependencies]
+pumice-settings = { path = "../settings" }
 axum = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true }
