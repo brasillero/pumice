@@ -275,7 +275,8 @@ impl CliAdapter for CodexAdapter {
 }
 
 /// The `model_reasoning_effort` value for each level; the installed CLI
-/// also knows `none`, `minimal`, `xhigh`, `max` and `ultra`.
+/// also knows `minimal`, `xhigh`, `max` and `ultra`, which models accept
+/// per their catalog.
 fn cli_effort(effort: Effort) -> &'static str {
     match effort {
         Effort::Low => "low",
