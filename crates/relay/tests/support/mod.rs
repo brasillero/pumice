@@ -48,10 +48,24 @@ pub fn relay_config(text: &str) -> String {
     yaml
 }
 
+/// The keys a provider entry writes after `timeout_secs` in the tests:
+/// `effort` on every entry and `thinking` on `claude` (p16-provider-effort/D4,
+/// D5), each on its own line.
+pub fn effort_keys(id: &str) -> &'static str {
+    if id == "claude" {
+        "    effort: low\n    thinking: false\n"
+    } else {
+        "    effort: low\n"
+    }
+}
+
 /// Provider settings for configurations built in code (YAML validation knows
-/// only registered ids): every field written, as the loader would, with
-/// `model` empty when the entry would write `model: null`.
+/// only registered ids): every field written, as the loader would for an
+/// entry of provider `id` (only `claude` has `thinking`), with `model` empty
+/// when the entry would write `model: null`, the lowest effort and thinking
+/// off.
 pub fn provider_settings(
+    id: &str,
     enabled: bool,
     binary: impl Into<PathBuf>,
     model: &str,
@@ -61,6 +75,8 @@ pub fn provider_settings(
         binary: binary.into(),
         model: model.to_owned(),
         timeout: std::time::Duration::from_secs(30),
+        effort: pumice_relay::providers::Effort::Low,
+        thinking: (id == "claude").then_some(false),
     }
 }
 

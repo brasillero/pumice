@@ -4,6 +4,14 @@
 //! 2.1.288): tools are disabled with `--tools ""`, the system prompt is a
 //! control file, the user message goes on stdin, and the reply is one JSON
 //! envelope whose `result` holds the text.
+//!
+//! Effort and thinking come from `relay.yml` (p16-provider-effort/D4, D5);
+//! both were checked against the installed 2.1.306
+//! (docs/research/P16-provider-effort.md). `--effort` takes the level, and the same level
+//! is pinned in `CLAUDE_CODE_EFFORT_LEVEL`, which overrides `--effort` when
+//! inherited. `thinking: false` sets `MAX_THINKING_TOKENS=0`; `thinking:
+//! true` clears it and sets `alwaysThinkingEnabled`, so the CLI uses its own
+//! thinking mode and budget (adaptive where the model has it).
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -14,8 +22,8 @@ use serde_json::Value;
 
 use super::cli::{CliAdapter, CliProvider};
 use super::{
-    FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode,
-    ProviderSettings, validate_settings_noop,
+    Effort, FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError,
+    ProviderErrorCode, ProviderSettings, validate_settings_noop,
 };
 use crate::config::ConfigError;
 use crate::process::{Argument, CliInvocation, ControlFile, ProcessOutput, ProcessRunner, ProgramSpec};
@@ -27,7 +35,6 @@ pub const DEFAULT_BINARY: &str = "claude";
 /// `Not logged in · Please run /login`; only its stable start is matched.
 const NOT_LOGGED_IN_PREFIX: &str = "Not logged in";
 
-
 /// npm package entrypoint the Windows `.cmd` shim translates to (layout from
 /// npm; verify on a real Windows install (owner check)).
 const NPM_ENTRYPOINT: &str = "@anthropic-ai/claude-code/cli.js";
@@ -35,6 +42,7 @@ const NPM_ENTRYPOINT: &str = "@anthropic-ai/claude-code/cli.js";
 pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: ID,
     build,
+    thinking_switch: true,
     validate_settings: validate_settings_noop,
     probe: ProbeSpec::Version(&["--version"]),
     default_binary: DEFAULT_BINARY,
@@ -46,34 +54,64 @@ fn build(
     settings: &ProviderSettings,
     runner: Arc<ProcessRunner>,
 ) -> Result<Arc<dyn Provider>, ConfigError> {
-    let binary = settings.binary.clone();
+    // The loader always sets `thinking` for a provider with the switch.
+    let thinking = settings
+        .thinking
+        .ok_or_else(|| ConfigError::general("providers entry \"claude\" has no thinking"))?;
     Ok(Arc::new(CliProvider::new(
-        ClaudeAdapter::new(binary, settings.model.clone()),
+        ClaudeAdapter::new(
+            settings.binary.clone(),
+            settings.model.clone(),
+            settings.effort,
+            thinking,
+        ),
         runner,
         settings.timeout,
     )))
 }
 
-/// Environment pins for the cheapest call (owner rule): thinking off where
-/// the model allows it, the lowest effort, no fast mode, and the thinking
-/// compatibility switch cleared so an inherited `1` cannot turn "off" into
-/// "upstream default". Bedrock's service tier is pinned to standard too: the
-/// fast-mode switch does not cover an inherited Bedrock `priority` tier.
-const CHEAPEST_ENV: [(&str, &str); 5] = [
-    ("MAX_THINKING_TOKENS", "0"),
-    ("CLAUDE_CODE_EFFORT_LEVEL", "low"),
-    ("CLAUDE_CODE_DISABLE_FAST_MODE", "1"),
-    ("CLAUDE_CODE_DISABLE_THINKING", ""),
-    ("ANTHROPIC_BEDROCK_SERVICE_TIER", "default"),
-];
+/// The `--effort` and `CLAUDE_CODE_EFFORT_LEVEL` value for each level; the
+/// installed CLI accepts low, medium, high, xhigh and max.
+fn cli_effort(effort: Effort) -> &'static str {
+    match effort {
+        Effort::Low => "low",
+        Effort::Medium => "medium",
+        Effort::High => "high",
+    }
+}
 
-/// The per-call `--settings` layer: fast mode off plus [`CHEAPEST_ENV`].
-fn cheapest_settings_json() -> String {
-    let env: serde_json::Map<String, serde_json::Value> = CHEAPEST_ENV
-        .iter()
-        .map(|(key, value)| ((*key).to_owned(), serde_json::Value::from(*value)))
+/// Environment pins for one call, in the order the settings layer writes
+/// them: the thinking budget (`0` turns thinking off where the model allows
+/// it; an empty value clears an inherited one, so the CLI's own default
+/// applies), the effort level, no fast mode, and the thinking compatibility
+/// switch cleared, because an inherited `1` drops the thinking parameter
+/// altogether ("off" would become "upstream default", "on" would become
+/// off). Bedrock's service tier is pinned to standard too: the fast-mode
+/// switch does not cover an inherited Bedrock `priority` tier.
+fn pinned_env(effort: Effort, thinking: bool) -> [(&'static str, &'static str); 5] {
+    [
+        ("MAX_THINKING_TOKENS", if thinking { "" } else { "0" }),
+        ("CLAUDE_CODE_EFFORT_LEVEL", cli_effort(effort)),
+        ("CLAUDE_CODE_DISABLE_FAST_MODE", "1"),
+        ("CLAUDE_CODE_DISABLE_THINKING", ""),
+        ("ANTHROPIC_BEDROCK_SERVICE_TIER", "default"),
+    ]
+}
+
+/// The per-call `--settings` layer: fast mode off plus [`pinned_env`]. With
+/// thinking allowed it also overrides a user's `alwaysThinkingEnabled:
+/// false`, which would otherwise keep thinking off.
+fn settings_json(effort: Effort, thinking: bool) -> String {
+    let env: serde_json::Map<String, serde_json::Value> = pinned_env(effort, thinking)
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), serde_json::Value::from(value)))
         .collect();
-    serde_json::json!({"fastMode": false, "env": env}).to_string()
+    let mut layer = serde_json::json!({"fastMode": false});
+    if thinking {
+        layer["alwaysThinkingEnabled"] = serde_json::Value::Bool(true);
+    }
+    layer["env"] = serde_json::Value::Object(env);
+    layer.to_string()
 }
 
 /// Builds restricted `claude -p` calls.
@@ -81,13 +119,20 @@ fn cheapest_settings_json() -> String {
 pub struct ClaudeAdapter {
     binary: PathBuf,
     model: String,
+    effort: Effort,
+    thinking: bool,
 }
 
 impl ClaudeAdapter {
     /// `binary` is a command name looked up on PATH (normally `claude`) or a
     /// path to the official CLI.
-    pub fn new(binary: PathBuf, model: String) -> ClaudeAdapter {
-        ClaudeAdapter { binary, model }
+    pub fn new(binary: PathBuf, model: String, effort: Effort, thinking: bool) -> ClaudeAdapter {
+        ClaudeAdapter {
+            binary,
+            model,
+            effort,
+            thinking,
+        }
     }
 }
 
@@ -120,15 +165,15 @@ impl CliAdapter for ClaudeAdapter {
         ];
         let mut args: Vec<Argument> = flags.into_iter().map(Argument::literal).collect();
         args.push(Argument::literal(&self.model));
-        // Cheapest settings (owner rule): lowest effort, and the same pins
-        // as a per-call settings layer, because a user's settings `env`
-        // block would otherwise overwrite the child environment. The layer
-        // only sets these keys; the user's routing and login stay.
+        // The configured effort, and the same pins as a per-call settings
+        // layer, because a user's settings `env` block would otherwise
+        // overwrite the child environment. The layer only sets these keys;
+        // the user's routing and login stay.
         args.extend([
             Argument::literal("--effort"),
-            Argument::literal("low"),
+            Argument::literal(cli_effort(self.effort)),
             Argument::literal("--settings"),
-            Argument::literal(cheapest_settings_json()),
+            Argument::literal(settings_json(self.effort, self.thinking)),
         ]);
         args.extend([
             Argument::literal("--output-format"),
@@ -142,8 +187,8 @@ impl CliAdapter for ClaudeAdapter {
 
         // The same pins in the child environment. Everything else the CLI
         // inherits from the user's own configuration.
-        let env: BTreeMap<OsString, OsString> = CHEAPEST_ENV
-            .iter()
+        let env: BTreeMap<OsString, OsString> = pinned_env(self.effort, self.thinking)
+            .into_iter()
             .map(|(key, value)| (OsString::from(key), OsString::from(value)))
             .collect();
 

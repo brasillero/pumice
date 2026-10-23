@@ -204,16 +204,20 @@ providers:
     model: test
     binary: unused-codex
     timeout_secs: 30
+    effort: low
   - id: kiro
     enabled: false
     model: null
     binary: unused-kiro
     timeout_secs: 30
+    effort: low
   - id: claude
     enabled: true
     model: test
     binary: unused-claude
     timeout_secs: 30
+    effort: low
+    thinking: false
 debug_log:
   enabled: false
   path: debug.jsonl

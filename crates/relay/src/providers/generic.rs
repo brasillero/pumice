@@ -54,6 +54,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: ID,
     build,
+    thinking_switch: false,
     validate_settings,
     // This adapter has no CLI: detection neither resolves nor spawns
     // anything for it (no PATH lookup, no probe). Its endpoint is a network

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use pumice_relay::config::{self, Config};
 use pumice_relay::process::ProcessRunner;
-use pumice_relay::providers::{self, ProviderDescriptor, ProviderSettings};
+use pumice_relay::providers::{self, Effort, ProviderDescriptor, ProviderSettings};
 use tempfile::TempDir;
 
 mod support;
@@ -46,6 +46,8 @@ providers:
     model: haiku
     binary: claude
     timeout_secs: 30
+    effort: low
+    thinking: false
 debug_log:
   enabled: false
   path: pumice-debug.jsonl
@@ -123,6 +125,7 @@ mod capability_probe {
     pub const PROBE: ProviderDescriptor = ProviderDescriptor {
         id: "probe",
         build: probe_build,
+        thinking_switch: false,
         validate_settings: validate_settings_noop,
         probe: ProbeSpec::NotApplicable,
         default_binary: "probe-cli",
@@ -186,16 +189,16 @@ fn every_top_level_setting_is_required() {
 
 #[test]
 fn missing_nested_settings_are_reported_at_their_mapping() {
-    // `debug_log` starts on line 10; its first key is at column 3.
+    // `debug_log` starts on line 12; its first key is at column 3.
     for key in ["enabled", "path"] {
         let error = load_exact(&without(&format!("  {key}:"))).expect_err(key);
         assert!(
-            error.contains(&format!(":11:3: \"debug_log.{key}\" is missing")),
+            error.contains(&format!(":13:3: \"debug_log.{key}\" is missing")),
             "{key}: {error}"
         );
     }
     // A provider entry is reported at its first key (`id`, line 5, column 5).
-    for key in ["model", "binary", "timeout_secs"] {
+    for key in ["model", "binary", "timeout_secs", "effort", "thinking"] {
         let error = load_exact(&without(&format!("    {key}:"))).expect_err(key);
         assert!(
             error.contains(&format!(
@@ -229,7 +232,7 @@ fn explicit_null_is_rejected_where_a_value_is_needed() {
             "\"max_parallel\"",
         ),
         (
-            "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: claude\n    timeout_secs: 30\n",
+            "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: claude\n    timeout_secs: 30\n    effort: low\n    thinking: false\n",
             "providers: null\n",
             ":4:12:",
             "\"providers\"",
@@ -247,15 +250,27 @@ fn explicit_null_is_rejected_where_a_value_is_needed() {
             "providers entry \"claude\".timeout_secs",
         ),
         (
+            "    effort: low",
+            "    effort: null",
+            ":10:13:",
+            "providers entry \"claude\".effort",
+        ),
+        (
+            "    thinking: false",
+            "    thinking: null",
+            ":11:15:",
+            "providers entry \"claude\".thinking",
+        ),
+        (
             "  enabled: false",
             "  enabled: null",
-            ":11:12:",
+            ":13:12:",
             "\"debug_log.enabled\"",
         ),
         (
             "  path: pumice-debug.jsonl",
             "  path: null",
-            ":12:9:",
+            ":14:9:",
             "\"debug_log.path\"",
         ),
     ] {
@@ -273,7 +288,7 @@ fn explicit_null_is_rejected_where_a_value_is_needed() {
     ))
     .expect_err("null debug_log");
     assert!(
-        error.contains(":10:12: \"debug_log\" must not be null"),
+        error.contains(":12:12: \"debug_log\" must not be null"),
         "{error}"
     );
 }
@@ -283,7 +298,7 @@ fn explicit_values_are_kept_apart_from_omitted_ones() {
     // `false`, an empty list and a disabled entry's `model: null` are
     // explicit values, not omissions.
     let config = load_text(
-        "providers:\n  - id: claude\n    enabled: false\n    model: null\n    binary: claude\n    timeout_secs: 30\n",
+        "providers:\n  - id: claude\n    enabled: false\n    model: null\n    binary: claude\n    timeout_secs: 30\n    effort: low\n    thinking: false\n",
     )
     .expect("explicit values load");
     let claude = claude(&config);
@@ -295,7 +310,7 @@ fn explicit_values_are_kept_apart_from_omitted_ones() {
 
     // The same disabled entry without the `model` key is incomplete.
     let error = load_text(
-        "providers:\n  - id: claude\n    enabled: false\n    binary: claude\n    timeout_secs: 30\n",
+        "providers:\n  - id: claude\n    enabled: false\n    binary: claude\n    timeout_secs: 30\n    effort: low\n    thinking: false\n",
     )
     .expect_err("model is omitted");
     assert!(
@@ -340,7 +355,7 @@ fn mapping_form_of_providers_fails_with_a_removal_hint() {
 #[test]
 fn crlf_line_endings_parse_and_positions_count_lines() {
     let config = load_text(
-        "port: 9001\r\nproviders:\r\n  - id: claude\r\n    enabled: true\r\n    model: olá\r\n    binary: claude\r\n    timeout_secs: 30\r\n",
+        "port: 9001\r\nproviders:\r\n  - id: claude\r\n    enabled: true\r\n    model: olá\r\n    binary: claude\r\n    timeout_secs: 30\r\n    effort: low\r\n    thinking: false\r\n",
     )
     .expect("CRLF loads");
     assert_eq!(config.port, 9001);
@@ -358,7 +373,7 @@ fn crlf_line_endings_parse_and_positions_count_lines() {
 #[test]
 fn unicode_content_round_trips() {
     let config = load_text(
-        "# configuração\nproviders:\n  - id: claude\n    enabled: true\n    model: ünïcodé-ãõ\n    binary: claude\n    timeout_secs: 30\n",
+        "# configuração\nproviders:\n  - id: claude\n    enabled: true\n    model: ünïcodé-ãõ\n    binary: claude\n    timeout_secs: 30\n    effort: low\n    thinking: false\n",
     )
     .expect("unicode loads");
     assert_eq!(claude(&config).model, "ünïcodé-ãõ");
@@ -380,7 +395,7 @@ fn zero_timeouts_are_rejected_at_the_value() {
     );
     // Line 12 and column 19, matching the documented error shape.
     assert_error(
-        "# seven comment lines place the value on line 12\n# 2\n# 3\n# 4\n# 5\n# 6\n# 7\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    timeout_secs: 0\n    binary: claude\n",
+        "# seven comment lines place the value on line 12\n# 2\n# 3\n# 4\n# 5\n# 6\n# 7\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    timeout_secs: 0\n    effort: low\n    thinking: false\n    binary: claude\n",
         12,
         19,
         "providers entry \"claude\".timeout_secs must be greater than zero",
@@ -390,7 +405,7 @@ fn zero_timeouts_are_rejected_at_the_value() {
 #[test]
 fn max_parallel_is_read_from_config() {
     let config = load_text(
-        "max_parallel: 2\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: claude\n    timeout_secs: 30\n",
+        "max_parallel: 2\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: claude\n    timeout_secs: 30\n    effort: low\n    thinking: false\n",
     )
     .expect("loads");
     assert_eq!(config.max_parallel, 2);
@@ -490,7 +505,8 @@ fn unknown_provider_is_rejected_at_its_id() {
 fn enabled_entry_with_a_model_loads_for_every_provider() {
     for (id, model) in PROVIDERS {
         let config = load_text(&format!(
-            "providers:\n  - id: {id}\n    enabled: true\n    model: {model}\n    binary: {id}-cli\n    timeout_secs: 7\n"
+            "providers:\n  - id: {id}\n    enabled: true\n    model: {model}\n    binary: {id}-cli\n    timeout_secs: 7\n{}",
+                support::effort_keys(id)
         ))
         .unwrap_or_else(|error| panic!("{id}: {error}"));
         let settings = config.provider(id).expect("provider configured");
@@ -503,10 +519,145 @@ fn enabled_entry_with_a_model_loads_for_every_provider() {
 }
 
 #[test]
+fn every_provider_loads_every_effort_level() {
+    for (id, model) in PROVIDERS {
+        for (level, effort) in [
+            ("low", Effort::Low),
+            ("medium", Effort::Medium),
+            ("high", Effort::High),
+        ] {
+            let thinking = if id == "claude" {
+                "    thinking: false\n"
+            } else {
+                ""
+            };
+            let config = load_text(&format!(
+                "providers:\n  - id: {id}\n    enabled: true\n    model: {model}\n    binary: {id}\n    timeout_secs: 30\n    effort: {level}\n{thinking}"
+            ))
+            .unwrap_or_else(|error| panic!("{id} {level}: {error}"));
+            let settings = config.provider(id).expect("provider configured");
+            assert_eq!(settings.effort, effort, "{id} {level}");
+        }
+    }
+}
+
+#[test]
+fn claude_loads_both_thinking_values_and_the_others_have_none() {
+    for (written, thinking) in [("false", false), ("true", true)] {
+        let config = load_text(&format!(
+            "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: claude\n    timeout_secs: 30\n    effort: low\n    thinking: {written}\n"
+        ))
+        .expect("claude loads");
+        assert_eq!(claude(&config).thinking, Some(thinking), "{written}");
+    }
+    for (id, model) in PROVIDERS.into_iter().filter(|(id, _)| *id != "claude") {
+        let config = load_text(&format!(
+            "providers:\n  - id: {id}\n    enabled: true\n    model: {model}\n    binary: {id}\n    timeout_secs: 30\n    effort: low\n"
+        ))
+        .expect("loads");
+        assert_eq!(config.provider(id).unwrap().thinking, None, "{id}");
+    }
+}
+
+#[test]
+fn missing_effort_is_reported_at_the_entry_even_when_disabled() {
+    for (id, _) in PROVIDERS {
+        for enabled in ["true", "false"] {
+            let model = if enabled == "true" {
+                "some-model"
+            } else {
+                "null"
+            };
+            assert_error(
+                &format!(
+                    "providers:\n  - id: {id}\n    enabled: {enabled}\n    model: {model}\n    binary: {id}\n    timeout_secs: 30\n"
+                ),
+                2,
+                5,
+                &format!(
+                    "providers entry \"{id}\".effort is missing; every setting must be written (see relay.example.yml)"
+                ),
+            );
+        }
+    }
+}
+
+#[test]
+fn null_or_unknown_effort_is_rejected_at_the_value() {
+    for (id, _) in PROVIDERS {
+        // A disabled entry still writes a level: unlike `model`, every
+        // provider takes every level.
+        assert_error(
+            &format!(
+                "providers:\n  - id: {id}\n    enabled: false\n    model: null\n    binary: {id}\n    timeout_secs: 30\n    effort: null\n"
+            ),
+            7,
+            13,
+            &format!("providers entry \"{id}\".effort must not be null; write low, medium or high"),
+        );
+        for value in ["max", "xhigh", "minimal", "Low", "LOW", "\"\"", "1"] {
+            let shown = value.trim_matches('"');
+            assert_error(
+                &format!(
+                    "providers:\n  - id: {id}\n    enabled: true\n    model: m\n    binary: {id}\n    timeout_secs: 30\n    effort: {value}\n"
+                ),
+                7,
+                13,
+                &format!(
+                    "providers entry \"{id}\".effort must be low, medium or high, found \"{shown}\""
+                ),
+            );
+        }
+    }
+}
+
+#[test]
+fn claude_must_write_thinking_even_when_disabled() {
+    for enabled in ["true", "false"] {
+        let model = if enabled == "true" { "haiku" } else { "null" };
+        assert_error(
+            &format!(
+                "providers:\n  - id: claude\n    enabled: {enabled}\n    model: {model}\n    binary: claude\n    timeout_secs: 30\n    effort: low\n"
+            ),
+            2,
+            5,
+            "providers entry \"claude\".thinking is missing; every setting must be written (see relay.example.yml)",
+        );
+        assert_error(
+            &format!(
+                "providers:\n  - id: claude\n    enabled: {enabled}\n    model: {model}\n    binary: claude\n    timeout_secs: 30\n    effort: low\n    thinking: null\n"
+            ),
+            8,
+            15,
+            "providers entry \"claude\".thinking must not be null; write true or false",
+        );
+    }
+}
+
+#[test]
+fn thinking_on_another_provider_is_rejected_at_its_line() {
+    for (id, model) in PROVIDERS.into_iter().filter(|(id, _)| *id != "claude") {
+        for (value, column) in [("true", 15), ("false", 15), ("null", 15)] {
+            assert_error(
+                &format!(
+                    "providers:\n  - id: {id}\n    enabled: true\n    model: {model}\n    binary: {id}\n    timeout_secs: 30\n    effort: low\n    thinking: {value}\n"
+                ),
+                8,
+                column,
+                &format!(
+                    "providers entry \"{id}\".thinking is not a setting of this provider: only claude has it, and {id} reasons through effort alone. Delete this key."
+                ),
+            );
+        }
+    }
+}
+
+#[test]
 fn disabled_entry_is_kept_but_off_for_every_provider() {
     for (id, _) in PROVIDERS {
         let config = load_text(&format!(
-            "providers:\n  - id: {id}\n    enabled: false\n    model: null\n    binary: {id}\n    timeout_secs: 30\n"
+            "providers:\n  - id: {id}\n    enabled: false\n    model: null\n    binary: {id}\n    timeout_secs: 30\n{}",
+                support::effort_keys(id)
         ))
             .unwrap_or_else(|error| panic!("{id}: {error}"));
         let settings = config.provider(id).expect("provider configured");
@@ -518,17 +669,18 @@ fn disabled_entry_is_kept_but_off_for_every_provider() {
 #[test]
 fn duplicate_provider_entries_are_rejected_at_the_second_id() {
     assert_error(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: claude\n    timeout_secs: 30\n  - id: claude\n    enabled: false\n",
-        7,
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: claude\n    timeout_secs: 30\n    effort: low\n    thinking: false\n  - id: claude\n    enabled: false\n",
+        9,
         9,
         "duplicate provider \"claude\" in providers",
     );
     for (id, _) in PROVIDERS {
         assert_error(
             &format!(
-                "providers:\n  - id: {id}\n    enabled: false\n    model: null\n    binary: {id}\n    timeout_secs: 30\n  - id: {id}\n    enabled: false\n"
+                "providers:\n  - id: {id}\n    enabled: false\n    model: null\n    binary: {id}\n    timeout_secs: 30\n{}  - id: {id}\n    enabled: false\n",
+                support::effort_keys(id)
             ),
-            7,
+            7 + support::effort_keys(id).lines().count() as u64,
             9,
             &format!("duplicate provider \"{id}\" in providers"),
         );
@@ -627,7 +779,7 @@ fn empty_model_on_a_disabled_entry_is_allowed() {
     // may keep an empty one (this is the shape `pumice setup` will write
     // for a provider the owner has not picked a model for yet).
     let config = load_text(
-        "providers:\n  - id: claude\n    enabled: false\n    model: \"\"\n    binary: claude\n    timeout_secs: 30\n",
+        "providers:\n  - id: claude\n    enabled: false\n    model: \"\"\n    binary: claude\n    timeout_secs: 30\n    effort: low\n    thinking: false\n",
     )
         .expect("a disabled entry with an empty model loads");
     let claude = config.provider("claude").expect("claude is configured");
@@ -642,7 +794,7 @@ fn relative_binary_path_resolves_against_the_config_directory() {
     fs::write(
         &path,
         relay_config(
-            "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: tools/claude\n    timeout_secs: 30\n",
+            "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: tools/claude\n    timeout_secs: 30\n    effort: low\n    thinking: false\n",
         ),
     )
     .expect("write config");
@@ -657,7 +809,7 @@ fn relative_binary_path_resolves_against_the_config_directory() {
 #[test]
 fn bare_and_absolute_binary_paths_are_not_resolved() {
     let config = load_text(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: myclaude\n    timeout_secs: 30\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: myclaude\n    timeout_secs: 30\n    effort: low\n    thinking: false\n",
     )
     .expect("bare name loads");
     assert_eq!(claude(&config).binary, PathBuf::from("myclaude"));
@@ -665,7 +817,7 @@ fn bare_and_absolute_binary_paths_are_not_resolved() {
     // An absolute path on every OS (`/opt/claude` is relative on Windows).
     let absolute = std::env::temp_dir().join("claude");
     let yaml = format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n",
         absolute.display()
     );
     let config = load_text(&yaml).expect("absolute loads");
@@ -673,7 +825,7 @@ fn bare_and_absolute_binary_paths_are_not_resolved() {
 
     // `null` used to mean the command on PATH: the command is now written.
     assert_error(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: null\n    timeout_secs: 30\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: null\n    timeout_secs: 30\n    effort: low\n    thinking: false\n",
         5,
         13,
         "providers entry \"claude\".binary must not be null; write the command, e.g. \"binary: claude\" to look it up on PATH",
@@ -824,7 +976,7 @@ fn no_configuration_directory_is_an_error_but_optional_for_doctor() {
 #[test]
 fn registry_builds_enabled_providers_from_config() {
     let config = load_text(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: claude\n    timeout_secs: 30\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: codex\n    timeout_secs: 30\n  - id: kiro\n    enabled: false\n    model: null\n    binary: kiro-cli\n    timeout_secs: 30\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: claude\n    timeout_secs: 30\n    effort: low\n    thinking: false\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: codex\n    timeout_secs: 30\n    effort: low\n  - id: kiro\n    enabled: false\n    model: null\n    binary: kiro-cli\n    timeout_secs: 30\n    effort: low\n",
     )
     .expect("config loads");
     let built = providers::build_from_config(&config, Arc::new(ProcessRunner::new()))
@@ -858,7 +1010,7 @@ fn unlisted_provider_is_absent_until_listed() {
 
     let config = load_with_descriptors(
         &relay_config(
-            "providers:\n  - id: probe\n    enabled: false\n    model: null\n    binary: probe-cli\n    timeout_secs: 30\n",
+            "providers:\n  - id: probe\n    enabled: false\n    model: null\n    binary: probe-cli\n    timeout_secs: 30\n    effort: low\n",
         ),
         &descriptors,
     )
@@ -869,7 +1021,7 @@ fn unlisted_provider_is_absent_until_listed() {
 
     let config = load_with_descriptors(
         &relay_config(
-            "providers:\n  - id: probe\n    enabled: true\n    model: test/model\n    binary: probe-cli\n    timeout_secs: 30\n",
+            "providers:\n  - id: probe\n    enabled: true\n    model: test/model\n    binary: probe-cli\n    timeout_secs: 30\n    effort: low\n",
         ),
         &descriptors,
     )
@@ -884,7 +1036,7 @@ fn enabled_with_a_null_model_is_rejected_at_the_null() {
     let descriptors = probe_registry();
     let error = load_with_descriptors(
         &relay_config(
-            "providers:\n  - id: probe\n    enabled: true\n    model: null\n    binary: probe-cli\n    timeout_secs: 30\n",
+            "providers:\n  - id: probe\n    enabled: true\n    model: null\n    binary: probe-cli\n    timeout_secs: 30\n    effort: low\n",
         ),
         &descriptors,
     )
@@ -924,7 +1076,7 @@ fn check_config_success_prints_summary() {
     fs::write(
         &path,
         relay_config(
-            "port: 8000\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: claude\n    timeout_secs: 30\n  - id: kiro\n    enabled: false\n    model: null\n    binary: kiro-cli\n    timeout_secs: 30\n",
+            "port: 8000\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: claude\n    timeout_secs: 30\n    effort: low\n    thinking: false\n  - id: kiro\n    enabled: false\n    model: null\n    binary: kiro-cli\n    timeout_secs: 30\n    effort: low\n",
         ),
     )
     .expect("write config");
@@ -942,7 +1094,9 @@ fn check_config_success_prints_summary() {
     assert!(!stdout.contains("default"), "{stdout}");
     assert!(stdout.contains("providers (in order):"), "{stdout}");
     assert!(
-        stdout.contains("  claude: enabled, model haiku, timeout 30s, binary claude"),
+        stdout.contains(
+            "  claude: enabled, model haiku, timeout 30s, binary claude, effort low, thinking off"
+        ),
         "{stdout}"
     );
     assert!(stdout.contains("  kiro: disabled"), "{stdout}");
@@ -978,7 +1132,7 @@ fn check_config_error_exits_2_with_the_exact_error() {
     fs::write(
         &path,
         relay_config(
-            "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    timeout_secs: 0\n    binary: claude\n",
+            "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    timeout_secs: 0\n    effort: low\n    thinking: false\n    binary: claude\n",
         ),
     )
     .expect("write config");
@@ -1051,7 +1205,7 @@ fn serve_reports_config_errors_like_check_config() {
     fs::write(
         &path,
         relay_config(
-            "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    timeout_secs: 0\n    binary: claude\n",
+            "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    timeout_secs: 0\n    effort: low\n    thinking: false\n    binary: claude\n",
         ),
     )
     .expect("write config");
@@ -1110,9 +1264,12 @@ fn example_config_loads() {
     assert_eq!(claude.model, "haiku");
     assert_eq!(claude.timeout, Duration::from_secs(30));
     assert_eq!(claude.binary, PathBuf::from("claude"));
+    // Today's cheapest call: the lowest effort and thinking off.
+    assert_eq!(claude.effort, Effort::Low);
+    assert_eq!(claude.thinking, Some(false));
 
-    // Every other entry ships disabled, with no model, its standard command
-    // and the same timeout.
+    // Every other entry ships disabled, with no model, its standard command,
+    // the same timeout and the lowest effort.
     for (id, binary) in [("codex", "codex"), ("kiro", "kiro-cli")] {
         let settings = config
             .provider(id)
@@ -1121,6 +1278,8 @@ fn example_config_loads() {
         assert!(settings.model.is_empty(), "{id} ships without a model");
         assert_eq!(settings.binary, PathBuf::from(binary), "{id}");
         assert_eq!(settings.timeout, Duration::from_secs(30), "{id}");
+        assert_eq!(settings.effort, Effort::Low, "{id}");
+        assert_eq!(settings.thinking, None, "{id}");
     }
 }
 
@@ -1138,7 +1297,7 @@ fn relative_config_path_still_anchors_relative_settings() {
     fs::write(
         &relative_config,
         relay_config(
-            "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: tools/claude\n    timeout_secs: 30\n",
+            "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: tools/claude\n    timeout_secs: 30\n    effort: low\n    thinking: false\n",
         ),
     )
     .expect("write config");
@@ -1178,7 +1337,7 @@ fn removed_keys_set_to_null_are_still_rejected() {
 #[test]
 fn empty_binary_is_rejected_at_the_value() {
     let error = load_error(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: ''\n    timeout_secs: 30\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: ''\n    timeout_secs: 30\n    effort: low\n    thinking: false\n",
     );
     assert!(error.contains(":5:"), "{error}");
     assert!(
@@ -1194,7 +1353,8 @@ fn enabled_with_a_null_model_is_rejected_at_the_null_for_every_provider() {
     for (id, _) in PROVIDERS {
         assert_error(
             &format!(
-                "providers:\n  - id: {id}\n    enabled: true\n    model: null\n    binary: {id}\n    timeout_secs: 30\n"
+                "providers:\n  - id: {id}\n    enabled: true\n    model: null\n    binary: {id}\n    timeout_secs: 30\n{}",
+                support::effort_keys(id)
             ),
             4,
             12,
@@ -1263,9 +1423,9 @@ fn removed_kimi_and_antigravity_entries_fail_at_their_id() {
         for enabled in [true, false] {
             assert_error(
                 &format!(
-                    "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: claude\n    timeout_secs: 30\n  - id: {id}\n    enabled: {enabled}\n    model: some-model\n    binary: {id}\n    timeout_secs: 30\n"
+                    "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: claude\n    timeout_secs: 30\n    effort: low\n    thinking: false\n  - id: {id}\n    enabled: {enabled}\n    model: some-model\n    binary: {id}\n    timeout_secs: 30\n    effort: low\n"
                 ),
-                7,
+                9,
                 9,
                 &format!(
                     "\"{id}\" provider was removed (p16-provider-effort/D6); delete this entry"

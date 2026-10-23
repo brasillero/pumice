@@ -309,7 +309,7 @@ fn settings_at<A: ContractAdapter>(fake: &FakeCli) -> ProviderSettings {
         providers::descriptor(A::ID).is_some(),
         "contract adapter has a descriptor"
     );
-    super::provider_settings(false, fake.path(), "")
+    super::provider_settings(A::ID, false, fake.path(), "")
 }
 
 /// Builds a configuration directly (YAML validation knows only registered

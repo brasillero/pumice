@@ -10,7 +10,8 @@ use pumice_relay::process::ProcessRunner;
 use pumice_relay::providers::claude::ClaudeAdapter;
 use pumice_relay::providers::cli::CliProvider;
 use pumice_relay::providers::{
-    FormatInput, Provider, ProviderError, ProviderErrorCode, UserPrompt,
+    self, Effort, FormatInput, Provider, ProviderError, ProviderErrorCode, ProviderSettings,
+    UserPrompt,
 };
 use serde_json::json;
 use support::{FakeCli, fixture};
@@ -33,7 +34,12 @@ fn fake_claude(stdout: &str, exit_code: i32) -> FakeCli {
 
 fn provider(fake: &FakeCli) -> CliProvider<ClaudeAdapter> {
     CliProvider::new(
-        ClaudeAdapter::new(fake.path().to_path_buf(), "haiku".to_owned()),
+        ClaudeAdapter::new(
+            fake.path().to_path_buf(),
+            "haiku".to_owned(),
+            Effort::Low,
+            false,
+        ),
         Arc::new(ProcessRunner::new()),
         Duration::from_secs(30),
     )
@@ -93,7 +99,7 @@ async fn passes_the_restricted_invocation() {
             "low",
             "--settings",
             // serde_json preserves insertion order (workspace preserve_order
-            // feature): fastMode first, then CHEAPEST_ENV in array order.
+            // feature): fastMode first, then the pinned env in array order.
             "{\"fastMode\":false,\"env\":{\"MAX_THINKING_TOKENS\":\"0\",\"CLAUDE_CODE_EFFORT_LEVEL\":\"low\",\"CLAUDE_CODE_DISABLE_FAST_MODE\":\"1\",\"CLAUDE_CODE_DISABLE_THINKING\":\"\",\"ANTHROPIC_BEDROCK_SERVICE_TIER\":\"default\"}}",
             "--output-format",
             "json",
@@ -106,6 +112,98 @@ async fn passes_the_restricted_invocation() {
     assert!(!prompt_path.starts_with(report["cwd"].as_str().unwrap()));
     assert_eq!(report["cwd_entries"], json!([]));
     assert_eq!(report["env"], json!({"MAX_THINKING_TOKENS": "0"}));
+}
+
+/// The pinned variables, in the order the `--settings` layer writes them.
+const PINNED_ENV: [&str; 5] = [
+    "MAX_THINKING_TOKENS",
+    "CLAUDE_CODE_EFFORT_LEVEL",
+    "CLAUDE_CODE_DISABLE_FAST_MODE",
+    "CLAUDE_CODE_DISABLE_THINKING",
+    "ANTHROPIC_BEDROCK_SERVICE_TIER",
+];
+
+/// Every effort level and both thinking values reach the CLI as
+/// `--effort`, the settings layer and the child environment, built from
+/// configured settings (p16-provider-effort/D4, D5).
+#[tokio::test]
+async fn configured_effort_and_thinking_reach_the_cli() {
+    let descriptor = providers::descriptor("claude").expect("claude is registered");
+    for (effort, level) in [
+        (Effort::Low, "low"),
+        (Effort::Medium, "medium"),
+        (Effort::High, "high"),
+    ] {
+        for thinking in [false, true] {
+            let fake = FakeCli::new(json!({
+                "stdout": fixture("claude/success.json"),
+                "report_env": PINNED_ENV,
+            }));
+            let settings = ProviderSettings {
+                enabled: true,
+                binary: fake.path().to_path_buf(),
+                model: "haiku".to_owned(),
+                timeout: Duration::from_secs(30),
+                effort,
+                thinking: Some(thinking),
+            };
+            let provider = (descriptor.build)(&settings, Arc::new(ProcessRunner::new()))
+                .expect("claude builds");
+            let input = FormatInput {
+                system_prompt: SYSTEM_PROMPT,
+                user_prompt: UserPrompt {
+                    before_text: BEFORE,
+                    after_text: AFTER,
+                },
+                text: "hello",
+            };
+            provider
+                .format(input, Instant::now() + Duration::from_secs(30))
+                .await
+                .expect("success");
+            let report = fake.report();
+            let argv: Vec<&str> = report["argv"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap())
+                .collect();
+            let case = format!("{level}, thinking {thinking}");
+
+            let effort_at = argv
+                .iter()
+                .position(|a| *a == "--effort")
+                .expect("--effort");
+            assert_eq!(argv[effort_at + 1], level, "{case}");
+            assert_eq!(argv[effort_at + 2], "--settings", "{case}");
+            // `""` clears an inherited budget so the CLI's default applies.
+            let budget = if thinking { "" } else { "0" };
+            let always = if thinking {
+                "\"alwaysThinkingEnabled\":true,"
+            } else {
+                ""
+            };
+            assert_eq!(
+                argv[effort_at + 3],
+                format!(
+                    "{{\"fastMode\":false,{always}\"env\":{{\"MAX_THINKING_TOKENS\":\"{budget}\",\"CLAUDE_CODE_EFFORT_LEVEL\":\"{level}\",\"CLAUDE_CODE_DISABLE_FAST_MODE\":\"1\",\"CLAUDE_CODE_DISABLE_THINKING\":\"\",\"ANTHROPIC_BEDROCK_SERVICE_TIER\":\"default\"}}}}"
+                ),
+                "{case}"
+            );
+            assert_eq!(
+                report["env"],
+                json!({
+                    "MAX_THINKING_TOKENS": budget,
+                    "CLAUDE_CODE_EFFORT_LEVEL": level,
+                    "CLAUDE_CODE_DISABLE_FAST_MODE": "1",
+                    "CLAUDE_CODE_DISABLE_THINKING": "",
+                    "ANTHROPIC_BEDROCK_SERVICE_TIER": "default",
+                }),
+                "{case}"
+            );
+            assert_eq!(argv.iter().filter(|a| **a == "--effort").count(), 1);
+        }
+    }
 }
 
 #[tokio::test]

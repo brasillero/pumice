@@ -239,7 +239,7 @@ fn make_rig(script: &Script) -> Rig {
     fs::write(
         cfg.join("relay.yml"),
         format!(
-            "port: 7567\ntotal_timeout_secs: 30\nmax_parallel: 4\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku-test\n    binary: '{}'\n    timeout_secs: 30\ndebug_log:\n  enabled: false\n  path: pumice-debug.jsonl\n",
+            "port: 7567\ntotal_timeout_secs: 30\nmax_parallel: 4\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku-test\n    binary: '{}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\ndebug_log:\n  enabled: false\n  path: pumice-debug.jsonl\n",
             fake.display()
         ),
     )

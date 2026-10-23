@@ -39,7 +39,7 @@ fn load(yaml: &str) -> Config {
 /// other setting default).
 fn claude_at(path: &Path) -> Config {
     load(&format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n",
         path.display()
     ))
 }
@@ -132,7 +132,7 @@ async fn detection_covers_every_registered_provider_enabled_or_not() {
     let codex = FakeCli::new(json!({"stdout": "codex-cli 0.160.0"}));
     let kiro = FakeCli::new(json!({"stdout": "2.29.0"}));
     let config = load(&format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{0}'\n    timeout_secs: 30\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{1}'\n    timeout_secs: 30\n  - id: kiro\n    enabled: false\n    binary: '{2}'\n    model: null\n    timeout_secs: 30\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{0}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{1}'\n    timeout_secs: 30\n    effort: low\n  - id: kiro\n    enabled: false\n    binary: '{2}'\n    model: null\n    timeout_secs: 30\n    effort: low\n",
         claude.path().display(),
         codex.path().display(),
         kiro.path().display(),
@@ -190,7 +190,7 @@ async fn archived_generic_is_never_resolved_or_spawned() {
     let descriptors = [providers::generic::DESCRIPTOR];
     let config = load_with(
         &format!(
-            "providers:\n  - id: generic\n    enabled: false\n    binary: '{}'\n    model: null\n    timeout_secs: 30\n",
+            "providers:\n  - id: generic\n    enabled: false\n    binary: '{}'\n    model: null\n    timeout_secs: 30\n    effort: low\n",
             fake.path().display()
         ),
         &descriptors,

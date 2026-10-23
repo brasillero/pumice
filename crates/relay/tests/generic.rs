@@ -947,7 +947,7 @@ async fn failure_keeps_the_dictation_and_never_runs_another_provider() {
 /// [`GenericProvider::new`]; the endpoint lives in the provider itself.
 fn generic_settings() -> pumice_relay::providers::ProviderSettings {
     // No binary exists; the value is never resolved.
-    support::provider_settings(true, "", MODEL)
+    support::provider_settings("generic", true, "", MODEL)
 }
 
 fn pipeline_config(entries: Vec<(&str, pumice_relay::providers::ProviderSettings)>) -> Config {

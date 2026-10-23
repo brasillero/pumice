@@ -34,6 +34,42 @@ pub struct ProviderSettings {
     /// Empty only on a disabled entry that writes `model: null`.
     pub model: String,
     pub timeout: Duration,
+    /// Reasoning effort for every call this provider makes
+    /// (p16-provider-effort/D4).
+    pub effort: Effort,
+    /// Whether the CLI may think: `Some` exactly when the descriptor has a
+    /// [`ProviderDescriptor::thinking_switch`] (Claude, p16-provider-effort/D5).
+    pub thinking: Option<bool>,
+}
+
+/// Reasoning effort on Pumice's common scale (p16-provider-effort/D2). Each
+/// plugin maps it to its own CLI setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+}
+
+impl Effort {
+    /// Every level, lowest first.
+    pub const ALL: [Effort; 3] = [Effort::Low, Effort::Medium, Effort::High];
+
+    /// The level as `relay.yml` writes it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+        }
+    }
+
+    /// The level `relay.yml` writes, exactly (no case folding, no aliases).
+    pub fn parse(value: &str) -> Option<Effort> {
+        Effort::ALL
+            .into_iter()
+            .find(|effort| effort.as_str() == value)
+    }
 }
 
 /// Source locations of one provider's configuration entries.
@@ -61,6 +97,9 @@ pub struct ProviderDescriptor {
     pub id: &'static str,
     /// Builds a runnable provider from validated settings.
     pub build: BuildFn,
+    /// Whether the entry has a `thinking` key next to `effort`: required
+    /// when true, rejected when false (p16-provider-effort/D5).
+    pub thinking_switch: bool,
     /// Validates the provider's settings as the file writes them.
     /// Runs for every listed entry, enabled or not, so it can relate fields
     /// (such as rejecting an enabled provider without a `model`). Errors should point at the most
@@ -177,12 +216,31 @@ pub fn build_from_config(
 mod tests {
     use super::*;
 
-    fn settings(model: &str) -> ProviderSettings {
+    fn settings(id: &str, model: &str) -> ProviderSettings {
         ProviderSettings {
             enabled: true,
             binary: PathBuf::from("cli"),
             model: model.to_owned(),
             timeout: Duration::from_secs(30),
+            effort: Effort::Low,
+            thinking: (id == "claude").then_some(false),
+        }
+    }
+
+    #[test]
+    fn effort_parses_exactly_the_three_levels() {
+        for effort in Effort::ALL {
+            assert_eq!(Effort::parse(effort.as_str()), Some(effort));
+        }
+        for other in ["", "Low", "LOW", "minimal", "xhigh", "max", " low"] {
+            assert_eq!(Effort::parse(other), None, "{other:?}");
+        }
+    }
+
+    #[test]
+    fn only_claude_has_a_thinking_switch() {
+        for d in PROVIDERS {
+            assert_eq!(d.thinking_switch, d.id == "claude", "{}", d.id);
         }
     }
 
@@ -200,10 +258,18 @@ mod tests {
     fn built_provider_reports_its_id() {
         for (id, model) in [("claude", "haiku"), ("codex", "gpt-6.1-sol"), ("kiro", "x")] {
             let d = descriptor(id).expect("registered");
-            let provider = (d.build)(&settings(model), Arc::new(ProcessRunner::new()))
+            let provider = (d.build)(&settings(id, model), Arc::new(ProcessRunner::new()))
                 .expect("builds with an explicit model");
             assert_eq!(provider.id(), id);
         }
+    }
+
+    #[test]
+    fn claude_refuses_to_build_without_thinking() {
+        let d = descriptor("claude").expect("registered");
+        let mut settings = settings("claude", "haiku");
+        settings.thinking = None;
+        assert!((d.build)(&settings, Arc::new(ProcessRunner::new())).is_err());
     }
 
     #[test]
@@ -211,7 +277,7 @@ mod tests {
         for id in ["claude", "codex"] {
             let d = descriptor(id).expect("registered");
             assert!(
-                (d.validate_settings)(&settings("any"), &ProviderLocations::default()).is_ok(),
+                (d.validate_settings)(&settings(id, "any"), &ProviderLocations::default()).is_ok(),
                 "{id} accepts an explicit model"
             );
         }

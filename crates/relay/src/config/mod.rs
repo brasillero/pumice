@@ -21,7 +21,7 @@ use serde_saphyr::Spanned;
 
 pub use error::ConfigError;
 
-use crate::providers::{self, ProviderSettings};
+use crate::providers::{self, Effort, ProviderSettings};
 use raw::{Setting, Within};
 
 /// Hard upper bound for `max_parallel`, kept small to limit resource use.
@@ -450,11 +450,60 @@ fn provider_settings(
             format!("{base}.timeout_secs must be greater than zero"),
         ));
     }
+    let effort = match &raw.effort {
+        Setting::Value(effort) => Effort::parse(&effort.value).ok_or_else(|| {
+            ConfigError::at(
+                effort.referenced,
+                format!(
+                    "{base}.effort must be low, medium or high, found \"{}\"",
+                    effort.value
+                ),
+            )
+        })?,
+        // Unlike `model`, every provider takes every level, so a disabled
+        // entry writes one too.
+        Setting::Null(location) => {
+            return Err(ConfigError::at(
+                *location,
+                format!("{base}.effort must not be null; write low, medium or high"),
+            ));
+        }
+        Setting::Missing => return Err(raw::missing(within, &format!("{base}.effort"))),
+    };
+
+    // Only a provider with a thinking switch (Claude, p16-provider-effort/D5)
+    // has the key; the others reason through effort alone.
+    let thinking = if descriptor.thinking_switch {
+        match &raw.thinking {
+            Setting::Value(thinking) => Some(thinking.value),
+            Setting::Null(location) => {
+                return Err(ConfigError::at(
+                    *location,
+                    format!("{base}.thinking must not be null; write true or false"),
+                ));
+            }
+            Setting::Missing => return Err(raw::missing(within, &format!("{base}.thinking"))),
+        }
+    } else {
+        if let Some(location) = raw.thinking.location() {
+            return Err(ConfigError::at(
+                location,
+                format!(
+                    "{base}.thinking is not a setting of this provider: only claude has it, and {} reasons through effort alone. Delete this key.",
+                    id.value
+                ),
+            ));
+        }
+        None
+    };
+
     let settings = ProviderSettings {
         enabled: enabled.value,
         binary,
         model,
         timeout: Duration::from_secs(timeout.value),
+        effort,
+        thinking,
     };
 
     // The descriptor runs first: its refusal (the archived generic adapter)

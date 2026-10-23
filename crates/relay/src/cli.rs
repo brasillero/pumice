@@ -651,6 +651,11 @@ fn print_summary(loaded: &LoadedConfig) {
             if settings.enabled {
                 line.push_str(&format!(", timeout {}s", settings.timeout.as_secs()));
                 line.push_str(&format!(", binary {}", settings.binary.display()));
+                line.push_str(&format!(", effort {}", settings.effort.as_str()));
+                if let Some(thinking) = settings.thinking {
+                    let state = if thinking { "on" } else { "off" };
+                    line.push_str(&format!(", thinking {state}"));
+                }
             }
             println!("{line}");
         }

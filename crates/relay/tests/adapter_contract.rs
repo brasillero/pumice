@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pumice_relay::process::ProcessRunner;
+use pumice_relay::providers::Effort;
 use pumice_relay::providers::Provider;
 use pumice_relay::providers::claude::ClaudeAdapter;
 use pumice_relay::providers::cli::CliProvider;
@@ -32,7 +33,7 @@ impl ContractAdapter for ClaudeContract {
 
     fn provider(fake: &Path, timeout: Duration) -> Arc<dyn Provider> {
         Arc::new(CliProvider::new(
-            ClaudeAdapter::new(fake.to_path_buf(), "haiku".to_owned()),
+            ClaudeAdapter::new(fake.to_path_buf(), "haiku".to_owned(), Effort::Low, false),
             Arc::new(ProcessRunner::new()),
             timeout,
         ))
@@ -143,7 +144,7 @@ impl ContractAdapter for CodexContract {
 
     fn provider(fake: &Path, timeout: Duration) -> Arc<dyn Provider> {
         Arc::new(CliProvider::new(
-            CodexAdapter::new(fake.to_path_buf(), "gpt-6.1-sol".to_owned()),
+            CodexAdapter::new(fake.to_path_buf(), "gpt-6.1-sol".to_owned(), Effort::Low),
             Arc::new(ProcessRunner::new()),
             timeout,
         ))
@@ -283,7 +284,11 @@ impl ContractAdapter for KiroContract {
 
     fn provider(fake: &Path, timeout: Duration) -> Arc<dyn Provider> {
         Arc::new(CliProvider::new(
-            KiroAdapter::new(fake.to_path_buf(), "claude-haiku-4.5".to_owned()),
+            KiroAdapter::new(
+                fake.to_path_buf(),
+                "claude-haiku-4.5".to_owned(),
+                Effort::Low,
+            ),
             Arc::new(ProcessRunner::new()),
             timeout,
         ))

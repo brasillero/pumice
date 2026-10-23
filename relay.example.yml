@@ -49,10 +49,17 @@ max_parallel: 4
 # shows: the enabled entries are listed in this order. There is NO fallback:
 # a request runs exactly one provider — the one its model names.
 #
-# Every entry writes all five keys: `id`, `enabled` (true or false),
-# `model` (`null` only on a disabled entry), `binary` and `timeout_secs`.
-# The removed keys `default`, `prompts`, `env` and `options` are rejected
-# with a message saying what replaced them.
+# Every entry writes `id`, `enabled` (true or false), `model` (`null` only on
+# a disabled entry), `binary`, `timeout_secs` and `effort`; the `claude`
+# entry also writes `thinking`. The removed keys `default`, `prompts`, `env`
+# and `options` are rejected with a message saying what replaced them.
+#
+# `effort` is the reasoning effort of every call the provider makes: `low`,
+# `medium` or `high`, mapped to the CLI's own setting (Claude and Kiro
+# `--effort`, Codex `model_reasoning_effort`). Higher effort can follow the
+# app's prompt more closely but takes longer and uses more of your quota.
+# A model without effort levels ignores it. Every other CLI setting stays
+# the cheapest the CLI offers, and fast/priority modes stay off.
 providers:
   # Claude Code, enabled.
   - id: claude
@@ -65,6 +72,12 @@ providers:
     binary: claude
     # Per-call cap, also limited by the remaining total budget.
     timeout_secs: 30
+    effort: low
+    # Claude only. `false` turns thinking off where the model allows it;
+    # `true` lets Claude Code think the way it does by default for the model
+    # (adaptive where the model supports it, otherwise up to its default
+    # thinking budget), which is slower and uses more of your quota.
+    thinking: false
 
   # Codex CLI, off. A disabled entry is kept out of the model list and
   # never runs; its `model` may be null.
@@ -73,6 +86,7 @@ providers:
     model: null # e.g. gpt-6.1-sol
     binary: codex
     timeout_secs: 30
+    effort: low
 
   # Kiro CLI, off. Pumice writes a one-off no-tools agent file into the
   # call's empty temporary directory to carry the app's system prompt; your
@@ -83,6 +97,7 @@ providers:
     model: null # e.g. claude-haiku-4.5
     binary: kiro-cli
     timeout_secs: 30
+    effort: low
 
   # The generic local-server adapter is archived for now, and Kimi,
   # Antigravity and OpenCode support was removed: listing any of them is an
