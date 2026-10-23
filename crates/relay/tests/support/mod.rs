@@ -48,6 +48,22 @@ pub fn relay_config(text: &str) -> String {
     yaml
 }
 
+/// Provider settings for configurations built in code (YAML validation knows
+/// only registered ids): every field written, as the loader would, with
+/// `model` empty when the entry would write `model: null`.
+pub fn provider_settings(
+    enabled: bool,
+    binary: impl Into<PathBuf>,
+    model: &str,
+) -> pumice_relay::providers::ProviderSettings {
+    pumice_relay::providers::ProviderSettings {
+        enabled,
+        binary: binary.into(),
+        model: model.to_owned(),
+        timeout: std::time::Duration::from_secs(30),
+    }
+}
+
 /// Path of the fake CLI built by Cargo for this test run.
 pub const FAKE_CLI_BIN: &str = env!("CARGO_BIN_EXE_pumice-test-cli");
 

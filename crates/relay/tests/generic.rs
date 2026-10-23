@@ -946,10 +946,8 @@ async fn failure_keeps_the_dictation_and_never_runs_another_provider() {
 /// Pipeline-level settings for a generic provider built directly with
 /// [`GenericProvider::new`]; the endpoint lives in the provider itself.
 fn generic_settings() -> pumice_relay::providers::ProviderSettings {
-    let mut settings = (DESCRIPTOR.defaults)();
-    settings.enabled = true;
-    settings.model = MODEL.to_owned();
-    settings
+    // No binary exists; the value is never resolved.
+    support::provider_settings(true, "", MODEL)
 }
 
 fn pipeline_config(entries: Vec<(&str, pumice_relay::providers::ProviderSettings)>) -> Config {
@@ -1025,9 +1023,7 @@ async fn error_status_with_a_stalled_body_keeps_its_status() {
 
 #[test]
 fn the_archived_descriptor_refuses_enablement_and_never_builds() {
-    let mut settings = (DESCRIPTOR.defaults)();
-    settings.enabled = true;
-    settings.model = MODEL.to_owned();
+    let settings = generic_settings();
     let error = (DESCRIPTOR.validate_settings)(&settings, &Default::default())
         .expect_err("enablement is refused");
     assert!(

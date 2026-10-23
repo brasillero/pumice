@@ -9,7 +9,6 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde_json::Value;
 
@@ -23,8 +22,6 @@ use crate::process::{Argument, CliInvocation, ControlFile, ProcessOutput, Proces
 
 pub const ID: &str = "claude";
 pub const DEFAULT_BINARY: &str = "claude";
-/// Provider default timeout, measured in Phase 0.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Result text of the verified "not logged in" envelope is
 /// `Not logged in · Please run /login`; only its stable start is matched.
@@ -37,7 +34,6 @@ const NPM_ENTRYPOINT: &str = "@anthropic-ai/claude-code/cli.js";
 
 pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: ID,
-    defaults,
     build,
     validate_settings: validate_settings_noop,
     probe: ProbeSpec::Version(&["--version"]),
@@ -46,26 +42,11 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     install_hint: "npm install -g @anthropic-ai/claude-code",
 };
 
-fn defaults() -> ProviderSettings {
-    ProviderSettings {
-        enabled: false,
-        binary: None,
-        // The configuration file sets the model on every enabled entry;
-        // nothing is built in.
-        model: String::new(),
-        timeout: DEFAULT_TIMEOUT,
-    }
-}
-
-
 fn build(
     settings: &ProviderSettings,
     runner: Arc<ProcessRunner>,
 ) -> Result<Arc<dyn Provider>, ConfigError> {
-    let binary = settings
-        .binary
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_BINARY));
+    let binary = settings.binary.clone();
     Ok(Arc::new(CliProvider::new(
         ClaudeAdapter::new(binary, settings.model.clone()),
         runner,

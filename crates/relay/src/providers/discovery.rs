@@ -194,7 +194,7 @@ fn probe_program(
     settings: Option<&ProviderSettings>,
 ) -> ProgramSpec {
     let binary = settings
-        .and_then(|settings| settings.binary.clone())
+        .map(|settings| settings.binary.clone())
         .unwrap_or_else(|| PathBuf::from(descriptor.default_binary));
     ProgramSpec {
         binary,

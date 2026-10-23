@@ -650,9 +650,7 @@ fn print_summary(loaded: &LoadedConfig) {
             }
             if settings.enabled {
                 line.push_str(&format!(", timeout {}s", settings.timeout.as_secs()));
-                if let Some(binary) = &settings.binary {
-                    line.push_str(&format!(", binary {}", binary.display()));
-                }
+                line.push_str(&format!(", binary {}", settings.binary.display()));
             }
             println!("{line}");
         }

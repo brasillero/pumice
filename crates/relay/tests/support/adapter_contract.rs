@@ -305,10 +305,11 @@ fn handy_request(model: Option<&str>, text: &str) -> ExtractedRequest {
 
 /// Settings pointing the contract adapter at the fake CLI.
 fn settings_at<A: ContractAdapter>(fake: &FakeCli) -> ProviderSettings {
-    let descriptor = providers::descriptor(A::ID).expect("contract adapter has a descriptor");
-    let mut settings = (descriptor.defaults)();
-    settings.binary = Some(fake.path().to_path_buf());
-    settings
+    assert!(
+        providers::descriptor(A::ID).is_some(),
+        "contract adapter has a descriptor"
+    );
+    super::provider_settings(false, fake.path(), "")
 }
 
 /// Builds a configuration directly (YAML validation knows only registered

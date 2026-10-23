@@ -385,10 +385,6 @@ fn provider_settings(
             ));
         }
     }
-    // The descriptor's settings are only the shape; every field below is
-    // replaced with the entry's own value.
-    let mut settings = (descriptor.defaults)();
-    settings.enabled = enabled.value;
     let mut locations = providers::ProviderLocations {
         provider: Some(id.referenced),
         enabled: Some(enabled.referenced),
@@ -416,11 +412,11 @@ fn provider_settings(
         ));
     }
     locations.binary = Some(binary.referenced);
-    settings.binary = Some(resolve_binary(&binary.value, config_dir));
+    let binary = resolve_binary(&binary.value, config_dir);
 
     // `model: null` means no model; only a disabled entry may say so (the
     // checks below reject it on an enabled one).
-    match raw.model.nullable(within, &format!("{base}.model"))? {
+    let model = match raw.model.nullable(within, &format!("{base}.model"))? {
         Some(model) => {
             locations.model = Some(model.referenced);
             if model.value.trim().is_empty() && enabled.value {
@@ -437,13 +433,13 @@ fn provider_settings(
                     format!("{base}.model must not start with '-'"),
                 ));
             }
-            settings.model = model.value.clone();
+            model.value.clone()
         }
         None => {
             locations.model = raw.model.location();
-            settings.model = String::new();
+            String::new()
         }
-    }
+    };
 
     let timeout = raw
         .timeout_secs
@@ -454,7 +450,12 @@ fn provider_settings(
             format!("{base}.timeout_secs must be greater than zero"),
         ));
     }
-    settings.timeout = Duration::from_secs(timeout.value);
+    let settings = ProviderSettings {
+        enabled: enabled.value,
+        binary,
+        model,
+        timeout: Duration::from_secs(timeout.value),
+    };
 
     // The descriptor runs first: its refusal (the archived generic adapter)
     // and its own requirements keep their established messages and

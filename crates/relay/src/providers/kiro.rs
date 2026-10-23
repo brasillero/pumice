@@ -34,7 +34,6 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -50,8 +49,6 @@ use crate::process::{
 
 pub const ID: &str = "kiro";
 pub const DEFAULT_BINARY: &str = "kiro-cli";
-/// Provider default timeout (real calls took 2.4–5.3 s, S2.14).
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Name of the one-off agent, passed to `--agent`.
 pub const AGENT_NAME: &str = "pumice";
@@ -71,7 +68,6 @@ const CHILD_ENV: [(&str, &str); 2] = [
 
 pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: ID,
-    defaults,
     build,
     validate_settings: validate_settings_noop,
     probe: ProbeSpec::Version(&["--version"]),
@@ -80,25 +76,11 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     install_hint: "curl -fsSL https://cli.kiro.dev/install | bash",
 };
 
-fn defaults() -> ProviderSettings {
-    ProviderSettings {
-        enabled: false,
-        binary: None,
-        // The configuration file sets the model on every enabled entry;
-        // nothing is built in.
-        model: String::new(),
-        timeout: DEFAULT_TIMEOUT,
-    }
-}
-
 fn build(
     settings: &ProviderSettings,
     runner: Arc<ProcessRunner>,
 ) -> Result<Arc<dyn Provider>, ConfigError> {
-    let binary = settings
-        .binary
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_BINARY));
+    let binary = settings.binary.clone();
     Ok(Arc::new(CliProvider::new(
         KiroAdapter::new(binary, settings.model.clone()),
         runner,

@@ -89,20 +89,13 @@ fn assert_raw(outcome: &FormatOutcome, reason: RawReason, text: &str) {
 /// only knows registered provider ids). Enabled settings carry a model, as
 /// the configuration file requires.
 fn test_settings(enabled: bool) -> ProviderSettings {
-    let descriptor = providers::descriptor("claude").expect("claude is registered");
-    let mut settings = (descriptor.defaults)();
-    settings.enabled = enabled;
-    if enabled {
-        settings.model = "test-model".to_owned();
-    }
-    settings
+    let model = if enabled { "test-model" } else { "" };
+    support::provider_settings(enabled, "claude", model)
 }
 
 /// Settings pointing the real Claude adapter at a fake CLI.
 fn claude_settings_at(fake: &FakeCli) -> ProviderSettings {
-    let mut settings = test_settings(true);
-    settings.binary = Some(fake.path().to_path_buf());
-    settings
+    support::provider_settings(true, fake.path(), "test-model")
 }
 
 fn build_claude(settings: &ProviderSettings) -> Arc<dyn Provider> {

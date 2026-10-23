@@ -23,15 +23,15 @@ pub use interface::{
 use crate::config::{Config, ConfigError};
 use crate::process::ProcessRunner;
 
-/// Validated, fully defaulted settings of one provider.
+/// Validated settings of one provider, every one written in the file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderSettings {
     pub enabled: bool,
-    /// Overrides the provider's command. `None` uses the provider's command
-    /// name (a PATH lookup); a bare name is also a PATH lookup; anything
-    /// with a path separator is a path, already resolved against the
-    /// configuration file's directory.
-    pub binary: Option<PathBuf>,
+    /// The provider's command: a bare name is a PATH lookup; anything with a
+    /// path separator is a path, already resolved against the configuration
+    /// file's directory.
+    pub binary: PathBuf,
+    /// Empty only on a disabled entry that writes `model: null`.
     pub model: String,
     pub timeout: Duration,
 }
@@ -52,19 +52,16 @@ pub struct ProviderLocations {
 
 /// What the registry knows about one provider.
 ///
-/// The descriptor owns the provider's defaults and the validation of its
-/// settings, so a new provider brings its own rules with it. Enablement is
-/// never the descriptor's business: the configuration file decides, and
+/// The descriptor owns the validation of its settings, so a new provider
+/// brings its own rules with it. It has no built-in settings: every one is
+/// written in the configuration file (p17-serve-model-names/D3), and
 /// nothing is enabled unless an entry says `enabled: true`.
 #[derive(Clone, Copy)]
 pub struct ProviderDescriptor {
     pub id: &'static str,
-    /// Built-in settings (command, timeout, empty model). The loader
-    /// replaces `enabled` with the entry's explicit value.
-    pub defaults: fn() -> ProviderSettings,
     /// Builds a runnable provider from validated settings.
     pub build: BuildFn,
-    /// Validates the provider's fully defaulted settings after overrides.
+    /// Validates the provider's settings as the file writes them.
     /// Runs for every listed entry, enabled or not, so it can relate fields
     /// (such as rejecting an enabled provider without a `model`). Errors should point at the most
     /// specific [`ProviderLocations`] entry available.
@@ -72,8 +69,8 @@ pub struct ProviderDescriptor {
     /// How startup detection checks this provider's presence (S2.8).
     /// Detection never spends quota and never changes `enabled`.
     pub probe: ProbeSpec,
-    /// Command name looked up on PATH when the configuration sets no
-    /// `binary`; the same default the adapter builds with.
+    /// The provider's standard command name: what detection looks up for a
+    /// provider the file does not list, and the `binary` hint in errors.
     pub default_binary: &'static str,
     /// npm package entrypoint for Windows `.cmd` shim translation during
     /// detection. Must equal the adapter's value so detection resolves the
@@ -97,7 +94,7 @@ pub enum ProbeSpec {
     NotApplicable,
 }
 
-/// Validates one provider's fully defaulted settings; see
+/// Validates one provider's settings; see
 /// [`ProviderDescriptor::validate_settings`].
 pub type ValidateSettingsFn = fn(&ProviderSettings, &ProviderLocations) -> Result<(), ConfigError>;
 
@@ -180,6 +177,15 @@ pub fn build_from_config(
 mod tests {
     use super::*;
 
+    fn settings(model: &str) -> ProviderSettings {
+        ProviderSettings {
+            enabled: true,
+            binary: PathBuf::from("cli"),
+            model: model.to_owned(),
+            timeout: Duration::from_secs(30),
+        }
+    }
+
     #[test]
     fn registry_ids_are_unique_and_found() {
         assert_eq!(PROVIDERS.len(), 3, "three providers are registered");
@@ -192,42 +198,20 @@ mod tests {
 
     #[test]
     fn built_provider_reports_its_id() {
-        // Built-in settings carry no model anymore: the configuration file
-        // sets one on every enabled entry.
-        let d = descriptor("claude").expect("claude is registered");
-        let settings = (d.defaults)();
-        assert_eq!(settings.model, "");
-        assert_eq!(settings.binary, None);
-        assert_eq!(settings.timeout, Duration::from_secs(30));
-        let mut settings = settings;
-        settings.enabled = true;
-        settings.model = "haiku".to_owned();
-        let provider = (d.build)(&settings, Arc::new(ProcessRunner::new()))
-            .expect("claude builds with an explicit model");
-        assert_eq!(provider.id(), "claude");
-
-        let d = descriptor("codex").expect("codex is registered");
-        let settings = (d.defaults)();
-        assert_eq!(settings.model, "");
-        assert_eq!(settings.binary, None);
-        assert_eq!(settings.timeout, Duration::from_secs(30));
-        let mut settings = settings;
-        settings.enabled = true;
-        settings.model = "gpt-6.1-sol".to_owned();
-        let provider = (d.build)(&settings, Arc::new(ProcessRunner::new()))
-            .expect("codex builds with an explicit model");
-        assert_eq!(provider.id(), "codex");
+        for (id, model) in [("claude", "haiku"), ("codex", "gpt-6.1-sol"), ("kiro", "x")] {
+            let d = descriptor(id).expect("registered");
+            let provider = (d.build)(&settings(model), Arc::new(ProcessRunner::new()))
+                .expect("builds with an explicit model");
+            assert_eq!(provider.id(), id);
+        }
     }
 
     #[test]
     fn claude_and_codex_accept_any_explicit_model() {
         for id in ["claude", "codex"] {
             let d = descriptor(id).expect("registered");
-            let mut settings = (d.defaults)();
-            settings.enabled = true;
-            settings.model = "any".to_owned();
             assert!(
-                (d.validate_settings)(&settings, &ProviderLocations::default()).is_ok(),
+                (d.validate_settings)(&settings("any"), &ProviderLocations::default()).is_ok(),
                 "{id} accepts an explicit model"
             );
         }

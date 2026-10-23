@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use pumice_relay::process::ProcessRunner;
 use pumice_relay::providers::cli::CliProvider;
-use pumice_relay::providers::kiro::{self as kiro_plugin, AGENT_FILE, DESCRIPTOR, ID, KiroAdapter};
+use pumice_relay::providers::kiro::{self as kiro_plugin, AGENT_FILE, ID, KiroAdapter};
 use pumice_relay::providers::{
     FormatInput, Provider, ProviderError, ProviderErrorCode, UserPrompt,
 };
@@ -382,11 +382,4 @@ fn provider_reports_its_id_without_running() {
     let fake = fake_kiro("", 0);
     assert_eq!(provider(&fake, TEST_MODEL).id(), ID);
     assert!(!fake.report_path().exists());
-}
-
-#[test]
-fn descriptor_defaults_ship_disabled_with_an_empty_model() {
-    let settings = (DESCRIPTOR.defaults)();
-    assert!(!settings.enabled);
-    assert_eq!(settings.model, "");
 }

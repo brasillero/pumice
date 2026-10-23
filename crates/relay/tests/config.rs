@@ -112,7 +112,6 @@ fn no_env(_: &str) -> Option<OsString> {
 /// leaving the built-in registry untouched.
 mod capability_probe {
     use std::sync::Arc;
-    use std::time::Duration;
 
     use pumice_relay::config::ConfigError;
     use pumice_relay::process::ProcessRunner;
@@ -123,7 +122,6 @@ mod capability_probe {
     /// A minimal provider: off until the file says `enabled: true`.
     pub const PROBE: ProviderDescriptor = ProviderDescriptor {
         id: "probe",
-        defaults: probe_defaults,
         build: probe_build,
         validate_settings: validate_settings_noop,
         probe: ProbeSpec::NotApplicable,
@@ -131,15 +129,6 @@ mod capability_probe {
         npm_entrypoint: None,
         install_hint: "the probe is not installable",
     };
-
-    fn probe_defaults() -> ProviderSettings {
-        ProviderSettings {
-            enabled: false, // the loader replaces this with the entry's explicit value
-            binary: None,
-            model: String::new(),
-            timeout: Duration::from_secs(30),
-        }
-    }
 
     fn probe_build(
         _settings: &ProviderSettings,
@@ -160,7 +149,7 @@ fn complete_file_loads_the_written_values() {
     let claude = claude(&config);
     assert!(claude.enabled);
     assert_eq!(claude.model, "haiku");
-    assert_eq!(claude.binary, Some(PathBuf::from("claude")));
+    assert_eq!(claude.binary, PathBuf::from("claude"));
     assert_eq!(claude.timeout, Duration::from_secs(30));
 }
 
@@ -507,11 +496,7 @@ fn enabled_entry_with_a_model_loads_for_every_provider() {
         let settings = config.provider(id).expect("provider configured");
         assert!(settings.enabled, "{id}");
         assert_eq!(settings.model, model, "{id}");
-        assert_eq!(
-            settings.binary,
-            Some(PathBuf::from(format!("{id}-cli"))),
-            "{id}"
-        );
+        assert_eq!(settings.binary, PathBuf::from(format!("{id}-cli")), "{id}");
         assert_eq!(settings.timeout, Duration::from_secs(7), "{id}");
         assert_eq!(config.provider("bogus"), None);
     }
@@ -665,7 +650,7 @@ fn relative_binary_path_resolves_against_the_config_directory() {
     let loaded = config::load_with_env(Some(&path), no_env).expect("config loads");
     assert_eq!(
         claude(&loaded.config).binary,
-        Some(dir.path().join("tools").join("claude"))
+        dir.path().join("tools").join("claude")
     );
 }
 
@@ -675,7 +660,7 @@ fn bare_and_absolute_binary_paths_are_not_resolved() {
         "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: myclaude\n    timeout_secs: 30\n",
     )
     .expect("bare name loads");
-    assert_eq!(claude(&config).binary, Some(PathBuf::from("myclaude")));
+    assert_eq!(claude(&config).binary, PathBuf::from("myclaude"));
 
     // An absolute path on every OS (`/opt/claude` is relative on Windows).
     let absolute = std::env::temp_dir().join("claude");
@@ -684,7 +669,7 @@ fn bare_and_absolute_binary_paths_are_not_resolved() {
         absolute.display()
     );
     let config = load_text(&yaml).expect("absolute loads");
-    assert_eq!(claude(&config).binary, Some(absolute));
+    assert_eq!(claude(&config).binary, absolute);
 
     // `null` used to mean the command on PATH: the command is now written.
     assert_error(
@@ -1124,7 +1109,7 @@ fn example_config_loads() {
     assert!(claude.enabled);
     assert_eq!(claude.model, "haiku");
     assert_eq!(claude.timeout, Duration::from_secs(30));
-    assert_eq!(claude.binary, Some(PathBuf::from("claude")));
+    assert_eq!(claude.binary, PathBuf::from("claude"));
 
     // Every other entry ships disabled, with no model, its standard command
     // and the same timeout.
@@ -1134,7 +1119,7 @@ fn example_config_loads() {
             .unwrap_or_else(|| panic!("{id} is listed"));
         assert!(!settings.enabled, "{id} stays off in the example");
         assert!(settings.model.is_empty(), "{id} ships without a model");
-        assert_eq!(settings.binary, Some(PathBuf::from(binary)), "{id}");
+        assert_eq!(settings.binary, PathBuf::from(binary), "{id}");
         assert_eq!(settings.timeout, Duration::from_secs(30), "{id}");
     }
 }
@@ -1159,10 +1144,7 @@ fn relative_config_path_still_anchors_relative_settings() {
     .expect("write config");
 
     let loaded = config::load_with_env(Some(&relative_config), no_env).expect("config loads");
-    let resolved = claude(&loaded.config)
-        .binary
-        .as_ref()
-        .expect("binary is set");
+    let resolved = &claude(&loaded.config).binary;
     assert!(resolved.is_absolute(), "{resolved:?}");
     assert_eq!(
         resolved,
