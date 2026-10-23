@@ -6,7 +6,7 @@ Rules for every AI coding agent working in this repository (Claude Code, Codex, 
 
 Pumice lets dictation use the AI subscriptions the user already pays for, instead of API keys (no "bring your own key"), and aims to eventually replace dictation apps such as [Handy](https://github.com/cjpais/Handy). It is a set of independent modules, each a CLI that works on its own:
 
-- **Relay** (`crates/relay`): an OpenAI-compatible endpoint on `127.0.0.1` (`/v1/chat/completions`, `/v1/models`). It hands the request to the official CLI of a subscription the user is logged into (Claude Code, Codex, Kimi, Kiro) and returns the answer in OpenAI format. This is what Handy uses today.
+- **Relay** (`crates/relay`): an OpenAI-compatible endpoint on `127.0.0.1` (`/v1/chat/completions`, `/v1/models`). It hands the request to the official CLI of a subscription the user is logged into (Claude Code, Codex, Kiro) and returns the answer in OpenAI format. This is what Handy uses today.
 - **Transcription** (`crates/transcription`, program `pumice-transcribe`): audio in, raw text out, OpenAI-compatible where an OpenAI contract exists. Independent of the relay.
 - **Formatter** (planned): injects explicitly selected formatting rules, as a system message, into an incoming request before it reaches the relay.
 - **Orchestrator** (`pumice`, planned): runs one module or the whole stack and combines their flows.
@@ -52,7 +52,7 @@ Each provider is a plugin with the same contract:
 
 - **Input:** the client's request, unchanged: its messages and the model route. The plugin only puts it into the form its CLI accepts (stdin, a file, an argument, inline JSON). It never adds prompt text, with one exception: when the client sends no system prompt and the CLI refuses an empty one (Codex, Kimi), the plugin sends the neutral `Follow the user's message.`
 - **Output:** the final answer as text, or a safe typed error. The plugin decodes its CLI's output format and returns just the answer.
-- **Settings:** always the smallest, cheapest configuration the CLI offers: no extended thinking or the lowest reasoning effort, and never a fast/priority mode. The model itself comes from the user's config.
+- **Settings:** the model, the reasoning effort (`low`, `medium` or `high`, mapped to the CLI's own setting) and, for Claude, thinking come from the user's config. Every other setting is the cheapest the CLI offers, and never a fast/priority mode.
 - **Differences:** CLI limits and features differ (input size, what can be switched off). The plugin absorbs them; keep plugins as similar as possible and record each limitation in its research note.
 - **On any failure** (error, timeout, empty answer) or a missing model, Pumice returns an HTTP error with a safe reason and logs why; the app keeps its own text. There is no fallback to another provider.
 
