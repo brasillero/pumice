@@ -89,8 +89,6 @@ pub struct ProviderDescriptor {
 pub enum ProbeSpec {
     /// Resolve and run the given version arguments.
     Version(&'static [&'static str]),
-    /// Resolve on PATH only; never spawn.
-    PathOnly,
     /// No CLI exists to detect (the generic loopback adapter): detection
     /// neither resolves nor spawns anything. The provider is reported
     /// available for listing purposes when enabled; its endpoint is a
@@ -117,13 +115,12 @@ macro_rules! register_providers {
     };
 }
 
-register_providers!(claude, codex, kimi, kiro);
+register_providers!(claude, codex, kiro);
 
-// Archived providers (owner decision 2026-10-08): their code and tests stay,
-// but they are not registered, so configuration, detection, `doctor` and
-// `/v1/models` never see them. They come back once the plugin architecture
+// Archived provider (owner decision 2026-10-08): its code and tests stay,
+// but it is not registered, so configuration, detection, `doctor` and
+// `/v1/models` never see it. It comes back once the plugin architecture
 // settles.
-pub mod antigravity;
 pub mod generic;
 
 /// Provider IDs that are archived or removed, with what the configuration
@@ -131,11 +128,15 @@ pub mod generic;
 pub const RETIRED: &[(&str, &str)] = &[
     (
         "antigravity",
-        "is archived for now and cannot be used; delete this entry",
+        "provider was removed (p16-provider-effort/D6); delete this entry",
     ),
     (
         "generic",
         "is archived for now and cannot be used; delete this entry",
+    ),
+    (
+        "kimi",
+        "provider was removed (p16-provider-effort/D6); delete this entry",
     ),
     ("opencode", "support was removed; delete this entry"),
 ];
@@ -181,7 +182,7 @@ mod tests {
 
     #[test]
     fn registry_ids_are_unique_and_found() {
-        assert_eq!(PROVIDERS.len(), 4, "four providers are registered");
+        assert_eq!(PROVIDERS.len(), 3, "three providers are registered");
         for (i, d) in PROVIDERS.iter().enumerate() {
             assert!(PROVIDERS[..i].iter().all(|other| other.id != d.id));
             assert!(std::ptr::eq(descriptor(d.id).unwrap(), d));

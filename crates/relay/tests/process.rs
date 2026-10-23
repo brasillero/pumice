@@ -532,7 +532,7 @@ async fn temp_root_and_control_files_are_private() {
             name: "system.txt".to_owned(),
             contents: b"system prompt".to_vec(),
         },
-        // Kimi uses this exact control file name.
+        // A second control file, such as an agent file.
         ControlFile {
             name: "pumice-agent.md".to_owned(),
             contents: b"agent body".to_vec(),
@@ -566,7 +566,7 @@ async fn temp_root_and_control_files_are_private() {
     assert_eq!(
         modes["../control/pumice-agent.md"].as_u64().unwrap(),
         file_mode,
-        "kimi agent file"
+        "agent control file"
     );
     assert_eq!(modes[".cli"].as_u64().unwrap(), dir_mode, ".cli dir");
     assert_eq!(

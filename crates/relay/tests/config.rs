@@ -97,10 +97,9 @@ fn claude(config: &Config) -> &ProviderSettings {
 /// Every active provider ID with a model it accepts. The common entry rules
 /// below run over this table; provider-specific validation stays in each
 /// provider's own suite.
-const PROVIDERS: [(&str, &str); 4] = [
+const PROVIDERS: [(&str, &str); 3] = [
     ("claude", "haiku"),
     ("codex", "gpt-6.1-sol"),
-    ("kimi", "kimi-k2.7-code-highspeed"),
     ("kiro", "claude-haiku-4.5"),
 ];
 
@@ -127,7 +126,7 @@ mod capability_probe {
         defaults: probe_defaults,
         build: probe_build,
         validate_settings: validate_settings_noop,
-        probe: ProbeSpec::PathOnly,
+        probe: ProbeSpec::NotApplicable,
         default_binary: "probe-cli",
         npm_entrypoint: None,
         install_hint: "the probe is not installable",
@@ -840,7 +839,7 @@ fn no_configuration_directory_is_an_error_but_optional_for_doctor() {
 #[test]
 fn registry_builds_enabled_providers_from_config() {
     let config = load_text(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: claude\n    timeout_secs: 30\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: codex\n    timeout_secs: 30\n  - id: kimi\n    enabled: false\n    model: null\n    binary: kimi\n    timeout_secs: 30\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: claude\n    timeout_secs: 30\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: codex\n    timeout_secs: 30\n  - id: kiro\n    enabled: false\n    model: null\n    binary: kiro-cli\n    timeout_secs: 30\n",
     )
     .expect("config loads");
     let built = providers::build_from_config(&config, Arc::new(ProcessRunner::new()))
@@ -940,7 +939,7 @@ fn check_config_success_prints_summary() {
     fs::write(
         &path,
         relay_config(
-            "port: 8000\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: claude\n    timeout_secs: 30\n  - id: kimi\n    enabled: false\n    model: null\n    binary: kimi\n    timeout_secs: 30\n",
+            "port: 8000\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: claude\n    timeout_secs: 30\n  - id: kiro\n    enabled: false\n    model: null\n    binary: kiro-cli\n    timeout_secs: 30\n",
         ),
     )
     .expect("write config");
@@ -961,7 +960,7 @@ fn check_config_success_prints_summary() {
         stdout.contains("  claude: enabled, model haiku, timeout 30s, binary claude"),
         "{stdout}"
     );
-    assert!(stdout.contains("  kimi: disabled"), "{stdout}");
+    assert!(stdout.contains("  kiro: disabled"), "{stdout}");
 }
 
 #[test]
@@ -970,7 +969,7 @@ fn check_config_rejects_the_removed_default_key_at_its_position() {
     let path = dir.path().join(CONFIG_NAME);
     fs::write(
         &path,
-        "port: 8000\ndefault: kimi\nproviders:\n  - id: kimi\n    enabled: false\n",
+        "port: 8000\ndefault: kiro\nproviders:\n  - id: kiro\n    enabled: false\n",
     )
     .expect("write config");
 
@@ -1119,7 +1118,7 @@ fn example_config_loads() {
         .iter()
         .map(|entry| entry.id.as_str())
         .collect();
-    assert_eq!(ids, ["claude", "codex", "kimi", "kiro"]);
+    assert_eq!(ids, ["claude", "codex", "kiro"]);
 
     let claude = config.provider("claude").expect("claude is listed");
     assert!(claude.enabled);
@@ -1129,7 +1128,7 @@ fn example_config_loads() {
 
     // Every other entry ships disabled, with no model, its standard command
     // and the same timeout.
-    for (id, binary) in [("codex", "codex"), ("kimi", "kimi"), ("kiro", "kiro-cli")] {
+    for (id, binary) in [("codex", "codex"), ("kiro", "kiro-cli")] {
         let settings = config
             .provider(id)
             .unwrap_or_else(|| panic!("{id} is listed"));
@@ -1210,8 +1209,7 @@ fn empty_binary_is_rejected_at_the_value() {
 
 #[test]
 fn enabled_with_a_null_model_is_rejected_at_the_null_for_every_provider() {
-    // Kimi checks this itself, with its own message (tests/kimi.rs).
-    for (id, _) in PROVIDERS.into_iter().filter(|(id, _)| *id != "kimi") {
+    for (id, _) in PROVIDERS {
         assert_error(
             &format!(
                 "providers:\n  - id: {id}\n    enabled: true\n    model: null\n    binary: {id}\n    timeout_secs: 30\n"
@@ -1273,6 +1271,26 @@ fn removed_opencode_entry_says_so() {
         error.contains("\"opencode\" support was removed; delete this entry"),
         "{error}"
     );
+}
+
+#[test]
+fn removed_kimi_and_antigravity_entries_fail_at_their_id() {
+    // p16-provider-effort/D6: the plugins were deleted. A complete entry,
+    // enabled or not, still fails at its `id`, after a valid one.
+    for id in ["kimi", "antigravity"] {
+        for enabled in [true, false] {
+            assert_error(
+                &format!(
+                    "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: claude\n    timeout_secs: 30\n  - id: {id}\n    enabled: {enabled}\n    model: some-model\n    binary: {id}\n    timeout_secs: 30\n"
+                ),
+                7,
+                9,
+                &format!(
+                    "\"{id}\" provider was removed (p16-provider-effort/D6); delete this entry"
+                ),
+            );
+        }
+    }
 }
 
 #[test]

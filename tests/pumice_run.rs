@@ -740,13 +740,13 @@ fn forbidden_flow_combinations_are_rejected_at_load() {
 
 #[test]
 fn a_route_that_is_not_enabled_is_a_config_error() {
-    // The flow routes to kimi, but relay.yml only enables claude.
+    // The flow routes to kiro, but relay.yml only enables claude.
     let rig = make_rig(&Script {
         flows: "  - id: clean
     enabled: true
     transcription_model: turbo
     formatter: builtin:clean
-    relay_route: kimi
+    relay_route: kiro
 "
         .to_owned(),
         ..Script::default()

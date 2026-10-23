@@ -3,10 +3,8 @@
 //!
 //! [`detect`] resolves every registered provider through the same
 //! [`resolve_program`] path a formatting call uses, then — except for
-//! [`ProbeSpec::PathOnly`] providers, which are never spawned (the archived
-//! Antigravity adapter), and [`ProbeSpec::NotApplicable`] providers, which
-//! have no CLI and are never even resolved (the archived generic adapter) —
-//! runs a
+//! [`ProbeSpec::NotApplicable`] providers, which have no CLI and are never
+//! even resolved (the archived generic adapter) — runs a
 //! bounded `--version`-style probe through the shared
 //! [`ProcessRunner`], so a probe gets a fresh empty workspace, no shell,
 //! closed stdin and process-tree kill on timeout. The service runs detection
@@ -71,8 +69,7 @@ pub enum Version {
     /// The probe failed, timed out or printed nothing version-shaped. This
     /// never changes [`Found`]: the provider is still installed.
     Unavailable,
-    /// Deliberately not probed ([`ProbeSpec::PathOnly`] or
-    /// [`ProbeSpec::NotApplicable`]).
+    /// Deliberately not probed ([`ProbeSpec::NotApplicable`]).
     Skipped,
 }
 
@@ -80,7 +77,7 @@ pub enum Version {
 /// `pumice relay doctor` can show the whole registry — and returns the statuses in
 /// descriptor order. Probes run concurrently; each gets its own deadline of
 /// [`PROBE_TIMEOUT`]. Never spends quota and never spawns a
-/// [`ProbeSpec::PathOnly`] provider.
+/// [`ProbeSpec::NotApplicable`] provider.
 pub async fn detect(
     config: &Config,
     descriptors: &[ProviderDescriptor],
@@ -175,9 +172,7 @@ async fn detect_entries(
                 }
                 // Unreachable in practice: NotApplicable descriptors never
                 // resolve, so they never report Found. Nothing was probed.
-                (Found::Found(_), ProbeSpec::PathOnly | ProbeSpec::NotApplicable) => {
-                    Version::Skipped
-                }
+                (Found::Found(_), ProbeSpec::NotApplicable) => Version::Skipped,
                 (Found::NotApplicable, _) => Version::Skipped,
                 (Found::Missing, _) | (Found::UnsupportedShim, _) => Version::Unavailable,
             };

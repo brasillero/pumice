@@ -32,7 +32,7 @@ const FIXTURE_TRANSCRIPT: &str = "Reunião com a equipe às nove horas, não esq
 fn hermetic_yaml(port: u16) -> (Vec<FakeCli>, String) {
     let mut fakes: Vec<FakeCli> = Vec::new();
     let mut yaml = format!("port: {port}\nproviders:\n");
-    for id in ["claude", "codex", "kimi", "kiro"] {
+    for id in ["claude", "codex", "kiro"] {
         let fake = FakeCli::new(json!({}));
         yaml.push_str(&format!(
             "  - id: {id}\n    enabled: false\n    model: null\n    binary: '{}'\n    timeout_secs: 30\n",

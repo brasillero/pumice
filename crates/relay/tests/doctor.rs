@@ -57,7 +57,6 @@ fn full_fake_yaml() -> (Vec<FakeCli>, String) {
     for (id, model, stdout) in [
         ("claude", Some("haiku"), "2.1.288 (Claude Code)\n"),
         ("codex", Some("gpt-6.1-sol"), "codex-cli 0.160.0\n"),
-        ("kimi", None, "2.1.1\n"),
         ("kiro", None, "2.29.0\n"),
     ] {
         let fake = FakeCli::new(json!({"stdout": stdout, "exit_code": 0}));
@@ -96,10 +95,6 @@ fn all_enabled_found_lists_every_provider_and_the_summary() {
     );
     assert!(
         stdout.contains("codex: enabled, found 0.160.0\n"),
-        "stdout: {stdout}"
-    );
-    assert!(
-        stdout.contains("kimi: disabled, found 2.1.1\n"),
         "stdout: {stdout}"
     );
     assert!(
@@ -191,7 +186,7 @@ fn the_report_runs_without_a_configuration_file() {
 
     assert_eq!(output.status.code(), Some(0), "output: {text}");
     assert!(text.contains("config: none found"), "output: {text}");
-    for id in ["claude", "codex", "kimi", "kiro"] {
+    for id in ["claude", "codex", "kiro"] {
         assert!(
             text.contains(&format!("{id}: disabled, missing")),
             "output: {text}"
@@ -300,25 +295,25 @@ fn provider_without_login_check_is_a_usage_error() {
 }
 
 #[test]
-fn login_check_runs_kimi_through_the_fake() {
+fn login_check_runs_kiro_through_the_fake() {
     // One fake serves the probe and the call: `--version` gets the success
     // stream too, which only makes the parsed version unavailable.
     let fake = FakeCli::new(json!({
-        "stdout": support::fixture("kimi/success.jsonl"),
+        "stdout": support::fixture("kiro/success.jsonl"),
         "exit_code": 0,
     }));
     let (_dir, config_path) = write_config(&format!(
-        "providers:\n  - id: kimi\n    enabled: true\n    model: kimi-k2.7-code-highspeed\n    binary: '{}'\n    timeout_secs: 30\n",
+        "providers:\n  - id: kiro\n    enabled: true\n    model: claude-haiku-4.5\n    binary: '{}'\n    timeout_secs: 30\n",
         fake.path().display()
     ));
 
-    let output = run_doctor(&config_path, &["--login-check", "--provider", "kimi"]);
+    let output = run_doctor(&config_path, &["--login-check", "--provider", "kiro"]);
     let text = combined(&output);
 
     assert_eq!(output.status.code(), Some(0), "output: {text}");
     assert!(text.contains("login check: ok ("), "output: {text}");
     assert!(
-        !text.contains(FIXTURE_RESULT),
+        !text.contains("Bonjour"),
         "the response text must never be printed: {text}"
     );
     assert!(fake.report_path().exists(), "the fake ran");

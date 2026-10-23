@@ -21,7 +21,7 @@ pub struct UserPrompt<'a> {
 }
 
 /// The system prompt a plugin sends when the client sent none and its CLI
-/// cannot take an empty one (Codex and Kimi reject it). The only text
+/// cannot take an empty one (Codex rejects it). The only text
 /// Pumice ever adds, and only as a transport necessity (owner decision
 /// 2026-10-08).
 pub const NEUTRAL_SYSTEM_PROMPT: &str = "Follow the user's message.";

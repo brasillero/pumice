@@ -3,8 +3,8 @@
 //! Windows shim translation tests.
 //!
 //! The behavior every adapter must share — final-text parsing, restricted
-//! mode, fresh empty workspace, literal transport of the dictation (stdin, or
-//! a single argument for Kimi), system prompt separation, cleanup, error
+//! mode, fresh empty workspace, literal transport of the dictation on stdin,
+//! system prompt separation, cleanup, error
 //! classification, timeouts, invalid output, privacy and terminal failure (no
 //! other provider runs) — is asserted once, per adapter, by the contract
 //! suite in `tests/adapter_contract.rs` (`tests/support/adapter_contract.rs`).

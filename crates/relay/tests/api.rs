@@ -1252,14 +1252,12 @@ async fn start_missing_selected_server(
     codex_scenario: Value,
 ) -> MissingSelectedServer {
     let codex = FakeCli::new(codex_scenario);
-    let kimi = FakeCli::new(json!({}));
     let kiro = FakeCli::new(json!({}));
     let missing_dir = TempDir::new().expect("temp dir");
     let missing_binary = missing_dir.path().join("claude");
     let yaml = format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n  - id: kimi\n    enabled: false\n    binary: '{}'\n    model: null\n    timeout_secs: 30\n  - id: kiro\n    enabled: false\n    binary: '{}'\n    model: null\n    timeout_secs: 30\n{yaml_tail}",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n  - id: kiro\n    enabled: false\n    binary: '{}'\n    model: null\n    timeout_secs: 30\n{yaml_tail}",
         missing_binary.display(),
-        kimi.path().display(),
         kiro.path().display(),
     )
     .replace("{codex}", &codex.path().display().to_string());
@@ -1444,12 +1442,6 @@ fn hermetic_serve_yaml(port: u16, claude_scenario: Value) -> (FakeCli, Vec<FakeC
         claude.path().display(),
     );
     // Disabled providers, each at its own fake so detection never searches PATH.
-    let kimi = FakeCli::new(json!({}));
-    yaml.push_str(&format!(
-        "  - id: kimi\n    enabled: false\n    binary: '{}'\n    model: null\n    timeout_secs: 30\n",
-        kimi.path().display()
-    ));
-    fakes.push(kimi);
     let kiro = FakeCli::new(json!({}));
     yaml.push_str(&format!(
         "  - id: kiro\n    enabled: false\n    binary: '{}'\n    model: null\n    timeout_secs: 30\n",
@@ -1692,8 +1684,8 @@ fn serve_prints_one_status_line_per_enabled_provider() {
     }
     // A disabled provider is detected but gets no line.
     assert!(
-        !lines.iter().any(|line| line.starts_with("provider kimi:")),
-        "disabled provider kimi must get no line: {lines:?}"
+        !lines.iter().any(|line| line.starts_with("provider kiro:")),
+        "disabled provider kiro must get no line: {lines:?}"
     );
 }
 
