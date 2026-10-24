@@ -18,6 +18,8 @@
 - [x] Map the levels per provider, checked against the installed CLIs (Claude Code 2.1.306, codex-cli 0.163.0, kiro-cli 2.29.0; `docs/research/P16-provider-effort.md`): implemented in `2ac62d5`.
 - [x] Claude `thinking` (D5): `false` keeps `MAX_THINKING_TOKENS=0`, `true` lets Claude Code use its own thinking mode and budget (`2ac62d5`).
 - [x] Remove the cheapest-settings sentence from AGENTS.md (D3): replaced with the owner's wording in `7b4c5e2`.
+- [x] Refuse models the CLI is known to run without effort at the `effort` key (Codex review round 1): Claude Code's `claude-haiku-4-5`, `claude-sonnet-4-5`/`4-0`, `claude-opus-4-1`/`4-0`, `claude-3-…`; Kiro's `claude-haiku-4.5`; none for Codex. Aliases and unknown models are accepted (`d45280f`, evidence in `docs/research/P16-provider-effort.md`).
+- [x] Document Claude Code's effort caps (`maxEffortLevel`, per-model and organization caps) and how they clamp the mapped level (`03f8b61`).
 
 **Acceptance criteria.**
 - Startup refuses an unknown or unsupported value with the file and line.
@@ -55,6 +57,7 @@
 
 **To do.**
 - [ ] Owner: a few calls per provider with `medium` and `high`, and Claude Haiku with `thinking: true`, on a temporary config.
+- [ ] Owner: check which model the `haiku` alias reaches through the gateway. Claude Code 2.1.306 maps it to `claude-haiku-5-5` by default but to `claude-haiku-4-5` on gateway and cloud providers, and it drops effort for Haiku 4.5 without a warning (read from the binary, not run).
 
 **Acceptance criteria.**
 - Each combination answers, or its limitation is recorded in the research note.
