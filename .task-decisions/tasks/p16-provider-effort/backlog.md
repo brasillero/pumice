@@ -20,6 +20,8 @@
 - [x] Remove the cheapest-settings sentence from AGENTS.md (D3): replaced with the owner's wording in `7b4c5e2`.
 - [x] Refuse models the CLI is known to run without effort at the `effort` key (Codex review round 1): Claude Code's `claude-haiku-4-5`, `claude-sonnet-4-5`/`4-0`, `claude-opus-4-1`/`4-0`, `claude-3-…`; Kiro's `claude-haiku-4.5`; none for Codex. Aliases and unknown models are accepted (`d45280f`, evidence in `docs/research/P16-provider-effort.md`).
 - [x] Document Claude Code's effort caps (`maxEffortLevel`, per-model and organization caps) and how they clamp the mapped level (`03f8b61`).
+- [x] Match Claude models the way Claude Code 2.1.306 canonicalizes their names (Codex review round 2): `claude-sonnet-4`, `claude-opus-4` and their dated, Bedrock and Vertex ids are refused too; the four legacy Opus ids Claude Code remaps to the default Opus are accepted like aliases (`6b8decc`, port checked against the binary's own functions in `4f8647f`).
+- [x] Refuse `thinking: false` at its line for models that keep thinking on (`rejects_disabled_thinking`: Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5 and 5.1, Mythos 5.1), also on disabled entries (`6b8decc`).
 
 **Acceptance criteria.**
 - Startup refuses an unknown or unsupported value with the file and line.
@@ -109,6 +111,21 @@
 
 **Acceptance criteria.**
 - Both services start with the new binaries and answer as before.
+
+### #7 · To do · Owner: `haiku` with `thinking: false` in the shipped example
+- type: Alignment
+- area: config
+- origin: #1
+- ticket: —
+- created: 2026-10-24
+
+**Context.** `relay.example.yml`, which is also the first-start `relay.yml`, writes `model: haiku` with `thinking: false`. Claude Code 2.1.306 resolves `haiku` at run time: on a first-party login it is `claude-haiku-5-5`, which cannot turn thinking off (the CLI sends adaptive thinking whatever `MAX_THINKING_TOKENS` says); through a gateway or cloud provider it is `claude-haiku-4-5`, which drops `effort`. Pumice accepts aliases, so neither case is refused at startup. The example's values were left unchanged; a comment near `thinking` explains this (`6b8decc`, `docs/research/P16-provider-effort.md`, question 6).
+
+**To do.**
+- [ ] Owner: keep `haiku` with `thinking: false`, switch the example to `thinking: true`, or pin a model.
+
+**Where in the code.**
+- `relay.example.yml` (the `claude` entry)
 
 ## Deferred
 
