@@ -479,7 +479,10 @@ fn provider_settings(
     // has the key; the others reason through effort alone.
     let thinking = if descriptor.thinking_switch {
         match &raw.thinking {
-            Setting::Value(thinking) => Some(thinking.value),
+            Setting::Value(thinking) => {
+                locations.thinking = Some(thinking.referenced);
+                Some(thinking.value)
+            }
             Setting::Null(location) => {
                 return Err(ConfigError::at(
                     *location,

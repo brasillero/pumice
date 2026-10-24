@@ -85,6 +85,7 @@ pub struct ProviderLocations {
     pub model: Option<Location>,
     pub binary: Option<Location>,
     pub effort: Option<Location>,
+    pub thinking: Option<Location>,
 }
 
 /// What the registry knows about one provider.

@@ -545,17 +545,31 @@ fn every_provider_loads_every_effort_level() {
     }
 }
 
+/// The Claude cases follow Claude Code 2.1.306's model-name
+/// canonicalization (docs/research/P16-provider-effort.md).
 #[test]
 fn models_with_effort_or_unknown_ones_load_every_level() {
     for (id, model) in [
+        // Aliases, resolved at run time.
+        ("claude", "haiku"),
         ("claude", "sonnet"),
         ("claude", "opus"),
+        ("claude", "opusplan"),
         ("claude", "claude-haiku-5-5"),
         ("claude", "claude-sonnet-4-6"),
         ("claude", "claude-opus-4-5"),
-        // Only a `-` or `@` suffix continues a listed name.
+        ("claude", "claude-opus-4-5-20251101"),
+        // Versions of their own, not spellings of a listed one.
         ("claude", "claude-opus-4-10"),
         ("claude", "claude-haiku-4-50"),
+        ("claude", "claude-sonnet-4-1"),
+        ("claude", "claude-haiku-4"),
+        // Remapped to the default Opus on first-party and gateway setups,
+        // so resolved at run time like an alias.
+        ("claude", "claude-opus-4-0"),
+        ("claude", "claude-opus-4-1"),
+        ("claude", "claude-opus-4-20250514"),
+        ("claude", "claude-opus-4-1-20250805"),
         ("codex", "gpt-6-luna"),
         ("codex", "gpt-5.5"),
         ("kiro", "claude-sonnet-4.6"),
@@ -565,7 +579,7 @@ fn models_with_effort_or_unknown_ones_load_every_level() {
     ] {
         for effort in Effort::ALL {
             let thinking = if id == "claude" {
-                "    thinking: false\n"
+                "    thinking: true\n"
             } else {
                 ""
             };
@@ -581,50 +595,35 @@ fn models_with_effort_or_unknown_ones_load_every_level() {
 
 /// p16-provider-effort/D2: a model the CLI is known to run without effort
 /// ignores every level, so each one is refused at the `effort` key, on a
-/// disabled entry too.
+/// disabled entry too. Claude models match in every spelling Claude Code
+/// 2.1.306 canonicalizes to a listed name.
 #[test]
 fn models_without_effort_are_refused_at_the_effort_key() {
+    let claude = "Claude Code 2.1.306 drops effort for it";
     for (id, model, why) in [
         (
             "kiro",
             "claude-haiku-4.5",
             "kiro-cli 2.29.0 ignores --effort for it: \"model does not support additional fields\"",
         ),
+        ("claude", "claude-haiku-4-5", claude),
+        ("claude", "claude-haiku-4-5-20251001", claude),
+        ("claude", "claude-haiku-4-5@20251001", claude),
         (
             "claude",
-            "claude-haiku-4-5",
-            "Claude Code 2.1.306 drops effort for it",
+            "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            claude,
         ),
-        (
-            "claude",
-            "claude-haiku-4-5-20251001",
-            "Claude Code 2.1.306 drops effort for it",
-        ),
-        (
-            "claude",
-            "Claude-Sonnet-4-5[1m]",
-            "Claude Code 2.1.306 drops effort for it",
-        ),
-        (
-            "claude",
-            "claude-sonnet-4-0@20250514",
-            "Claude Code 2.1.306 drops effort for it",
-        ),
-        (
-            "claude",
-            "claude-opus-4-0",
-            "Claude Code 2.1.306 drops effort for it",
-        ),
-        (
-            "claude",
-            "claude-opus-4-1",
-            "Claude Code 2.1.306 drops effort for it",
-        ),
-        (
-            "claude",
-            "claude-3-5-haiku-20241022",
-            "Claude Code 2.1.306 drops effort for it",
-        ),
+        ("claude", "Claude-Sonnet-4-5[1m]", claude),
+        ("claude", "claude-sonnet-4-0", claude),
+        ("claude", "claude-sonnet-4", claude),
+        ("claude", "claude-sonnet-4-20250514", claude),
+        ("claude", "claude-sonnet-4-0@20250514", claude),
+        ("claude", "claude-opus-4", claude),
+        ("claude", "claude-opus-4@20250514", claude),
+        ("claude", "claude-opus-4-1@20250805", claude),
+        ("claude", "claude-3-5-haiku-20241022", claude),
+        ("claude", "claude-3-opus", claude),
     ] {
         for enabled in ["true", "false"] {
             for effort in Effort::ALL {
@@ -647,6 +646,70 @@ fn models_without_effort_are_refused_at_the_effort_key() {
                 );
             }
         }
+    }
+}
+
+/// Models whose baked capabilities in Claude Code 2.1.306 include
+/// `rejects_disabled_thinking`: the CLI sends adaptive thinking for them
+/// even with `MAX_THINKING_TOKENS=0`, so `thinking: false` is refused at its
+/// line, on a disabled entry too.
+#[test]
+fn thinking_off_is_refused_for_models_that_keep_it_on() {
+    for model in [
+        "claude-haiku-5-5",
+        "Claude-Haiku-5-5[1m]",
+        "claude-haiku-5-5-20260101",
+        "us.anthropic.claude-haiku-5-5",
+        "claude-sonnet-5-5",
+        "claude-opus-5-5",
+        "claude-fable-5",
+        "claude-fable-5-0",
+        "claude-fable-5-1",
+        "claude-mythos-5-1",
+    ] {
+        for enabled in ["true", "false"] {
+            for effort in Effort::ALL {
+                let text = format!(
+                    "providers:\n  - id: claude\n    enabled: {enabled}\n    model: {model}\n    binary: claude\n    timeout_secs: 30\n    effort: {}\n    thinking: false\n",
+                    effort.as_str()
+                );
+                assert_error(
+                    &text,
+                    8,
+                    15,
+                    &format!(
+                        "providers entry \"claude\".thinking: model \"{model}\" cannot turn thinking off (Claude Code 2.1.306 sends adaptive thinking for it even with thinking off), so \"false\" cannot be honoured; write \"thinking: true\" or choose a model that can turn thinking off"
+                    ),
+                );
+                let config = load_text(&text.replace("thinking: false", "thinking: true"))
+                    .unwrap_or_else(|error| panic!("{model}: {error}"));
+                assert_eq!(claude(&config).thinking, Some(true), "{model}");
+            }
+        }
+    }
+}
+
+/// `thinking: false` stays valid where Claude Code can turn thinking off,
+/// and for spellings it resolves at run time (aliases, remapped Opus).
+#[test]
+fn thinking_off_loads_for_models_that_can_turn_it_off() {
+    for model in [
+        "haiku",
+        "sonnet",
+        "opus",
+        "claude-sonnet-4-6",
+        "claude-sonnet-5",
+        "claude-opus-4-8",
+        "claude-opus-5",
+        "claude-mythos-5",
+        "claude-opus-4-1",
+        "glm-5",
+    ] {
+        let config = load_text(&format!(
+            "providers:\n  - id: claude\n    enabled: true\n    model: {model}\n    binary: claude\n    timeout_secs: 30\n    effort: high\n    thinking: false\n"
+        ))
+        .unwrap_or_else(|error| panic!("{model}: {error}"));
+        assert_eq!(claude(&config).thinking, Some(false), "{model}");
     }
 }
 
