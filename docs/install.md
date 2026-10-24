@@ -240,11 +240,15 @@ help, version and optional diagnostic commands do not create files.
 `medium` or `high`, mapped to the CLI's own setting (Claude and Kiro
 `--effort`, Codex `model_reasoning_effort`). Higher effort can follow the
 app's prompt more closely, but answers take longer and use more of your
-plan. Claude's `thinking: false` turns thinking off where the model allows
-it; `thinking: true` lets Claude Code think the way it does by default for
-that model. Every other CLI setting stays the cheapest one, and fast or
-priority modes stay off. The other providers have no `thinking` key: they
-reason through effort alone.
+plan. A model the CLI is known to run without effort (Claude Code's
+`claude-haiku-4-5`, `claude-sonnet-4-5`, `claude-opus-4-1` and older, Kiro's
+`claude-haiku-4.5`) is refused at startup with the file and line, because it
+would ignore every level; an alias such as `haiku`, or a model Pumice knows
+nothing about, is accepted. Claude's `thinking: false` turns thinking off
+where the model allows it; `thinking: true` lets Claude Code think the way
+it does by default for that model. Every other CLI setting stays the
+cheapest one, and fast or priority modes stay off. The other providers have
+no `thinking` key: they reason through effort alone.
 
 `max_parallel` (1 to 32) sets how many requests may run their provider at
 the same time. Extra requests wait in line, first come first served; a
