@@ -58,8 +58,11 @@ max_parallel: 4
 # `medium` or `high`, mapped to the CLI's own setting (Claude and Kiro
 # `--effort`, Codex `model_reasoning_effort`). Higher effort can follow the
 # app's prompt more closely but takes longer and uses more of your quota.
-# A model without effort levels ignores it. Every other CLI setting stays
-# the cheapest the CLI offers, and fast/priority modes stay off.
+# A model known to have no effort (Claude `claude-haiku-4-5`, Kiro
+# `claude-haiku-4.5`, …) is refused at startup, since no level would be
+# honoured; an alias or an unknown model is accepted. Every other CLI
+# setting stays the cheapest the CLI offers, and fast/priority modes stay
+# off.
 providers:
   # Claude Code, enabled.
   - id: claude
@@ -94,7 +97,7 @@ providers:
   # shows the model ids.
   - id: kiro
     enabled: false
-    model: null # e.g. claude-haiku-4.5
+    model: null # e.g. glm-5
     binary: kiro-cli
     timeout_secs: 30
     effort: low

@@ -451,17 +451,21 @@ fn provider_settings(
         ));
     }
     let effort = match &raw.effort {
-        Setting::Value(effort) => Effort::parse(&effort.value).ok_or_else(|| {
-            ConfigError::at(
-                effort.referenced,
-                format!(
-                    "{base}.effort must be low, medium or high, found \"{}\"",
-                    effort.value
-                ),
-            )
-        })?,
-        // Unlike `model`, every provider takes every level, so a disabled
-        // entry writes one too.
+        Setting::Value(effort) => {
+            locations.effort = Some(effort.referenced);
+            Effort::parse(&effort.value).ok_or_else(|| {
+                ConfigError::at(
+                    effort.referenced,
+                    format!(
+                        "{base}.effort must be low, medium or high, found \"{}\"",
+                        effort.value
+                    ),
+                )
+            })?
+        }
+        // Unlike `model`, every provider takes every level (only models
+        // known to have no effort are refused, by the descriptor), so a
+        // disabled entry writes one too.
         Setting::Null(location) => {
             return Err(ConfigError::at(
                 *location,

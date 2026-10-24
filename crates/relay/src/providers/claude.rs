@@ -23,7 +23,7 @@ use serde_json::Value;
 use super::cli::{CliAdapter, CliProvider};
 use super::{
     Effort, FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError,
-    ProviderErrorCode, ProviderSettings, validate_settings_noop,
+    ProviderErrorCode, ProviderLocations, ProviderSettings, effort_unsupported,
 };
 use crate::config::ConfigError;
 use crate::process::{Argument, CliInvocation, ControlFile, ProcessOutput, ProcessRunner, ProgramSpec};
@@ -43,12 +43,54 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: ID,
     build,
     thinking_switch: true,
-    validate_settings: validate_settings_noop,
+    validate_settings,
     probe: ProbeSpec::Version(&["--version"]),
     default_binary: DEFAULT_BINARY,
     npm_entrypoint: Some(NPM_ENTRYPOINT),
     install_hint: "npm install -g @anthropic-ai/claude-code",
 };
+
+/// Models Claude Code 2.1.306 sends no effort for: its effort check is false
+/// for them (with the whole `claude-3-` family) and the request builder then
+/// drops `effort` without a warning (docs/research/P16-provider-effort.md).
+/// Each matches with a `-` or `@` suffix too (dated ids such as
+/// `claude-haiku-4-5-20251001`). Every other model is accepted, including
+/// the aliases (`haiku`, `sonnet`, …) that the CLI resolves at run time.
+const MODELS_WITHOUT_EFFORT: [&str; 5] = [
+    "claude-opus-4-0",
+    "claude-opus-4-1",
+    "claude-sonnet-4-0",
+    "claude-sonnet-4-5",
+    "claude-haiku-4-5",
+];
+
+fn validate_settings(
+    settings: &ProviderSettings,
+    locations: &ProviderLocations,
+) -> Result<(), ConfigError> {
+    if has_no_effort(&settings.model) {
+        return Err(effort_unsupported(
+            ID,
+            settings,
+            locations,
+            "Claude Code 2.1.306 drops effort for it",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `model` is one of [`MODELS_WITHOUT_EFFORT`], compared like the
+/// CLI does: case-insensitively and without a `[1m]` suffix.
+fn has_no_effort(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    let model = model.strip_suffix("[1m]").unwrap_or(&model);
+    model.starts_with("claude-3-")
+        || MODELS_WITHOUT_EFFORT.iter().any(|name| {
+            model
+                .strip_prefix(name)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(['-', '@']))
+        })
+}
 
 fn build(
     settings: &ProviderSettings,

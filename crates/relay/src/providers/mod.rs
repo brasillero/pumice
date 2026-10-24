@@ -84,6 +84,7 @@ pub struct ProviderLocations {
     pub enabled: Option<Location>,
     pub model: Option<Location>,
     pub binary: Option<Location>,
+    pub effort: Option<Location>,
 }
 
 /// What the registry knows about one provider.
@@ -191,6 +192,29 @@ pub fn validate_settings_noop(
     Ok(())
 }
 
+/// Refuses `effort` on a model the provider's CLI is known to run without
+/// reasoning effort: it ignores every level, so none can be honoured
+/// (p16-provider-effort/D2). `why` names the evidence. Points at `effort`,
+/// or the provider's entry when the loader had no location for it.
+pub fn effort_unsupported(
+    id: &str,
+    settings: &ProviderSettings,
+    locations: &ProviderLocations,
+    why: &str,
+) -> ConfigError {
+    ConfigError::at(
+        locations
+            .effort
+            .or(locations.provider)
+            .unwrap_or(Location::UNKNOWN),
+        format!(
+            "providers entry \"{id}\".effort: model \"{}\" has no reasoning effort ({why}), so \"{}\" cannot be honoured, nor can any other level; choose a model with reasoning effort",
+            settings.model,
+            settings.effort.as_str()
+        ),
+    )
+}
+
 /// Builds every enabled provider in `config`, in configuration (list) order.
 pub fn build_from_config(
     config: &Config,
@@ -273,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_and_codex_accept_any_explicit_model() {
+    fn claude_and_codex_accept_an_unknown_model() {
         for id in ["claude", "codex"] {
             let d = descriptor(id).expect("registered");
             assert!(

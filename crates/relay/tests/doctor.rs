@@ -304,7 +304,7 @@ fn login_check_runs_kiro_through_the_fake() {
         "exit_code": 0,
     }));
     let (_dir, config_path) = write_config(&format!(
-        "providers:\n  - id: kiro\n    enabled: true\n    model: claude-haiku-4.5\n    binary: '{}'\n    timeout_secs: 30\n    effort: low\n",
+        "providers:\n  - id: kiro\n    enabled: true\n    model: glm-5\n    binary: '{}'\n    timeout_secs: 30\n    effort: low\n",
         fake.path().display()
     ));
 

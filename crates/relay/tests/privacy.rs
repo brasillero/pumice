@@ -477,7 +477,7 @@ fn hermetic_serve_yaml(port: u16, debug_log: &str) -> (Vec<FakeCli>, String) {
     for (id, model) in [
         ("claude", "haiku"),
         ("codex", "gpt-6.1-sol"),
-        ("kiro", "claude-haiku-4.5"),
+        ("kiro", "glm-5"),
     ] {
         let fake = FakeCli::new(json!({}));
         yaml.push_str(&format!(

@@ -96,13 +96,14 @@ fn claude(config: &Config) -> &ProviderSettings {
     config.provider("claude").expect("claude is configured")
 }
 
-/// Every active provider ID with a model it accepts. The common entry rules
+/// Every active provider ID with a model it accepts at every effort level
+/// (Kiro's `glm-5` has no known effort limitation). The common entry rules
 /// below run over this table; provider-specific validation stays in each
 /// provider's own suite.
 const PROVIDERS: [(&str, &str); 3] = [
     ("claude", "haiku"),
     ("codex", "gpt-6.1-sol"),
-    ("kiro", "claude-haiku-4.5"),
+    ("kiro", "glm-5"),
 ];
 
 fn no_env(_: &str) -> Option<OsString> {
@@ -518,6 +519,9 @@ fn enabled_entry_with_a_model_loads_for_every_provider() {
     }
 }
 
+/// Models with no known effort limitation take every level: the aliases
+/// Claude Code resolves at run time, models whose effort is recorded, and
+/// models nothing is known about.
 #[test]
 fn every_provider_loads_every_effort_level() {
     for (id, model) in PROVIDERS {
@@ -537,6 +541,111 @@ fn every_provider_loads_every_effort_level() {
             .unwrap_or_else(|error| panic!("{id} {level}: {error}"));
             let settings = config.provider(id).expect("provider configured");
             assert_eq!(settings.effort, effort, "{id} {level}");
+        }
+    }
+}
+
+#[test]
+fn models_with_effort_or_unknown_ones_load_every_level() {
+    for (id, model) in [
+        ("claude", "sonnet"),
+        ("claude", "opus"),
+        ("claude", "claude-haiku-5-5"),
+        ("claude", "claude-sonnet-4-6"),
+        ("claude", "claude-opus-4-5"),
+        // Only a `-` or `@` suffix continues a listed name.
+        ("claude", "claude-opus-4-10"),
+        ("claude", "claude-haiku-4-50"),
+        ("codex", "gpt-6-luna"),
+        ("codex", "gpt-5.5"),
+        ("kiro", "claude-sonnet-4.6"),
+        ("kiro", "auto"),
+        // Kiro ids are compared verbatim: this is Claude Code's spelling.
+        ("kiro", "claude-haiku-4-5"),
+    ] {
+        for effort in Effort::ALL {
+            let thinking = if id == "claude" {
+                "    thinking: false\n"
+            } else {
+                ""
+            };
+            let config = load_text(&format!(
+                "providers:\n  - id: {id}\n    enabled: true\n    model: {model}\n    binary: {id}\n    timeout_secs: 30\n    effort: {}\n{thinking}",
+                effort.as_str()
+            ))
+            .unwrap_or_else(|error| panic!("{id} {model} {effort:?}: {error}"));
+            assert_eq!(config.provider(id).unwrap().effort, effort);
+        }
+    }
+}
+
+/// p16-provider-effort/D2: a model the CLI is known to run without effort
+/// ignores every level, so each one is refused at the `effort` key, on a
+/// disabled entry too.
+#[test]
+fn models_without_effort_are_refused_at_the_effort_key() {
+    for (id, model, why) in [
+        (
+            "kiro",
+            "claude-haiku-4.5",
+            "kiro-cli 2.29.0 ignores --effort for it: \"model does not support additional fields\"",
+        ),
+        (
+            "claude",
+            "claude-haiku-4-5",
+            "Claude Code 2.1.306 drops effort for it",
+        ),
+        (
+            "claude",
+            "claude-haiku-4-5-20251001",
+            "Claude Code 2.1.306 drops effort for it",
+        ),
+        (
+            "claude",
+            "Claude-Sonnet-4-5[1m]",
+            "Claude Code 2.1.306 drops effort for it",
+        ),
+        (
+            "claude",
+            "claude-sonnet-4-0@20250514",
+            "Claude Code 2.1.306 drops effort for it",
+        ),
+        (
+            "claude",
+            "claude-opus-4-0",
+            "Claude Code 2.1.306 drops effort for it",
+        ),
+        (
+            "claude",
+            "claude-opus-4-1",
+            "Claude Code 2.1.306 drops effort for it",
+        ),
+        (
+            "claude",
+            "claude-3-5-haiku-20241022",
+            "Claude Code 2.1.306 drops effort for it",
+        ),
+    ] {
+        for enabled in ["true", "false"] {
+            for effort in Effort::ALL {
+                let thinking = if id == "claude" {
+                    "    thinking: false\n"
+                } else {
+                    ""
+                };
+                assert_error(
+                    &format!(
+                        "providers:\n  - id: {id}\n    enabled: {enabled}\n    model: {model}\n    binary: {id}\n    timeout_secs: 30\n    effort: {}\n{thinking}",
+                        effort.as_str()
+                    ),
+                    7,
+                    13,
+                    &format!(
+                        "providers entry \"{id}\".effort: model \"{model}\" has no reasoning effort ({why}), so \"{}\" cannot be honoured, nor can any other level; choose a model with reasoning effort",
+                        effort.as_str()
+                    ),
+                );
+            }
         }
     }
 }

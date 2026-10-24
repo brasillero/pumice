@@ -43,7 +43,7 @@ use serde_json::{Value, json};
 use super::cli::{CliAdapter, CliProvider};
 use super::{
     Effort, FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError,
-    ProviderErrorCode, ProviderSettings, validate_settings_noop,
+    ProviderErrorCode, ProviderLocations, ProviderSettings, effort_unsupported,
 };
 use crate::config::ConfigError;
 use crate::process::{
@@ -73,12 +73,36 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: ID,
     build,
     thinking_switch: false,
-    validate_settings: validate_settings_noop,
+    validate_settings,
     probe: ProbeSpec::Version(&["--version"]),
     default_binary: DEFAULT_BINARY,
     npm_entrypoint: None,
     install_hint: "curl -fsSL https://cli.kiro.dev/install | bash",
 };
+
+/// Models kiro-cli 2.29.0 runs without effort: it prints `failed to set
+/// effort '<level>': model does not support additional fields` and runs, and
+/// the run's metadata says `reasoning: {support: "unavailable", effortLevels:
+/// []}` (S2.14 live calls, docs/research/S2.14-kiro-plugin.md). Kiro's
+/// service reports each model's levels only during a run, so every other
+/// model is accepted. Ids are compared verbatim, as `--list-models` prints
+/// them.
+const MODELS_WITHOUT_EFFORT: [&str; 1] = ["claude-haiku-4.5"];
+
+fn validate_settings(
+    settings: &ProviderSettings,
+    locations: &ProviderLocations,
+) -> Result<(), ConfigError> {
+    if MODELS_WITHOUT_EFFORT.contains(&settings.model.as_str()) {
+        return Err(effort_unsupported(
+            ID,
+            settings,
+            locations,
+            "kiro-cli 2.29.0 ignores --effort for it: \"model does not support additional fields\"",
+        ));
+    }
+    Ok(())
+}
 
 fn build(
     settings: &ProviderSettings,

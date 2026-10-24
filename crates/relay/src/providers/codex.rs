@@ -48,6 +48,9 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: ID,
     build,
     thinking_switch: false,
+    // Every model in codex-cli 0.163.0's bundled catalog takes low, medium
+    // and high, so no model is refused for its effort
+    // (docs/research/P16-provider-effort.md).
     validate_settings: validate_settings_noop,
     probe: ProbeSpec::Version(&["--version"]),
     default_binary: DEFAULT_BINARY,
