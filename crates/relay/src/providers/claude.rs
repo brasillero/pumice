@@ -6,8 +6,8 @@
 //! envelope whose `result` holds the text.
 //!
 //! Effort and thinking come from `relay.yml` (p16-provider-effort/D4, D5);
-//! both were checked against the installed 2.1.306
-//! (docs/research/P16-provider-effort.md). `--effort` takes the level, and the same level
+//! both were checked against 2.1.306 and re-checked against the installed
+//! 2.1.310 (docs/research/P16-provider-effort.md). `--effort` takes the level, and the same level
 //! is pinned in `CLAUDE_CODE_EFFORT_LEVEL`, which overrides `--effort` when
 //! inherited. `thinking: false` sets `MAX_THINKING_TOKENS=0`; `thinking:
 //! true` clears it and sets `alwaysThinkingEnabled`, so the CLI uses its own
@@ -65,7 +65,7 @@ fn validate_settings(
             ID,
             settings,
             locations,
-            "Claude Code 2.1.306 drops effort for it",
+            "Claude Code 2.1.310 drops effort for it",
         ));
     }
     if settings.thinking == Some(false) && models::keeps_thinking_on(&settings.model) {
@@ -75,7 +75,7 @@ fn validate_settings(
                 .or(locations.provider)
                 .unwrap_or(Location::UNKNOWN),
             format!(
-                "providers entry \"{ID}\".thinking: model \"{}\" cannot turn thinking off (Claude Code 2.1.306 sends adaptive thinking for it even with thinking off), so \"false\" cannot be honoured; write \"thinking: true\" or choose a model that can turn thinking off",
+                "providers entry \"{ID}\".thinking: model \"{}\" cannot turn thinking off (Claude Code 2.1.310 sends adaptive thinking for it even with thinking off), so \"false\" cannot be honoured; write \"thinking: true\" or choose a model that can turn thinking off",
                 settings.model
             ),
         ));

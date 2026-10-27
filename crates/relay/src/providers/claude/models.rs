@@ -1,9 +1,11 @@
-//! Claude Code 2.1.306's model facts that `relay.yml` can contradict.
+//! Claude Code 2.1.310's model facts that `relay.yml` can contradict.
 //!
 //! Claude Code compares a model with its tables only after canonicalizing
 //! its name (`claude-opus-4` and `claude-opus-4-20250514` both become
 //! `claude-opus-4-0`), so [`canonical`] reproduces that step: a port of the
 //! binary's `NU` and the helpers it calls (`Ac`, `u`, `_2o`, `LU`, `Mv`).
+//! The names are 2.1.306's, where the port was made; 2.1.310 renames them
+//! and keeps the same code.
 //! The rules, the excerpts and the cases checked against the binary's own
 //! code are in docs/research/P16-provider-effort.md.
 
@@ -103,8 +105,10 @@ const FALLBACK: [Rule; 25] = [
 /// Spellings `Dt` (the `--model` resolution) replaces with the default
 /// Opus on first-party, gateway and Anthropic cloud setups, unless
 /// `CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP` is set. Like an alias, which
-/// model they reach depends on the account and the environment, so neither
-/// check refuses them.
+/// model they reach depends on the account and the environment, so the
+/// effort check does not refuse them; the thinking check needs no exception,
+/// since they canonicalize to `claude-opus-4-0` and `claude-opus-4-1`, which
+/// can turn thinking off.
 const REMAPPED: [&str; 4] = [
     "claude-opus-4-20250514",
     "claude-opus-4-1-20250805",
@@ -112,7 +116,7 @@ const REMAPPED: [&str; 4] = [
     "claude-opus-4-1",
 ];
 
-/// Whether Claude Code 2.1.306 sends no effort for `model`.
+/// Whether Claude Code 2.1.310 sends no effort for `model`.
 pub(super) fn has_no_effort(model: &str) -> bool {
     if remapped(model) {
         return false;
@@ -121,12 +125,9 @@ pub(super) fn has_no_effort(model: &str) -> bool {
     name.contains("claude-3-") || NO_EFFORT.contains(&name.as_str())
 }
 
-/// Whether Claude Code 2.1.306 keeps thinking on for `model` whatever
+/// Whether Claude Code 2.1.310 keeps thinking on for `model` whatever
 /// `MAX_THINKING_TOKENS` says.
 pub(super) fn keeps_thinking_on(model: &str) -> bool {
-    if remapped(model) {
-        return false;
-    }
     let name = canonical(model).replace("[1m]", "");
     THINKING_ALWAYS_ON.contains(&name.as_str())
 }
@@ -445,6 +446,7 @@ mod tests {
             " claude-opus-4-1-20250805[1m] ",
         ] {
             assert!(!has_no_effort(model), "{model}");
+            assert!(!keeps_thinking_on(model), "{model}");
         }
         for model in ["claude-opus-4", "claude-opus-4-0@20250514", "claude-opus-4-1-fast"] {
             assert!(has_no_effort(model), "{model}");

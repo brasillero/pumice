@@ -545,7 +545,7 @@ fn every_provider_loads_every_effort_level() {
     }
 }
 
-/// The Claude cases follow Claude Code 2.1.306's model-name
+/// The Claude cases follow Claude Code 2.1.310's model-name
 /// canonicalization (docs/research/P16-provider-effort.md).
 #[test]
 fn models_with_effort_or_unknown_ones_load_every_level() {
@@ -557,6 +557,8 @@ fn models_with_effort_or_unknown_ones_load_every_level() {
         ("claude", "opusplan"),
         ("claude", "claude-haiku-5-5"),
         ("claude", "claude-sonnet-4-6"),
+        // No effort capability in the catalog: Claude Code sends effort or
+        // drops it depending on the API provider.
         ("claude", "claude-opus-4-5"),
         ("claude", "claude-opus-4-5-20251101"),
         // Versions of their own, not spellings of a listed one.
@@ -596,10 +598,10 @@ fn models_with_effort_or_unknown_ones_load_every_level() {
 /// p16-provider-effort/D2: a model the CLI is known to run without effort
 /// ignores every level, so each one is refused at the `effort` key, on a
 /// disabled entry too. Claude models match in every spelling Claude Code
-/// 2.1.306 canonicalizes to a listed name.
+/// 2.1.310 canonicalizes to a listed name.
 #[test]
 fn models_without_effort_are_refused_at_the_effort_key() {
-    let claude = "Claude Code 2.1.306 drops effort for it";
+    let claude = "Claude Code 2.1.310 drops effort for it";
     for (id, model, why) in [
         (
             "kiro",
@@ -649,7 +651,7 @@ fn models_without_effort_are_refused_at_the_effort_key() {
     }
 }
 
-/// Models whose baked capabilities in Claude Code 2.1.306 include
+/// Models whose baked capabilities in Claude Code 2.1.310 include
 /// `rejects_disabled_thinking`: the CLI sends adaptive thinking for them
 /// even with `MAX_THINKING_TOKENS=0`, so `thinking: false` is refused at its
 /// line, on a disabled entry too.
@@ -678,7 +680,7 @@ fn thinking_off_is_refused_for_models_that_keep_it_on() {
                     8,
                     15,
                     &format!(
-                        "providers entry \"claude\".thinking: model \"{model}\" cannot turn thinking off (Claude Code 2.1.306 sends adaptive thinking for it even with thinking off), so \"false\" cannot be honoured; write \"thinking: true\" or choose a model that can turn thinking off"
+                        "providers entry \"claude\".thinking: model \"{model}\" cannot turn thinking off (Claude Code 2.1.310 sends adaptive thinking for it even with thinking off), so \"false\" cannot be honoured; write \"thinking: true\" or choose a model that can turn thinking off"
                     ),
                 );
                 let config = load_text(&text.replace("thinking: false", "thinking: true"))
@@ -702,7 +704,10 @@ fn thinking_off_loads_for_models_that_can_turn_it_off() {
         "claude-opus-4-8",
         "claude-opus-5",
         "claude-mythos-5",
+        "claude-opus-4-0",
         "claude-opus-4-1",
+        "claude-opus-4-20250514",
+        "claude-opus-4-1-20250805",
         "glm-5",
     ] {
         let config = load_text(&format!(
