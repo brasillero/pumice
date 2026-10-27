@@ -22,6 +22,7 @@
 - [x] Document Claude Code's effort caps (`maxEffortLevel`, per-model and organization caps) and how they clamp the mapped level (`03f8b61`).
 - [x] Match Claude models the way Claude Code 2.1.306 canonicalizes their names (Codex review round 2): `claude-sonnet-4`, `claude-opus-4` and their dated, Bedrock and Vertex ids are refused too; the four legacy Opus ids Claude Code remaps to the default Opus are accepted like aliases (`6b8decc`, port checked against the binary's own functions in `4f8647f`).
 - [x] Refuse `thinking: false` at its line for models that keep thinking on (`rejects_disabled_thinking`: Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5 and 5.1, Mythos 5.1), also on disabled entries (`6b8decc`).
+- [x] Re-check against the installed Claude Code 2.1.310 (Codex review round 3): same code under new names, identical catalog, no difference on the canonicalization corpus; messages and tests name 2.1.310 (`684ddda`), evidence, `claude-opus-4-5`'s provider-dependent effort and the gateway condition in the research note (`2ca20fb`).
 
 **Acceptance criteria.**
 - Startup refuses an unknown or unsupported value with the file and line.
@@ -59,7 +60,7 @@
 
 **To do.**
 - [ ] Owner: a few calls per provider with `medium` and `high`, and Claude Haiku with `thinking: true`, on a temporary config.
-- [ ] Owner: check which model the `haiku` alias reaches through the gateway. Claude Code 2.1.306 maps it to `claude-haiku-5-5` by default but to `claude-haiku-4-5` on gateway and cloud providers, and it drops effort for Haiku 4.5 without a warning (read from the binary, not run).
+- [ ] Owner: check which model the `haiku` alias reaches through CLIProxyAPI. Claude Code 2.1.310 maps it to `claude-haiku-5-5` on first-party setups, which include a proxy set only through `ANTHROPIC_BASE_URL`, and to `claude-haiku-4-5`, whose effort it drops without a warning, in its gateway mode (`CLAUDE_CODE_USE_GATEWAY`) and on cloud providers (read from the binary, not run).
 
 **Acceptance criteria.**
 - Each combination answers, or its limitation is recorded in the research note.
@@ -119,10 +120,11 @@
 - ticket: —
 - created: 2026-10-24
 
-**Context.** `relay.example.yml`, which is also the first-start `relay.yml`, writes `model: haiku` with `thinking: false`. Claude Code 2.1.306 resolves `haiku` at run time: on a first-party login it is `claude-haiku-5-5`, which cannot turn thinking off (the CLI sends adaptive thinking whatever `MAX_THINKING_TOKENS` says); through a gateway or cloud provider it is `claude-haiku-4-5`, which drops `effort`. Pumice accepts aliases, so neither case is refused at startup. The example's values were left unchanged; a comment near `thinking` explains this (`6b8decc`, `docs/research/P16-provider-effort.md`, question 6).
+**Context.** `relay.example.yml`, which is also the first-start `relay.yml`, writes `model: haiku` with `thinking: false`. Claude Code 2.1.310 resolves `haiku` at run time: on a first-party setup, which includes a proxy set only through `ANTHROPIC_BASE_URL`, it is `claude-haiku-5-5`, which cannot turn thinking off (the CLI sends adaptive thinking whatever `MAX_THINKING_TOKENS` says); in its gateway mode or on a cloud provider it is `claude-haiku-4-5`, which drops `effort`. The same holds for `opus` and `sonnet` (Opus 5.5 and Sonnet 5.5 on first-party) and for the four legacy Opus ids it remaps to the default Opus (`claude-opus-4-0`, `claude-opus-4-1`, `claude-opus-4-20250514`, `claude-opus-4-1-20250805`). Pumice accepts aliases and the remapped ids, so none of these is refused at startup. The example's values were left unchanged; a comment near `thinking` explains this (`6b8decc`, `2ca20fb`, `docs/research/P16-provider-effort.md`, question 6).
 
 **To do.**
 - [ ] Owner: keep `haiku` with `thinking: false`, switch the example to `thinking: true`, or pin a model.
+- [ ] Owner: whether aliases and the remapped Opus ids stay accepted with `thinking: false`.
 
 **Where in the code.**
 - `relay.example.yml` (the `claude` entry)
