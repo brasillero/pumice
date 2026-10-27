@@ -2,12 +2,84 @@
 
 ## Active
 
-### #1 · In progress · Add the common effort setting to the YAML
+## Deferred
+
+### #3 · Deferred · Owner: live check of the new effort levels and Claude thinking
+- type: Task
+- area: providers
+- origin: #1
+- ticket: —
+- created: 2026-10-23
+- reason: needs real calls the owner runs (quota)
+
+**Context.** The mapping was checked against the installed CLIs' help and code only; no AI call was made (AGENTS.md: real calls cost quota). `medium`, `high` and `thinking: true` have never run through Pumice. Claude Code's code warns that some efforts need thinking on, with `high` as its fallback, so `high` with `thinking: false` should work but is unverified (`docs/research/P16-provider-effort.md`).
+
+**To do.**
+- [ ] Owner: a few calls per provider with `medium` and `high`, and Claude Haiku with `thinking: true`, on a temporary config.
+- [ ] Owner: check which model the `haiku` alias reaches through CLIProxyAPI. Claude Code 2.1.310 maps it to `claude-haiku-5-5` on first-party setups, which include a proxy set only through `ANTHROPIC_BASE_URL`, and to `claude-haiku-4-5`, whose effort it drops without a warning, in its gateway mode (`CLAUDE_CODE_USE_GATEWAY`) and on cloud providers (read from the binary, not run).
+
+**Acceptance criteria.**
+- Each combination answers, or its limitation is recorded in the research note.
+
+### #4 · Deferred · Owner: decide whether Claude thinking needs a budget setting
+- type: Alignment
+- area: config
+- origin: D5
+- ticket: —
+- created: 2026-10-23
+- reason: owner decision, not needed while the live config keeps `thinking: false`
+
+**Context.** With `thinking: true`, Pumice sets no budget. On models without adaptive thinking (Claude Code 2.1.306 lists `claude-haiku-4-5`, `claude-sonnet-4-5`, `claude-opus-4-5` and older), the CLI then allows thinking up to the request's whole output budget; newer models use adaptive thinking, with no budget. A smaller cap would be a new setting (`MAX_THINKING_TOKENS=<n>`, which only affects the older models).
+
+**To do.**
+- [ ] Owner: keep the CLI's default, or add a budget key to the `claude` entry.
+
+**Where in the code.**
+- `crates/relay/src/providers/claude.rs` (`pinned_env`, `settings_json`)
+
+### #5 · Deferred · Owner: drop the remaining Kimi mentions from AGENTS.md
+- type: Alignment
+- area: docs
+- origin: D6
+- ticket: —
+- created: 2026-10-23
+- reason: AGENTS.md is owner-only; waiting for the owner's wording
+
+**Context.** This task changed only the two AGENTS.md sentences the owner authorized. AGENTS.md still says "Claude Code, Codex, OpenCode, Kimi and others" (coding agents, first paragraph) and, in the Input bullet, "the CLI refuses an empty one (Codex, Kimi)"; since D6 only Codex needs the neutral system prompt.
+
+**To do.**
+- [ ] Owner: authorize "(Codex)" in the Input bullet, and say whether the coding-agent list changes.
+
+**Where in the code.**
+- `AGENTS.md` (first paragraph; Provider plugins → Input)
+
+### #7 · Deferred · Owner: `haiku` with `thinking: false` in the shipped example
+- type: Alignment
+- area: config
+- origin: #1
+- ticket: —
+- created: 2026-10-24
+- reason: owner decision; the shipped example keeps its values until then
+
+**Context.** `relay.example.yml`, which is also the first-start `relay.yml`, writes `model: haiku` with `thinking: false`. Claude Code 2.1.310 resolves `haiku` at run time: on a first-party setup, which includes a proxy set only through `ANTHROPIC_BASE_URL`, it is `claude-haiku-5-5`, which cannot turn thinking off (the CLI sends adaptive thinking whatever `MAX_THINKING_TOKENS` says); in its gateway mode or on a cloud provider it is `claude-haiku-4-5`, which drops `effort`. The same holds for `opus` and `sonnet` (Opus 5.5 and Sonnet 5.5 on first-party) and for the four legacy Opus ids it remaps to the default Opus (`claude-opus-4-0`, `claude-opus-4-1`, `claude-opus-4-20250514`, `claude-opus-4-1-20250805`). Pumice accepts aliases and the remapped ids, so none of these is refused at startup. The example's values were left unchanged; a comment near `thinking` explains this (`6b8decc`, `2ca20fb`, `docs/research/P16-provider-effort.md`, question 6).
+
+**To do.**
+- [ ] Owner: keep `haiku` with `thinking: false`, switch the example to `thinking: true`, or pin a model.
+- [ ] Owner: whether aliases and the remapped Opus ids stay accepted with `thinking: false`.
+
+**Where in the code.**
+- `relay.example.yml` (the `claude` entry)
+
+## Closed
+
+### #1 · Done · Add the common effort setting to the YAML
 - type: Improvement
 - area: config
 - origin: D2
 - ticket: —
 - created: 2026-10-20
+- closed: 2026-10-27
+- outcome: PR #128
 
 **Context.** Each plugin today hard-codes the lowest effort (Claude also forces thinking off with `MAX_THINKING_TOKENS=0`). D2 adds `low`, `medium`, `high`, mapped per provider. Two questions are open for the owner.
 
@@ -22,7 +94,7 @@
 - [x] Document Claude Code's effort caps (`maxEffortLevel`, per-model and organization caps) and how they clamp the mapped level (`03f8b61`).
 - [x] Match Claude models the way Claude Code 2.1.306 canonicalizes their names (Codex review round 2): `claude-sonnet-4`, `claude-opus-4` and their dated, Bedrock and Vertex ids are refused too; the four legacy Opus ids Claude Code remaps to the default Opus are accepted like aliases (`6b8decc`, port checked against the binary's own functions in `4f8647f`).
 - [x] Refuse `thinking: false` at its line for models that keep thinking on (`rejects_disabled_thinking`: Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5 and 5.1, Mythos 5.1), also on disabled entries (`6b8decc`).
-- [x] Re-check against the installed Claude Code 2.1.310 (Codex review round 3): same code under new names, identical catalog, no difference on the canonicalization corpus; messages and tests name 2.1.310 (`684ddda`), evidence, `claude-opus-4-5`'s provider-dependent effort and the gateway condition in the research note (`2ca20fb`).
+- [x] Re-check against the installed Claude Code 2.1.310 (Claude review round 3; Codex was out of quota): same code under new names, identical catalog, no difference on the canonicalization corpus; messages and tests name 2.1.310 (`684ddda`), evidence, `claude-opus-4-5`'s provider-dependent effort and the gateway condition in the research note (`2ca20fb`).
 
 **Acceptance criteria.**
 - Startup refuses an unknown or unsupported value with the file and line.
@@ -32,12 +104,14 @@
 - `crates/relay/src/providers/claude.rs` (`CHEAPEST_ENV`), `codex.rs`, `kiro.rs`
 - `crates/relay/src/config/raw.rs`
 
-### #2 · In progress · Archive the Kimi and Antigravity providers
+### #2 · Done · Archive the Kimi and Antigravity providers
 - type: Task
 - area: providers
 - origin: D1
 - ticket: —
 - created: 2026-10-20
+- closed: 2026-10-27
+- outcome: PR #128
 
 **Context.** D1 archives both providers. The owner's live `relay.yml` already has `kimi` disabled; Antigravity is not configured there.
 
@@ -49,86 +123,22 @@
 **Where in the code.**
 - `crates/relay/src/providers/kimi.rs`, `antigravity.rs`
 
-### #3 · To do · Owner: live check of the new effort levels and Claude thinking
-- type: Task
-- area: providers
-- origin: #1
-- ticket: —
-- created: 2026-10-23
-
-**Context.** The mapping was checked against the installed CLIs' help and code only; no AI call was made (AGENTS.md: real calls cost quota). `medium`, `high` and `thinking: true` have never run through Pumice. Claude Code's code warns that some efforts need thinking on, with `high` as its fallback, so `high` with `thinking: false` should work but is unverified (`docs/research/P16-provider-effort.md`).
-
-**To do.**
-- [ ] Owner: a few calls per provider with `medium` and `high`, and Claude Haiku with `thinking: true`, on a temporary config.
-- [ ] Owner: check which model the `haiku` alias reaches through CLIProxyAPI. Claude Code 2.1.310 maps it to `claude-haiku-5-5` on first-party setups, which include a proxy set only through `ANTHROPIC_BASE_URL`, and to `claude-haiku-4-5`, whose effort it drops without a warning, in its gateway mode (`CLAUDE_CODE_USE_GATEWAY`) and on cloud providers (read from the binary, not run).
-
-**Acceptance criteria.**
-- Each combination answers, or its limitation is recorded in the research note.
-
-### #4 · To do · Owner: decide whether Claude thinking needs a budget setting
-- type: Alignment
-- area: config
-- origin: D5
-- ticket: —
-- created: 2026-10-23
-
-**Context.** With `thinking: true`, Pumice sets no budget. On models without adaptive thinking (Claude Code 2.1.306 lists `claude-haiku-4-5`, `claude-sonnet-4-5`, `claude-opus-4-5` and older), the CLI then allows thinking up to the request's whole output budget; newer models use adaptive thinking, with no budget. A smaller cap would be a new setting (`MAX_THINKING_TOKENS=<n>`, which only affects the older models).
-
-**To do.**
-- [ ] Owner: keep the CLI's default, or add a budget key to the `claude` entry.
-
-**Where in the code.**
-- `crates/relay/src/providers/claude.rs` (`pinned_env`, `settings_json`)
-
-### #5 · To do · Owner: drop the remaining Kimi mentions from AGENTS.md
-- type: Alignment
-- area: docs
-- origin: D6
-- ticket: —
-- created: 2026-10-23
-
-**Context.** This task changed only the two AGENTS.md sentences the owner authorized. AGENTS.md still says "Claude Code, Codex, OpenCode, Kimi and others" (coding agents, first paragraph) and, in the Input bullet, "the CLI refuses an empty one (Codex, Kimi)"; since D6 only Codex needs the neutral system prompt.
-
-**To do.**
-- [ ] Owner: authorize "(Codex)" in the Input bullet, and say whether the coding-agent list changes.
-
-**Where in the code.**
-- `AGENTS.md` (first paragraph; Provider plugins → Input)
-
-### #6 · To do · Complete the owner's live relay.yml before deploying
+### #6 · Done · Complete the owner's live relay.yml before deploying
 - type: Task
 - area: config
 - origin: #1
 - ticket: —
 - created: 2026-10-23
+- closed: 2026-10-27
+- outcome: applied on server-1 on 2026-10-27 with the PR #128 build (`c2ca88c`)
 
 **Context.** The new binaries refuse a `relay.yml` whose provider entries lack `effort` (or `thinking` on `claude`), and one that still lists `kimi` (the live file has `kimi` disabled, D1). Both live services read the owner's per-user `relay.yml`. This task never touched `~/.config/pumice`.
 
 **To do.**
-- [ ] Back up `relay.yml`.
-- [ ] Delete the `kimi` entry (and any `antigravity` one).
-- [ ] Add `effort: low` to every remaining entry and `thinking: false` to `claude` (today's behaviour), or the levels the owner picks.
-- [ ] Validate with the candidate binary's `pumice relay check-config`, then restart both services and check both ports.
+- [x] Back up `relay.yml`.
+- [x] Delete the `kimi` entry (and any `antigravity` one).
+- [x] Add `effort: low` to every remaining entry and `thinking: false` to `claude` (today's behaviour), or the levels the owner picks: today's behaviour, owner's "ok, proceed please" on 2026-10-27.
+- [x] Validate with the candidate binary's `pumice relay check-config`, then restart both services and check both ports: done on 2026-10-27 with the `c2ca88c` build (backup `relay.yml.bak-2026-10-27`); 7567 and 17570 list their models, and one call each through `claude` and `codex` on 7567 answered.
 
 **Acceptance criteria.**
 - Both services start with the new binaries and answer as before.
-
-### #7 · To do · Owner: `haiku` with `thinking: false` in the shipped example
-- type: Alignment
-- area: config
-- origin: #1
-- ticket: —
-- created: 2026-10-24
-
-**Context.** `relay.example.yml`, which is also the first-start `relay.yml`, writes `model: haiku` with `thinking: false`. Claude Code 2.1.310 resolves `haiku` at run time: on a first-party setup, which includes a proxy set only through `ANTHROPIC_BASE_URL`, it is `claude-haiku-5-5`, which cannot turn thinking off (the CLI sends adaptive thinking whatever `MAX_THINKING_TOKENS` says); in its gateway mode or on a cloud provider it is `claude-haiku-4-5`, which drops `effort`. The same holds for `opus` and `sonnet` (Opus 5.5 and Sonnet 5.5 on first-party) and for the four legacy Opus ids it remaps to the default Opus (`claude-opus-4-0`, `claude-opus-4-1`, `claude-opus-4-20250514`, `claude-opus-4-1-20250805`). Pumice accepts aliases and the remapped ids, so none of these is refused at startup. The example's values were left unchanged; a comment near `thinking` explains this (`6b8decc`, `2ca20fb`, `docs/research/P16-provider-effort.md`, question 6).
-
-**To do.**
-- [ ] Owner: keep `haiku` with `thinking: false`, switch the example to `thinking: true`, or pin a model.
-- [ ] Owner: whether aliases and the remapped Opus ids stay accepted with `thinking: false`.
-
-**Where in the code.**
-- `relay.example.yml` (the `claude` entry)
-
-## Deferred
-
-## Closed

@@ -1,11 +1,11 @@
 ---
 title: Configurable reasoning effort per provider
-state: In progress
+state: Done
 ticket: —
 branch: p16-provider-effort
-mr: —
+mr: PR #128
 start: 2026-10-20
-end: —
+end: 2026-10-27
 ---
 
-Lets the owner set the reasoning effort of each AI provider in `relay.yml`, on one common scale (`low`, `medium`, `high`) mapped to each CLI's own setting, with a separate `thinking` switch for Claude (D2, D4, D5), and deletes the archived Kimi and Antigravity providers (D1, D6). Implemented and pushed on the branch, waiting for review: every provider entry writes `effort` and `claude` writes `thinking`, the plugins are deleted, AGENTS.md carries the authorized wording, and the mapping and its evidence are in `docs/research/P16-provider-effort.md`. Along the way the descriptors' built-in settings were dropped (`p17.1-explicit-config#1`). Models the CLIs are known to run without effort (Claude Code's `claude-haiku-4-5` and older, Kiro's `claude-haiku-4.5`) are refused at the `effort` key, and since Codex review round 2 Claude models are matched the way Claude Code canonicalizes their names and `thinking: false` is refused for models that keep thinking on. Codex review round 3 approved it with three polish findings, now fixed: the checks were re-verified against Claude Code 2.1.310, and the research note names `claude-opus-4-5`'s provider-dependent effort, Claude Code's gateway condition and what the aliases and remapped Opus ids reach per provider. Open: owner checks with real calls (#3), a thinking budget question (#4), the remaining Kimi mentions in AGENTS.md (#5), the live `relay.yml` before deploying (#6) and the shipped example's aliases with `thinking: false` (#7).
+Each provider entry in `relay.yml` now sets its reasoning effort on one common scale (`low`, `medium`, `high`), mapped to each CLI's own setting, and `claude` sets a separate `thinking` switch (D2, D4, D5); the Kimi and Antigravity providers are deleted (D1, D6). Startup refuses, at the key's file and line, effort on models the CLIs run without it and `thinking: false` on models whose CLI keeps thinking on, matching Claude model names the way Claude Code 2.1.310 canonicalizes them; aliases, the remapped legacy Opus ids and unknown models are accepted. The mapping, the CLIs' caps and the evidence are in `docs/research/P16-provider-effort.md`. Merged in PR #128 and deployed on server-1 with today's behaviour (`effort: low` everywhere, `thinking: false` on `claude`, `kimi` removed). Deferred for the owner: live checks with real calls (#3), a thinking budget (#4), the remaining Kimi mentions in AGENTS.md (#5) and the shipped example's aliases with `thinking: false` (#7).
