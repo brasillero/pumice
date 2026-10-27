@@ -1,6 +1,6 @@
 //! Tests for startup provider detection (S2.8 part 1): version parsing over
 //! realistic outputs, missing binaries, probe deadlines, the never-spawn
-//! guarantees for Antigravity and the CLI-less generic adapter, and
+//! guarantee for the CLI-less generic adapter, and
 //! full-registry detection. Every CLI below is the portable fake; no test
 //! looks a real CLI up on PATH (each test passes descriptors whose binaries
 //! it controls).
@@ -39,7 +39,7 @@ fn load(yaml: &str) -> Config {
 /// other setting default).
 fn claude_at(path: &Path) -> Config {
     load(&format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n",
         path.display()
     ))
 }
@@ -130,13 +130,11 @@ async fn a_slow_probe_dies_with_its_deadline() {
 async fn detection_covers_every_registered_provider_enabled_or_not() {
     let claude = FakeCli::new(json!({"stdout": "2.1.288 (Claude Code)"}));
     let codex = FakeCli::new(json!({"stdout": "codex-cli 0.160.0"}));
-    let kimi = FakeCli::new(json!({"stdout": "2.1.1"}));
     let kiro = FakeCli::new(json!({"stdout": "2.29.0"}));
     let config = load(&format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{0}'\n    timeout_secs: 30\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{1}'\n    timeout_secs: 30\n  - id: kimi\n    enabled: false\n    binary: '{2}'\n    model: null\n    timeout_secs: 30\n  - id: kiro\n    enabled: false\n    binary: '{3}'\n    model: null\n    timeout_secs: 30\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{0}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{1}'\n    timeout_secs: 30\n    effort: low\n  - id: kiro\n    enabled: false\n    binary: '{2}'\n    model: null\n    timeout_secs: 30\n    effort: low\n",
         claude.path().display(),
         codex.path().display(),
-        kimi.path().display(),
         kiro.path().display(),
     ));
     let statuses = discovery::detect(&config, providers::PROVIDERS, &ProcessRunner::new()).await;
@@ -152,8 +150,6 @@ async fn detection_covers_every_registered_provider_enabled_or_not() {
     assert_eq!(status("claude").version, Version::Parsed("2.1.288".into()));
     assert_eq!(status("codex").version, Version::Parsed("0.160.0".into()));
     // Disabled but still probed, so `doctor` can show it.
-    assert!(!status("kimi").enabled);
-    assert_eq!(status("kimi").version, Version::Parsed("2.1.1".into()));
     assert!(!status("kiro").enabled);
     assert_eq!(status("kiro").version, Version::Parsed("2.29.0".into()));
 }
@@ -163,7 +159,7 @@ fn registry_probe_metadata_is_consistent() {
     for descriptor in providers::PROVIDERS {
         match descriptor.probe {
             ProbeSpec::Version(args) => assert_eq!(args, ["--version"], "{}", descriptor.id),
-            ProbeSpec::PathOnly | ProbeSpec::NotApplicable => {}
+            ProbeSpec::NotApplicable => {}
         }
         if descriptor.probe == ProbeSpec::NotApplicable {
             // No CLI exists: the empty default binary is never resolved.
@@ -187,32 +183,6 @@ fn load_with(yaml: &str, descriptors: &[ProviderDescriptor]) -> Config {
 }
 
 #[tokio::test]
-async fn archived_antigravity_is_resolved_but_never_spawned() {
-    let fake = FakeCli::new(json!({"stdout": "1.2.14", "exit_code": 0}));
-    let descriptors = [providers::antigravity::DESCRIPTOR];
-    let config = load_with(
-        &format!(
-            "providers:\n  - id: antigravity\n    enabled: false\n    binary: '{}'\n    model: null\n    timeout_secs: 30\n",
-            fake.path().display()
-        ),
-        &descriptors,
-    );
-    let statuses = discovery::detect(&config, &descriptors, &ProcessRunner::new()).await;
-
-    assert_eq!(statuses.len(), 1);
-    assert!(!statuses[0].enabled);
-    assert!(
-        matches!(statuses[0].found, Found::Found(_)),
-        "PATH lookup still reports the binary"
-    );
-    assert_eq!(statuses[0].version, Version::Skipped);
-    assert!(
-        !fake.report_path().exists(),
-        "agy must never be spawned, not even for --version"
-    );
-}
-
-#[tokio::test]
 async fn archived_generic_is_never_resolved_or_spawned() {
     // The generic adapter has no CLI: even with a `binary` that exists on
     // disk, detection neither resolves nor spawns it.
@@ -220,7 +190,7 @@ async fn archived_generic_is_never_resolved_or_spawned() {
     let descriptors = [providers::generic::DESCRIPTOR];
     let config = load_with(
         &format!(
-            "providers:\n  - id: generic\n    enabled: false\n    binary: '{}'\n    model: null\n    timeout_secs: 30\n",
+            "providers:\n  - id: generic\n    enabled: false\n    binary: '{}'\n    model: null\n    timeout_secs: 30\n    effort: low\n",
             fake.path().display()
         ),
         &descriptors,
@@ -238,11 +208,6 @@ async fn archived_generic_is_never_resolved_or_spawned() {
 
 #[test]
 fn archived_probe_metadata_keeps_its_guarantees() {
-    assert_eq!(
-        providers::antigravity::DESCRIPTOR.probe,
-        ProbeSpec::PathOnly,
-        "agy is never spawned, so its probe must stay PATH-only"
-    );
     assert_eq!(
         providers::generic::DESCRIPTOR.probe,
         ProbeSpec::NotApplicable,

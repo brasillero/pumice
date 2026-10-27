@@ -16,18 +16,21 @@
 //!
 //! Routing (for example a gateway's `openai_base_url`) comes only from the
 //! user's own Codex configuration; Pumice adds none.
+//!
+//! Effort comes from `relay.yml` (p16-provider-effort/D4) as
+//! `-c model_reasoning_effort="<level>"`, checked against the installed
+//! 0.163.0 (docs/research/P16-provider-effort.md).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde_json::Value;
 
 use super::cli::{CliAdapter, CliProvider};
 use super::{
-    FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode,
-    ProviderSettings, validate_settings_noop,
+    Effort, FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError,
+    ProviderErrorCode, ProviderSettings, validate_settings_noop,
 };
 use crate::config::ConfigError;
 use crate::process::{
@@ -36,10 +39,6 @@ use crate::process::{
 
 pub const ID: &str = "codex";
 pub const DEFAULT_BINARY: &str = "codex";
-/// Provider default timeout, measured in Phase 0.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-
-
 
 /// npm package entrypoint the Windows `.cmd` shim translates to (layout from
 /// npm; verify on a real Windows install (owner check)).
@@ -47,8 +46,11 @@ const NPM_ENTRYPOINT: &str = "@openai/codex/bin/codex.js";
 
 pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: ID,
-    defaults,
     build,
+    thinking_switch: false,
+    // Every model in codex-cli 0.163.0's bundled catalog takes low, medium
+    // and high, so no model is refused for its effort
+    // (docs/research/P16-provider-effort.md).
     validate_settings: validate_settings_noop,
     probe: ProbeSpec::Version(&["--version"]),
     default_binary: DEFAULT_BINARY,
@@ -56,28 +58,15 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     install_hint: "npm install -g @openai/codex",
 };
 
-fn defaults() -> ProviderSettings {
-    ProviderSettings {
-        enabled: false,
-        binary: None,
-        // The configuration file sets the model on every enabled entry;
-        // nothing is built in.
-        model: String::new(),
-        timeout: DEFAULT_TIMEOUT,
-    }
-}
-
-
-
 fn build(
     settings: &ProviderSettings,
     runner: Arc<ProcessRunner>,
 ) -> Result<Arc<dyn Provider>, ConfigError> {
-    let binary = settings
-        .binary
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_BINARY));
-    let adapter = CodexAdapter::new(binary, settings.model.clone());
+    let adapter = CodexAdapter::new(
+        settings.binary.clone(),
+        settings.model.clone(),
+        settings.effort,
+    );
     let adapter = match codex_home() {
         Some(home) => adapter.with_codex_home(home),
         None => adapter,
@@ -94,6 +83,7 @@ fn build(
 pub struct CodexAdapter {
     binary: PathBuf,
     model: String,
+    effort: Effort,
     /// Codex's home directory, whose `config.toml` the call inherits. `None`
     /// keeps `--ignore-user-config`.
     codex_home: Option<PathBuf>,
@@ -102,10 +92,11 @@ pub struct CodexAdapter {
 impl CodexAdapter {
     /// `binary` is a command name looked up on PATH (normally `codex`) or a
     /// path to the official CLI.
-    pub fn new(binary: PathBuf, model: String) -> CodexAdapter {
+    pub fn new(binary: PathBuf, model: String, effort: Effort) -> CodexAdapter {
         CodexAdapter {
             binary,
             model,
+            effort,
             codex_home: None,
         }
     }
@@ -225,7 +216,7 @@ impl CliAdapter for CodexAdapter {
             "features.plugins=false",
             "features.apps=false",
             "notify=[]",
-            // Cheapest settings (owner rule): the standard service tier even
+            // Cheapest settings: the standard service tier even
             // when the user's config prefers fast (`default` is Codex's
             // sentinel for standard routing; omitting it would inherit the
             // user's tier), the fast feature off, and no reasoning summary.
@@ -253,7 +244,10 @@ impl CliAdapter for CodexAdapter {
         });
         args.extend([
             Argument::literal("-c"),
-            Argument::literal(r#"model_reasoning_effort="low""#),
+            Argument::literal(format!(
+                r#"model_reasoning_effort="{}""#,
+                cli_effort(self.effort)
+            )),
             // `-` reads the user message from stdin.
             Argument::literal("-"),
         ]);
@@ -280,6 +274,17 @@ impl CliAdapter for CodexAdapter {
             workspace_files: Vec::new(),
             parser: parse_output,
         })
+    }
+}
+
+/// The `model_reasoning_effort` value for each level; the installed CLI
+/// also knows `minimal`, `xhigh`, `max` and `ultra`, which models accept
+/// per their catalog.
+fn cli_effort(effort: Effort) -> &'static str {
+    match effort {
+        Effort::Low => "low",
+        Effort::Medium => "medium",
+        Effort::High => "high",
     }
 }
 
@@ -420,7 +425,7 @@ mod tests {
         if let Some(config) = config {
             std::fs::write(home.path().join("config.toml"), config).expect("config written");
         }
-        let adapter = CodexAdapter::new(PathBuf::from("codex"), "gpt-6.1-sol".to_owned())
+        let adapter = CodexAdapter::new(PathBuf::from("codex"), "gpt-6.1-sol".to_owned(), Effort::Low)
             .with_codex_home(home.path().to_path_buf());
         (home, adapter)
     }
@@ -478,7 +483,7 @@ mod tests {
 
     #[test]
     fn without_a_codex_home_the_user_config_is_ignored() {
-        let adapter = CodexAdapter::new(PathBuf::from("codex"), "gpt-6.1-sol".to_owned());
+        let adapter = CodexAdapter::new(PathBuf::from("codex"), "gpt-6.1-sol".to_owned(), Effort::Low);
         assert!(literal_args(&adapter).contains(&"--ignore-user-config".to_owned()));
     }
 

@@ -78,16 +78,14 @@ pub trait ContractAdapter {
     /// The answer a plugin returns from [`tool_activity`](Self::tool_activity)
     /// output. Active plugins do not police tool use in the output (owner
     /// decision 2026-10-08) and return their final answer; `None` (the
-    /// default, kept by archived adapters) means the run is rejected with
-    /// `UnexpectedToolActivity`.
+    /// default) means the run is rejected with `UnexpectedToolActivity`.
     fn tool_activity_answer() -> Option<&'static str> {
         None
     }
 
     /// Adds the scenario keys that make the fake CLI capture the system
     /// prompt control file (for example `report_arg_files`). Adapters whose
-    /// transport has no control file (Antigravity's merged stdin event) keep
-    /// the default no-op.
+    /// transport has no control file keep the default no-op.
     fn capture_system_prompt(_scenario: &mut Value) {}
 
     /// Names of files or directories the adapter writes inside the working
@@ -107,25 +105,21 @@ pub trait ContractAdapter {
 
     /// Asserts the dictated text travelled as data: byte-exact through the
     /// transport's input channel and in no argv element. The default expects
-    /// the plain user message on stdin; merged-input transports (Antigravity)
-    /// override [`ContractAdapter::assert_stdin_payload`] instead.
+    /// the plain user message on stdin; other transports override
+    /// [`ContractAdapter::assert_stdin_payload`] instead.
     fn assert_dictation_is_data(report: &Value, text: &str) {
         Self::assert_stdin_payload(report, text);
         assert_no_argv_carries_text(report, text);
     }
 
     /// The transport-specific half of [`ContractAdapter::assert_dictation_is_data`]:
-    /// where the text must appear byte-exact. Merged-input overrides decode
-    /// their stdin event.
+    /// where the text must appear byte-exact.
     fn assert_stdin_payload(report: &Value, text: &str) {
         assert_eq!(report["stdin"], json!(format!("{BEFORE}{text}{AFTER}")));
     }
 
     /// Asserts the system prompt stayed separate from the user message. The
-    /// default: never in stdin, only in the control file. Antigravity's
-    /// merged-input transport overrides this with its documented fallback:
-    /// the system prompt is inside the single stdin event and no
-    /// system-prompt flag or file exists.
+    /// default: never in stdin, only in the control file.
     fn assert_system_separation(report: &Value) {
         let stdin = report["stdin"].as_str().unwrap();
         assert_eq!(stdin, format!("{BEFORE}{HOSTILE_TEXT}{AFTER}"));
@@ -138,8 +132,8 @@ pub trait ContractAdapter {
     }
 
     /// Asserts where the system prompt lives relative to the workspace. The
-    /// default: a control file outside the call's cwd. Antigravity overrides:
-    /// no file exists at all, so no argv element may name one.
+    /// default: a control file outside the call's cwd; Kiro overrides it
+    /// with its workspace agent file.
     fn assert_system_prompt_placement(report: &Value) {
         let cwd = Path::new(report["cwd"].as_str().unwrap());
         let (path, contents) = Self::captured_system_prompt(report);
@@ -311,14 +305,11 @@ fn handy_request(model: Option<&str>, text: &str) -> ExtractedRequest {
 
 /// Settings pointing the contract adapter at the fake CLI.
 fn settings_at<A: ContractAdapter>(fake: &FakeCli) -> ProviderSettings {
-    // Archived adapters are not registered but keep their contract tests.
-    let archived = [&providers::antigravity::DESCRIPTOR];
-    let descriptor = providers::descriptor(A::ID)
-        .or_else(|| archived.into_iter().find(|d| d.id == A::ID))
-        .expect("contract adapter has a descriptor");
-    let mut settings = (descriptor.defaults)();
-    settings.binary = Some(fake.path().to_path_buf());
-    settings
+    assert!(
+        providers::descriptor(A::ID).is_some(),
+        "contract adapter has a descriptor"
+    );
+    super::provider_settings(A::ID, false, fake.path(), "")
 }
 
 /// Builds a configuration directly (YAML validation knows only registered
@@ -408,7 +399,7 @@ pub async fn transport<A: ContractAdapter>() {
 
 /// System separation: the system prompt never mixes into the user message;
 /// how it reaches the CLI is transport-specific (a control file by default,
-/// the merged stdin event for Antigravity).
+/// Kiro's workspace agent file).
 pub async fn system_separation<A: ContractAdapter>() {
     let fake = success_fake::<A>("Texto formatado.");
     let provider = A::provider(fake.path(), CALL_TIMEOUT);

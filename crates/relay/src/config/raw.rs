@@ -20,7 +20,7 @@ use super::ConfigError;
 
 /// Shown when a removed setting or the removed mapping form of `providers`
 /// is used; points at the list form that replaces it.
-pub(crate) const PROVIDERS_LIST_FORM: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: claude\n    timeout_secs: 30";
+pub(crate) const PROVIDERS_LIST_FORM: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: claude\n    timeout_secs: 30\n    effort: low\n    thinking: false";
 
 /// The commented reference configuration every missing-setting error points
 /// at.
@@ -63,7 +63,8 @@ pub(crate) struct RawConfig {
 
 /// One entry of the `providers:` list. Every key is required by semantic
 /// validation (so the error can name the entry and point at it); `model`
-/// may be `null` only on a disabled entry.
+/// may be `null` only on a disabled entry, and `thinking` belongs only to
+/// providers with a thinking switch (Claude).
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawProviderEntry {
@@ -77,6 +78,12 @@ pub(crate) struct RawProviderEntry {
     pub model: Setting<String>,
     #[serde(default)]
     pub timeout_secs: Setting<u64>,
+    /// `low`, `medium` or `high` (p16-provider-effort/D2), checked by
+    /// semantic validation so the error can list the levels.
+    #[serde(default)]
+    pub effort: Setting<String>,
+    #[serde(default)]
+    pub thinking: Setting<bool>,
     /// Removed (owner decision 2026-10-08): each CLI keeps its own
     /// configuration. Parsed only so the error can point at the key.
     #[serde(default, deserialize_with = "removed_key")]
@@ -221,7 +228,7 @@ impl<'de> Deserialize<'de> for ProviderList {
                 // One-line example: serde renders custom errors with escaped
                 // newlines, unlike the semantic errors below.
                 Err(serde::de::Error::custom(
-                    "the mapping form of \"providers\" was removed in 0.2; use an ordered list instead, e.g. providers: [{id: claude, enabled: true, model: haiku, binary: claude, timeout_secs: 30}]",
+                    "the mapping form of \"providers\" was removed in 0.2; use an ordered list instead, e.g. providers: [{id: claude, enabled: true, model: haiku, binary: claude, timeout_secs: 30, effort: low, thinking: false}]",
                 ))
             }
         }

@@ -17,7 +17,7 @@ be pasted. The app's prompt decides what happens to the text.
   or macOS ARM64 (Apple Silicon)**.
 - The **official CLI of at least one AI provider**, installed and logged into
   in the *same* environment where Pumice runs — for example `claude`,
-  `codex`, `kimi` or `kiro-cli` on your PATH. Pumice never installs or logs
+  `codex` or `kiro-cli` on your PATH. Pumice never installs or logs
   into these for you, and it never reads their credentials: it only invokes
   the CLI you already use.
 - **Node.js 22 or newer**, only if you install through npm/pnpm/Bun. The npm
@@ -178,7 +178,7 @@ then:
 - Provider: **Custom**
 - Base URL: `http://127.0.0.1:7567/v1`
 - API key: leave **empty**
-- Model: `claude`, `codex`, `kimi` or `kiro` (the CLIs you installed
+- Model: `claude`, `codex` or `kiro` (the CLIs you installed
   above), `passthrough` to get the raw transcript back exactly as dictated,
   or `inspect` to echo the full JSON request body for diagnostics. `inspect` includes Handy's
   attached prompt and pastes the result as JSON; neither `passthrough` nor
@@ -208,11 +208,14 @@ providers:                 # the client's model picks the entry; there is no
     model: haiku
     binary: claude         # a bare name is looked up on PATH
     timeout_secs: 30
+    effort: low            # low, medium or high
+    thinking: false        # Claude only
   - id: codex
     enabled: false         # kept in the file, not offered, never run
     model: null            # null only on a disabled entry
     binary: codex
     timeout_secs: 30
+    effort: low            # written on disabled entries too
 debug_log:
   enabled: false
   path: pumice-debug.jsonl
@@ -221,8 +224,9 @@ debug_log:
 The client picks the provider: Handy sends the `model` the user chose, and
 Pumice runs exactly that provider. A request without a model, or any
 failure, is answered with an HTTP error, and the app keeps its own
-transcript. Every provider entry writes `id`, `enabled`, `model`, `binary`
-and `timeout_secs`. With no provider enabled every AI request gets an
+transcript. Every provider entry writes `id`, `enabled`, `model`, `binary`,
+`timeout_secs` and `effort`, and the `claude` entry also writes `thinking`.
+With no provider enabled every AI request gets an
 error and the app keeps its own transcript (the built-in `passthrough` and
 `inspect` still work). Gateways, routing and logins are configured in each
 CLI itself; Pumice inherits them. Validate the file with
@@ -231,6 +235,20 @@ file exists. The config lives outside the install folder, so upgrading
 never replaces it. Automatic creation writes all four module files and the
 sample formatter definition. An explicit `--config` path must already exist;
 help, version and optional diagnostic commands do not create files.
+
+`effort` is the reasoning effort of every call the provider makes: `low`,
+`medium` or `high`, mapped to the CLI's own setting (Claude and Kiro
+`--effort`, Codex `model_reasoning_effort`). Higher effort can follow the
+app's prompt more closely, but answers take longer and use more of your
+plan. A model the CLI is known to run without effort (Claude Code's
+`claude-haiku-4-5`, `claude-sonnet-4-5`, `claude-opus-4-1` and older, Kiro's
+`claude-haiku-4.5`) is refused at startup with the file and line, because it
+would ignore every level; an alias such as `haiku`, or a model Pumice knows
+nothing about, is accepted. Claude's `thinking: false` turns thinking off
+where the model allows it; `thinking: true` lets Claude Code think the way
+it does by default for that model. Every other CLI setting stays the
+cheapest one, and fast or priority modes stay off. The other providers have
+no `thinking` key: they reason through effort alone.
 
 `max_parallel` (1 to 32) sets how many requests may run their provider at
 the same time. Extra requests wait in line, first come first served; a
@@ -243,10 +261,11 @@ Nothing is on until you list it with `enabled: true` and a `model` (the
 example config shows how). Then set the model in Handy to the provider's
 id to pick it.
 
-- **Claude**, **Codex**, **Kimi** and **Kiro** — supported and tested with real calls.
-- **Antigravity** and the **local-model adapter** (Ollama, LM Studio) —
-  archived for now; listing them in the config is an error.
-- **OpenCode** — support was removed.
+- **Claude**, **Codex** and **Kiro** — supported and tested with real calls.
+- The **local-model adapter** (Ollama, LM Studio) — archived for now;
+  listing it in the config is an error.
+- **Kimi**, **Antigravity** and **OpenCode** — support was removed; listing
+  them in the config is an error.
 
 ## Upgrading from 0.2
 

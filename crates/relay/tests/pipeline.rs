@@ -28,7 +28,7 @@ use tokio::time::Instant;
 
 /// Minimal YAML configuring `claude` at the fake CLI. `{binary}` is replaced
 /// by the fake's path.
-const CLAUDE_AT_FAKE: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n";
+const CLAUDE_AT_FAKE: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n";
 
 /// Builds a pipeline from `yaml` (`{binary}` replaced by the fake's path)
 /// together with the fake CLI its provider will run.
@@ -89,20 +89,13 @@ fn assert_raw(outcome: &FormatOutcome, reason: RawReason, text: &str) {
 /// only knows registered provider ids). Enabled settings carry a model, as
 /// the configuration file requires.
 fn test_settings(enabled: bool) -> ProviderSettings {
-    let descriptor = providers::descriptor("claude").expect("claude is registered");
-    let mut settings = (descriptor.defaults)();
-    settings.enabled = enabled;
-    if enabled {
-        settings.model = "test-model".to_owned();
-    }
-    settings
+    let model = if enabled { "test-model" } else { "" };
+    support::provider_settings("claude", enabled, "claude", model)
 }
 
 /// Settings pointing the real Claude adapter at a fake CLI.
 fn claude_settings_at(fake: &FakeCli) -> ProviderSettings {
-    let mut settings = test_settings(true);
-    settings.binary = Some(fake.path().to_path_buf());
-    settings
+    support::provider_settings("claude", true, fake.path(), "test-model")
 }
 
 fn build_claude(settings: &ProviderSettings) -> Arc<dyn Provider> {
@@ -197,7 +190,7 @@ async fn no_model_fails_and_runs_nothing() {
 #[tokio::test]
 async fn model_selects_the_named_provider_regardless_of_list_order() {
     // codex is listed first, claude second; naming claude still runs claude.
-    let yaml = "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: codex\n    timeout_secs: 30\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n";
+    let yaml = "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: codex\n    timeout_secs: 30\n    effort: low\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n";
     let (pipeline, fake) = pipeline(yaml, success_scenario("Feito."));
     let outcome = pipeline
         .format(&handy_request(Some("claude"), "dita"), Instant::now())
@@ -244,7 +237,7 @@ async fn removed_default_key_fails_the_config() {
     // Through real YAML: `default:` no longer loads with a warning; it is a
     // removed key and fails at its own line:column.
     let fake = FakeCli::new(success_scenario("unused"));
-    let yaml = "default: claude\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n"
+    let yaml = "default: claude\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n"
         .replace("{binary}", &fake.path().display().to_string());
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join("relay.yml");
@@ -280,7 +273,7 @@ async fn missing_binary_fails_and_keeps_the_dictation() {
     let dir = TempDir::new().expect("temp dir");
     let missing = dir.path().join("no-such-cli");
     let yaml = format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n",
         missing.display()
     );
     let (pipeline, fake) = pipeline(&yaml, json!({}));
@@ -316,7 +309,7 @@ async fn malformed_output_fails_and_keeps_the_dictation() {
 #[tokio::test]
 async fn total_timeout_stops_a_slow_cli() {
     let (pipeline, fake) = pipeline(
-        "total_timeout_secs: 1\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n",
+        "total_timeout_secs: 1\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n",
         json!({
             "stdout": success_envelope("too late"),
             "exit_code": 0,
@@ -346,7 +339,7 @@ async fn total_timeout_stops_a_slow_cli() {
 #[tokio::test]
 async fn provider_timeout_wins_over_the_total_budget() {
     let (pipeline, _fake) = pipeline(
-        "total_timeout_secs: 30\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 1\n",
+        "total_timeout_secs: 30\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 1\n    effort: low\n    thinking: false\n",
         json!({
             "stdout": success_envelope("too late"),
             "exit_code": 0,
@@ -379,7 +372,7 @@ async fn caller_deadline_shortens_the_module_budget() {
     // Module budgets are generous (30 s total and per-provider); the caller
     // deadline of about a second stops the sleeping fake first.
     let (pipeline, fake) = pipeline(
-        "total_timeout_secs: 30\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n",
+        "total_timeout_secs: 30\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n",
         json!({
             "stdout": success_envelope("too late"),
             "exit_code": 0,
@@ -421,7 +414,7 @@ async fn caller_deadline_bound_stays_false_when_the_provider_timeout_fires_first
     // The caller deadline (5 s) shortens the module budget (30 s), but the
     // provider's own timeout (1 s) fires first: not the caller's budget.
     let (pipeline, _fake) = pipeline(
-        "total_timeout_secs: 30\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 1\n",
+        "total_timeout_secs: 30\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 1\n    effort: low\n    thinking: false\n",
         json!({
             "stdout": success_envelope("too late"),
             "exit_code": 0,
@@ -453,7 +446,7 @@ async fn caller_deadline_never_extends_the_module_budget() {
     // The caller allows 30 s but the module's total budget is 1 s: the
     // module budget still wins.
     let (pipeline, _fake) = pipeline(
-        "total_timeout_secs: 1\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n",
+        "total_timeout_secs: 1\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n",
         json!({
             "stdout": success_envelope("too late"),
             "exit_code": 0,
@@ -488,7 +481,7 @@ async fn caller_deadline_never_extends_the_module_budget() {
 #[tokio::test]
 async fn spent_caller_deadline_starts_no_cli() {
     let (pipeline, fake) = pipeline(
-        "total_timeout_secs: 30\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n",
+        "total_timeout_secs: 30\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n",
         success_scenario("unused"),
     );
     let started = Instant::now();
@@ -528,7 +521,7 @@ async fn caller_deadline_with_room_runs_like_format() {
 #[tokio::test]
 async fn exhausted_budget_never_starts_the_cli() {
     let (pipeline, fake) = pipeline(
-        "total_timeout_secs: 2\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n",
+        "total_timeout_secs: 2\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n",
         success_scenario("unused"),
     );
     // The request arrived long enough ago that its budget is spent.
@@ -645,7 +638,7 @@ async fn a_second_run_fails_when_its_budget_runs_out_waiting() {
 #[tokio::test]
 async fn queued_request_runs_after_the_slot_frees() {
     let (pipeline, fake) = pipeline(
-        "total_timeout_secs: 10\nmax_parallel: 1\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n",
+        "total_timeout_secs: 10\nmax_parallel: 1\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n",
         json!({
             "stdout": success_envelope("Olá."),
             "exit_code": 0,

@@ -49,10 +49,21 @@ max_parallel: 4
 # shows: the enabled entries are listed in this order. There is NO fallback:
 # a request runs exactly one provider — the one its model names.
 #
-# Every entry writes all five keys: `id`, `enabled` (true or false),
-# `model` (`null` only on a disabled entry), `binary` and `timeout_secs`.
-# The removed keys `default`, `prompts`, `env` and `options` are rejected
-# with a message saying what replaced them.
+# Every entry writes `id`, `enabled` (true or false), `model` (`null` only on
+# a disabled entry), `binary`, `timeout_secs` and `effort`; the `claude`
+# entry also writes `thinking`. The removed keys `default`, `prompts`, `env`
+# and `options` are rejected with a message saying what replaced them.
+#
+# `effort` is the reasoning effort of every call the provider makes: `low`,
+# `medium` or `high`, mapped to the CLI's own setting (Claude and Kiro
+# `--effort`, Codex `model_reasoning_effort`). Higher effort can follow the
+# app's prompt more closely but takes longer and uses more of your quota.
+# A model known to have no effort (Claude `claude-haiku-4-5`,
+# `claude-sonnet-4`, Kiro `claude-haiku-4.5`, …) is refused at startup, in
+# every spelling the CLI reads as that model, since no level would be
+# honoured; an alias or an unknown model is accepted. Every other CLI
+# setting stays the cheapest the CLI offers, and fast/priority modes stay
+# off.
 providers:
   # Claude Code, enabled.
   - id: claude
@@ -65,6 +76,20 @@ providers:
     binary: claude
     # Per-call cap, also limited by the remaining total budget.
     timeout_secs: 30
+    effort: low
+    # Claude only. `false` turns thinking off where the model allows it;
+    # `true` lets Claude Code think the way it does by default for the model
+    # (adaptive where the model supports it, otherwise up to its default
+    # thinking budget), which is slower and uses more of your quota.
+    # A model that cannot turn thinking off (Claude Haiku 5.5, Sonnet 5.5,
+    # Opus 5.5, Fable 5 and 5.1, Mythos 5.1) is refused with `false`.
+    # Aliases are resolved by Claude Code at run time and are accepted: on a
+    # first-party login, which includes a proxy set only through
+    # `ANTHROPIC_BASE_URL`, `haiku` means Haiku 5.5, which keeps thinking on
+    # whatever this says; on a cloud provider or in Claude Code's gateway
+    # mode (`CLAUDE_CODE_USE_GATEWAY`) it means Haiku 4.5, which drops
+    # `effort`.
+    thinking: false
 
   # Codex CLI, off. A disabled entry is kept out of the model list and
   # never runs; its `model` may be null.
@@ -73,15 +98,7 @@ providers:
     model: null # e.g. gpt-6.1-sol
     binary: codex
     timeout_secs: 30
-
-  # Kimi Code CLI, off. The dictation travels in the command line, so very
-  # long dictations are refused (an error; the app keeps its text). Any alias
-  # from `kimi provider list` works.
-  - id: kimi
-    enabled: false
-    model: null # e.g. kimi-k2.7-code-highspeed
-    binary: kimi
-    timeout_secs: 30
+    effort: low
 
   # Kiro CLI, off. Pumice writes a one-off no-tools agent file into the
   # call's empty temporary directory to carry the app's system prompt; your
@@ -89,12 +106,14 @@ providers:
   # shows the model ids.
   - id: kiro
     enabled: false
-    model: null # e.g. claude-haiku-4.5
+    model: null # e.g. glm-5
     binary: kiro-cli
     timeout_secs: 30
+    effort: low
 
-  # Antigravity and the generic local-server adapter are archived for now,
-  # and OpenCode support was removed: listing any of them is an error.
+  # The generic local-server adapter is archived for now, and Kimi,
+  # Antigravity and OpenCode support was removed: listing any of them is an
+  # error.
 
 # Dictated text is written to a log only when debug logging is enabled.
 debug_log:

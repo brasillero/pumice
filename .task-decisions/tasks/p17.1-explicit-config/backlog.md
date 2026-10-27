@@ -4,25 +4,26 @@
 
 ## Deferred
 
-### #1 · Deferred · Drop the provider descriptors' built-in settings
+## Closed
+
+### #1 · Done · Drop the provider descriptors' built-in settings
 - type: Tech debt
 - area: providers
 - origin: p17-serve-model-names/D3
 - ticket: —
 - created: 2026-10-20
-- reason: no effect on loaded settings; until `p16-provider-effort` changes `ProviderSettings`
+- closed: 2026-10-23
+- outcome: removed in `80254be` (branch `p16-provider-effort`): `ProviderDescriptor::defaults`, the per-provider `DEFAULT_TIMEOUT` and the `binary: None` fallback are gone, and `ProviderSettings::binary` is a plain path; `default_binary` stays
 
 **Context.** Each provider descriptor still has a `defaults()` (`binary: None`, `timeout: DEFAULT_TIMEOUT` of 30 s, empty model), and each `build` falls back to its `DEFAULT_BINARY` when `binary` is `None`. Since D3 the loader writes every field from `relay.yml` (`binary` is always set), so these values only shape settings built in code: tests and the archived providers. Detection still uses `default_binary` for providers the file does not list, which is a probe, not a setting.
 
 **To do.**
-- [ ] Decide whether `ProviderDescriptor::defaults` and the `binary: None` fallback go, or stay as test helpers.
-- [ ] Keep `default_binary` for detection of unlisted providers and for the `binary` hint in errors.
+- [x] Decide whether `ProviderDescriptor::defaults` and the `binary: None` fallback go, or stay as test helpers.
+- [x] Keep `default_binary` for detection of unlisted providers and for the `binary` hint in errors.
 
 **Where in the code.**
 - `crates/relay/src/providers/mod.rs` (`ProviderDescriptor::defaults`, `ProviderSettings::binary`)
 - `crates/relay/src/providers/claude.rs`, `codex.rs`, `kimi.rs`, `kiro.rs` (`defaults`, `build`)
-
-## Closed
 
 ### #2 · Done · Fix the stale relay rename clause in AGENTS.md
 - type: Alignment

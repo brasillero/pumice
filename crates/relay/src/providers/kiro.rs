@@ -29,19 +29,21 @@
 //! with the dictated text; `runError` carries no structured cause, so login,
 //! quota and rate-limit failures are all `NonzeroExit`; a CLI that is not
 //! logged in starts a device-code login and waits, which ends in `Timeout`.
+//!
+//! Effort comes from `relay.yml` (p16-provider-effort/D4) as `--effort`,
+//! checked against the installed 2.29.0 (docs/research/P16-provider-effort.md).
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use super::cli::{CliAdapter, CliProvider};
 use super::{
-    FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode,
-    ProviderSettings, validate_settings_noop,
+    Effort, FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError,
+    ProviderErrorCode, ProviderLocations, ProviderSettings, effort_unsupported,
 };
 use crate::config::ConfigError;
 use crate::process::{
@@ -50,8 +52,6 @@ use crate::process::{
 
 pub const ID: &str = "kiro";
 pub const DEFAULT_BINARY: &str = "kiro-cli";
-/// Provider default timeout (real calls took 2.4–5.3 s, S2.14).
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Name of the one-off agent, passed to `--agent`.
 pub const AGENT_NAME: &str = "pumice";
@@ -71,36 +71,49 @@ const CHILD_ENV: [(&str, &str); 2] = [
 
 pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: ID,
-    defaults,
     build,
-    validate_settings: validate_settings_noop,
+    thinking_switch: false,
+    validate_settings,
     probe: ProbeSpec::Version(&["--version"]),
     default_binary: DEFAULT_BINARY,
     npm_entrypoint: None,
     install_hint: "curl -fsSL https://cli.kiro.dev/install | bash",
 };
 
-fn defaults() -> ProviderSettings {
-    ProviderSettings {
-        enabled: false,
-        binary: None,
-        // The configuration file sets the model on every enabled entry;
-        // nothing is built in.
-        model: String::new(),
-        timeout: DEFAULT_TIMEOUT,
+/// Models kiro-cli 2.29.0 runs without effort: it prints `failed to set
+/// effort '<level>': model does not support additional fields` and runs, and
+/// the run's metadata says `reasoning: {support: "unavailable", effortLevels:
+/// []}` (S2.14 live calls, docs/research/S2.14-kiro-plugin.md). Kiro's
+/// service reports each model's levels only during a run, so every other
+/// model is accepted. Ids are compared verbatim, as `--list-models` prints
+/// them.
+const MODELS_WITHOUT_EFFORT: [&str; 1] = ["claude-haiku-4.5"];
+
+fn validate_settings(
+    settings: &ProviderSettings,
+    locations: &ProviderLocations,
+) -> Result<(), ConfigError> {
+    if MODELS_WITHOUT_EFFORT.contains(&settings.model.as_str()) {
+        return Err(effort_unsupported(
+            ID,
+            settings,
+            locations,
+            "kiro-cli 2.29.0 ignores --effort for it: \"model does not support additional fields\"",
+        ));
     }
+    Ok(())
 }
 
 fn build(
     settings: &ProviderSettings,
     runner: Arc<ProcessRunner>,
 ) -> Result<Arc<dyn Provider>, ConfigError> {
-    let binary = settings
-        .binary
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_BINARY));
     Ok(Arc::new(CliProvider::new(
-        KiroAdapter::new(binary, settings.model.clone()),
+        KiroAdapter::new(
+            settings.binary.clone(),
+            settings.model.clone(),
+            settings.effort,
+        ),
         runner,
         settings.timeout,
     )))
@@ -111,13 +124,18 @@ fn build(
 pub struct KiroAdapter {
     binary: PathBuf,
     model: String,
+    effort: Effort,
 }
 
 impl KiroAdapter {
     /// `binary` is a command name looked up on PATH (normally `kiro-cli`) or
     /// a path to the official CLI.
-    pub fn new(binary: PathBuf, model: String) -> KiroAdapter {
-        KiroAdapter { binary, model }
+    pub fn new(binary: PathBuf, model: String, effort: Effort) -> KiroAdapter {
+        KiroAdapter {
+            binary,
+            model,
+            effort,
+        }
     }
 }
 
@@ -158,10 +176,10 @@ impl CliAdapter for KiroAdapter {
         .map(Argument::literal)
         .collect();
         args.push(Argument::literal(&self.model));
-        // Cheapest settings (owner rule): the lowest level every reasoning
-        // model accepts. Models without levels warn on stderr and run.
+        // The configured effort. Models without levels warn on stderr and
+        // run.
         args.push(Argument::literal("--effort"));
-        args.push(Argument::literal("low"));
+        args.push(Argument::literal(cli_effort(self.effort)));
 
         let user = input.user_prompt;
         let stdin = [user.before_text, input.text, user.after_text].concat();
@@ -190,6 +208,16 @@ impl CliAdapter for KiroAdapter {
             }],
             parser: parse_output,
         })
+    }
+}
+
+/// The `--effort` value for each level; the installed CLI's help lists low,
+/// medium, high, xhigh and max.
+fn cli_effort(effort: Effort) -> &'static str {
+    match effort {
+        Effort::Low => "low",
+        Effort::Medium => "medium",
+        Effort::High => "high",
     }
 }
 

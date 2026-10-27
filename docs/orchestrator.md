@@ -190,14 +190,8 @@ the final text or the audio contents, and the orchestrator keeps no log of
 its own. Provider calls run in the relay's usual restricted form (no tools,
 a private empty workspace per call).
 
-The provider's argv carries no dictation either, with one exception: the
-Kimi CLI accepts its message only as a command-line argument (`-p MESSAGE`;
-see [`research/S2.4-kimi-adapter.md`](research/S2.4-kimi-adapter.md)), so a
-flow routed to `kimi` puts the user message — the transcript — in Kimi's
-argv (the formatter's instructions go into a private agent file). While
-that call runs, other local users can see the transcript in the process
-list. Use another provider for dictation
-that must stay private on a shared machine.
+The provider's argv carries no dictation either: every provider receives
+the user message on stdin.
 
 ## `pumice serve`
 

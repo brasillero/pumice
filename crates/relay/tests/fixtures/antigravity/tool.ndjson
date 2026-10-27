@@ -1,3 +1,0 @@
-{"event":"init","model":"gemini-test"}
-{"event":"tool_use","name":"read_file","args":{"path":"/etc/hostname"}}
-{"event":"result","status":"SUCCESS","result":{"response":"ignored"}}

@@ -3,8 +3,8 @@
 //! Windows shim translation tests.
 //!
 //! The behavior every adapter must share — final-text parsing, restricted
-//! mode, fresh empty workspace, literal transport of the dictation (stdin, or
-//! a single argument for Kimi), system prompt separation, cleanup, error
+//! mode, fresh empty workspace, literal transport of the dictation on stdin,
+//! system prompt separation, cleanup, error
 //! classification, timeouts, invalid output, privacy and terminal failure (no
 //! other provider runs) — is asserted once, per adapter, by the contract
 //! suite in `tests/adapter_contract.rs` (`tests/support/adapter_contract.rs`).
@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pumice_relay::process::ProcessRunner;
+use pumice_relay::providers::Effort;
 use pumice_relay::providers::claude::ClaudeAdapter;
 use pumice_relay::providers::cli::CliProvider;
 use pumice_relay::providers::codex::CodexAdapter;
@@ -50,7 +51,12 @@ async fn format_with(provider: &impl Provider, text: &str) -> Result<String, Pro
 
 fn claude_provider(fake: &FakeCli) -> CliProvider<ClaudeAdapter> {
     CliProvider::new(
-        ClaudeAdapter::new(fake.path().to_path_buf(), "haiku".to_owned()),
+        ClaudeAdapter::new(
+            fake.path().to_path_buf(),
+            "haiku".to_owned(),
+            Effort::Low,
+            false,
+        ),
         Arc::new(ProcessRunner::new()),
         Duration::from_secs(30),
     )
@@ -58,7 +64,7 @@ fn claude_provider(fake: &FakeCli) -> CliProvider<ClaudeAdapter> {
 
 fn codex_provider(fake: &FakeCli) -> CliProvider<CodexAdapter> {
     CliProvider::new(
-        CodexAdapter::new(fake.path().to_path_buf(), MODEL.to_owned()),
+        CodexAdapter::new(fake.path().to_path_buf(), MODEL.to_owned(), Effort::Low),
         Arc::new(ProcessRunner::new()),
         Duration::from_secs(30),
     )
@@ -217,7 +223,7 @@ async fn windows_shim_launches_node_with_entrypoint() {
     );
 
     let provider = CliProvider::new(
-        CodexAdapter::new(shim, MODEL.to_owned()),
+        CodexAdapter::new(shim, MODEL.to_owned(), Effort::Low),
         Arc::new(ProcessRunner::new()),
         Duration::from_secs(30),
     );
@@ -256,7 +262,7 @@ async fn windows_hostile_shim_is_refused_without_running() {
     );
 
     let provider = CliProvider::new(
-        CodexAdapter::new(shim, MODEL.to_owned()),
+        CodexAdapter::new(shim, MODEL.to_owned(), Effort::Low),
         Arc::new(ProcessRunner::new()),
         Duration::from_secs(30),
     );

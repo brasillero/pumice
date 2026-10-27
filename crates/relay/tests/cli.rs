@@ -32,11 +32,12 @@ const FIXTURE_TRANSCRIPT: &str = "Reunião com a equipe às nove horas, não esq
 fn hermetic_yaml(port: u16) -> (Vec<FakeCli>, String) {
     let mut fakes: Vec<FakeCli> = Vec::new();
     let mut yaml = format!("port: {port}\nproviders:\n");
-    for id in ["claude", "codex", "kimi", "kiro"] {
+    for id in ["claude", "codex", "kiro"] {
         let fake = FakeCli::new(json!({}));
         yaml.push_str(&format!(
-            "  - id: {id}\n    enabled: false\n    model: null\n    binary: '{}'\n    timeout_secs: 30\n",
-            fake.path().display()
+            "  - id: {id}\n    enabled: false\n    model: null\n    binary: '{}'\n    timeout_secs: 30\n{}",
+            fake.path().display(),
+            support::effort_keys(id)
         ));
         fakes.push(fake);
     }
@@ -633,7 +634,7 @@ fn startup_prints_the_route_line_naming_the_enabled_providers() {
     let claude = FakeCli::new(json!({}));
     let codex = FakeCli::new(json!({}));
     let (_dir, path) = write_config(&format!(
-        "port: {port}\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{}'\n    timeout_secs: 30\n",
+        "port: {port}\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{}'\n    timeout_secs: 30\n    effort: low\n",
         claude.path().display(),
         codex.path().display()
     ));
@@ -655,7 +656,7 @@ fn startup_prints_the_route_line_naming_the_enabled_providers() {
 fn startup_with_no_enabled_providers_prints_one_clear_line() {
     let port = grab_free_port();
     let (_dir, path) = write_config(&format!(
-        "port: {port}\nproviders:\n  - id: claude\n    enabled: false\n    model: null\n    binary: claude\n    timeout_secs: 30\n"
+        "port: {port}\nproviders:\n  - id: claude\n    enabled: false\n    model: null\n    binary: claude\n    timeout_secs: 30\n    effort: low\n    thinking: false\n"
     ));
     let child = Command::new(env!("CARGO_BIN_EXE_pumice-relay"))
         .args(["--config", path.to_str().expect("UTF-8 path")])

@@ -33,7 +33,7 @@ use tokio::net::TcpStream;
 /// Minimal YAML configuring `claude` with its binary at the fake CLI and
 /// `codex` disabled, so the enabled model list is exactly `claude`.
 /// `{binary}` is replaced by the fake's path.
-const CLAUDE_AT_FAKE: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n  - id: codex\n    enabled: false\n    model: null\n    binary: codex\n    timeout_secs: 30\n";
+const CLAUDE_AT_FAKE: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n  - id: codex\n    enabled: false\n    model: null\n    binary: codex\n    timeout_secs: 30\n    effort: low\n";
 
 /// The recorded Handy transcript: what passthrough returns, and what logs
 /// and error bodies must never contain.
@@ -90,7 +90,7 @@ impl DualServer {
 
 /// YAML configuring `claude` and `codex`, each at its own fake CLI.
 /// `{claude}` and `{codex}` are replaced by the fakes' paths.
-const BOTH_AT_FAKES: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{claude}'\n    timeout_secs: 30\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex}'\n    timeout_secs: 30\n";
+const BOTH_AT_FAKES: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{claude}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex}'\n    timeout_secs: 30\n    effort: low\n";
 
 /// Builds a pipeline from `yaml` with one fake per provider (`{claude}` and
 /// `{codex}` replaced by the fakes' paths), serves it on an ephemeral
@@ -1051,7 +1051,7 @@ async fn post_model(server_port: u16, model: &str) -> RawResponse {
 #[tokio::test]
 async fn models_follow_the_list_order() {
     // The model list follows the file: both orders of the same two entries.
-    let codex_first = "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex}'\n    timeout_secs: 30\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{claude}'\n    timeout_secs: 30\n";
+    let codex_first = "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex}'\n    timeout_secs: 30\n    effort: low\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{claude}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n";
     for (yaml, expected) in [
         (BOTH_AT_FAKES, ["claude", "codex", "passthrough", "inspect"]),
         (codex_first, ["codex", "claude", "passthrough", "inspect"]),
@@ -1195,7 +1195,7 @@ async fn unknown_model_is_an_http_404_and_runs_no_provider() {
 
 #[tokio::test]
 async fn disabled_provider_is_not_listed_and_is_an_http_404() {
-    let yaml = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{claude}'\n    timeout_secs: 30\n  - id: codex\n    enabled: false\n    model: null\n    binary: codex\n    timeout_secs: 30\n";
+    let yaml = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{claude}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n  - id: codex\n    enabled: false\n    model: null\n    binary: codex\n    timeout_secs: 30\n    effort: low\n";
     let server = start_dual_server(
         yaml,
         success_scenario("unused"),
@@ -1252,14 +1252,12 @@ async fn start_missing_selected_server(
     codex_scenario: Value,
 ) -> MissingSelectedServer {
     let codex = FakeCli::new(codex_scenario);
-    let kimi = FakeCli::new(json!({}));
     let kiro = FakeCli::new(json!({}));
     let missing_dir = TempDir::new().expect("temp dir");
     let missing_binary = missing_dir.path().join("claude");
     let yaml = format!(
-        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n  - id: kimi\n    enabled: false\n    binary: '{}'\n    model: null\n    timeout_secs: 30\n  - id: kiro\n    enabled: false\n    binary: '{}'\n    model: null\n    timeout_secs: 30\n{yaml_tail}",
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n  - id: kiro\n    enabled: false\n    binary: '{}'\n    model: null\n    timeout_secs: 30\n    effort: low\n{yaml_tail}",
         missing_binary.display(),
-        kimi.path().display(),
         kiro.path().display(),
     )
     .replace("{codex}", &codex.path().display().to_string());
@@ -1302,7 +1300,7 @@ async fn start_missing_selected_server(
 #[tokio::test]
 async fn models_omit_an_enabled_provider_whose_binary_is_missing() {
     let server = start_missing_selected_server(
-        "  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex}'\n    timeout_secs: 30\n",
+        "  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex}'\n    timeout_secs: 30\n    effort: low\n",
         codex_success_scenario("unused"),
     )
     .await;
@@ -1320,7 +1318,7 @@ async fn models_omit_an_enabled_provider_whose_binary_is_missing() {
 #[tokio::test]
 async fn selecting_a_missing_provider_is_an_http_error_and_runs_no_other_provider() {
     let server = start_missing_selected_server(
-        "  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex}'\n    timeout_secs: 30\n",
+        "  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex}'\n    timeout_secs: 30\n    effort: low\n",
         codex_success_scenario("unused"),
     )
     .await;
@@ -1361,7 +1359,7 @@ async fn selecting_a_missing_provider_is_an_http_error_and_runs_no_other_provide
 #[tokio::test]
 async fn model_less_request_is_an_http_400_even_when_the_provider_is_missing() {
     let server =
-        start_missing_selected_server("  - id: codex\n    enabled: false\n    model: null\n    binary: codex\n    timeout_secs: 30\n", json!({})).await;
+        start_missing_selected_server("  - id: codex\n    enabled: false\n    model: null\n    binary: codex\n    timeout_secs: 30\n    effort: low\n", json!({})).await;
 
     let mut body: Value =
         serde_json::from_str(&support::fixture("handy-request.json")).expect("fixture parses");
@@ -1440,19 +1438,13 @@ fn hermetic_serve_yaml(port: u16, claude_scenario: Value) -> (FakeCli, Vec<FakeC
     let mut fakes: Vec<FakeCli> = vec![codex];
     let codex_path = fakes[0].path().display().to_string();
     let mut yaml = format!(
-        "port: {port}\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex_path}'\n    timeout_secs: 30\n",
+        "port: {port}\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex_path}'\n    timeout_secs: 30\n    effort: low\n",
         claude.path().display(),
     );
     // Disabled providers, each at its own fake so detection never searches PATH.
-    let kimi = FakeCli::new(json!({}));
-    yaml.push_str(&format!(
-        "  - id: kimi\n    enabled: false\n    binary: '{}'\n    model: null\n    timeout_secs: 30\n",
-        kimi.path().display()
-    ));
-    fakes.push(kimi);
     let kiro = FakeCli::new(json!({}));
     yaml.push_str(&format!(
-        "  - id: kiro\n    enabled: false\n    binary: '{}'\n    model: null\n    timeout_secs: 30\n",
+        "  - id: kiro\n    enabled: false\n    binary: '{}'\n    model: null\n    timeout_secs: 30\n    effort: low\n",
         kiro.path().display()
     ));
     fakes.push(kiro);
@@ -1692,8 +1684,8 @@ fn serve_prints_one_status_line_per_enabled_provider() {
     }
     // A disabled provider is detected but gets no line.
     assert!(
-        !lines.iter().any(|line| line.starts_with("provider kimi:")),
-        "disabled provider kimi must get no line: {lines:?}"
+        !lines.iter().any(|line| line.starts_with("provider kiro:")),
+        "disabled provider kiro must get no line: {lines:?}"
     );
 }
 
@@ -2096,7 +2088,7 @@ async fn normal_model_rejects_absent_messages_and_unsupported_content_shapes() {
 #[tokio::test]
 async fn inspect_works_with_no_available_providers_and_no_fallback() {
     let server =
-        start_missing_selected_server("  - id: codex\n    enabled: false\n    model: null\n    binary: codex\n    timeout_secs: 30\n", json!({})).await;
+        start_missing_selected_server("  - id: codex\n    enabled: false\n    model: null\n    binary: codex\n    timeout_secs: 30\n    effort: low\n", json!({})).await;
 
     let models = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
     assert_eq!(models.status, 200);

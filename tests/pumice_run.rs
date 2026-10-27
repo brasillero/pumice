@@ -239,7 +239,7 @@ fn make_rig(script: &Script) -> Rig {
     fs::write(
         cfg.join("relay.yml"),
         format!(
-            "port: 7567\ntotal_timeout_secs: 30\nmax_parallel: 4\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku-test\n    binary: '{}'\n    timeout_secs: 30\ndebug_log:\n  enabled: false\n  path: pumice-debug.jsonl\n",
+            "port: 7567\ntotal_timeout_secs: 30\nmax_parallel: 4\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku-test\n    binary: '{}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\ndebug_log:\n  enabled: false\n  path: pumice-debug.jsonl\n",
             fake.display()
         ),
     )
@@ -740,13 +740,13 @@ fn forbidden_flow_combinations_are_rejected_at_load() {
 
 #[test]
 fn a_route_that_is_not_enabled_is_a_config_error() {
-    // The flow routes to kimi, but relay.yml only enables claude.
+    // The flow routes to kiro, but relay.yml only enables claude.
     let rig = make_rig(&Script {
         flows: "  - id: clean
     enabled: true
     transcription_model: turbo
     formatter: builtin:clean
-    relay_route: kimi
+    relay_route: kiro
 "
         .to_owned(),
         ..Script::default()

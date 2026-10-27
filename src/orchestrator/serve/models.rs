@@ -204,16 +204,20 @@ providers:
     model: test
     binary: unused-codex
     timeout_secs: 30
-  - id: kimi
+    effort: low
+  - id: kiro
     enabled: false
     model: null
-    binary: unused-kimi
+    binary: unused-kiro
     timeout_secs: 30
+    effort: low
   - id: claude
     enabled: true
     model: test
     binary: unused-claude
     timeout_secs: 30
+    effort: low
+    thinking: false
 debug_log:
   enabled: false
   path: debug.jsonl
@@ -287,7 +291,7 @@ debug_log:
             assert!(models.get("Voice").is_none());
             assert!(models.get("voice:passthrough:clean").is_none());
             assert!(models.get("voice:inspect:clean").is_none());
-            assert!(models.get("voice:kimi:clean").is_none());
+            assert!(models.get("voice:kiro:clean").is_none());
         }
     }
 
@@ -296,7 +300,7 @@ debug_log:
         let (_dir, loaded) = fixture();
         let runtime = Runtime::build(&loaded, Arc::new(CleanupScope::new())).unwrap();
         let mut settings = config::serve_settings(&loaded).unwrap();
-        settings.relay.default_provider = "kimi".to_owned();
+        settings.relay.default_provider = "kiro".to_owned();
         let error = Models::build(&loaded, &settings, &runtime).unwrap_err();
         assert!(error.to_string().contains("default_provider"));
         assert!(error.to_string().contains(":24:"), "{error}");

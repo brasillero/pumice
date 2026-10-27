@@ -21,7 +21,7 @@ use serde_saphyr::Spanned;
 
 pub use error::ConfigError;
 
-use crate::providers::{self, ProviderSettings};
+use crate::providers::{self, Effort, ProviderSettings};
 use raw::{Setting, Within};
 
 /// Hard upper bound for `max_parallel`, kept small to limit resource use.
@@ -385,10 +385,6 @@ fn provider_settings(
             ));
         }
     }
-    // The descriptor's settings are only the shape; every field below is
-    // replaced with the entry's own value.
-    let mut settings = (descriptor.defaults)();
-    settings.enabled = enabled.value;
     let mut locations = providers::ProviderLocations {
         provider: Some(id.referenced),
         enabled: Some(enabled.referenced),
@@ -416,11 +412,11 @@ fn provider_settings(
         ));
     }
     locations.binary = Some(binary.referenced);
-    settings.binary = Some(resolve_binary(&binary.value, config_dir));
+    let binary = resolve_binary(&binary.value, config_dir);
 
     // `model: null` means no model; only a disabled entry may say so (the
     // checks below reject it on an enabled one).
-    match raw.model.nullable(within, &format!("{base}.model"))? {
+    let model = match raw.model.nullable(within, &format!("{base}.model"))? {
         Some(model) => {
             locations.model = Some(model.referenced);
             if model.value.trim().is_empty() && enabled.value {
@@ -437,13 +433,13 @@ fn provider_settings(
                     format!("{base}.model must not start with '-'"),
                 ));
             }
-            settings.model = model.value.clone();
+            model.value.clone()
         }
         None => {
             locations.model = raw.model.location();
-            settings.model = String::new();
+            String::new()
         }
-    }
+    };
 
     let timeout = raw
         .timeout_secs
@@ -454,11 +450,72 @@ fn provider_settings(
             format!("{base}.timeout_secs must be greater than zero"),
         ));
     }
-    settings.timeout = Duration::from_secs(timeout.value);
+    let effort = match &raw.effort {
+        Setting::Value(effort) => {
+            locations.effort = Some(effort.referenced);
+            Effort::parse(&effort.value).ok_or_else(|| {
+                ConfigError::at(
+                    effort.referenced,
+                    format!(
+                        "{base}.effort must be low, medium or high, found \"{}\"",
+                        effort.value
+                    ),
+                )
+            })?
+        }
+        // Unlike `model`, every provider takes every level (only models
+        // known to have no effort are refused, by the descriptor), so a
+        // disabled entry writes one too.
+        Setting::Null(location) => {
+            return Err(ConfigError::at(
+                *location,
+                format!("{base}.effort must not be null; write low, medium or high"),
+            ));
+        }
+        Setting::Missing => return Err(raw::missing(within, &format!("{base}.effort"))),
+    };
 
-    // The descriptor runs first: its refusal (Antigravity) and its own
-    // requirements (an explicit provider/model, a plausible alias) keep
-    // their established messages and positions.
+    // Only a provider with a thinking switch (Claude, p16-provider-effort/D5)
+    // has the key; the others reason through effort alone.
+    let thinking = if descriptor.thinking_switch {
+        match &raw.thinking {
+            Setting::Value(thinking) => {
+                locations.thinking = Some(thinking.referenced);
+                Some(thinking.value)
+            }
+            Setting::Null(location) => {
+                return Err(ConfigError::at(
+                    *location,
+                    format!("{base}.thinking must not be null; write true or false"),
+                ));
+            }
+            Setting::Missing => return Err(raw::missing(within, &format!("{base}.thinking"))),
+        }
+    } else {
+        if let Some(location) = raw.thinking.location() {
+            return Err(ConfigError::at(
+                location,
+                format!(
+                    "{base}.thinking is not a setting of this provider: only claude has it, and {} reasons through effort alone. Delete this key.",
+                    id.value
+                ),
+            ));
+        }
+        None
+    };
+
+    let settings = ProviderSettings {
+        enabled: enabled.value,
+        binary,
+        model,
+        timeout: Duration::from_secs(timeout.value),
+        effort,
+        thinking,
+    };
+
+    // The descriptor runs first: its refusal (the archived generic adapter)
+    // and its own requirements keep their established messages and
+    // positions.
     (descriptor.validate_settings)(&settings, &locations)?;
     // Loader backstop for descriptors without requirements of their own:
     // an enabled entry always needs a usable model.

@@ -13,6 +13,7 @@ use std::time::Duration;
 use pumice_relay::process::ProcessRunner;
 use pumice_relay::providers::cli::CliProvider;
 use pumice_relay::providers::kiro::{self as kiro_plugin, AGENT_FILE, DESCRIPTOR, ID, KiroAdapter};
+use pumice_relay::providers::{Effort, ProviderSettings};
 use pumice_relay::providers::{
     FormatInput, Provider, ProviderError, ProviderErrorCode, UserPrompt,
 };
@@ -42,7 +43,7 @@ fn fake_kiro(stdout: &str, exit_code: i32) -> FakeCli {
 
 fn provider(fake: &FakeCli, model: &str) -> CliProvider<KiroAdapter> {
     CliProvider::new(
-        KiroAdapter::new(fake.path().to_path_buf(), model.to_owned()),
+        KiroAdapter::new(fake.path().to_path_buf(), model.to_owned(), Effort::Low),
         Arc::new(ProcessRunner::new()),
         Duration::from_secs(30),
     )
@@ -139,6 +140,48 @@ async fn invocation_argv_is_exact() {
     .map(|s| (*s).to_owned())
     .collect();
     assert_eq!(argv, expected, "{argv:?}");
+}
+
+/// Every effort level reaches the CLI as `--effort`, once, built from
+/// configured settings (p16-provider-effort/D4).
+#[tokio::test]
+async fn configured_effort_reaches_the_cli() {
+    for (effort, level) in [
+        (Effort::Low, "low"),
+        (Effort::Medium, "medium"),
+        (Effort::High, "high"),
+    ] {
+        let fake = fake_kiro(&fixture("kiro/success.jsonl"), 0);
+        let settings = ProviderSettings {
+            enabled: true,
+            binary: fake.path().to_path_buf(),
+            model: TEST_MODEL.to_owned(),
+            timeout: Duration::from_secs(30),
+            effort,
+            thinking: None,
+        };
+        let provider =
+            (DESCRIPTOR.build)(&settings, Arc::new(ProcessRunner::new())).expect("kiro builds");
+        let input = FormatInput {
+            system_prompt: SYSTEM_PROMPT,
+            user_prompt: UserPrompt {
+                before_text: BEFORE,
+                after_text: AFTER,
+            },
+            text: "hello",
+        };
+        provider
+            .format(input, Instant::now() + Duration::from_secs(30))
+            .await
+            .expect("success");
+        let argv = argv(&fake.report());
+        assert_eq!(
+            argv[argv.len() - 2..],
+            ["--effort".to_owned(), level.to_owned()],
+            "{level}"
+        );
+        assert_eq!(argv.iter().filter(|a| *a == "--effort").count(), 1);
+    }
 }
 
 #[tokio::test]
@@ -382,11 +425,4 @@ fn provider_reports_its_id_without_running() {
     let fake = fake_kiro("", 0);
     assert_eq!(provider(&fake, TEST_MODEL).id(), ID);
     assert!(!fake.report_path().exists());
-}
-
-#[test]
-fn descriptor_defaults_ship_disabled_with_an_empty_model() {
-    let settings = (DESCRIPTOR.defaults)();
-    assert!(!settings.enabled);
-    assert_eq!(settings.model, "");
 }

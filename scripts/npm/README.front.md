@@ -4,7 +4,7 @@ Polish your dictation with the AI subscriptions you already have.
 
 Pumice is a small open-source tool that runs on your computer and connects
 your dictation app (such as [Handy](https://github.com/cjpais/Handy)) to the AI
-assistants you already pay for (Claude, Codex, Kimi or Kiro), using their
+assistants you already pay for (Claude, Codex or Kiro), using their
 official command-line apps. The app sends its own prompt and the text
 transcribed by Whisper; Pumice passes them, unchanged, to the assistant you
 chose and returns the answer ready to paste. The app's prompt decides what
@@ -89,6 +89,8 @@ providers:
     model: haiku
     binary: claude
     timeout_secs: 30
+    effort: low       # low, medium or high
+    thinking: false   # Claude only
 debug_log:
   enabled: false
   path: pumice-debug.jsonl
@@ -102,7 +104,7 @@ external connections of its own.
 ## AI CLIs
 
 Pumice relays your dictation app's request **through the official CLIs of
-your subscriptions** (currently Claude, Codex and Kimi). Install and
+your subscriptions** (currently Claude, Codex and Kiro). Install and
 authenticate those separately — the npm package does not install or log into
 them, and it cannot provide accounts. If the selected provider fails or times
 out, Pumice answers with an error and the app keeps its own transcript.

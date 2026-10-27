@@ -21,7 +21,7 @@ OpenAI-compatible; this is what Handy and other post-processing clients use.
 
 | Route | Purpose |
 | --- | --- |
-| `POST /v1/chat/completions` | Hands the client's messages, unchanged, to the provider CLI named by `model` (`claude`, `codex`, `kimi`, `kiro`, or the built-in `passthrough` / `inspect`) and answers in the OpenAI chat completion shape |
+| `POST /v1/chat/completions` | Hands the client's messages, unchanged, to the provider CLI named by `model` (`claude`, `codex`, `kiro`, or the built-in `passthrough` / `inspect`) and answers in the OpenAI chat completion shape |
 | `GET /v1/models` | The enabled model routes, in the OpenAI list shape |
 | `GET /health` | `{"status":"ok","version":…}` |
 | `GET /` | A static landing page |

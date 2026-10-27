@@ -269,7 +269,7 @@ mod tests {
                 found(),
                 Version::Parsed("0.160.0".to_owned()),
             ),
-            status("kimi", false, Found::Missing, Version::Unavailable),
+            status("kiro", false, Found::Missing, Version::Unavailable),
         ]
     }
 
@@ -288,7 +288,7 @@ mod tests {
         );
         assert!(
             report.contains(
-                "kimi: disabled, missing (install: curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash)\n"
+                "kiro: disabled, missing (install: curl -fsSL https://cli.kiro.dev/install | bash)\n"
             ),
             "{report}"
         );
@@ -345,11 +345,11 @@ mod tests {
     #[test]
     fn render_shows_an_enabled_provider_without_warnings() {
         let mut statuses = full_scan();
-        statuses[2] = status("kimi", true, found(), Version::Unavailable);
+        statuses[2] = status("kiro", true, found(), Version::Unavailable);
         let report = render(None, &statuses);
 
         assert!(
-            report.contains("kimi: enabled, found (version unavailable)\n"),
+            report.contains("kiro: enabled, found (version unavailable)\n"),
             "{report}"
         );
         assert!(!report.contains("warning"), "{report}");

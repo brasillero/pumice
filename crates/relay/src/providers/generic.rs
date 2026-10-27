@@ -38,7 +38,6 @@ use crate::config::ConfigError;
 use crate::process::ProcessRunner;
 
 pub const ID: &str = "generic";
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 // Residual risk (recorded here; not printed, owner decision 2026-10-07):
 // Connects only to an unauthenticated loopback HTTP endpoint. The local
@@ -54,8 +53,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: ID,
-    defaults,
     build,
+    thinking_switch: false,
     validate_settings,
     // This adapter has no CLI: detection neither resolves nor spawns
     // anything for it (no PATH lookup, no probe). Its endpoint is a network
@@ -71,18 +70,6 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     // at the configured `base_url`.
     install_hint: "start a local OpenAI-compatible server such as Ollama or LM Studio",
 };
-
-fn defaults() -> ProviderSettings {
-    ProviderSettings {
-        // Nothing is enabled unless the configuration entry says so; the
-        // loader replaces this with the entry's explicit value.
-        enabled: false,
-        binary: None,
-        // No default model: enablement requires an explicit one.
-        model: String::new(),
-        timeout: DEFAULT_TIMEOUT,
-    }
-}
 
 /// Archived (owner decision 2026-10-08): the provider's only setting was
 /// `options.base_url`, and provider options were removed. Its configuration

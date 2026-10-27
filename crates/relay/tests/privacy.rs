@@ -30,7 +30,7 @@ use tokio::net::TcpStream;
 
 /// Minimal YAML configuring `claude` with its binary at the fake CLI and
 /// `codex` disabled. `{binary}` is replaced by the fake's path.
-const CLAUDE_AT_FAKE: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n  - id: codex\n    enabled: false\n    model: null\n    binary: codex\n    timeout_secs: 30\n";
+const CLAUDE_AT_FAKE: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n  - id: codex\n    enabled: false\n    model: null\n    binary: codex\n    timeout_secs: 30\n    effort: low\n";
 
 /// Captured metadata lines, one per completion request.
 #[derive(Default)]
@@ -477,13 +477,13 @@ fn hermetic_serve_yaml(port: u16, debug_log: &str) -> (Vec<FakeCli>, String) {
     for (id, model) in [
         ("claude", "haiku"),
         ("codex", "gpt-6.1-sol"),
-        ("kimi", "kimi-k2.7-code-highspeed"),
-        ("kiro", "claude-haiku-4.5"),
+        ("kiro", "glm-5"),
     ] {
         let fake = FakeCli::new(json!({}));
         yaml.push_str(&format!(
-            "  - id: {id}\n    enabled: true\n    model: {model}\n    binary: '{}'\n    timeout_secs: 30\n",
-            fake.path().display()
+            "  - id: {id}\n    enabled: true\n    model: {model}\n    binary: '{}'\n    timeout_secs: 30\n{}",
+            fake.path().display(),
+            support::effort_keys(id)
         ));
         fakes.push(fake);
     }

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pumice_relay::process::{ProcessRunner, toml_basic_string};
+use pumice_relay::providers::Effort;
 use pumice_relay::providers::cli::CliProvider;
 use pumice_relay::providers::codex::CodexAdapter;
 use pumice_relay::providers::{
@@ -78,7 +79,7 @@ fn fake_codex(stdout: &str, exit_code: i32) -> FakeCli {
 
 fn provider(fake: &FakeCli) -> CliProvider<CodexAdapter> {
     CliProvider::new(
-        CodexAdapter::new(fake.path().to_path_buf(), MODEL.to_owned()),
+        CodexAdapter::new(fake.path().to_path_buf(), MODEL.to_owned(), Effort::Low),
         Arc::new(ProcessRunner::new()),
         Duration::from_secs(30),
     )
@@ -187,6 +188,59 @@ async fn passes_the_restricted_invocation() {
         ["-c", r#"model_reasoning_effort="low""#, "-"].map(String::from)
     );
     assert_eq!(report["cwd_entries"], json!([]));
+}
+
+/// Every effort level reaches the CLI as the last `-c` before the stdin
+/// marker, once (p16-provider-effort/D4). Built without a Codex home, so the
+/// test never reads the user's own Codex configuration.
+#[tokio::test]
+async fn configured_effort_reaches_the_cli() {
+    for (effort, level) in [
+        (Effort::Low, "low"),
+        (Effort::Medium, "medium"),
+        (Effort::High, "high"),
+    ] {
+        let fake = fake_codex(&fixture("codex/success.jsonl"), 0);
+        let provider = CliProvider::new(
+            CodexAdapter::new(fake.path().to_path_buf(), MODEL.to_owned(), effort),
+            Arc::new(ProcessRunner::new()),
+            Duration::from_secs(30),
+        );
+        let input = FormatInput {
+            system_prompt: SYSTEM_PROMPT,
+            user_prompt: UserPrompt {
+                before_text: BEFORE,
+                after_text: AFTER,
+            },
+            text: "hello",
+        };
+        provider
+            .format(input, Instant::now() + Duration::from_secs(30))
+            .await
+            .expect("success");
+        let argv = argv(&fake.report());
+        let value = format!(r#"model_reasoning_effort="{level}""#);
+        assert_eq!(
+            argv[argv.len() - 3..],
+            ["-c".to_owned(), value.clone(), "-".to_owned()],
+            "{level}"
+        );
+        assert_eq!(
+            argv.iter()
+                .filter(|a| a.starts_with("model_reasoning_effort="))
+                .count(),
+            1,
+            "{level}"
+        );
+        // The other pins stay the cheapest whatever the effort.
+        for pin in [
+            r#"service_tier="default""#,
+            "features.fast_mode=false",
+            r#"model_reasoning_summary="none""#,
+        ] {
+            assert!(argv.iter().any(|a| a == pin), "{level}: {pin}");
+        }
+    }
 }
 
 #[tokio::test]
