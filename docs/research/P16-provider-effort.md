@@ -5,7 +5,7 @@ Task: `p16-provider-effort` (owner decisions D2, D4, D5). Checked on
 
 | CLI | Installed version | How it was checked |
 | --- | --- | --- |
-| Claude Code | `2.1.306 (Claude Code)`, native binary built 2026-10-21 (the task named 2.1.304; the machine had updated) | `claude --version`, `claude --help`, read-only string inspection of the installed binary (`~/.local/share/claude/versions/2.1.306`), and on 2026-10-24 its model-name functions extracted and run under node (no `claude` process; [Claude Code's model names](#claude-codes-model-names)) |
+| Claude Code | `2.1.306 (Claude Code)`, native binary built 2026-10-21 (the task named 2.1.304; the machine had updated); re-checked on 2026-10-26 against `2.1.310 (Claude Code)`, the installed version since then | `claude --version`, `claude --help`, read-only string inspection of the installed binary (`~/.local/share/claude/versions/2.1.306`), and on 2026-10-24 its model-name functions extracted and run under node (no `claude` process; [Claude Code's model names](#claude-codes-model-names)); the same for 2.1.310 ([Re-check on Claude Code 2.1.310](#re-check-on-claude-code-21310)) |
 | Codex | `codex-cli 0.163.0` (standalone musl build) | `codex --version`, `codex --help`, `codex exec --help`, `codex app-server --help`, and read-only string inspection of the installed binary |
 | Kiro | `kiro-cli 2.29.0` | `kiro-cli --version`, `kiro-cli chat --help` |
 
@@ -18,7 +18,7 @@ from the CLIs' help and code, not measured, unless it says otherwise.
 `relay.yml` writes `effort: low | medium | high` on every provider entry, and
 `thinking: true | false` on the `claude` entry only. Each plugin maps them:
 
-| Pumice | Claude Code 2.1.306 | Codex 0.163.0 | Kiro 2.29.0 |
+| Pumice | Claude Code 2.1.306 and 2.1.310 | Codex 0.163.0 | Kiro 2.29.0 |
 | --- | --- | --- | --- |
 | `effort: low` | `--effort low` and `CLAUDE_CODE_EFFORT_LEVEL=low` (child env and the `--settings` layer's `env`) | `-c model_reasoning_effort="low"` | `--effort low` |
 | `effort: medium` | `--effort medium` and `CLAUDE_CODE_EFFORT_LEVEL=medium` | `-c model_reasoning_effort="medium"` | `--effort medium` |
@@ -119,7 +119,7 @@ provider at all.
 
 | Provider | Models refused | Evidence |
 | --- | --- | --- |
-| Claude | Every spelling Claude Code canonicalizes to `claude-haiku-4-5`, `claude-sonnet-4-5`, `claude-sonnet-4-0`, `claude-opus-4-1`, `claude-opus-4-0` or a `claude-3-…` name: `claude-sonnet-4`, `claude-sonnet-4-20250514`, `claude-opus-4`, `claude-opus-4@20250514`, `claude-haiku-4-5-20251001`, `us.anthropic.claude-haiku-4-5-20251001-v1:0`, `Claude-Sonnet-4-5[1m]`, … (see [Claude Code's model names](#claude-codes-model-names)), except the four legacy Opus spellings Claude Code remaps at run time | Claude Code 2.1.306 binary: the effort check (`JS`) canonicalizes the model (`r=qe(e)`) and returns false for exactly these names (`r.includes("claude-3-")\|\|r==="claude-opus-4-0"\|\|r==="claude-opus-4-1"\|\|r==="claude-sonnet-4-0"\|\|r==="claude-sonnet-4-5"\|\|r==="claude-haiku-4-5"`), after overrides that only apply to custom setups (see below); the request builder then deletes `effort` (`if(!JS(h)){delete n.effort;return}`) without a warning. Its bundled model catalog agrees: none of these entries has the `effort` capability. |
+| Claude | Every spelling Claude Code canonicalizes to `claude-haiku-4-5`, `claude-sonnet-4-5`, `claude-sonnet-4-0`, `claude-opus-4-1`, `claude-opus-4-0` or a `claude-3-…` name: `claude-sonnet-4`, `claude-sonnet-4-20250514`, `claude-opus-4`, `claude-opus-4@20250514`, `claude-haiku-4-5-20251001`, `us.anthropic.claude-haiku-4-5-20251001-v1:0`, `Claude-Sonnet-4-5[1m]`, … (see [Claude Code's model names](#claude-codes-model-names)), except the four legacy Opus spellings Claude Code remaps at run time | Claude Code 2.1.306 binary: the effort check (`JS`) canonicalizes the model (`r=qe(e)`) and returns false for exactly these names (`r.includes("claude-3-")\|\|r==="claude-opus-4-0"\|\|r==="claude-opus-4-1"\|\|r==="claude-sonnet-4-0"\|\|r==="claude-sonnet-4-5"\|\|r==="claude-haiku-4-5"`), after overrides that only apply to custom setups (see below); the request builder then deletes `effort` (`if(!JS(h)){delete n.effort;return}`) without a warning. Its bundled model catalog agrees: none of these entries has the `effort` capability. `claude-opus-4-5` lacks that capability too but is not in this list, so it is accepted: its effort depends on the API provider (see below). |
 | Kiro | `claude-haiku-4.5` (verbatim, as `--list-models` prints it) | S2.14 live calls 1 and 3 ([Effort](S2.14-kiro-plugin.md#effort)): `[warn] failed to set effort 'low': model does not support additional fields`; the recorded run (`crates/relay/tests/fixtures/kiro/success.jsonl`, which is live call 1: same answer and the same 0.0059 credits) says `"reasoning":{"support":"unavailable","effortLevels":[]}` in every `metadata` event (line 2 onwards). |
 | Codex | none | `codex debug models --bundled` (0.163.0, no network): every model in the bundled catalog (`gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5` and the hidden ones) lists `low`, `medium` and `high` in `supported_reasoning_levels`. |
 
@@ -136,11 +136,25 @@ honour the level:
   Pumice cannot tell at startup which model an alias means. **This matters
   for `haiku`:** the 2.1.306 binary's alias tables map it to
   `claude-haiku-5-5` (which takes effort) by default but to
-  `claude-haiku-4-5` (which does not) on Bedrock, Vertex, Foundry and
-  gateway setups, and a second table maps it to
-  `claude-haiku-4-5-20251001`. When it resolves to Haiku 4.5, the
-  configured `effort` is silently dropped. Which one the owner's `haiku`
-  entry reaches through the gateway was not checked (it needs a call).
+  `claude-haiku-4-5` (which does not) on Bedrock, Vertex, Foundry, Mantle,
+  Claude Platform on AWS and on Google Cloud and in Claude Code's gateway
+  mode, and a second table maps it to `claude-haiku-4-5-20251001`. When it
+  resolves to Haiku 4.5, the configured `effort` is silently dropped. A
+  proxy set only through `ANTHROPIC_BASE_URL` is not gateway mode, so by
+  these tables the owner's `haiku` entry reaches Haiku 5.5
+  ([Which setups count as a gateway](#which-setups-count-as-a-gateway));
+  this was read from the binary, not run.
+- `claude-opus-4-5` (and its spellings, such as `claude-opus-4-5-20251101`)
+  is a known model whose effort depends on the API provider. Its catalog
+  entry has no `effort` capability, but the effort check does not list it,
+  so the answer comes from the last step, `AK(vd(e))` (`eq(Od(e))` in
+  2.1.310): effort is sent on first-party, Claude Platform on AWS and on
+  Google Cloud, Foundry and Mantle setups, and dropped without a warning on
+  Bedrock, Vertex and in Claude Code's gateway mode. It is the only catalog
+  model that reaches that step; names the tables do not know (such as
+  `claude-opus-4-10`) reach it too. Pumice cannot tell the provider at
+  startup ([Which setups count as a gateway](#which-setups-count-as-a-gateway)),
+  so it accepts the model.
 - `claude-opus-4-0`, `claude-opus-4-1`, `claude-opus-4-20250514` and
   `claude-opus-4-1-20250805` (exactly these, any case, with or without
   `[1m]`) are accepted for the same reason: Claude Code's `--model`
@@ -148,9 +162,11 @@ honour the level:
   and Anthropic cloud setups (`if(Iu()&&c7e(h)&&P1t())return … uh()`, with
   `WU=["claude-opus-4-20250514","claude-opus-4-1-20250805","claude-opus-4-0","claude-opus-4-1"]`),
   unless `CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP` is set; elsewhere (Bedrock,
-  Vertex, Foundry) they keep their model and lose `effort`. Other spellings
-  of the same models (`claude-opus-4`, `claude-opus-4-1@20250805`, …) are
-  not remapped and are refused.
+  Vertex, Foundry, Mantle) they keep their model and lose `effort`. Other
+  spellings of the same models (`claude-opus-4`, `claude-opus-4-1@20250805`,
+  …) are not remapped and are refused. Thinking follows the model they
+  reach, as for `opus`: see
+  [Models that cannot turn thinking off](#models-that-cannot-turn-thinking-off).
 
 A model added to a CLI later is accepted until its limitation is recorded
 here and added to the plugin's table.
@@ -255,9 +271,52 @@ that only exist at run time; Pumice uses the baked rules alone:
   pairs, which override the capability answer;
 - per-model effort levels the account's model knowledge serves (`iBr`), and
   a latch set after the API refuses effort for a model;
-- for a model the tables do not know, effort is sent on first-party,
-  Anthropic cloud, Foundry and Mantle setups and dropped elsewhere
-  (`AK(vd(e))`).
+- for `claude-opus-4-5` and for a model the tables do not know, effort is
+  sent on first-party, Claude Platform on AWS and on Google Cloud, Foundry
+  and Mantle setups and dropped elsewhere (Bedrock, Vertex, gateway mode;
+  `AK(vd(e))`, where `vd` keeps Bedrock's provider unless Mantle is enabled
+  and serves the model).
+
+### Which setups count as a gateway
+
+Claude Code's provider (`xe()` in 2.1.306, `Ae()` in 2.1.310) is
+`"gateway"` when any of three run-time slots is set, before any
+`CLAUDE_CODE_USE_<cloud>` variable is looked at:
+
+```js
+function xe(){if(Wr()||knt()||Ant())return"gateway";return a.CLAUDE_CODE_USE_BEDROCK?"bedrock":…:"firstParty"}
+```
+
+- `Wr()`, the gateway credential: set when `CLAUDE_CODE_USE_GATEWAY` is set
+  together with `ANTHROPIC_BASE_URL` and a token (`ANTHROPIC_AUTH_TOKEN` or a
+  gateway descriptor), or from a stored `enterpriseGateway` login (Claude
+  Code's gateway sign-in). With `CLAUDE_CODE_USE_GATEWAY` but no base URL or
+  token it warns and ignores the variable.
+- `knt()` (`Rit()` in 2.1.310): the process is `claude gateway --config
+  <file>`, Claude Code's own gateway server.
+- `Ant()` (`Pit()` in 2.1.310): managed settings require a gateway login
+  (`forceLoginMethod: "gateway"` or `forceLoginGatewayUrl`), no
+  `CLAUDE_CODE_USE_<cloud>` variable is set and the provider is not
+  managed by a host (`CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST`).
+
+`ANTHROPIC_BASE_URL` alone does not make a gateway: the provider stays
+`"firstParty"`. The binary says so itself: its gateway model discovery
+(`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`) runs only when the provider
+is `"firstParty"` and `ANTHROPIC_BASE_URL` is set, and otherwise logs
+`skipped: provider is <provider>`. The alias tables pick their
+`per_provider` entry from the same provider.
+
+The owner routes Claude Code through CLIProxyAPI with
+`ANTHROPIC_BASE_URL`. On this development machine `~/.claude/settings.json`
+sets `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` and
+`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` in its `env` block and not
+`CLAUDE_CODE_USE_GATEWAY` (only the key names were read), and there is no
+`/etc/claude-code/managed-settings.json`. A stored gateway login was not
+checked, because it sits with the credentials. So by the binary's rules
+such a setup counts as first-party: `haiku`, `sonnet` and `opus` mean
+Haiku 5.5, Sonnet 5.5 and Opus 5.5, and `claude-opus-4-5` gets its effort.
+The live services run on another host with their own environment, which
+was not checked. None of this was run.
 
 ## Claude thinking
 
@@ -338,19 +397,32 @@ one of them (the same port as for effort), on a disabled entry too, at the
 `thinking` key:
 
 ```text
-relay.yml:90:15: providers entry "claude".thinking: model "claude-haiku-5-5" cannot turn thinking off (Claude Code 2.1.306 sends adaptive thinking for it even with thinking off), so "false" cannot be honoured; write "thinking: true" or choose a model that can turn thinking off
+relay.yml:90:15: providers entry "claude".thinking: model "claude-haiku-5-5" cannot turn thinking off (Claude Code 2.1.310 sends adaptive thinking for it even with thinking off), so "false" cannot be honoured; write "thinking: true" or choose a model that can turn thinking off
 ```
 
 An effort refusal is reported first when both apply (no model is in both
 lists today). Aliases and the four remapped legacy Opus spellings are
-accepted, as for effort. **This matters for the shipped example:**
-`relay.example.yml`, which is also the first-start `relay.yml`, writes
-`model: haiku` with `thinking: false`. On a first-party login `haiku`
-resolves to `claude-haiku-5-5` (the catalog's `aliases.haiku.default`), so
-thinking stays on whatever the file says; through a gateway or cloud
-provider (`per_provider`: `claude-haiku-4-5`) thinking is off but `effort`
-is dropped. The example's values are the owner's to change (question 6);
-for now it carries a comment saying this.
+accepted, as for effort, although on a first-party setup (which includes
+a proxy set only through `ANTHROPIC_BASE_URL`,
+[Which setups count as a gateway](#which-setups-count-as-a-gateway)) all
+of them reach a model that keeps thinking on. From the catalog's alias
+tables, unless `ANTHROPIC_DEFAULT_*_MODEL` or the account's served alias
+targets say otherwise:
+
+| Written | First-party | Gateway mode | Cloud providers |
+| --- | --- | --- | --- |
+| `haiku` | `claude-haiku-5-5`: thinking always on | `claude-haiku-4-5`: no effort | `claude-haiku-4-5`: no effort |
+| `sonnet` | `claude-sonnet-5-5`: thinking always on | `claude-sonnet-4-6` | `claude-sonnet-4-5` (no effort) on Bedrock, Vertex, Foundry, Mantle; `claude-sonnet-4-6` on Claude Platform on AWS; `claude-sonnet-5-5` (thinking always on) on Claude Platform on Google Cloud |
+| `opus` | `claude-opus-5-5`: thinking always on | `claude-opus-4-7` | `claude-opus-5-5` (thinking always on) except Foundry (`claude-opus-4-6`) |
+| `claude-opus-4-0`, `claude-opus-4-1`, `claude-opus-4-20250514`, `claude-opus-4-1-20250805` | remapped to the default Opus, `claude-opus-5-5`: thinking always on | remapped to `claude-opus-4-7` | remapped to `claude-opus-5-5` (thinking always on) on Claude Platform on AWS and on Google Cloud; elsewhere not remapped: no effort |
+
+**This matters for the shipped example:** `relay.example.yml`, which is
+also the first-start `relay.yml`, writes `model: haiku` with
+`thinking: false`. On a first-party setup `haiku` resolves to
+`claude-haiku-5-5`, so thinking stays on whatever the file says; in
+gateway mode or on a cloud provider (`claude-haiku-4-5`) thinking is off
+but `effort` is dropped. The example's values are the owner's to change
+(question 6); for now it carries a comment saying this.
 
 ## Settings that stay pinned
 
@@ -382,6 +454,33 @@ Only effort and Claude thinking became configurable. Every call still pins:
   writes `effort: low` on every entry and `thinking: false` on `claude`:
   the behaviour before this change.
 
+## Re-check on Claude Code 2.1.310
+
+On 2026-10-26 the installed Claude Code was `2.1.310 (Claude Code)`
+(`~/.local/share/claude/versions/2.1.310`, `sha256 b7367643…bb47df56`).
+It was checked the same way as 2.1.306: its 2,552 `// @bun @bytecode`
+chunks were read in place, the relevant functions extracted verbatim and
+run under node 24.21.0 in a `vm` context (no `claude` process, no
+network). Everything above holds for 2.1.310; the minifier renamed most
+functions:
+
+| 2.1.306 | 2.1.310 | Result |
+| --- | --- | --- |
+| baked catalog `lGr` | `G5r` | byte-identical (`sha256 b46409c9…1123c95` for both extracts) |
+| `qe` → `Iv` → `sw` → `NU` | `Xe` → `mk` → `_b` → `XB` | same code modulo names |
+| `Ac`, `u`, `_2o`, `xL`, `E2e`, `QSt`, `LU`, `Mv`, `qv`, `pye` | `Tc`, `u`, `W9o`, `H0`, `jqe`, `aTt`, `JB`, `pk`, `Pk`, `F9` | same code modulo names; the 94,263 spellings of the 2.1.306 corpus give the same canonical name under 2.1.310's functions (0 differences), so the Rust port still matches |
+| effort check `JS` | `Tw` | same code modulo names, same five names and `claude-3-`; the request builder still runs `if(!Tw(h)){delete n.effort;return}` |
+| `AK` / `vd` / `xe` / `Iu` | `eq` / `Od` / `Ae` / `bu` | same code modulo names |
+| thinking checks `u7e` / `NHe` | `pnt` / `C0e` | same code modulo names, same list of older models; `alwaysOn:pnt(e)` still feeds the disabled-to-adaptive substitution (`Fni`, was `D6s`) |
+| legacy Opus remap list `WU` | `oH` | the same four ids |
+| `--model` resolution `Dt` | `$t` | same, except the name it tests: `h=s?Mt(r).trim():r` became `h=Ot(r).trim()`. `Ot` is `Mt` renamed (`e.replace(/\[1m\]$/i,"")`), and without a `[1m]` suffix it returns the already trimmed, lowercased name, so the result is the same |
+
+`claude --help` still lists `--effort <level>` with the same five levels,
+and the binary still carries the strings quoted above (`Unknown --effort
+value`, `CLAUDE_CODE_EFFORT_LEVEL overrides effort for this session`, the
+effort-with-thinking-off error). Pumice's messages and tests now name
+2.1.310; the excerpts above keep 2.1.306's names, where they were read.
+
 ## Questions for the owner
 
 1. A live check of `medium`, `high` and `thinking: true` on your models
@@ -394,16 +493,27 @@ Only effort and Claude thinking became configurable. Every call still pins:
    OpenCode, Kimi and others", about coding agents) and the Input bullet
    ("the CLI refuses an empty one (Codex, Kimi)"). Only Codex needs the
    neutral system prompt now.
-4. Does your Claude `haiku` entry reach Haiku 4.5 through your gateway? If
-   so, its `effort` has no effect (Claude Code drops it without a warning);
-   naming a model with effort, such as `claude-haiku-5-5`, would make it
-   apply. One call with `--debug` (or the gateway's request log) would show
-   the resolved model.
+4. Does your Claude `haiku` entry reach Haiku 4.5 or Haiku 5.5 through
+   CLIProxyAPI? Read from the binary, a proxy set only through
+   `ANTHROPIC_BASE_URL` counts as first-party, so `haiku` should be Haiku
+   5.5 (effort applies, thinking cannot be turned off); Haiku 4.5 would
+   mean the live host's setup is gateway mode or a cloud provider, and then
+   `effort` has no effect. One call with `--debug` (or the proxy's request
+   log) would show the resolved model.
 5. Kiro's `claude-haiku-4.5`, the model S2.14 tested, can no longer be
    configured, because it ignores every effort level. The shipped example
    now suggests `glm-5`, your live Kiro model.
 6. The shipped `relay.example.yml` (also the first-start `relay.yml`) writes
-   `model: haiku` with `thinking: false`. On a first-party login `haiku` is
-   Haiku 5.5, which keeps thinking on regardless; through a gateway it is
-   Haiku 4.5, which drops `effort`. Keep `haiku` with `thinking: false`, or
-   switch the example to `thinking: true` or to a pinned model?
+   `model: haiku` with `thinking: false`. On a first-party setup, which
+   includes a proxy set only through `ANTHROPIC_BASE_URL`, `haiku` is Haiku
+   5.5, which keeps thinking on regardless; in gateway mode or on a cloud
+   provider it is Haiku 4.5, which drops `effort`. The same holds for
+   `opus` and `sonnet` (Opus 5.5 and Sonnet 5.5 on first-party) and for the
+   four legacy Opus ids Claude Code remaps to the default Opus
+   (`claude-opus-4-0`, `claude-opus-4-1`, `claude-opus-4-20250514`,
+   `claude-opus-4-1-20250805`): Pumice accepts all of them with
+   `thinking: false`, and on first-party thinking stays on (see the table
+   in [Models that cannot turn thinking off](#models-that-cannot-turn-thinking-off)).
+   Keep `haiku` with `thinking: false`, or switch the example to
+   `thinking: true` or to a pinned model? And should aliases with
+   `thinking: false` stay accepted?

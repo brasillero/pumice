@@ -84,9 +84,11 @@ providers:
     # A model that cannot turn thinking off (Claude Haiku 5.5, Sonnet 5.5,
     # Opus 5.5, Fable 5 and 5.1, Mythos 5.1) is refused with `false`.
     # Aliases are resolved by Claude Code at run time and are accepted: on a
-    # first-party login `haiku` means Haiku 5.5, which keeps thinking on
-    # whatever this says; through a gateway or cloud provider it means
-    # Haiku 4.5, which drops `effort`.
+    # first-party login, which includes a proxy set only through
+    # `ANTHROPIC_BASE_URL`, `haiku` means Haiku 5.5, which keeps thinking on
+    # whatever this says; on a cloud provider or in Claude Code's gateway
+    # mode (`CLAUDE_CODE_USE_GATEWAY`) it means Haiku 4.5, which drops
+    # `effort`.
     thinking: false
 
   # Codex CLI, off. A disabled entry is kept out of the model list and
