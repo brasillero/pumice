@@ -16,7 +16,7 @@
 
 **To do.**
 - [ ] Owner: a few calls per provider with `medium` and `high`, and Claude Haiku with `thinking: true`, on a temporary config.
-- [ ] Owner: check which model the `haiku` alias reaches through CLIProxyAPI. Claude Code 2.1.310 maps it to `claude-haiku-5-5` on first-party setups, which include a proxy set only through `ANTHROPIC_BASE_URL`, and to `claude-haiku-4-5`, whose effort it drops without a warning, in its gateway mode (`CLAUDE_CODE_USE_GATEWAY`) and on cloud providers (read from the binary, not run).
+- [x] Owner: check which model the `haiku` alias reaches through CLIProxyAPI. Claude Code 2.1.310 maps it to `claude-haiku-5-5` on first-party setups, which include a proxy set only through `ANTHROPIC_BASE_URL`, and to `claude-haiku-4-5`, whose effort it drops without a warning, in its gateway mode (`CLAUDE_CODE_USE_GATEWAY`) and on cloud providers (read from the binary, not run). Owner, 2026-10-29: it reaches the latest Haiku (Haiku 5.5), so its thinking stays on whatever `thinking` says.
 
 **Acceptance criteria.**
 - Each combination answers, or its limitation is recorded in the research note.
@@ -52,23 +52,6 @@
 
 **Where in the code.**
 - `AGENTS.md` (first paragraph; Provider plugins → Input)
-
-### #7 · Deferred · Owner: `haiku` with `thinking: false` in the shipped example
-- type: Alignment
-- area: config
-- origin: #1
-- ticket: —
-- created: 2026-10-24
-- reason: owner decision; the shipped example keeps its values until then
-
-**Context.** `relay.example.yml`, which is also the first-start `relay.yml`, writes `model: haiku` with `thinking: false`. Claude Code 2.1.310 resolves `haiku` at run time: on a first-party setup, which includes a proxy set only through `ANTHROPIC_BASE_URL`, it is `claude-haiku-5-5`, which cannot turn thinking off (the CLI sends adaptive thinking whatever `MAX_THINKING_TOKENS` says); in its gateway mode or on a cloud provider it is `claude-haiku-4-5`, which drops `effort`. The same holds for `opus` and `sonnet` (Opus 5.5 and Sonnet 5.5 on first-party) and for the four legacy Opus ids it remaps to the default Opus (`claude-opus-4-0`, `claude-opus-4-1`, `claude-opus-4-20250514`, `claude-opus-4-1-20250805`). Pumice accepts aliases and the remapped ids, so none of these is refused at startup. The example's values were left unchanged; a comment near `thinking` explains this (`6b8decc`, `2ca20fb`, `docs/research/P16-provider-effort.md`, question 6).
-
-**To do.**
-- [ ] Owner: keep `haiku` with `thinking: false`, switch the example to `thinking: true`, or pin a model.
-- [ ] Owner: whether aliases and the remapped Opus ids stay accepted with `thinking: false`.
-
-**Where in the code.**
-- `relay.example.yml` (the `claude` entry)
 
 ## Closed
 
@@ -142,3 +125,21 @@
 
 **Acceptance criteria.**
 - Both services start with the new binaries and answer as before.
+
+### #7 · Discarded · Owner: `haiku` with `thinking: false` in the shipped example
+- type: Alignment
+- area: config
+- origin: #1
+- ticket: —
+- created: 2026-10-24
+- closed: 2026-10-29
+- outcome: the owner sets defaults case by case (D3), and the example's values were already settled; nothing to change
+
+**Context.** `relay.example.yml`, which is also the first-start `relay.yml`, writes `model: haiku` with `thinking: false`. Claude Code 2.1.310 resolves `haiku` at run time: on a first-party setup, which includes a proxy set only through `ANTHROPIC_BASE_URL`, it is `claude-haiku-5-5`, which cannot turn thinking off (the CLI sends adaptive thinking whatever `MAX_THINKING_TOKENS` says); in its gateway mode or on a cloud provider it is `claude-haiku-4-5`, which drops `effort`. The same holds for `opus` and `sonnet` (Opus 5.5 and Sonnet 5.5 on first-party) and for the four legacy Opus ids it remaps to the default Opus (`claude-opus-4-0`, `claude-opus-4-1`, `claude-opus-4-20250514`, `claude-opus-4-1-20250805`). Pumice accepts aliases and the remapped ids, so none of these is refused at startup. The example's values were left unchanged; a comment near `thinking` explains this (`6b8decc`, `2ca20fb`, `docs/research/P16-provider-effort.md`, question 6).
+
+**To do.**
+- [ ] Owner: keep `haiku` with `thinking: false`, switch the example to `thinking: true`, or pin a model.
+- [ ] Owner: whether aliases and the remapped Opus ids stay accepted with `thinking: false`.
+
+**Where in the code.**
+- `relay.example.yml` (the `claude` entry)
