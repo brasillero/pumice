@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Rules for every AI coding agent working in this repository (Claude Code, Codex, OpenCode, Kimi and others). Read this file and the task notes in [`.task-decisions/`](.task-decisions/README.md) before starting any task. Task notes in `.task-decisions/` follow the task-decisions skill (`.agents/skills/task-decisions/`); do not edit them without it.
+Rules for every AI coding agent working in this repository (Claude Code, Codex, OpenCode and others). Read this file and the task notes in [`.task-decisions/`](.task-decisions/README.md) before starting any task. Task notes in `.task-decisions/` follow the task-decisions skill (`.agents/skills/task-decisions/`); do not edit them without it.
 
 ## What Pumice is
 
@@ -50,7 +50,7 @@ The dictation can be in any language. Transcription never translates it; whether
 
 Each provider is a plugin with the same contract:
 
-- **Input:** the client's request, unchanged: its messages and the model route. The plugin only puts it into the form its CLI accepts (stdin, a file, an argument, inline JSON). It never adds prompt text, with one exception: when the client sends no system prompt and the CLI refuses an empty one (Codex, Kimi), the plugin sends the neutral `Follow the user's message.`
+- **Input:** the client's request, unchanged: its messages and the model route. The plugin only puts it into the form its CLI accepts (stdin, a file, an argument, inline JSON). It never adds prompt text, with one exception: when the client sends no system prompt and the CLI refuses an empty one (Codex), the plugin sends the neutral `Follow the user's message.`
 - **Output:** the final answer as text, or a safe typed error. The plugin decodes its CLI's output format and returns just the answer.
 - **Settings:** the model, the reasoning effort (`low`, `medium` or `high`, mapped to the CLI's own setting) and, for Claude, thinking come from the user's config. Every other setting is the cheapest the CLI offers, and never a fast/priority mode.
 - **Differences:** CLI limits and features differ (input size, what can be switched off). The plugin absorbs them; keep plugins as similar as possible and record each limitation in its research note.
