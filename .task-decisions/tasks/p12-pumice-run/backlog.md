@@ -41,13 +41,16 @@
 **Where in the code.**
 - `src/orchestrator/cancel.rs`, `crates/relay/src/process/tree.rs` (`CleanupScope`)
 
-### #3 · Deferred · Kimi receives the transcript on its command line
+## Closed
+
+### #3 · Discarded · Kimi receives the transcript on its command line
 - type: Tech debt
 - area: providers
 - origin: conversation
 - ticket: —
 - created: 2026-10-15
-- reason: the Kimi CLI only accepts the message as `-p MESSAGE`; revisit when it can read the prompt from stdin or a file
+- closed: 2026-10-29
+- outcome: Kimi provider deleted (p16-provider-effort/D6)
 
 **Context.** Other local users can read a Kimi call's transcript in the process list while it runs. Documented in `docs/orchestrator.md` (Privacy). Other providers and the formatter's instructions (a private agent file) are not affected.
 
@@ -56,5 +59,3 @@
 
 **Where in the code.**
 - `crates/relay/src/providers/kimi.rs`
-
-## Closed

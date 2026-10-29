@@ -46,18 +46,6 @@
 - [ ] Audit the modules and close the gaps.
 - [ ] Rename `Raw`/`RawReason`.
 
-### #4 · To do · Run Kimi through the shared contract suite
-- type: Tech debt
-- area: providers
-- origin: conversation
-- ticket: —
-- created: 2026-10-07
-
-**Context.** Claude, Codex, Kiro and Antigravity run the shared `adapter_contract!` suite; Kimi is tested separately in `tests/kimi.rs` because its argv transport differs. From the 2026-10-07 audit.
-
-**To do.**
-- [ ] Make the suite cover an argv transport, then move Kimi into it.
-
 ## Deferred
 
 ### #5 · Deferred · Let plugins report usage metrics
@@ -87,3 +75,17 @@
 - [ ] Owner decides.
 
 ## Closed
+
+### #4 · Discarded · Run Kimi through the shared contract suite
+- type: Tech debt
+- area: providers
+- origin: conversation
+- ticket: —
+- created: 2026-10-07
+- closed: 2026-10-29
+- outcome: Kimi provider deleted (p16-provider-effort/D6)
+
+**Context.** Claude, Codex, Kiro and Antigravity run the shared `adapter_contract!` suite; Kimi is tested separately in `tests/kimi.rs` because its argv transport differs. From the 2026-10-07 audit.
+
+**To do.**
+- [ ] Make the suite cover an argv transport, then move Kimi into it.

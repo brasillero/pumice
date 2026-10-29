@@ -4,19 +4,6 @@
 
 ## Deferred
 
-### #2 · Deferred · Test the Windows GPU bundle on a machine with no Vulkan loader
-- type: Task
-- area: distribution
-- origin: reports/2026-10-16-gpu-design.md
-- ticket: —
-- created: 2026-10-16
-- reason: the CI runner gets `System32\vulkan-1.dll` from the SDK install; a clean machine is needed
-
-**Context.** P14.1 proved the no-device case on CI (the Vulkan module loads, finds 0 devices, transcription runs on CPU), but not a machine without `vulkan-1.dll`, where the Vulkan module must fail to load and be skipped.
-
-**To do.**
-- [ ] Owner check on a Windows machine or VM without a Vulkan driver, or an automated equivalent.
-
 ## Closed
 
 ### #1 · Done · Restrict the Windows DLL search order of the GPU bundle
@@ -33,6 +20,20 @@
 **To do.**
 - [x] Choose and implement the mechanism.
 - [x] Test with a malicious DLL in the current directory and on PATH, and with a missing core DLL.
+
+### #2 · Discarded · Test the Windows GPU bundle on a machine with no Vulkan loader
+- type: Task
+- area: distribution
+- origin: reports/2026-10-16-gpu-design.md
+- ticket: —
+- created: 2026-10-16
+- closed: 2026-10-29
+- outcome: owner dropped this check on 2026-10-29
+
+**Context.** P14.1 proved the no-device case on CI (the Vulkan module loads, finds 0 devices, transcription runs on CPU), but not a machine without `vulkan-1.dll`, where the Vulkan module must fail to load and be skipped.
+
+**To do.**
+- [ ] Owner check on a Windows machine or VM without a Vulkan driver, or an automated equivalent.
 
 ### #3 · Done · Replace P14.1's temporary GPU switches with the backend policy
 - type: Tech debt
