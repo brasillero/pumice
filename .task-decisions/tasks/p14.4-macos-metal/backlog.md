@@ -4,20 +4,6 @@
 
 ## Deferred
 
-### #1 · Deferred · Real-Metal check on an Apple Silicon Mac
-- type: Task
-- area: transcription
-- origin: D1
-- ticket: —
-- created: 2026-10-16
-- reason: needs an Apple Silicon Mac; GitHub's hosted runners have no usable GPU
-
-**Context.** GitHub's Apple Silicon runners have no GPU acceleration, so CI proves the build, the layout and the CPU fallback, not Metal itself. A real Mac must confirm `--backend gpu` reports `metal`, the transcript matches the CPU's, and the speed difference against the best CPU run, which decides whether `auto` should pick Metal (D1).
-
-**To do.**
-- [ ] Run the Apple Silicon checklist in `docs/transcription.md` on a real Mac (ideally also one on macOS 11, the deployment floor) and record the results here.
-- [ ] If Metal gives correct text and is faster, revisit D1 and D2.
-
 ### #2 · Deferred · Sign and notarize the macOS bundle with a Developer ID
 - type: Improvement
 - area: distribution
@@ -32,3 +18,18 @@
 - [ ] Decide whether to get a Developer ID, then sign and notarize in the release job.
 
 ## Closed
+
+### #1 · Discarded · Real-Metal check on an Apple Silicon Mac
+- type: Task
+- area: transcription
+- origin: D1
+- ticket: —
+- created: 2026-10-16
+- closed: 2026-10-29
+- outcome: owner dropped this check on 2026-10-29
+
+**Context.** GitHub's Apple Silicon runners have no GPU acceleration, so CI proves the build, the layout and the CPU fallback, not Metal itself. A real Mac must confirm `--backend gpu` reports `metal`, the transcript matches the CPU's, and the speed difference against the best CPU run, which decides whether `auto` should pick Metal (D1).
+
+**To do.**
+- [ ] Run the Apple Silicon checklist in `docs/transcription.md` on a real Mac (ideally also one on macOS 11, the deployment floor) and record the results here.
+- [ ] If Metal gives correct text and is faster, revisit D1 and D2.
