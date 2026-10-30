@@ -8,37 +8,35 @@ Pumice lets dictation use the AI subscriptions the user already pays for, instea
 
 - **Relay** (`crates/relay`): an OpenAI-compatible endpoint on `127.0.0.1` (`/v1/chat/completions`, `/v1/models`). It hands the request to the official CLI of a subscription the user is logged into (Claude Code, Codex, Kiro) and returns the answer in OpenAI format. This is what Handy uses today.
 - **Transcription** (`crates/transcription`, program `pumice-transcribe`): audio in, raw text out, OpenAI-compatible where an OpenAI contract exists. Independent of the relay.
-- **Formatter** (planned): injects explicitly selected formatting rules, as a system message, into an incoming request before it reaches the relay.
-- **Orchestrator** (`pumice`, planned): runs one module or the whole stack and combines their flows.
+- **Formatter** (`crates/formatter`, built into `pumice`): injects explicitly selected formatting rules, as a system message, into an incoming request before it reaches the relay.
+- **Orchestrator** (`pumice`): runs one module or the whole stack and combines their flows (`pumice run`, `pumice serve`).
 
-Interfaces (a future UI) are built on top of the CLIs and the orchestrator, never by duplicating module logic; CLIs offer machine-readable output for that. The architecture and the owner's decisions are in [`docs/research/architecture-plan.md`](docs/research/architecture-plan.md) and `.task-decisions/tasks/arch-modules/`.
+Interfaces (a future UI) are built on top of the CLIs and the orchestrator, never by duplicating module logic; CLIs offer machine-readable output for that. Current module architecture and contracts are documented in [`docs/api.md`](docs/api.md), [`docs/formatter.md`](docs/formatter.md), [`docs/orchestrator.md`](docs/orchestrator.md) and [`docs/transcription.md`](docs/transcription.md). The owner's architecture decisions are in `.task-decisions/tasks/arch-modules/`.
 
 **The relay is plumbing, not a formatter.** When a client app sends its own prompt, the app owns the task: the relay adds no instructions of its own (the only exception is a neutral system prompt some CLIs need, see Provider plugins), does not rewrite the request and changes the reply as little as possible. Formatting rules come only from the formatter module, when explicitly selected.
 
-The original product spec is in [`docs/spec.md`](docs/spec.md). It predates the pass-through direction and the modular architecture; where it conflicts with an owner decision recorded in `.task-decisions/`, the owner decision wins.
+Owner decisions recorded in `.task-decisions/` take precedence over descriptive documentation. Current behavior is documented in the relevant module guides.
 
 ## Documents and who edits them
 
 | File | Role | Agents may edit? |
 | --- | --- | --- |
-| `docs/product.pt-BR.md` | Snapshot of the Portuguese product doc | No |
-| `docs/spec.md` | English translation of the product doc | No |
 | `.task-decisions/` | Task notes: one task per branch with its backlog (open work, known limitations), decisions and reports | Yes, through the task-decisions skill only; record as decisions only what the owner made or authorized |
-| `docs/research/*.md` | Findings from investigation stories | Yes |
+| `docs/*.md` and crate READMEs | Current user and developer documentation, including provider evidence and the release procedure | Yes; preserve owner decisions recorded in `.task-decisions/` |
 | `AGENTS.md` | These rules | No, propose changes in a PR description instead |
 
-When the spec seems wrong, incomplete or contradicted by a finding, do not change it. Write the finding in the relevant `docs/research/` file under **Questions for the owner**, and mention it in the PR.
+When a finding reveals a gap in current documentation or conflicts with an owner decision, record it in `.task-decisions/tasks/<task>/reports/` under **Questions for the owner**, following the task-decisions skill, and mention it in the PR. Do not change an owner decision without authorization.
 
 ## Language
 
-Everything in this repository is in English: code, identifiers, comments, commit messages, PR descriptions, docs and research notes. The only exception is `docs/product.pt-BR.md`.
+Everything in this repository is in English: code, identifiers, comments, commit messages, PR descriptions, documentation and task notes.
 
 The dictation can be in any language. Transcription never translates it; whether the answer stays in the same language or is translated is up to the client's prompt or the selected formatter.
 
 ## Stack and constraints
 
 - **Rust (stable)**, one Cargo workspace with a library and a thin binary per module.
-- **The core is a single executable per platform.** `pumice` (orchestrator, relay and formatter, which are built in) and `pumice-relay` stay self-contained: static musl on Linux, static C runtime on Windows (`+crt-static`), only OS libraries on macOS. They contain no native transcription engine.
+- **One CLI, which may be installed as a folder** (`arch-modules/D16`). Users get one `pumice` command; an install may be a folder holding `pumice`, `pumice-transcribe` and its native libraries, delivered together by npm or a release archive. `pumice` (orchestrator, relay and formatter, which are built in) and `pumice-relay` keep their static linkage as an implementation choice, not a product requirement: static musl on Linux, static C runtime on Windows (`+crt-static`), only OS libraries on macOS. They contain no native transcription engine.
 - **Transcription is a separate program** and may ship version-matched native libraries, runtime CPU variants and GPU backends. GPU drivers are OS prerequisites, documented as such.
 - **No developer runtimes for end users.** Users need no Rust, Python, CMake or compilers. The npm package is only a launcher and needs Node.js 22 or newer.
 - **Targets:** Windows, Linux and macOS. Windows is the main day-to-day target.
@@ -53,7 +51,7 @@ Each provider is a plugin with the same contract:
 - **Input:** the client's request, unchanged: its messages and the model route. The plugin only puts it into the form its CLI accepts (stdin, a file, an argument, inline JSON). It never adds prompt text, with one exception: when the client sends no system prompt and the CLI refuses an empty one (Codex), the plugin sends the neutral `Follow the user's message.`
 - **Output:** the final answer as text, or a safe typed error. The plugin decodes its CLI's output format and returns just the answer.
 - **Settings:** the model, the reasoning effort (`low`, `medium` or `high`, mapped to the CLI's own setting) and, for Claude, thinking come from the user's config. Every other setting is the cheapest the CLI offers, and never a fast/priority mode.
-- **Differences:** CLI limits and features differ (input size, what can be switched off). The plugin absorbs them; keep plugins as similar as possible and record each limitation in its research note.
+- **Differences:** CLI limits and features differ (input size, what can be switched off). The plugin absorbs them; keep plugins as similar as possible and record each limitation in `docs/providers.md`, with the CLI version, evidence date and verification status.
 - **On any failure** (error, timeout, empty answer) or a missing model, Pumice returns an HTTP error with a safe reason and logs why; the app keeps its own text. There is no fallback to another provider.
 
 ## Security rules (non-negotiable)
@@ -101,5 +99,5 @@ Do not create a `CLAUDE.md`. This `AGENTS.md` is the single rules file for every
 
 - Anything that needs the Windows GUI (for example, configuring Handy) or a login to an AI service
 - Anything that spends paid quota beyond a few test calls
-- Any decision listed as open in the spec or in `.task-decisions/`
-- Any finding that contradicts the spec or an owner decision in `.task-decisions/`
+- Any unresolved owner decision or question recorded in `.task-decisions/`
+- Any finding that contradicts an owner decision recorded in `.task-decisions/`
