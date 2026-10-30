@@ -34,11 +34,17 @@ runs:
           echo "TRANSCRIBE_CMAKE_ARGS=$TRANSCRIBE_CMAKE_ARGS -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
           echo "PUMICE_NATIVE_CACHE=1"
         } >> "$GITHUB_ENV"
-    - uses: actions/cache@v6
+    - uses: actions/cache/restore@v6
+      id: restore
       with:
         path: ${{ runner.temp }}/ccache
         key: ${{ steps.key.outputs.key }}
         restore-keys: ${{ steps.key.outputs.key }}-
+    - name: Record native cache state
+      shell: bash
+      run: |
+        echo "NATIVE_CACHE_KEY=${{ steps.key.outputs.key }}" >> "$GITHUB_ENV"
+        echo "NATIVE_CACHE_HIT=${{ steps.restore.outputs.cache-hit }}" >> "$GITHUB_ENV"
     - name: Reset native cache statistics
       shell: bash
       run: ccache --zero-stats
