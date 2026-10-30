@@ -135,7 +135,8 @@ def profile_sections(manifest: str) -> str:
     """The [profile.*] tables of a Cargo manifest, without comments or blank
     lines. They change every artifact, but no other part of the key sees
     them, and an exact hit is never saved again (cache entries are
-    immutable)."""
+    immutable). Headers are matched by text, not parsed: a key spelled with
+    escapes (`["pro\\u0066ile".dev]`) is not recognised."""
     keep, lines = False, []
     for line in manifest.splitlines():
         stripped = line.strip()
