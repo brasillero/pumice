@@ -3,7 +3,7 @@ title: Docs: consolidate product docs and research notes into maintained docs
 state: In progress
 ticket: —
 branch: docs-consolidation
-mr: —
+mr: PR #131
 start: 2026-10-29
 end: —
 ---
