@@ -47,18 +47,27 @@ MANIFEST_FIELDS = (
 
 
 def read_manifest(tarball: Path) -> dict:
-    with tarfile.open(tarball) as archive:
-        for member in archive.getmembers():
+    # Streamed: stops at package.json instead of decompressing a whole
+    # transcription bundle to list its members (npm pack writes the deeper
+    # bin/ entries, the CPU and GPU modules, after package.json).
+    with tarfile.open(tarball, "r|gz") as archive:
+        for member in archive:
             if member.name == "package/package.json" and member.isreg():
                 return json.loads(archive.extractfile(member).read())
     raise SystemExit(f"error: no package/package.json in {tarball}")
 
 
-def build_packument(name: str, tarballs: dict[str, Path], base_url: str) -> dict:
-    """Builds a packument for one package name from its tarball files."""
+def build_packument(
+    name: str,
+    tarballs: dict[str, Path],
+    base_url: str,
+    manifests: dict[Path, dict] | None = None,
+) -> dict:
+    """Builds a packument for one package name from its tarball files.
+    ``manifests`` holds package.json already read from those tarballs."""
     versions = {}
     for filename, path in tarballs.items():
-        manifest = read_manifest(path)
+        manifest = manifests[path] if manifests else read_manifest(path)
         payload = path.read_bytes()
         version_doc = {
             key: manifest[key] for key in MANIFEST_FIELDS if key in manifest
@@ -77,17 +86,30 @@ def build_packument(name: str, tarballs: dict[str, Path], base_url: str) -> dict
     }
 
 
-def index_tarballs(root: Path, base_url: str) -> dict[str, dict]:
-    """Maps npm package name -> packument for every .tgz in root."""
+def read_manifests(root: Path) -> dict[Path, dict]:
+    """package.json of every .tgz in root, each read once."""
     files = sorted(root.glob("*.tgz"))
     if not files:
         raise SystemExit(f"error: no .tgz files found in {root}")
-    by_name: dict[str, dict[str, Path]] = {}
-    for path in files:
-        by_name.setdefault(read_manifest(path)["name"], {})[path.name] = path
+    return {path: read_manifest(path) for path in files}
+
+
+def group_tarballs(manifests: dict[Path, dict]) -> dict[str, dict[str, Path]]:
+    """Maps npm package name -> {tarball file name: path}."""
+    grouped: dict[str, dict[str, Path]] = {}
+    for path, manifest in manifests.items():
+        grouped.setdefault(manifest["name"], {})[path.name] = path
+    return grouped
+
+
+def index_tarballs(
+    root: Path, base_url: str, manifests: dict[Path, dict] | None = None
+) -> dict[str, dict]:
+    """Maps npm package name -> packument for every .tgz in root."""
+    manifests = manifests or read_manifests(root)
     return {
-        name: build_packument(name, tarballs, base_url)
-        for name, tarballs in by_name.items()
+        name: build_packument(name, tarballs, base_url, manifests)
+        for name, tarballs in group_tarballs(manifests).items()
     }
 
 
@@ -99,18 +121,13 @@ class TestRegistry:
         host = "127.0.0.1"
         self._httpd = ThreadingHTTPServer((host, port), self._handler())
         self.base_url = f"http://{host}:{self._httpd.server_address[1]}"
-        self._index = index_tarballs(self.root, self.base_url)
+        manifests = read_manifests(self.root)
+        self._index = index_tarballs(self.root, self.base_url, manifests)
         self._files = {
             name: set(tarballs)
-            for name, tarballs in self._grouped().items()
+            for name, tarballs in group_tarballs(manifests).items()
         }
         self._thread: threading.Thread | None = None
-
-    def _grouped(self) -> dict[str, dict[str, Path]]:
-        grouped: dict[str, dict[str, Path]] = {}
-        for path in sorted(self.root.glob("*.tgz")):
-            grouped.setdefault(read_manifest(path)["name"], {})[path.name] = path
-        return grouped
 
     @property
     def port(self) -> int:

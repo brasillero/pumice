@@ -158,15 +158,20 @@ jobs:
           test "$out" = "pumice-relay ${{ steps.meta.outputs.version }}"
 
       # Locate dumpbin through vswhere instead of ilammy/msvc-dev-cmd (which
-      # still pins an old Node runtime). A static CRT means no vcruntime /
-      # msvcp / ucrtbase / api-ms-win-crt dependencies.
+      # still pins an old Node runtime): the default MSVC tools version's
+      # x64 dumpbin, not a recursive search of the whole Visual Studio tree
+      # (about a minute). A static CRT means no vcruntime / msvcp / ucrtbase
+      # / api-ms-win-crt dependencies.
       - name: Verify exe has no CRT DLL dependencies
         if: matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
         run: |
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-          $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find '**\dumpbin.exe' | Select-Object -First 1
-          if (-not $dumpbin) { Write-Error 'FAIL: dumpbin.exe not found via vswhere'; exit 1 }
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1
+          if (-not $vs) { Write-Error 'FAIL: Visual Studio C++ x64 tools not found via vswhere'; exit 1 }
+          $tools = (Get-Content (Join-Path $vs 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt') -TotalCount 1).Trim()
+          $dumpbin = Join-Path $vs "VC\Tools\MSVC\$tools\bin\Hostx64\x64\dumpbin.exe"
+          if (-not (Test-Path $dumpbin -PathType Leaf)) { Write-Error "FAIL: dumpbin.exe not found at $dumpbin"; exit 1 }
           $output = & $dumpbin /dependents "target\${{ matrix.target }}\release\pumice.exe"
           if ($LASTEXITCODE -ne 0) { Write-Error "FAIL: dumpbin exited with $LASTEXITCODE"; exit 1 }
           $output | ForEach-Object { Write-Host $_ }
