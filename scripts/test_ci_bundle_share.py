@@ -28,10 +28,6 @@ class IdentityTests(unittest.TestCase):
                 self.assertEqual('', share.coordinate())
                 api.assert_not_called()
 
-
-if __name__ == '__main__':
-    unittest.main()
-
 class CoordinatorTests(unittest.TestCase):
     def coordinate(self, responses):
         with tempfile.TemporaryDirectory() as tmp:
@@ -59,3 +55,7 @@ class CoordinatorTests(unittest.TestCase):
                     {'status': 'completed', 'conclusion': conclusion},
                 ])
                 self.assertEqual(value, '')
+
+
+if __name__ == '__main__':
+    unittest.main()
