@@ -296,7 +296,8 @@ target_dir="$(cd "$target_dir" && pwd)"
 stage_dir="$target_dir/stage"
 
 export CARGO_TARGET_DIR="$target_dir"
-export TRANSCRIBE_CMAKE_ARGS="${TRANSCRIBE_CMAKE_ARGS:--DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF}"
+# Keep compiler launchers while enforcing the portable bundle baseline.
+export TRANSCRIBE_CMAKE_ARGS="${TRANSCRIBE_CMAKE_ARGS:-} -DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF"
 # rustc, cc and CMake (CMAKE_OSX_DEPLOYMENT_TARGET) all read it.
 export MACOSX_DEPLOYMENT_TARGET="$deployment_target"
 # Ambient settings that would change or bypass the native build, or the

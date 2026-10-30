@@ -219,7 +219,8 @@ target_dir="$(cd "$target_dir" && pwd)"
 stage_dir="$target_dir/stage"
 
 export CARGO_TARGET_DIR="$target_dir"
-export TRANSCRIBE_CMAKE_ARGS="${TRANSCRIBE_CMAKE_ARGS:--DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF}"
+# Keep compiler launchers while enforcing the portable bundle baseline.
+export TRANSCRIBE_CMAKE_ARGS="${TRANSCRIBE_CMAKE_ARGS:-} -DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF"
 # Ambient settings that would change or bypass the native build.
 unset CMAKE_ARGS TRANSCRIBE_DIR GGML_BACKEND_PATH
 
