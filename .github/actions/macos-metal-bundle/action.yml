@@ -38,10 +38,17 @@ runs:
         toolchain: ${{ inputs.rust-toolchain }}
         components: clippy
 
+    - uses: ./.github/actions/bundle-reuse
+      id: reuse
+      with:
+        backend: macos-metal
+
     # The calling job ends with ./.github/actions/cargo-cache-save.
     - uses: ./.github/actions/cargo-cache
+      if: steps.reuse.outputs.hit != 'true'
       with:
         name: bundle-macos-metal
+        provenance: true
         build: pumice-transcription metal, pumice (release; clippy and tests in the transcription workflow)
         target-dir: target/macos-metal
 
@@ -73,5 +80,11 @@ runs:
 
     # Bounded by the calling job's timeout (composite steps take none).
     - name: Build, stage and audit the Metal bundle
+      if: steps.reuse.outputs.hit != 'true'
       shell: bash
       run: crates/transcription/scripts/build-macos-metal.sh
+
+    - uses: ./.github/actions/bundle-publish
+      if: github.workflow == 'Transcription engine'
+      with:
+        backend: macos-metal

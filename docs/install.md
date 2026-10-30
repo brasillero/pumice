@@ -361,9 +361,12 @@ This section is for whoever cuts a release; users need none of it. Nothing
 publishes automatically: the **Release preview** workflow
 ([`.github/workflows/release.yml`](../.github/workflows/release.yml)) runs on
 pull requests that touch release-related paths and on manual dispatch, with
-`permissions: contents: read` and no secrets, and only builds and checks
-artifacts. GitHub releases and npm publishing are done by hand from one
-preview run.
+`permissions: contents: read` and `actions: read` (to find and download a
+pull request's shared transcription bundles, see below) and no secrets, and
+only builds and checks artifacts. GitHub releases and npm publishing are
+done by hand from one **manual-dispatch** (`workflow_dispatch`) preview run,
+which builds every artifact itself; never cut a release from a pull
+request's preview.
 
 ### What a preview run builds
 
@@ -399,7 +402,16 @@ preview run.
   `.github/actions/` (`windows-vulkan-bundle`, `linux-vulkan-bundle`,
   `macos-metal-bundle`, shared with the transcription workflow) build the
   Windows x64 Vulkan, Linux x64 Vulkan and Apple Silicon Metal transcription
-  folders. No artifact from another run is used. Intel Macs get no bundle.
+  folders. Intel Macs get no bundle. On a manual-dispatch run every bundle
+  is built in that run. On a pull request, to save the long native builds,
+  the `bundle-producer` job (`scripts/ci_bundle_share.py`) looks for the
+  same PR head's **Transcription engine** run (same head commit and head
+  repository), waits up to 20 minutes for it to upload its audited stages
+  (`shared-bundle-<backend>`, kept 2 days), and each bundle job reuses a
+  stage only when its exact identity matches: the source tree, Rust,
+  Cargo, the C/C++ compiler, CMake, the runner image and its revision, the
+  SDK pins and the build flags. Otherwise, and whenever the lookup fails
+  in any way, the bundle job builds locally.
 - **npm packages.** `scripts/package_npm.py` (stdlib only) stages the five
   packages and packs each with `npm pack --ignore-scripts`, then uploads
   them as the `npm-preview` artifact with `PACKAGES.md` (sizes). Before
@@ -484,7 +496,8 @@ without overriding `HOME`).
 ### Publishing a release
 
 1. Merge the release PR. On `main`, run `gh workflow run release.yml --ref
-   main` and wait for it to pass.
+   main` and wait for it to pass. Use this manual-dispatch run, whose
+   bundles are all built in it, never a pull request's preview.
 2. `gh run download <run-id> -n release-preview -D dist` and
    `gh run download <run-id> -n npm-preview -D dist/npm`; then
    `cd dist && sha256sum -c SHA256SUMS`.

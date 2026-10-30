@@ -24,6 +24,14 @@ inputs:
     description: The target directory to cache, relative to the workspace.
     required: false
     default: target
+  provenance:
+    description: >
+      'true' for the bundle caches, whose output is published under a bundle
+      identity: the key then also covers the runner image revision and CMake
+      (scripts/ci_cargo_cache.py --provenance). Other caches leave it off so
+      a weekly runner image release does not start them over.
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -34,9 +42,12 @@ runs:
       env:
         NAME: ${{ inputs.name }}
         BUILD: ${{ inputs.build }}
+        PROVENANCE: ${{ inputs.provenance }}
       run: |
         if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
-        "$py" "$GITHUB_WORKSPACE/scripts/ci_cargo_cache.py" key --name "$NAME" --build "$BUILD"
+        provenance=()
+        if [ "$PROVENANCE" = true ]; then provenance=(--provenance); fi
+        "$py" "$GITHUB_WORKSPACE/scripts/ci_cargo_cache.py" key --name "$NAME" --build "$BUILD" "${provenance[@]}"
 
     - name: Restore the Cargo cache
       id: restore

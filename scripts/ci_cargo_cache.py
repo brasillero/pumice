@@ -9,7 +9,7 @@ artifact out of the cache. The workflows cache their target directories with
 actions/cache and this helper instead (.github/actions/cargo-cache and
 .github/actions/cargo-cache-save):
 
-    ci_cargo_cache.py key --name NAME --build WHAT
+    ci_cargo_cache.py key --name NAME --build WHAT [--provenance]
         Prints the cache key of one job's build and its restore prefix, and
         writes both to $GITHUB_OUTPUT when set. The key covers the job, the
         runner image and architecture, rustc, cargo, the native C/C++
@@ -18,6 +18,9 @@ actions/cache and this helper instead (.github/actions/cargo-cache and
         deployment target, Rust flags), .cargo/config.toml and the external
         packages of Cargo.lock. The restore prefix drops only the lockfile, so
         a dependency change still starts from the previous build.
+        --provenance adds the runner image revision and CMake, for the caches
+        whose output is published under a bundle identity (the three bundle
+        actions); other caches survive weekly image releases.
 
     ci_cargo_cache.py prune TARGET_DIR...
         Removes what a later run never reuses, before the cache is saved: the
@@ -127,13 +130,28 @@ def compiler_identity() -> str:
     return run(["cc", "--version"]).splitlines()[0]
 
 
-def cache_identity(name: str, build: str, env: dict[str, str], root: Path) -> str:
-    """Everything but the lockfile that makes a cached build reusable."""
+def cache_identity(
+    name: str, build: str, env: dict[str, str], root: Path, provenance: bool = False
+) -> str:
+    """Everything but the lockfile that makes a cached build reusable.
+
+    With provenance, also the runner image revision and CMake: native installs
+    survive pruning, so a cache whose output is published under a bundle
+    identity (ci_bundle_share.py, which derives that identity from this
+    function) must not restore, even by prefix, an installation another image
+    or CMake built."""
     config = root / ".cargo" / "config.toml"
     lines = [
         f"name={name}",
         f"build={build}",
         f"image={env.get('ImageOS', '')} {env.get('RUNNER_OS', '')} {env.get('RUNNER_ARCH', '')}",
+    ]
+    if provenance:
+        lines += [
+            f"image_revision={env.get('ImageVersion', '')}",
+            run(["cmake", "--version"]),
+        ]
+    lines += [
         run(["rustc", "-vV"]),
         run(["cargo", "-V"]),
         f"compiler={compiler_identity()}",
@@ -266,7 +284,7 @@ def prune_target(target: Path, packages: set[str]) -> None:
 
 def command_key(args: argparse.Namespace) -> int:
     env = dict(os.environ)
-    identity = cache_identity(args.name, args.build, env, REPO_ROOT)
+    identity = cache_identity(args.name, args.build, env, REPO_ROOT, args.provenance)
     dependencies = lockfile_dependencies(REPO_ROOT / "Cargo.lock")
     key, restore = cache_key(args.name, identity, dependencies, env)
     print("cache identity:")
@@ -302,6 +320,11 @@ def main(argv: list[str] | None = None) -> int:
     key.add_argument("--name", required=True, help="the job's cache name")
     key.add_argument(
         "--build", required=True, help="what the job builds: profiles, features, targets"
+    )
+    key.add_argument(
+        "--provenance",
+        action="store_true",
+        help="add the runner image revision and CMake (caches behind a bundle identity)",
     )
     key.set_defaults(func=command_key)
     prune = commands.add_parser("prune", help="drop what a warm build never reuses")
