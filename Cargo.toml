@@ -4,7 +4,7 @@ default-members = [".", "crates/formatter", "crates/relay", "crates/settings", "
 resolver = "3"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 
@@ -46,7 +46,7 @@ libc = "0.2.190"
 
 [package]
 name = "pumice"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Connects dictation apps to the AI assistants you already use"
 license = "MIT"

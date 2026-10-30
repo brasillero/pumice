@@ -361,7 +361,7 @@ included, only read
 in-memory state: they never wait for the transcription child, a provider, a
 model or a running dictation.
 
-- `GET /health` — `200` `{"status":"ok","version":"0.2.0"}` while the
+- `GET /health` — `200` `{"status":"ok","version":"0.3.0"}` while the
   service runs, whatever the child's state.
 - `GET /ready` — `200` only when the transcription child is ready, the
   service is not stopping and dictations are admitted (a running dictation
@@ -370,7 +370,7 @@ model or a running dictation.
   or `shutting_down`.
 - `GET /pumice/v1/status`:
   ```json
-  {"schema_version":1,"module":"orchestrator","version":"0.2.0",
+  {"schema_version":1,"module":"orchestrator","version":"0.3.0",
    "service":{"state":"running","ready":true},
    "transcription":{"state":"ready","model":"turbo","generation":1,
      "restart_attempts":0,"next_retry_delay_ms":null,"model_load_ms":362,
@@ -729,8 +729,8 @@ stdout. With `--json`, stdout carries lifecycle records, one JSON object per
 line:
 
 ```json
-{"schema_version":1,"event":"listening","module":"orchestrator","version":"0.2.0","host":"127.0.0.1","port":17570}
-{"schema_version":1,"event":"ready","module":"orchestrator","version":"0.2.0","host":"127.0.0.1","port":17570}
+{"schema_version":1,"event":"listening","module":"orchestrator","version":"0.3.0","host":"127.0.0.1","port":17570}
+{"schema_version":1,"event":"ready","module":"orchestrator","version":"0.3.0","host":"127.0.0.1","port":17570}
 {"schema_version":1,"event":"stopped","module":"orchestrator","exit_code":143}
 ```
 
