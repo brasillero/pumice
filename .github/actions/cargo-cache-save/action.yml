@@ -9,24 +9,6 @@ description: >
 runs:
   using: composite
   steps:
-    - name: Native compiler cache statistics
-      if: always() && env.PUMICE_NATIVE_CACHE == '1'
-      shell: bash
-      id: native
-      run: |
-        ccache --show-stats --verbose | tee -a "$GITHUB_STEP_SUMMARY"
-        # A Cargo hit can avoid CMake entirely. Do not freeze a stats-only
-        # empty native cache under an immutable key before another job builds.
-        calls="$(ccache --print-stats | awk '$1 == "cache_miss" || $1 ~ /cache_hit$/ { total += $2 } END { print total + 0 }')"
-        if [ "$calls" -gt 0 ]; then echo 'populated=true' >> "$GITHUB_OUTPUT"; fi
-
-    - name: Save populated native compiler cache
-      if: steps.native.outputs.populated == 'true' && env.NATIVE_CACHE_HIT != 'true'
-      uses: actions/cache/save@v6
-      with:
-        path: ${{ env.CCACHE_DIR }}
-        key: ${{ env.NATIVE_CACHE_KEY }}
-
     - name: Prune the Cargo target directory
       if: env.CARGO_CACHE_HIT != 'true'
       shell: bash

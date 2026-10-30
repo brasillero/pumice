@@ -38,10 +38,6 @@ runs:
         toolchain: ${{ inputs.rust-toolchain }}
         components: clippy
 
-    - uses: ./.github/actions/native-cache
-      with:
-        backend: macos-metal
-
     - uses: ./.github/actions/bundle-reuse
       id: reuse
       with:

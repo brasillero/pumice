@@ -1,5 +1,7 @@
 # Native compiler and SDK caches (2026-10-30)
 
+Historical trial design. Final measured outcome: `reports/2026-10-30-native-cache-outcome.md`; the compiler cache was discarded, the installed SDK cache retained.
+
 PR #136 implements CMake ccache launchers on Linux and macOS, including the Metal job. Cache keys include compiler, CMake and ccache versions, Rust, backend, runner image, SDK pins, CMake settings and script hashes. Each backend stores at most 400 MiB before compression. Statistics are printed at job completion. Windows retains the Visual Studio generator, which does not implement CMake compiler launchers. No generator, optimization or static CRT change was made.
 
 ## Vulkan SDK experiment (#7)
