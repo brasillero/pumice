@@ -45,17 +45,6 @@
 - [x] Stream until `package.json` and reuse the index.
 - [x] Use a targeted MSVC tool path, keeping the failure checks and import audit.
 
-### #4 · In progress · Native compiler cache for the transcription engine builds
-- type: Improvement
-- area: distribution
-- origin: reports/2026-10-30-pipeline-speed.md
-- ticket: —
-- created: 2026-10-30
-
-**Context.** Most bundle time is compiling transcribe.cpp/ggml through CMake. `RUSTC_WRAPPER=sccache` does not cover CMake's C/C++; launchers must go through `TRANSCRIBE_CMAKE_ARGS`. Windows uses the Visual Studio generator, so launcher support must be verified (maybe Ninja), and `/O2`, static CRT and the audits rechecked.
-
-**To do.**
-- [ ] Trial sccache (GHA backend) or ccache on Linux and macOS, measure hit rates, then Windows.
 
 ### #5 · To do · Stop building the transcription bundles twice
 - type: Improvement
@@ -97,17 +86,33 @@
 
 ## Deferred
 
-### #7 · Deferred · Cache the Vulkan SDK install
+
+## Closed
+
+### #4 · Discarded · Native compiler cache for the transcription engine builds
 - type: Improvement
 - area: distribution
 - origin: reports/2026-10-30-pipeline-speed.md
 - ticket: —
 - created: 2026-10-30
-- reason: at most about 20 s per job; only worth it if a benchmark wins
+- closed: 2026-10-30
+- outcome: cold compiler calls all missed; warm production jobs made zero C/C++ calls because Cargo already retained the native install; reports/2026-10-30-native-cache-outcome.md
+
+**Context.** Most bundle time is compiling transcribe.cpp/ggml through CMake. `RUSTC_WRAPPER=sccache` does not cover CMake's C/C++; launchers must go through `TRANSCRIBE_CMAKE_ARGS`. Windows uses the Visual Studio generator, so launcher support must be verified (maybe Ninja), and `/O2`, static CRT and the audits rechecked.
+
+**To do.**
+- [x] Trial sccache (GHA backend) or ccache on Linux and macOS, measure hit rates, then Windows.
+
+### #7 · Done · Cache the Vulkan SDK install
+- type: Improvement
+- area: distribution
+- origin: reports/2026-10-30-pipeline-speed.md
+- ticket: —
+- created: 2026-10-30
+- closed: 2026-10-30
+- outcome: PR #136; reports/2026-10-30-native-cache-outcome.md records the benchmark and successful Windows/Linux restored-SDK builds
 
 **Context.** The SDK install takes about 19 s on Windows and 23 s on Linux, before the cost of restoring a cache.
 
 **To do.**
-- [ ] Benchmark a cached install against the current one.
-
-## Closed
+- [x] Benchmark a cached install against the current one.
