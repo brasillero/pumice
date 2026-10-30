@@ -1,7 +1,7 @@
 //! Kiro CLI plugin (`kiro-cli chat`).
 //!
 //! Verified against the installed 2.29.0 in S2.14 (real calls, see
-//! docs/research/S2.14-kiro-plugin.md). Headless mode on the pinned V2
+//! docs/providers.md). Headless mode on the pinned V2
 //! engine reads the user message from stdin and writes the run's ACP events
 //! as JSON Lines (`--output-format stream-json`):
 //!
@@ -24,14 +24,14 @@
 //! user's own Kiro login and settings are inherited; `~/.kiro` is never
 //! touched.
 //!
-//! Residual risks (recorded here and in the research note; Pumice prints no
+//! Residual risks (recorded here and in docs/providers.md; Pumice prints no
 //! provider warnings): each run is saved in the user's own `~/.kiro/sessions`,
 //! with the dictated text; `runError` carries no structured cause, so login,
 //! quota and rate-limit failures are all `NonzeroExit`; a CLI that is not
 //! logged in starts a device-code login and waits, which ends in `Timeout`.
 //!
 //! Effort comes from `relay.yml` (p16-provider-effort/D4) as `--effort`,
-//! checked against the installed 2.29.0 (docs/research/P16-provider-effort.md).
+//! checked against the installed 2.29.0 (docs/providers.md).
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -83,7 +83,7 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
 /// Models kiro-cli 2.29.0 runs without effort: it prints `failed to set
 /// effort '<level>': model does not support additional fields` and runs, and
 /// the run's metadata says `reasoning: {support: "unavailable", effortLevels:
-/// []}` (S2.14 live calls, docs/research/S2.14-kiro-plugin.md). Kiro's
+/// []}` (S2.14 live calls, docs/providers.md). Kiro's
 /// service reports each model's levels only during a run, so every other
 /// model is accepted. Ids are compared verbatim, as `--list-models` prints
 /// them.

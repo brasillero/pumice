@@ -7,7 +7,7 @@
 //! The names are 2.1.306's, where the port was made; 2.1.310 renames them
 //! and keeps the same code.
 //! The rules, the excerpts and the cases checked against the binary's own
-//! code are in docs/research/P16-provider-effort.md.
+//! code are in docs/providers.md.
 
 /// Canonical names whose effort check is false: the whole `claude-3-`
 /// family and these. The request builder then drops `effort` without a
@@ -383,7 +383,7 @@ mod tests {
 
     /// Each expected name is what the binary's own functions return, run
     /// under node on the extracted code; the port also matched them on
-    /// 94,263 generated spellings (docs/research/P16-provider-effort.md).
+    /// 94,263 generated spellings (docs/providers.md).
     const CASES: &[(&str, &str)] = &[
         ("claude-sonnet-4", "claude-sonnet-4-0"),
         ("claude-sonnet-4-20250514", "claude-sonnet-4-0"),

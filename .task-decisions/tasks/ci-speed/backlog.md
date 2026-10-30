@@ -55,6 +55,7 @@
 - [x] Stream until `package.json` and reuse the index.
 - [x] Use a targeted MSVC tool path, keeping the failure checks and import audit.
 
+
 ### #4 · Discarded · Native compiler cache for the transcription engine builds
 - type: Improvement
 - area: distribution
@@ -91,7 +92,7 @@
 - ticket: —
 - created: 2026-10-30
 - closed: 2026-10-30
-- outcome: PR #134; native install reuse preserves debug-profile tests; cold 8m41 and warm 1m34 in run 40988030401; reports/2026-10-30-comparison.md
+- outcome: https://github.com/brasillero/pumice/pull/134 merged as 5ab0fa3; native install reuse preserves debug-profile tests; cold 8m41 and warm 1m34 in run 40988030401; reports/2026-10-30-comparison.md
 
 **Context.** Clippy, tests and staging compile the engine three times with different settings (about 19 min in total; `transcription.yml:151`, `build-cpu-variants.sh:33`). Align them or link debug and release Rust against one native build, keeping debug-profile coverage.
 

@@ -7,7 +7,7 @@
 //!
 //! Effort and thinking come from `relay.yml` (p16-provider-effort/D4, D5);
 //! both were checked against 2.1.306 and re-checked against the installed
-//! 2.1.310 (docs/research/P16-provider-effort.md). `--effort` takes the level, and the same level
+//! 2.1.310 (docs/providers.md). `--effort` takes the level, and the same level
 //! is pinned in `CLAUDE_CODE_EFFORT_LEVEL`, which overrides `--effort` when
 //! inherited. `thinking: false` sets `MAX_THINKING_TOKENS=0`; `thinking:
 //! true` clears it and sets `alwaysThinkingEnabled`, so the CLI uses its own

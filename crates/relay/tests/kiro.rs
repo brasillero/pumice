@@ -1,7 +1,7 @@
 //! Tests for the Kiro CLI adapter, through the portable fake CLI.
 //!
 //! The stream vocabulary was verified against the installed 2.29.0 with real
-//! calls (docs/research/S2.14-kiro-plugin.md); the fixtures below mirror the
+//! calls (docs/providers.md); the fixtures below mirror the
 //! captured shapes with private values removed.
 
 mod support;
