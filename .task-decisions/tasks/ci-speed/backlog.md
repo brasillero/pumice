@@ -45,7 +45,7 @@
 - [x] Stream until `package.json` and reuse the index.
 - [x] Use a targeted MSVC tool path, keeping the failure checks and import audit.
 
-### #4 · To do · Native compiler cache for the transcription engine builds
+### #4 · In progress · Native compiler cache for the transcription engine builds
 - type: Improvement
 - area: distribution
 - origin: reports/2026-10-30-pipeline-speed.md
