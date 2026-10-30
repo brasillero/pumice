@@ -9,6 +9,11 @@ description: >
 runs:
   using: composite
   steps:
+    - name: Native compiler cache statistics
+      if: always() && env.PUMICE_NATIVE_CACHE == '1'
+      shell: bash
+      run: ccache --show-stats --verbose | tee -a "$GITHUB_STEP_SUMMARY"
+
     - name: Prune the Cargo target directory
       if: env.CARGO_CACHE_HIT != 'true'
       shell: bash

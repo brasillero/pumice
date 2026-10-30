@@ -44,6 +44,10 @@ runs:
         toolchain: ${{ inputs.rust-toolchain }}
         components: clippy
 
+    - uses: ./.github/actions/native-cache
+      with:
+        backend: linux-vulkan
+
     # The calling job ends with ./.github/actions/cargo-cache-save.
     - uses: ./.github/actions/cargo-cache
       with:
@@ -51,18 +55,19 @@ runs:
         build: pumice-transcription vulkan (release; clippy and tests in the transcription workflow)
         target-dir: target/linux-vulkan
 
-    - name: Cache Vulkan SDK archive
+    - name: Cache unpacked Vulkan SDK
       id: cache-vulkan-sdk
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
-        path: ${{ runner.temp }}/vulkan-sdk/vulkan_sdk.tar.xz
-        key: vulkan-sdk-linux-${{ env.VULKAN_SDK_VERSION }}-${{ env.VULKAN_SDK_SHA256 }}
+        path: ${{ runner.temp }}/vulkan-sdk/${{ env.VULKAN_SDK_VERSION }}
+        key: vulkan-sdk-linux-unpacked-v1-${{ env.VULKAN_SDK_VERSION }}-${{ env.VULKAN_SDK_SHA256 }}
 
     - name: Download, verify and unpack the Vulkan SDK (pinned)
       shell: bash
       run: |
         dir="$RUNNER_TEMP/vulkan-sdk"
         archive="$dir/vulkan_sdk.tar.xz"
+        if [ "${{ steps.cache-vulkan-sdk.outputs.cache-hit }}" != true ]; then
         if [ ! -f "$archive" ]; then
           mkdir -p "$dir"
           curl -L --fail -o "$archive" \
@@ -70,6 +75,8 @@ runs:
         fi
         echo "$VULKAN_SDK_SHA256  $archive" | sha256sum -c -
         tar -xJf "$archive" -C "$dir"
+        rm "$archive"
+        fi
         sdk="$dir/$VULKAN_SDK_VERSION/x86_64"
         echo "VULKAN_SDK=$sdk" >> "$GITHUB_ENV"
         echo "$sdk/bin" >> "$GITHUB_PATH"

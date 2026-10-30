@@ -49,14 +49,15 @@ runs:
         build: pumice-transcription vulkan (release, --target x86_64-pc-windows-msvc; clippy and tests in the transcription workflow)
         target-dir: target/windows-vulkan
 
-    - name: Cache Vulkan SDK installer
+    - name: Cache installed Vulkan SDK
       id: cache-vulkan-sdk
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
-        path: ${{ runner.temp }}\vulkan-sdk\vulkan_sdk.exe
-        key: vulkan-sdk-windows-${{ env.VULKAN_SDK_VERSION }}-${{ env.VULKAN_SDK_SHA256 }}
+        path: C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}
+        key: vulkan-sdk-windows-installed-v1-${{ env.VULKAN_SDK_VERSION }}-${{ env.VULKAN_SDK_SHA256 }}
 
     - name: Download and verify Vulkan SDK installer
+      if: steps.cache-vulkan-sdk.outputs.cache-hit != 'true'
       shell: pwsh
       run: |
         $dir = Join-Path $env:RUNNER_TEMP 'vulkan-sdk'
@@ -81,10 +82,12 @@ runs:
       run: |
         $installer = Join-Path $env:RUNNER_TEMP 'vulkan-sdk\vulkan_sdk.exe'
         $root = "C:\VulkanSDK\$env:VULKAN_SDK_VERSION"
+        if ('${{ steps.cache-vulkan-sdk.outputs.cache-hit }}' -ne 'true') {
         $process = Start-Process -FilePath $installer -Wait -PassThru -NoNewWindow -ArgumentList @(
           '--root', $root, '--accept-licenses', '--default-answer', '--confirm-command', 'install'
         )
         if ($process.ExitCode -ne 0) { throw "Vulkan SDK installer exited with $($process.ExitCode)" }
+        }
         Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_SDK=$root"
         Add-Content -Path $env:GITHUB_PATH -Value "$root\Bin"
 
