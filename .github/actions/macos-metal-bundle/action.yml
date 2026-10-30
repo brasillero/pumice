@@ -49,6 +49,7 @@ runs:
 
     # The calling job ends with ./.github/actions/cargo-cache-save.
     - uses: ./.github/actions/cargo-cache
+      if: steps.reuse.outputs.hit != 'true'
       with:
         name: bundle-macos-metal
         build: pumice-transcription metal, pumice (release; clippy and tests in the transcription workflow)

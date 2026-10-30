@@ -34,5 +34,8 @@ runs:
         fi
         mkdir -p "$STAGE"
         tar -xzf "$shared/bundle.tar.gz" -C "$STAGE"
+        # A reused stage contains no compiler output. Never publish an empty
+        # Cargo cache that would win the immutable-key race with the producer.
+        echo 'CARGO_CACHE_HIT=true' >> "$GITHUB_ENV"
         echo 'hit=true' >> "$GITHUB_OUTPUT"
         echo "Reused $BACKEND from run $BUNDLE_PRODUCER_RUN ($IDENTITY)" >> "$GITHUB_STEP_SUMMARY"

@@ -49,6 +49,7 @@ runs:
 
     # The calling job ends with ./.github/actions/cargo-cache-save.
     - uses: ./.github/actions/cargo-cache
+      if: steps.reuse.outputs.hit != 'true'
       with:
         name: bundle-windows-vulkan
         build: pumice-transcription vulkan (release, --target x86_64-pc-windows-msvc; clippy and tests in the transcription workflow)
