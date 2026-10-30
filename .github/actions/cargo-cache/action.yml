@@ -5,7 +5,8 @@ description: >
   pumice-transcription's two names for transcribe-cpp-sys and then empties
   every cache. The key (scripts/ci_cargo_cache.py) covers the job, the runner
   image, rustc, the native compiler, what the job builds, the build scripts'
-  environment and the external packages of Cargo.lock. Run after the Rust
+  environment, the [profile] sections of Cargo.toml and the external
+  packages of Cargo.lock. Run after the Rust
   toolchain and every environment pin the build reads (CMake arguments, SDK
   versions); end the job with ./.github/actions/cargo-cache-save. Registry
   downloads are not cached: crates.io is about as fast as a cache restore.

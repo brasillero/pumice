@@ -122,6 +122,15 @@ tempfile = { workspace = true }
 # The dispatcher tests deliver a signal to the exec'd sibling by PID.
 libc = { workspace = true }
 
+# Debug and test builds keep file and line numbers for Pumice's own code, so
+# backtraces stay readable, and drop debug info from dependencies. Full debug
+# info made `target/` several times larger and linking slower.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 lto = true
 codegen-units = 1

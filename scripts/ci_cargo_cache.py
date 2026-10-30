@@ -15,8 +15,9 @@ actions/cache and this helper instead (.github/actions/cargo-cache and
         runner image and architecture, rustc, cargo, the native C/C++
         compiler, what the job builds (profiles, features, targets), the
         environment that reaches the build scripts (CMake arguments, SDK pins,
-        deployment target, Rust flags), .cargo/config.toml and the external
-        packages of Cargo.lock. The restore prefix drops only the lockfile, so
+        deployment target, Rust flags), .cargo/config.toml, the [profile]
+        sections of the root Cargo.toml and the external packages of
+        Cargo.lock. The restore prefix drops only the lockfile, so
         a dependency change still starts from the previous build.
         --provenance adds the runner image revision and CMake, for the caches
         whose output is published under a bundle identity (the three bundle
@@ -130,6 +131,27 @@ def compiler_identity() -> str:
     return run(["cc", "--version"]).splitlines()[0]
 
 
+def profile_sections(manifest: str) -> str:
+    """The [profile.*] tables of a Cargo manifest, without comments or blank
+    lines. They change every artifact, but no other part of the key sees
+    them, and an exact hit is never saved again (cache entries are
+    immutable). Include any table with an escaped header conservatively:
+    TOML escapes can spell `profile` too, and an extra cache miss is safer
+    than restoring stale artifacts. No TOML parser is needed on the runners."""
+    keep, lines = False, []
+    for line in manifest.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[["):
+            keep = False
+        elif stripped.startswith("["):
+            # TOML allows `[ profile.dev ]` and `["profile".dev]`.
+            first = stripped[1:].split("]", 1)[0].split(".", 1)[0]
+            keep = first.strip().strip("\"'") == "profile" or "\\" in stripped
+        if keep and stripped and not stripped.startswith("#"):
+            lines.append(stripped)
+    return "\n".join(lines)
+
+
 def cache_identity(
     name: str, build: str, env: dict[str, str], root: Path, provenance: bool = False
 ) -> str:
@@ -141,6 +163,7 @@ def cache_identity(
     function) must not restore, even by prefix, an installation another image
     or CMake built."""
     config = root / ".cargo" / "config.toml"
+    manifest = root / "Cargo.toml"
     lines = [
         f"name={name}",
         f"build={build}",
@@ -156,6 +179,7 @@ def cache_identity(
         run(["cargo", "-V"]),
         f"compiler={compiler_identity()}",
         f"config={short_hash(config.read_text(encoding='utf-8')) if config.exists() else '-'}",
+        f"profiles={short_hash(profile_sections(manifest.read_text(encoding='utf-8'))) if manifest.exists() else '-'}",
     ]
     lines += [f"{var}={env[var]}" for var in KEY_ENV if env.get(var)]
     return "\n".join(lines)

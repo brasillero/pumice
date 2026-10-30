@@ -120,6 +120,57 @@ class KeyTests(unittest.TestCase):
         _, other = ci_cargo_cache.cache_key("ci", "rustc 1.91", "deps", self.ENV)
         self.assertNotEqual(prefix, other)
 
+    def test_profile_sections_keep_only_profile_tables(self):
+        manifest = (
+            '[package]\nname = "pumice"\n\n'
+            "# Debug builds.\n[profile.dev]\ndebug = 1\n\n"
+            '[profile.dev.package."*"]\ndebug = false\n\n'
+            '[dependencies]\nserde = "1"\n\n'
+            "[profile.release]\nlto = true\n"
+        )
+        self.assertEqual(
+            ci_cargo_cache.profile_sections(manifest),
+            '[profile.dev]\ndebug = 1\n[profile.dev.package."*"]\ndebug = false\n'
+            "[profile.release]\nlto = true",
+        )
+
+    def test_profile_sections_ignore_comments_and_other_tables(self):
+        base = '[package]\nversion = "0.3.0"\n[profile.dev]\ndebug = 1\n'
+        same = '[package]\nversion = "0.4.0"\n[profile.dev]\n# why\n\ndebug = 1\n'
+        other = '[package]\nversion = "0.3.0"\n[profile.dev]\ndebug = 2\n'
+        sections = ci_cargo_cache.profile_sections
+        self.assertEqual(sections(base), sections(same))
+        self.assertNotEqual(sections(base), sections(other))
+
+    def test_profile_sections_accept_spaced_and_quoted_headers(self):
+        sections = ci_cargo_cache.profile_sections
+        for header in ("[ profile.dev ]", '["profile".dev]', "['profile'.dev]"):
+            with self.subTest(header=header):
+                manifest = f'[package]\nname = "pumice"\n{header}\ndebug = 1\n[[bin]]\nname = "x"\n'
+                self.assertEqual(sections(manifest), f"{header}\ndebug = 1")
+
+    def test_escaped_profile_headers_change_the_key_and_restore_prefix(self):
+        for header in (r'["pro\u0066ile".dev]', r'["\U00000070rofile".dev]'):
+            with self.subTest(header=header):
+                before = f'{header}\ndebug = 1\n[package]\nversion = "0.3.0"\n'
+                after = before.replace('debug = 1', 'debug = 2')
+                first = ci_cargo_cache.profile_sections(before)
+                second = ci_cargo_cache.profile_sections(after)
+                self.assertEqual(first, f'{header}\ndebug = 1')
+                key, prefix = ci_cargo_cache.cache_key('ci', first, 'deps', self.ENV)
+                other_key, other_prefix = ci_cargo_cache.cache_key('ci', second, 'deps', self.ENV)
+                self.assertNotEqual(key, other_key)
+                self.assertNotEqual(prefix, other_prefix)
+
+    def test_identity_covers_the_repository_profiles(self):
+        root = ci_cargo_cache.REPO_ROOT
+        identity = ci_cargo_cache.cache_identity("ci", "debug", self.ENV, root)
+        profiles = ci_cargo_cache.profile_sections(
+            (root / "Cargo.toml").read_text(encoding="utf-8")
+        )
+        self.assertIn("[profile.dev]", profiles)
+        self.assertIn(f"profiles={ci_cargo_cache.short_hash(profiles)}", identity)
+
 
 class PruneTests(unittest.TestCase):
     def setUp(self):
