@@ -181,7 +181,12 @@ jobs:
       # About 3x the slowest recent test step (~5 min with a cold build).
       - name: cargo test -p pumice-transcription --features cpu-variants
         timeout-minutes: 15
-        run: cargo test -p pumice-transcription --features cpu-variants --locked
+        run: |
+          # Cargo filters runtime search paths outside this profile's build
+          # outputs. Tests import the shared engine before main; point only
+          # this step at the release install (never the relocation smoke).
+          export LD_LIBRARY_PATH="$TRANSCRIBE_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          cargo test -p pumice-transcription --features cpu-variants --locked
 
       - name: Assert staged layout
         run: |
