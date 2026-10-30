@@ -54,6 +54,7 @@ runs:
       if: steps.reuse.outputs.hit != 'true'
       with:
         name: bundle-linux-vulkan
+        provenance: true
         build: pumice-transcription vulkan (release; clippy and tests in the transcription workflow)
         target-dir: target/linux-vulkan
 

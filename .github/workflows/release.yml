@@ -8,8 +8,10 @@ name: Release preview
 # smoke-tests installing the tarballs through a loopback registry on every
 # host. This workflow never publishes anything: previews validate the
 # packaging on pull requests and manual dispatch only. The owner cuts real
-# releases from these artifacts by hand (see "Building and publishing
-# releases" in docs/install.md).
+# releases by hand from a manual-dispatch run, which builds every bundle
+# itself; pull requests may reuse the same head's transcription-workflow
+# bundles (bundle-producer). See "Building and publishing releases" in
+# docs/install.md.
 
 on:
   pull_request:
@@ -95,10 +97,15 @@ jobs:
         id: rust
         run: echo "version=$(python3 scripts/third_party_notices.py --print-rust-version)" >> "$GITHUB_OUTPUT"
 
+  # Bundle sharing is only an optimisation: whatever happens to this job (an
+  # error, a timeout, a lost runner), the bundle jobs build locally. Its
+  # output is then empty, and the jobs after it check their direct needs
+  # instead of the default success(), which also counts this job.
   bundle-producer:
     name: Locate shared transcription bundles
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    continue-on-error: true
     outputs:
       run: ${{ steps.producer.outputs.value }}
     steps:
@@ -107,6 +114,8 @@ jobs:
       # Producer tests continue in parallel and remain required before merge.
       - name: Locate same-PR bundle producer
         id: producer
+        continue-on-error: true
+        timeout-minutes: 22
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/ci_bundle_share.py coordinate
@@ -283,6 +292,7 @@ jobs:
       BUNDLE_PRODUCER_RUN: ${{ needs.bundle-producer.outputs.run }}
     name: Transcription bundle (win32-x64, Vulkan)
     needs: [package-tests, bundle-producer]
+    if: ${{ !cancelled() && needs.package-tests.result == 'success' }}
     runs-on: windows-2022
     timeout-minutes: 120
     steps:
@@ -320,6 +330,7 @@ jobs:
       BUNDLE_PRODUCER_RUN: ${{ needs.bundle-producer.outputs.run }}
     name: Transcription bundle (linux-x64, Vulkan)
     needs: [package-tests, bundle-producer]
+    if: ${{ !cancelled() && needs.package-tests.result == 'success' }}
     # Ubuntu 22.04: glibc 2.35, the bundle's floor.
     runs-on: ubuntu-22.04
     timeout-minutes: 120
@@ -359,6 +370,7 @@ jobs:
       BUNDLE_PRODUCER_RUN: ${{ needs.bundle-producer.outputs.run }}
     name: Transcription bundle (darwin-arm64, Metal)
     needs: [package-tests, bundle-producer]
+    if: ${{ !cancelled() && needs.package-tests.result == 'success' }}
     runs-on: macos-15
     timeout-minutes: 90
     steps:
@@ -428,6 +440,9 @@ jobs:
       - transcription-windows-vulkan
       - transcription-linux-vulkan
       - transcription-macos-metal
+    if: >-
+      ${{ !cancelled() && !contains(needs.*.result, 'failure')
+      && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -508,6 +523,7 @@ jobs:
   npm-smoke:
     name: npm install smoke (${{ matrix.npm }})
     needs: npm-pack
+    if: ${{ !cancelled() && needs.npm-pack.result == 'success' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -731,6 +747,7 @@ jobs:
   npm-smoke-managers:
     name: pnpm/Bun install smoke (linux-x64)
     needs: npm-pack
+    if: ${{ !cancelled() && needs.npm-pack.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

@@ -52,6 +52,7 @@ runs:
       if: steps.reuse.outputs.hit != 'true'
       with:
         name: bundle-windows-vulkan
+        provenance: true
         build: pumice-transcription vulkan (release, --target x86_64-pc-windows-msvc; clippy and tests in the transcription workflow)
         target-dir: target/windows-vulkan
 

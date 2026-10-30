@@ -48,6 +48,7 @@ runs:
       if: steps.reuse.outputs.hit != 'true'
       with:
         name: bundle-macos-metal
+        provenance: true
         build: pumice-transcription metal, pumice (release; clippy and tests in the transcription workflow)
         target-dir: target/macos-metal
 
