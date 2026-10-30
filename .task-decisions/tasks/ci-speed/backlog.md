@@ -67,7 +67,8 @@
 **Context.** Release preview and Transcription engine build the same three bundles separately (about 15–25 runner minutes when both run). Release pins Rust, Transcription follows stable (`p14.3-npm-bundles/D4`), so sharing needs an exact build identity.
 
 **To do.**
-- [ ] Owner: may the two workflows share bundles when the toolchain matches, keeping stable coverage when it differs?
+- [x] Owner: may the two workflows share bundles when the toolchain matches, keeping stable coverage when it differs? Yes (D1).
+- [ ] Share the bundles by exact build identity.
 
 ### #6 · To do · Reuse native compilation inside the CPU-variants job
 - type: Improvement
@@ -80,6 +81,19 @@
 
 **To do.**
 - [ ] Measure, then align settings or share the native install.
+
+### #8 · To do · Run fewer previews or Intel Mac builds
+- type: Improvement
+- area: distribution
+- origin: reports/2026-10-30-pipeline-speed.md
+- ticket: —
+- created: 2026-10-30
+
+**Context.** Limiting Release preview to `main`/release branches, narrower path filters, or building Intel Mac less often save runner minutes but drop per-PR proof of packaged binaries, bundles and installs. Intel Mac costs about 5–8 runner minutes but is rarely on the critical path.
+
+**To do.**
+- [x] Owner: decide once the cache and concurrency fixes are measured. Authorized (D1).
+- [ ] Pick the variant from the measurements of #1–#4.
 
 ## Deferred
 
@@ -95,18 +109,5 @@
 
 **To do.**
 - [ ] Benchmark a cached install against the current one.
-
-### #8 · Deferred · Run fewer previews or Intel Mac builds
-- type: Improvement
-- area: distribution
-- origin: reports/2026-10-30-pipeline-speed.md
-- ticket: —
-- created: 2026-10-30
-- reason: owner decision; it removes pre-merge coverage, so it waits until #1–#4 are measured
-
-**Context.** Limiting Release preview to `main`/release branches, narrower path filters, or building Intel Mac less often save runner minutes but drop per-PR proof of packaged binaries, bundles and installs. Intel Mac costs about 5–8 runner minutes but is rarely on the critical path.
-
-**To do.**
-- [ ] Owner: decide once the cache and concurrency fixes are measured.
 
 ## Closed
