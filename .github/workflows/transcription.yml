@@ -161,7 +161,19 @@ jobs:
       - uses: ./.github/actions/cargo-cache
         with:
           name: transcription-cpu-variants
-          build: pumice-transcription clippy and tests cpu-variants (dev), cpu-variants stage (release)
+          build: cpu-variants stage (release), clippy and tests (dev) with TRANSCRIBE_DIR from release install v1
+
+      # Build the shipped release binary and every native CPU variant once.
+      # transcribe-cpp-sys already uses CMake Release even for debug Rust;
+      # its supported prebuilt path lets clippy/tests reuse this exact install
+      # while retaining their debug Rust profile and assertions.
+      - name: Build and stage cpu-variants
+        run: |
+          crates/transcription/scripts/build-cpu-variants.sh
+          . crates/transcription/scripts/stage-common.sh
+          native="$(transcribe_sys_out target/cpu-variants/cargo-build.json)"
+          test -f "$native/lib/transcribe-link.json"
+          echo "TRANSCRIBE_DIR=$native" >> "$GITHUB_ENV"
 
       - name: cargo clippy -p pumice-transcription --features cpu-variants
         run: cargo clippy -p pumice-transcription --features cpu-variants --all-targets --locked -- -D warnings
@@ -169,10 +181,12 @@ jobs:
       # About 3x the slowest recent test step (~5 min with a cold build).
       - name: cargo test -p pumice-transcription --features cpu-variants
         timeout-minutes: 15
-        run: cargo test -p pumice-transcription --features cpu-variants --locked
-
-      - name: Build and stage cpu-variants
-        run: crates/transcription/scripts/build-cpu-variants.sh
+        run: |
+          # Cargo filters runtime search paths outside this profile's build
+          # outputs. Tests import the shared engine before main; point only
+          # this step at the release install (never the relocation smoke).
+          export LD_LIBRARY_PATH="$TRANSCRIBE_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          cargo test -p pumice-transcription --features cpu-variants --locked
 
       - name: Assert staged layout
         run: |

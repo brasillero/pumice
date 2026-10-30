@@ -70,7 +70,7 @@
 - [x] Owner: may the two workflows share bundles when the toolchain matches, keeping stable coverage when it differs? Yes (D1).
 - [ ] Share the bundles by exact build identity.
 
-### #6 · To do · Reuse native compilation inside the CPU-variants job
+### #6 · In progress · Reuse native compilation inside the CPU-variants job
 - type: Improvement
 - area: transcription
 - origin: reports/2026-10-30-pipeline-speed.md
@@ -80,7 +80,7 @@
 **Context.** Clippy, tests and staging compile the engine three times with different settings (about 19 min in total; `transcription.yml:151`, `build-cpu-variants.sh:33`). Align them or link debug and release Rust against one native build, keeping debug-profile coverage.
 
 **To do.**
-- [ ] Measure, then align settings or share the native install.
+- [x] Measure, then align settings or share the native install. Results: `reports/2026-10-30-cpu-variants.md`; PR https://github.com/brasillero/pumice/pull/134 is measured and awaiting merge.
 
 ### #8 · To do · Run fewer previews or Intel Mac builds
 - type: Improvement
