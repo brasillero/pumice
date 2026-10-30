@@ -76,7 +76,6 @@ jobs:
     # there; see scripts/notices/README.md.
     outputs:
       rust-version: ${{ steps.rust.outputs.version }}
-      bundle-producer: ${{ steps.producer.outputs.value }}
     steps:
       - uses: actions/checkout@v7
 
@@ -96,8 +95,16 @@ jobs:
         id: rust
         run: echo "version=$(python3 scripts/third_party_notices.py --print-rust-version)" >> "$GITHUB_OUTPUT"
 
-      # One cheap Linux coordinator waits for the three early bundle uploads;
-      # producer tests continue in parallel and remain required before merge.
+  bundle-producer:
+    name: Locate shared transcription bundles
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      run: ${{ steps.producer.outputs.value }}
+    steps:
+      - uses: actions/checkout@v7
+      # Keep core archives independent of the producer's queue/build time.
+      # Producer tests continue in parallel and remain required before merge.
       - name: Locate same-PR bundle producer
         id: producer
         env:
@@ -273,9 +280,9 @@ jobs:
   # depth. Each job checks the stage starts and uploads it for npm-pack.
   transcription-windows-vulkan:
     env:
-      BUNDLE_PRODUCER_RUN: ${{ needs.package-tests.outputs.bundle-producer }}
+      BUNDLE_PRODUCER_RUN: ${{ needs.bundle-producer.outputs.run }}
     name: Transcription bundle (win32-x64, Vulkan)
-    needs: package-tests
+    needs: [package-tests, bundle-producer]
     runs-on: windows-2022
     timeout-minutes: 120
     steps:
@@ -310,9 +317,9 @@ jobs:
 
   transcription-linux-vulkan:
     env:
-      BUNDLE_PRODUCER_RUN: ${{ needs.package-tests.outputs.bundle-producer }}
+      BUNDLE_PRODUCER_RUN: ${{ needs.bundle-producer.outputs.run }}
     name: Transcription bundle (linux-x64, Vulkan)
-    needs: package-tests
+    needs: [package-tests, bundle-producer]
     # Ubuntu 22.04: glibc 2.35, the bundle's floor.
     runs-on: ubuntu-22.04
     timeout-minutes: 120
@@ -349,9 +356,9 @@ jobs:
 
   transcription-macos-metal:
     env:
-      BUNDLE_PRODUCER_RUN: ${{ needs.package-tests.outputs.bundle-producer }}
+      BUNDLE_PRODUCER_RUN: ${{ needs.bundle-producer.outputs.run }}
     name: Transcription bundle (darwin-arm64, Metal)
-    needs: package-tests
+    needs: [package-tests, bundle-producer]
     runs-on: macos-15
     timeout-minutes: 90
     steps:
