@@ -34,8 +34,7 @@ user PATH. (`pumice relay` with no further arguments is the same command, and
 
 No installation step and no runtime are needed: the executable is
 self-contained. It binds to `127.0.0.1` only and makes no outbound
-external connections of its own. The optional generic adapter connects only
-to local services. Stop it with Ctrl-C.
+external connections of its own. Stop it with Ctrl-C.
 
 ## Configuration
 
@@ -51,10 +50,17 @@ files from the supplied examples, including `relay.yml`. Edit it at:
 Run `./pumice relay check-config` (or `.\pumice.exe relay check-config` on Windows) to validate the file. Keep your config outside
 this archive so upgrading is a simple folder replace.
 
+Upgrading from 0.2: `pumice` alone no longer starts the service (use
+`pumice relay serve`), `pumice.yaml` is no longer read (rename it to
+`relay.yml`), and every setting must now be written; `check-config` names
+each missing one. Details are in the release notes and in
+https://github.com/brasillero/pumice/blob/main/docs/install.md#upgrading-from-02
+
 ## Point Handy at it
 
 In Handy, set the post-processing endpoint to `http://127.0.0.1:7567/v1`
-(Custom provider, API key empty, model `claude`, `codex` or `passthrough`).
+(Custom provider, API key empty, model `claude`, `codex`, `kiro` or
+`passthrough`).
 
 ## Contents
 

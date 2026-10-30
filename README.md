@@ -64,14 +64,14 @@ In Handy: **Settings → Advanced → Experimental Features → Post Processing*
 | Local pass-through service (Claude, Codex, explicit provider list) | Implemented |
 | Auto-detection | Implemented |
 | Kiro plugin | Implemented |
-| Configurable effort per provider, Claude thinking switch | Implemented (unreleased) |
+| Configurable effort per provider, Claude thinking switch | Implemented (0.3.0) |
 | Generic loopback adapter | Archived; Kimi, Antigravity and OpenCode support removed |
-| Distribution: GitHub release archives + npm package | Released (v0.2.0) |
-| Module dispatcher: `pumice relay`, `pumice format`, `pumice transcribe` | Implemented (unreleased) |
-| Transcription module `pumice-transcribe`: local files, HTTP, model downloads, runtime CPU variants | Implemented (unreleased, built from source) |
-| Formatter module (`pumice format`) | Implemented (unreleased) |
-| Whole stack: `pumice run`, `pumice serve` | Implemented (unreleased) |
-| Windows Vulkan (GPU) transcription | Experimental preview, CI artifact only |
+| Distribution: GitHub release archives + npm package | Released (v0.3.0) |
+| Module dispatcher: `pumice relay`, `pumice format`, `pumice transcribe` | Implemented (0.3.0) |
+| Transcription module `pumice-transcribe`: local files, HTTP, model downloads, runtime CPU variants | Implemented (0.3.0; in the npm packages for Windows x64, Linux x64 and Apple Silicon) |
+| Formatter module (`pumice format`) | Implemented (0.3.0) |
+| Whole stack: `pumice run`, `pumice serve` | Implemented (0.3.0) |
+| GPU transcription: Vulkan (Windows, Linux), Metal (Apple Silicon) | Experimental (0.3.0, `backend: gpu` or `auto`) |
 | `pumice setup` configuration wizard | Paused |
 | Tauri installer, auto-update, start-with-the-system | Deferred |
 

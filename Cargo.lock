@@ -1432,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "pumice"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "futures-core",
@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "pumice-formatter"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "clap",
  "pumice-relay",
@@ -1468,7 +1468,7 @@ dependencies = [
 
 [[package]]
 name = "pumice-relay"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "bytes",
@@ -1492,14 +1492,14 @@ dependencies = [
 
 [[package]]
 name = "pumice-settings"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "tempfile",
 ]
 
 [[package]]
 name = "pumice-transcription"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "bytes",

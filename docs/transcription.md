@@ -1095,7 +1095,7 @@ the server busy for 26 to 32 seconds, and a shutdown waited as long.
 
 - `GET /health` — liveness. Returns `200 application/json`:
   ```json
-  { "status": "ok", "version": "0.2.0" }
+  { "status": "ok", "version": "0.3.0" }
   ```
 
 - `GET /v1/models` — lists only the served model id in the OpenAI list shape:
@@ -1205,7 +1205,7 @@ under 4096 bytes; human messages stay on stderr. A run writes `ready` or
 `error`, then possibly `stopping` and `stopped`:
 
 ```json
-{"schema_version":1,"event":"ready","module":"transcription","instance_id":"gen-1","protocol_version":2,"version":"0.2.0","host":"127.0.0.1","port":49152,"model":"turbo","capabilities":["openai_transcriptions","detailed_transcriptions","managed_shutdown"],"model_load_ms":362,"compute":{"requested":"cpu","backend":"cpu","device":{"name":"CPU","description":"Intel(R) Core(TM) i5-14500T"},"cpu_variant":null,"fallback_reason":null}}
+{"schema_version":1,"event":"ready","module":"transcription","instance_id":"gen-1","protocol_version":2,"version":"0.3.0","host":"127.0.0.1","port":49152,"model":"turbo","capabilities":["openai_transcriptions","detailed_transcriptions","managed_shutdown"],"model_load_ms":362,"compute":{"requested":"cpu","backend":"cpu","device":{"name":"CPU","description":"Intel(R) Core(TM) i5-14500T"},"cpu_variant":null,"fallback_reason":null}}
 {"schema_version":1,"event":"stopping","module":"transcription","instance_id":"gen-1","reason":"stdin_closed"}
 {"schema_version":1,"event":"stopped","module":"transcription","instance_id":"gen-1"}
 ```
@@ -1248,7 +1248,7 @@ the OpenAI error object with `code` always set (for example
 - `GET /ready` — `200` while the instance accepts work (a running
   transcription does not change that); `503` `shutting_down` once stopping:
   ```json
-  {"schema_version":1,"module":"transcription","instance_id":"gen-1","protocol_version":2,"version":"0.2.0","model":"turbo","capabilities":["openai_transcriptions","detailed_transcriptions","managed_shutdown"],"compute":{"requested":"cpu","backend":"cpu","device":{"name":"CPU","description":"Intel(R) Core(TM) i5-14500T"},"cpu_variant":null,"fallback_reason":null},"state":"ready"}
+  {"schema_version":1,"module":"transcription","instance_id":"gen-1","protocol_version":2,"version":"0.3.0","model":"turbo","capabilities":["openai_transcriptions","detailed_transcriptions","managed_shutdown"],"compute":{"requested":"cpu","backend":"cpu","device":{"name":"CPU","description":"Intel(R) Core(TM) i5-14500T"},"cpu_variant":null,"fallback_reason":null},"state":"ready"}
   ```
   `compute` is the same snapshot as in `ready`.
 - `POST /pumice/v1/transcriptions` — the same multipart fields, limits,
