@@ -19,7 +19,7 @@
 //!
 //! Effort comes from `relay.yml` (p16-provider-effort/D4) as
 //! `-c model_reasoning_effort="<level>"`, checked against the installed
-//! 0.163.0 (docs/research/P16-provider-effort.md).
+//! 0.163.0 (docs/providers.md).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -50,7 +50,7 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     thinking_switch: false,
     // Every model in codex-cli 0.163.0's bundled catalog takes low, medium
     // and high, so no model is refused for its effort
-    // (docs/research/P16-provider-effort.md).
+    // (docs/providers.md).
     validate_settings: validate_settings_noop,
     probe: ProbeSpec::Version(&["--version"]),
     default_binary: DEFAULT_BINARY,

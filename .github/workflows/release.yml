@@ -8,8 +8,8 @@ name: Release preview
 # smoke-tests installing the tarballs through a loopback registry on every
 # host. This workflow never publishes anything: previews validate the
 # packaging on pull requests and manual dispatch only. The owner cuts real
-# releases from these artifacts by hand (see
-# docs/research/S7.1-portable-releases.md).
+# releases from these artifacts by hand (see "Building and publishing
+# releases" in docs/install.md).
 
 on:
   pull_request:

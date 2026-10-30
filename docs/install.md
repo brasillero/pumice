@@ -184,7 +184,29 @@ then:
   attached prompt and pastes the result as JSON; neither `passthrough` nor
   `inspect` spends quota or calls an AI.
 
-No Handy changes are needed beyond this Custom provider configuration.
+No Handy changes are needed beyond this Custom provider configuration. The
+exact request Handy sends is described in
+[api.md](api.md#captured-handy-contract).
+
+### Handy on Windows, Pumice in WSL
+
+Handy on Windows reaches a Pumice running inside WSL 2 with WSL's default
+NAT networking, with nothing installed on Windows and no setting changed
+(tested on 2026-10-03 and 2026-10-04 with Windows 11 build 26200 and WSL
+2.7.14.0, `wslinfo --networking-mode` reporting `nat`):
+
+- **Use `http://127.0.0.1:7567/v1` in Handy, not `localhost`.** WSL forwards
+  only IPv4 loopback: `http://[::1]:…` failed. Windows tries `::1` first for
+  `localhost`, so the first request took about 2.1 s before falling back to
+  IPv4; with `127.0.0.1` every request took about 14 ms.
+- **Pumice stays bound to `127.0.0.1`.** Forwarded requests arrive inside
+  WSL as loopback connections (`127.0.0.1:<port>`), so there is no need to
+  bind `0.0.0.0` or open a firewall port.
+- **WSL must be running.** The forwarding only exists while the WSL VM is
+  up, and after a Windows restart Pumice has to be started again inside WSL.
+  Starting it automatically at Windows login was not pursued (owner
+  decision, 2026-10-04).
+- **Mirrored networking** (`networkingMode=mirrored`) was not tested.
 
 ## Configuration
 
@@ -262,6 +284,12 @@ example config shows how). Then set the model in Handy to the provider's
 id to pick it.
 
 - **Claude**, **Codex** and **Kiro** — supported and tested with real calls.
+  How each CLI is called, and what each one keeps or cannot switch off, is
+  in [providers.md](providers.md). Two Kiro limits to know: `kiro-cli`
+  saves every run, dictated text included, in your own `~/.kiro/sessions`,
+  and Kiro's built-in instructions stay under the app's prompt, so with some
+  models it answers a dictation instead of formatting it
+  ([Kiro](providers.md#kiro)).
 - The **local-model adapter** (Ollama, LM Studio) — archived for now;
   listing it in the config is an error.
 - **Kimi**, **Antigravity** and **OpenCode** — support was removed; listing
@@ -326,3 +354,164 @@ makes no external network calls itself; only the AI CLIs contact their
 providers. It never loses a dictation: if the selected provider fails or
 times out, Pumice answers with an error and the app pastes its own
 transcript.
+
+## Building and publishing releases (maintainers)
+
+This section is for whoever cuts a release; users need none of it. Nothing
+publishes automatically: the **Release preview** workflow
+([`.github/workflows/release.yml`](../.github/workflows/release.yml)) runs on
+pull requests that touch release-related paths and on manual dispatch, with
+`permissions: contents: read` and no secrets, and only builds and checks
+artifacts. GitHub releases and npm publishing are done by hand from one
+preview run.
+
+### What a preview run builds
+
+| Target | Runner | Archive | npm platform package |
+| --- | --- | --- | --- |
+| `x86_64-unknown-linux-musl` | `ubuntu-latest` | `.tar.gz` | `linux-x64` |
+| `x86_64-pc-windows-msvc` | `windows-latest` | `.zip` | `win32-x64` |
+| `x86_64-apple-darwin` | `macos-15-intel` | `.tar.gz` | `darwin-x64` |
+| `aarch64-apple-darwin` | `macos-15` | `.tar.gz` | `darwin-arm64` |
+
+- **Version.** `scripts/package_release.py --print-version` reads
+  `[package].version` from the workspace `Cargo.toml` (Python's `tomllib`,
+  so Python 3.11 or newer; the workflow pins 3.13). The raw and the packaged
+  `pumice` must print `pumice <version>`, and `pumice-relay` must print
+  `pumice-relay <version>`.
+- **Linkage checks.** The Linux musl binary must have no dynamic interpreter
+  and no `NEEDED` library (`readelf`); the Windows `pumice.exe`, linked with
+  `+crt-static` (`.cargo/config.toml`), must not depend on `vcruntime`,
+  `msvcp`, `ucrtbase` or `api-ms-win-crt` (`dumpbin /dependents`, found
+  through `vswhere`). macOS builds run on native runners of each
+  architecture and use only OS libraries.
+- **Archives.** `scripts/package_release.py` (stdlib only) packages exactly
+  these files under one top-level folder `pumice-<version>-<target>/`:
+  `pumice` (`pumice.exe`), `LICENSE`, `THIRD_PARTY_NOTICES.md` (the core-only
+  notices from `scripts/third_party_notices.py --core-only`),
+  `relay.example.yml` and `INSTALL.md` (from `scripts/INSTALL.md`). It never
+  walks the repository or `target/` and keeps the executable mode on Unix.
+  The archives carry `pumice` alone, without transcription
+  (`p14.3-npm-bundles/D5`). The `checksums` job writes `SHA256SUMS`
+  (basenames only) and uploads the four archives with it as the
+  `release-preview` artifact (kept 7 days).
+- **Transcription bundles.** At the same commit, the composite actions in
+  `.github/actions/` (`windows-vulkan-bundle`, `linux-vulkan-bundle`,
+  `macos-metal-bundle`, shared with the transcription workflow) build the
+  Windows x64 Vulkan, Linux x64 Vulkan and Apple Silicon Metal transcription
+  folders. No artifact from another run is used. Intel Macs get no bundle.
+- **npm packages.** `scripts/package_npm.py` (stdlib only) stages the five
+  packages and packs each with `npm pack --ignore-scripts`, then uploads
+  them as the `npm-preview` artifact with `PACKAGES.md` (sizes). Before
+  staging it checks that the input holds exactly the four release archives
+  and their `SHA256SUMS` (strict parsing: malformed or duplicate lines fail),
+  and it extracts only the expected binary from each archive (symlinks, hard
+  links, directories and traversal names fail; no blind `extractall`), so
+  the npm binary is byte for byte the archive's.
+- **Bundle validation.** Each transcription folder must hold only regular
+  files and directories (npm drops symlinks), with safe names, every path on
+  a per-platform allowlist and listed in its `bundle.json`, nothing
+  unlisted, the identity (version, target, feature) and every size and
+  SHA-256 matching, the three core libraries, one GPU module and the
+  baseline CPU module present, and POSIX modes as staged (0755 directories
+  and executables; Linux libraries 0644, Mach-O libraries 0755). On Linux,
+  core libraries must sit under their ELF SONAME, and every `DT_NEEDED` of
+  every shipped ELF file must be a shipped core library or on the reviewed
+  OS-library allowlist (`libvulkan.so.1` for the GPU module only). After
+  packing, each tarball is read back and must hold exactly the staged files
+  with their modes and hashes (npm 12.2 keeps on-disk modes, so the packer
+  sets them). A native package fails above 50 MB packed or 150 MB unpacked;
+  npm's own limit is not documented.
+- **Notices.** `scripts/third_party_notices.py` (stdlib, `cargo metadata
+  --locked --filter-platform`) writes one `THIRD_PARTY_NOTICES.md` per
+  package: every crate with its license files, the native components from a
+  curated list and the formatter's Handy notice. Two crates publish no
+  license file (`ebml-iterable-specification` and its derive crate, MIT) and
+  get the standard MIT text with their authors. The Rust version every
+  shipping job installs is pinned there (`RUST_VERSION`); see
+  [`scripts/notices/README.md`](../scripts/notices/README.md).
+- **Install smoke.** `scripts/npm_registry_fixture.py` serves the generated
+  tarballs from a loopback-only registry (it derives packuments from them,
+  `libc` included), so installs go through the real resolution path without
+  publishing. On all four hosts, from a prefix with spaces and an unrelated
+  working directory, Node 22: `npm install -g` into an isolated prefix with
+  empty npm configs, `pumice --version`, executable bits after install,
+  `pumice transcribe --version`, `backends --json` (`bundle: verified`), a
+  whisper-tiny CPU transcription and npx; on the Intel Mac, the "not
+  installed next to pumice" error instead. On Linux, `pnpm add -g` and
+  `bun add -g` too. On macOS, no npm-installed file carries
+  `com.apple.quarantine`.
+
+The packaging helpers have their own tests, which the workflow runs first and
+which need no AI calls or network: `python3 -m unittest discover -s scripts
+-p "test_*.py" -v` (`test_package_release.py`, `test_package_npm.py`,
+`test_third_party_notices.py`, `test_npm_launcher.py` with a fake binary,
+and `test_npm_install.py`, which installs fake tarballs with npm, pnpm and
+Bun through the loopback registry, isolating each manager's config and cache
+without overriding `HOME`).
+
+### npm package layout
+
+- **Front package `@brasillero/pumice`**: the zero-dependency CommonJS
+  launcher `bin/pumice.js` (installed as the `pumice` command,
+  `engines.node >= 22`), `LICENSE` and a README. Its `optionalDependencies`
+  pin the four platform packages at the exact `Cargo.toml` version, so the
+  front and its native payload cannot drift apart. The unscoped name
+  `pumice` was refused by the registry as too similar to an existing package
+  and `pumice-cli` was taken, so everything lives under the owner's
+  `@brasillero` scope (owner decision, 2026-10-05); scoped packages publish
+  with `--access public`.
+- **Platform packages `@brasillero/pumice-<platform>`** (`win32-x64`,
+  `linux-x64`, `darwin-x64`, `darwin-arm64`) carry `os`/`cpu` selectors, so
+  package managers install only the matching one. `bin/` holds `pumice` and,
+  for `win32-x64`, `linux-x64` and `darwin-arm64`, the complete
+  transcription folder of the same commit; `darwin-x64` holds `pumice` alone
+  (`p14.3-npm-bundles/D1`–`D3`). `linux-x64` declares `libc: ["glibc"]`
+  because its transcription libraries need glibc 2.35 or newer.
+- **Launcher.** It finds this platform's package among the front's optional
+  dependencies, resolves it from the launcher's own directory
+  (`require.resolve(<name>/package.json, {paths: [__dirname]})`, which works
+  with pnpm's isolated layout; the caller's working directory is deliberately
+  not searched, so a planted `node_modules` there cannot satisfy it), checks
+  that both versions match and that the binary exists, then spawns it
+  directly with inherited stdio, working directory and environment. Exit
+  codes pass through; SIGINT and SIGTERM are forwarded, and a child killed
+  by a signal makes the launcher die by the same signal. It reports an
+  unsupported platform, a missing platform package (naming the glibc
+  requirement on musl Linux), a version mismatch, a missing binary or a
+  spawn error. It never downloads anything and no install scripts run.
+
+### Publishing a release
+
+1. Merge the release PR. On `main`, run `gh workflow run release.yml --ref
+   main` and wait for it to pass.
+2. `gh run download <run-id> -n release-preview -D dist` and
+   `gh run download <run-id> -n npm-preview -D dist/npm`; then
+   `cd dist && sha256sum -c SHA256SUMS`.
+3. `gh release create v<version> --target <merge-commit> --draft --title
+   v<version>` with the four `pumice-<version>-*` archives, `SHA256SUMS`
+   and the CHANGELOG section as notes; review the draft, then publish.
+4. Publish the **four platform packages first**, then the front package:
+   `pnpm publish <tarball> --access public` for each
+   `brasillero-pumice-<platform>-<version>.tgz`, then
+   `brasillero-pumice-<version>.tgz`.
+5. Smoke test: `pnpm dlx @brasillero/pumice@<version> --version` prints
+   `pumice <version>`, and on a bundled platform `pumice transcribe
+   --version` prints `pumice-transcribe <version>`.
+
+Notes from earlier publications (0.1.0 on 2026-10-05, 0.2.0 on 2026-10-11):
+
+- The npm account uses 2FA for authorization and writes, so publishing
+  needs the owner. `pnpm publish` (and `pnpm login`) use npm's web flow:
+  they print an `https://www.npmjs.com/login/cli/…` or `…/auth/cli/…` link
+  to approve in the browser and only poll for the approval after Enter is
+  pressed at "Press ENTER to open the URL". The link expires after about
+  three minutes. After the first approval, the next publishes in the same
+  session went through without another prompt.
+- Without a terminal, publishing fails with `ERR_PNPM_OTP_NON_INTERACTIVE`;
+  running it under `script` gives it one. An unauthenticated scoped publish
+  fails with HTTP 404, not 401.
+- Newly published packages took tens of minutes to show up in `npm view`
+  and install metadata. A same-day 404 after a successful upload can be
+  replication lag: check the publish output ("cannot publish over
+  previously published version") before retrying.

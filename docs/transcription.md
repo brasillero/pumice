@@ -110,8 +110,81 @@ below, with one portable CPU module instead of variants. On x86-64 Windows the s
 `cpu/<variant>/ggml-cpu-<variant>.dll` from the nine variants an MSVC build
 produces; it is only built as part of the Vulkan preview below.
 
-Measurements for both builds on server-1 and the details of the mechanism are
-in [`docs/research/P7-cpu-variants.md`](../docs/research/P7-cpu-variants.md).
+### Why Pumice picks the variant, not ggml
+
+- **OS-enabled state.** ggml's own best-score probe (pinned
+  transcribe-cpp-sys 0.3.1, `ggml/src/ggml-cpu/arch/x86/cpu-feats.cpp`,
+  which carries a FIXME about it) reads CPUID without checking whether the
+  OS enabled the matching register state, so a CPU or guest that advertises
+  AVX or AVX-512 with XSAVE state disabled could pick a module that faults
+  at inference. Pumice maps each ggml variant name to the exact feature set
+  its CMake table compiles in (`ggml_add_cpu_backend_variant` in
+  `ggml/src/CMakeLists.txt`) and detects features with
+  `is_x86_feature_detected!`, which checks OS support through
+  OSXSAVE/XGETBV for `avx`, `avx2`, `avx512*` and `avxvnni`. The best fully
+  usable tier wins.
+- **AMX is never selected.** On stable Rust the AMX detection intrinsics
+  are unstable (`x86_amx_intrinsics`), and AMX also needs a per-process OS
+  permission grant, so selecting it could not be shown safe. Sapphire Rapids
+  CPUs use the `zen4` tier (the same ISA without AMX); the `sapphirerapids`
+  module is staged but unreachable.
+- **Only the chosen module is loaded.** transcribe-cpp 0.3.1 only offers
+  directory-based backend loading, and ggml scores whatever a directory
+  holds, so each module is staged alone in its own directory and startup
+  initializes backends (CPU only, so no GPU driver is pulled in) from the
+  selected variant's directory. An earlier design that copied the module
+  into a per-process directory at runtime was rejected in review: it failed
+  on read-only installs and was attackable through symlinks.
+- **Fallback.** The variant table is not a nesting hierarchy (`alderlake`
+  follows `zen4` without needing AVX-512), so fallback candidates are
+  filtered by the same detector, not by table position, down to `x64`. If
+  no candidate's module exists, startup fails with a fixed "modules missing"
+  error and a recovery hint (no native error strings), distinct from "no
+  usable CPU module".
+- **Reported from ground truth.** The selected variant comes from the ggml
+  device description plus the `libggml-cpu-*.so` actually mapped in
+  `/proc/self/maps`, for example
+  `CPU (Intel(R) Core(TM) i5-14500T) [alderlake]`.
+- **Build.** `build-cpu-variants.sh` resolves the exact `transcribe-cpp-sys`
+  `out_dir` of the build it just ran (from cargo's JSON build-script
+  messages), so a fresh executable is never paired with stale cached
+  libraries, and checks that the core libraries, the `x64` module and at
+  least two variant directories were staged. The binary carries an
+  `$ORIGIN` rpath (`crates/transcription/build.rs`, gated on the feature).
+  CI (`.github/workflows/transcription.yml`) runs the feature's tests, then
+  stages the build, checks the staged layout, makes the stage read-only
+  (`chmod -R a-w`) and runs a Whisper tiny smoke test against it.
+
+### Measurements (Linux, historical)
+
+Measured during P7 on server-1 (Intel Core i5-14500T, 20 threads, AVX2 +
+AVX_VNNI, no usable AVX-512, a 35 W part that throttles under sustained
+all-core load), with the live services running, so the numbers are not
+isolated. Model `whisper-large-v3-turbo-Q8_0.gguf` (revision `5eaf945c`),
+sample `crates/transcription/tests/fixtures/sample-pt.wav` (14.19 s),
+`pumice-transcribe file SAMPLE --model-file MODEL --threads 16 --json`,
+3 runs per build with a warm page cache, timings from the envelope's
+`model_load_ms` and `transcription_ms`. Reproduce with
+`crates/transcription/scripts/bench.sh --bin BIN --runs 3 --threads "16"`.
+
+| Build | `transcription_ms` (3 runs) | Median | `model_load_ms` (median) | Selected variant |
+| --- | --- | --- | --- | --- |
+| cpu-variants (staged) | 6925 / 6903 / 6965 | 6925 | 349 | `alderlake` |
+| portable | 22941 / 24532 / 25900 | 24532 | 348 | — |
+
+About 3.5× faster at 16 threads, with the exact same transcript in every
+run of both builds (the target was under 14 s, `p7-transcribe-cpu-variants/D1`).
+An earlier sweep of 8, 12, 16 and 20 threads found 16 best on this hybrid
+P/E-core CPU and 20 the worst and noisiest. On the same machine only the
+chosen module was mapped in `/proc/self/maps`, the read-only stage started
+and transcribed, and `ldd` resolved the core libraries from the stage.
+
+**Not verified:** a real machine or guest with OS-disabled AVX state (the
+unit tests inject feature sets, including that case); fallback on a
+pre-AVX2 CPU (unit-tested down to plain `x64` only); cold-cache timings;
+p95 and sustained load; cancellation paths on the staged build; loader edge
+cases on other glibc versions or hardened loaders. These measurements are
+Linux only; the Windows variants ship with the Vulkan preview below.
 
 ## Windows Vulkan preview (experimental)
 
