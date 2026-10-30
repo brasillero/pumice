@@ -57,7 +57,7 @@
 **To do.**
 - [ ] Trial sccache (GHA backend) or ccache on Linux and macOS, measure hit rates, then Windows.
 
-### #5 · To do · Stop building the transcription bundles twice
+### #5 · In progress · Stop building the transcription bundles twice
 - type: Improvement
 - area: distribution
 - origin: reports/2026-10-30-pipeline-speed.md
@@ -82,7 +82,19 @@
 **To do.**
 - [ ] Measure, then align settings or share the native install.
 
-### #8 · To do · Run fewer previews or Intel Mac builds
+### #7 · In progress · Cache the Vulkan SDK install
+- type: Improvement
+- area: distribution
+- origin: reports/2026-10-30-pipeline-speed.md
+- ticket: —
+- created: 2026-10-30
+
+**Context.** The SDK install takes about 19 s on Windows and 23 s on Linux, before the cost of restoring a cache.
+
+**To do.**
+- [x] Benchmark a cached install against the current one.
+
+### #8 · In progress · Run fewer previews or Intel Mac builds
 - type: Improvement
 - area: distribution
 - origin: reports/2026-10-30-pipeline-speed.md
@@ -95,19 +107,8 @@
 - [x] Owner: decide once the cache and concurrency fixes are measured. Authorized (D1).
 - [ ] Pick the variant from the measurements of #1–#4.
 
+
 ## Deferred
 
-### #7 · Deferred · Cache the Vulkan SDK install
-- type: Improvement
-- area: distribution
-- origin: reports/2026-10-30-pipeline-speed.md
-- ticket: —
-- created: 2026-10-30
-- reason: at most about 20 s per job; only worth it if a benchmark wins
-
-**Context.** The SDK install takes about 19 s on Windows and 23 s on Linux, before the cost of restoring a cache.
-
-**To do.**
-- [ ] Benchmark a cached install against the current one.
 
 ## Closed
