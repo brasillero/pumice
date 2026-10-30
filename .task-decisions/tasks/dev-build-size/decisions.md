@@ -13,4 +13,4 @@
 
 **Rejected.** A different linker (`mold`, or setting `lld`): rustc 1.99 already links `x86_64-unknown-linux-gnu` with its bundled LLD, so there was nothing to gain without a system install. `lust-lang`: it cannot compile `async`, `unsafe` or proc-macro code, which Pumice needs. `debug = 0` for the workspace too: it would lose file and line numbers in backtraces for a few hundred megabytes.
 
-**Consequences.** Stepping through dependency code in a debugger shows no variables; set `CARGO_PROFILE_DEV_DEBUG=true` for such a session. `target/` still grows over time, because Cargo keeps old builds; `cargo clean` resets it.
+**Consequences.** Stepping through dependency code in a debugger shows no variables; for such a session, set `debug = true` under both `[profile.dev]` and `[profile.dev.package."*"]` locally (`CARGO_PROFILE_DEV_DEBUG=true` alone does not reach dependencies, because the package setting is more specific). `target/` still grows over time, because Cargo keeps old builds; `cargo clean` resets it.
