@@ -23,6 +23,7 @@ import argparse
 import base64
 import hashlib
 import json
+import socketserver
 import tarfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -113,13 +114,23 @@ def index_tarballs(
     }
 
 
+class LoopbackHTTPServer(ThreadingHTTPServer):
+    """Bind without reverse DNS: this fixture always advertises numeric loopback."""
+
+    def server_bind(self):
+        # HTTPServer.server_bind calls getfqdn(), which can block on macOS.
+        # Neither the handler nor the advertised registry URL needs DNS.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 class TestRegistry:
     """A loopback-only npm registry serving one directory of tarballs."""
 
     def __init__(self, root: Path, port: int = 0):
         self.root = Path(root)
         host = "127.0.0.1"
-        self._httpd = ThreadingHTTPServer((host, port), self._handler())
+        self._httpd = LoopbackHTTPServer((host, port), self._handler())
         self.base_url = f"http://{host}:{self._httpd.server_address[1]}"
         manifests = read_manifests(self.root)
         self._index = index_tarballs(self.root, self.base_url, manifests)

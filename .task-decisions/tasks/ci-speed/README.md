@@ -3,7 +3,7 @@ title: Shorter CI and release pipelines
 state: In progress
 ticket: —
 branch: ci-speed
-mr: —
+mr: https://github.com/brasillero/pumice/pull/133
 start: 2026-10-30
 end: —
 ---
