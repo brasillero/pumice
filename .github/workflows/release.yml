@@ -15,6 +15,8 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
+      - .github/workflows/transcription.yml
+      - scripts/ci_bundle_share.py
       - .github/fixtures/transcribe-smoke.yml
       - .github/actions/**
       - scripts/package_release.py
@@ -42,6 +44,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 # A new push to a pull request cancels that PR's older preview. Manual runs
 # (the owner's release builds) get a group of their own (the run ID), so
@@ -72,6 +75,7 @@ jobs:
     # there; see scripts/notices/README.md.
     outputs:
       rust-version: ${{ steps.rust.outputs.version }}
+      bundle-producer: ${{ steps.producer.outputs.value }}
     steps:
       - uses: actions/checkout@v7
 
@@ -90,6 +94,14 @@ jobs:
       - name: Read the pinned Rust version
         id: rust
         run: echo "version=$(python3 scripts/third_party_notices.py --print-rust-version)" >> "$GITHUB_OUTPUT"
+
+      # One cheap Linux coordinator waits for the three early bundle uploads;
+      # producer tests continue in parallel and remain required before merge.
+      - name: Locate same-PR bundle producer
+        id: producer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_bundle_share.py coordinate
 
   build:
     name: ${{ matrix.target }}
@@ -259,6 +271,8 @@ jobs:
   # match) as the transcription workflow's bundle jobs, which test them in
   # depth. Each job checks the stage starts and uploads it for npm-pack.
   transcription-windows-vulkan:
+    env:
+      BUNDLE_PRODUCER_RUN: ${{ needs.package-tests.outputs.bundle-producer }}
     name: Transcription bundle (win32-x64, Vulkan)
     needs: package-tests
     runs-on: windows-2022
@@ -294,6 +308,8 @@ jobs:
       - uses: ./.github/actions/cargo-cache-save
 
   transcription-linux-vulkan:
+    env:
+      BUNDLE_PRODUCER_RUN: ${{ needs.package-tests.outputs.bundle-producer }}
     name: Transcription bundle (linux-x64, Vulkan)
     needs: package-tests
     # Ubuntu 22.04: glibc 2.35, the bundle's floor.
@@ -331,6 +347,8 @@ jobs:
       - uses: ./.github/actions/cargo-cache-save
 
   transcription-macos-metal:
+    env:
+      BUNDLE_PRODUCER_RUN: ${{ needs.package-tests.outputs.bundle-producer }}
     name: Transcription bundle (darwin-arm64, Metal)
     needs: package-tests
     runs-on: macos-15

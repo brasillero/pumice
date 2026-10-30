@@ -1,0 +1,25 @@
+name: Publish a shareable bundle
+description: Publish the audited stage immediately; all producer tests still gate the PR.
+inputs:
+  backend:
+    description: Backend name.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Pack the audited stage
+      shell: bash
+      env:
+        BACKEND: ${{ inputs.backend }}
+      run: |
+        shared="$RUNNER_TEMP/share-$BACKEND"
+        mkdir -p "$shared"
+        echo "$PUMICE_BUNDLE_IDENTITY" > "$shared/identity"
+        COPYFILE_DISABLE=1 tar -czf "$shared/bundle.tar.gz" -C "$STAGE" .
+    - uses: actions/upload-artifact@v7
+      with:
+        name: shared-bundle-${{ inputs.backend }}
+        path: ${{ runner.temp }}/share-${{ inputs.backend }}
+        retention-days: 2
+        compression-level: 0
+        if-no-files-found: error
