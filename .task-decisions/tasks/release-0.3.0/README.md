@@ -3,7 +3,7 @@ title: Release 0.3.0
 state: In progress
 ticket: —
 branch: release-0.3.0
-mr: —
+mr: PR #130
 start: 2026-10-29
 end: —
 ---
