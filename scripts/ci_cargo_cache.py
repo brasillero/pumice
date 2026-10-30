@@ -12,7 +12,7 @@ actions/cache and this helper instead (.github/actions/cargo-cache and
     ci_cargo_cache.py key --name NAME --build WHAT
         Prints the cache key of one job's build and its restore prefix, and
         writes both to $GITHUB_OUTPUT when set. The key covers the job, the
-        runner image and architecture, rustc, cargo, the native C/C++
+        runner image revision and architecture, CMake, rustc, cargo, the native C/C++
         compiler, what the job builds (profiles, features, targets), the
         environment that reaches the build scripts (CMake arguments, SDK pins,
         deployment target, Rust flags), .cargo/config.toml and the external
@@ -129,11 +129,15 @@ def compiler_identity() -> str:
 
 def cache_identity(name: str, build: str, env: dict[str, str], root: Path) -> str:
     """Everything but the lockfile that makes a cached build reusable."""
+    # Native installs survive pruning. These inputs must constrain the restore
+    # prefix too, or bundle sharing could relabel an older native installation.
     config = root / ".cargo" / "config.toml"
     lines = [
         f"name={name}",
         f"build={build}",
         f"image={env.get('ImageOS', '')} {env.get('RUNNER_OS', '')} {env.get('RUNNER_ARCH', '')}",
+        f"image_revision={env.get('ImageVersion', '')}",
+        run(["cmake", "--version"]),
         run(["rustc", "-vV"]),
         run(["cargo", "-V"]),
         f"compiler={compiler_identity()}",

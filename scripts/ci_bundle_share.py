@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import time
 
 from ci_cargo_cache import cache_identity, run
@@ -16,16 +17,37 @@ from ci_cargo_cache import cache_identity, run
 def identity(backend):
     value = cache_identity(backend, 'release bundle', dict(os.environ), Path.cwd())
     value += run(['git', 'rev-parse', 'HEAD^{tree}'])
-    value += os.environ.get('ImageVersion', '')
-    value += run(['cmake', '--version'])
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+class ProducerUnavailable(RuntimeError):
+    """The optional cross-workflow producer cannot be queried."""
+
+
 def api(path):
-    return json.loads(subprocess.check_output(['gh', 'api', path]))
+    for attempt in range(3):
+        try:
+            return json.loads(subprocess.check_output(
+                ['gh', 'api', path], text=True, stderr=subprocess.PIPE, timeout=30,
+            ))
+        except (subprocess.SubprocessError, OSError, json.JSONDecodeError) as error:
+            if attempt == 2:
+                raise ProducerUnavailable(
+                    f'GitHub API unavailable after 3 attempts: {path} '
+                    f'({type(error).__name__})'
+                ) from error
+            time.sleep(attempt + 1)
 
 
 def coordinate():
+    try:
+        return locate_producer()
+    except ProducerUnavailable as error:
+        print(f'{error}; using local bundle builds.', file=sys.stderr)
+        return ''
+
+
+def locate_producer():
     event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
     if os.environ['GITHUB_EVENT_NAME'] != 'pull_request':
         return ''
