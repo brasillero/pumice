@@ -37,7 +37,7 @@ runs:
     - uses: actions/cache@v6
       with:
         path: ${{ runner.temp }}/ccache
-        key: ${{ steps.key.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}
+        key: ${{ steps.key.outputs.key }}
         restore-keys: ${{ steps.key.outputs.key }}-
     - name: Reset native cache statistics
       shell: bash
