@@ -274,7 +274,7 @@ fn ndjson(records: &[Value]) -> String {
 /// Kiro's protocol fixtures and adapter-specific assertions. The stream
 /// vocabulary (runStarted / metadata / sessionUpdate / runFinished / runError)
 /// is verified against the installed 2.29.0 in S2.14 with real calls
-/// (docs/research/S2.14-kiro-plugin.md). The system prompt travels in a
+/// (docs/providers.md). The system prompt travels in a
 /// workspace-local agent file — the approved exception to the outside-cwd
 /// rule — so placement assertions override the default.
 struct KiroContract;

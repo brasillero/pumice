@@ -546,7 +546,7 @@ fn every_provider_loads_every_effort_level() {
 }
 
 /// The Claude cases follow Claude Code 2.1.310's model-name
-/// canonicalization (docs/research/P16-provider-effort.md).
+/// canonicalization (docs/providers.md).
 #[test]
 fn models_with_effort_or_unknown_ones_load_every_level() {
     for (id, model) in [

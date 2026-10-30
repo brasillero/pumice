@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Documentation: how each provider CLI is called, its limits, the effort and Claude model-name rules and the subscription-terms findings are now in `docs/providers.md`; the captured Handy request and the `inspect` model are in `docs/api.md`; the WSL notes and the maintainers' release procedure are in `docs/install.md`; the CPU-variant evidence is in `docs/transcription.md`.
+
 ## [0.3.0] — 2026-10-29
 
 Pumice is now a set of modules behind one `pumice` command: the relay (what Handy uses, still on port 7567), local transcription, a formatter, and `pumice run` / `pumice serve`, which combine them. The relay now starts with `pumice relay serve`, and every setting must be written in YAML. Read "Upgrading from 0.2.0" before updating.
