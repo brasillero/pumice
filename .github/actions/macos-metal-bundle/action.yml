@@ -38,10 +38,6 @@ runs:
         toolchain: ${{ inputs.rust-toolchain }}
         components: clippy
 
-    - uses: ./.github/actions/native-cache
-      with:
-        backend: macos-metal
-
     # The calling job ends with ./.github/actions/cargo-cache-save.
     - uses: ./.github/actions/cargo-cache
       with:

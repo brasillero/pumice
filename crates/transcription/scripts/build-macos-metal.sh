@@ -296,18 +296,7 @@ target_dir="$(cd "$target_dir" && pwd)"
 stage_dir="$target_dir/stage"
 
 export CARGO_TARGET_DIR="$target_dir"
-# Preserve only compiler launchers from the caller. Other ambient CMake
-# settings must not override the portable bundle baseline. Keep this identical
-# to the action's environment so Cargo's rerun-if-env-changed/cache keys agree.
-read -r -a caller_cmake_args <<< "${TRANSCRIBE_CMAKE_ARGS:-}"
 export TRANSCRIBE_CMAKE_ARGS="-DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF"
-for cmake_arg in "${caller_cmake_args[@]}"; do
-    case "$cmake_arg" in
-        -DCMAKE_C_COMPILER_LAUNCHER=*|-DCMAKE_CXX_COMPILER_LAUNCHER=*)
-            TRANSCRIBE_CMAKE_ARGS+=" $cmake_arg"
-            ;;
-    esac
-done
 # rustc, cc and CMake (CMAKE_OSX_DEPLOYMENT_TARGET) all read it.
 export MACOSX_DEPLOYMENT_TARGET="$deployment_target"
 # Ambient settings that would change or bypass the native build, or the
