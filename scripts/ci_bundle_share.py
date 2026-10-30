@@ -17,6 +17,7 @@ def identity(backend):
     value = cache_identity(backend, 'release bundle', dict(os.environ), Path.cwd())
     value += run(['git', 'rev-parse', 'HEAD^{tree}'])
     value += os.environ.get('ImageVersion', '')
+    value += run(['cmake', '--version'])
     return hashlib.sha256(value.encode()).hexdigest()
 
 

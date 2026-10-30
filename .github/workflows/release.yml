@@ -17,6 +17,7 @@ on:
       - .github/workflows/release.yml
       - .github/workflows/transcription.yml
       - scripts/ci_bundle_share.py
+      - scripts/test_ci_bundle_share.py
       - .github/fixtures/transcribe-smoke.yml
       - .github/actions/**
       - scripts/package_release.py

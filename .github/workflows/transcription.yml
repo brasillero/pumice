@@ -13,6 +13,7 @@ on:
       - '.github/actions/**'
       - 'scripts/ci_cargo_cache.py'
       - 'scripts/ci_bundle_share.py'
+      - 'scripts/test_ci_bundle_share.py'
   pull_request:
     paths:
       - 'crates/transcription/**'
@@ -24,6 +25,7 @@ on:
       - '.github/actions/**'
       - 'scripts/ci_cargo_cache.py'
       - 'scripts/ci_bundle_share.py'
+      - 'scripts/test_ci_bundle_share.py'
   workflow_dispatch:
 
 permissions:
