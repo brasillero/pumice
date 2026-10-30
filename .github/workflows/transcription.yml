@@ -25,6 +25,13 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels that PR's older run. Pushes to main
+# and manual runs get a group of their own (the run ID), so nothing cancels
+# them, and other PRs never share a group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   TRANSCRIBE_SMOKE_CONFIG: ${{ github.workspace }}/.github/fixtures/transcribe-smoke.yml
   MODEL_URL: https://huggingface.co/handy-computer/whisper-tiny-gguf/resolve/6687f30c99641ee265df421e582354adbc8848fc/whisper-tiny-Q8_0.gguf
