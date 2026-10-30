@@ -22,6 +22,8 @@ on:
       - scripts/third_party_notices.py
       - scripts/notices/**
       - scripts/npm_registry_fixture.py
+      - scripts/ci_cargo_cache.py
+      - scripts/test_ci_cargo_cache.py
       - scripts/test_package_release.py
       - scripts/test_package_npm.py
       - scripts/test_third_party_notices.py
@@ -130,6 +132,11 @@ jobs:
       - name: Install musl tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - uses: ./.github/actions/cargo-cache
+        with:
+          name: release-core-${{ matrix.target }}
+          build: pumice and pumice-relay (release, --target ${{ matrix.target }})
 
       # Only the product executable; the fake CLI is a test-only binary and
       # must never ship in a release archive.
@@ -245,10 +252,12 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - uses: ./.github/actions/cargo-cache-save
+
   # The transcription bundles, built at this run's commit with the same
-  # actions (and job IDs, so the same Rust caches) as the transcription
-  # workflow's bundle jobs, which test them in depth. Each job checks the
-  # stage starts and uploads it for npm-pack.
+  # actions (and cache names, so the same Cargo caches when the toolchains
+  # match) as the transcription workflow's bundle jobs, which test them in
+  # depth. Each job checks the stage starts and uploads it for npm-pack.
   transcription-windows-vulkan:
     name: Transcription bundle (win32-x64, Vulkan)
     needs: package-tests
@@ -281,6 +290,8 @@ jobs:
           path: target/windows-vulkan/stage
           if-no-files-found: error
           retention-days: 7
+
+      - uses: ./.github/actions/cargo-cache-save
 
   transcription-linux-vulkan:
     name: Transcription bundle (linux-x64, Vulkan)
@@ -317,6 +328,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - uses: ./.github/actions/cargo-cache-save
+
   transcription-macos-metal:
     name: Transcription bundle (darwin-arm64, Metal)
     needs: package-tests
@@ -351,6 +364,8 @@ jobs:
           compression-level: 0
           if-no-files-found: error
           retention-days: 7
+
+      - uses: ./.github/actions/cargo-cache-save
 
   checksums:
     name: Aggregate checksums

@@ -34,7 +34,10 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-cache
+        with:
+          name: ci
+          build: workspace clippy and tests (dev), pumice and pumice-relay (release)
 
       - name: cargo fmt --check
         if: matrix.os == 'ubuntu-latest'
@@ -95,3 +98,5 @@ jobs:
             target/release/pumice
             target/release/pumice.exe
           if-no-files-found: ignore
+
+      - uses: ./.github/actions/cargo-cache-save

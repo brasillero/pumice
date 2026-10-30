@@ -11,6 +11,7 @@ on:
       - '.github/workflows/transcription.yml'
       - '.github/fixtures/transcribe-smoke.yml'
       - '.github/actions/**'
+      - 'scripts/ci_cargo_cache.py'
   pull_request:
     paths:
       - 'crates/transcription/**'
@@ -20,6 +21,7 @@ on:
       - '.github/workflows/transcription.yml'
       - '.github/fixtures/transcribe-smoke.yml'
       - '.github/actions/**'
+      - 'scripts/ci_cargo_cache.py'
   workflow_dispatch:
 
 permissions:
@@ -51,7 +53,10 @@ jobs:
         with:
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-cache
+        with:
+          name: transcription-engine
+          build: pumice-transcription clippy engine and tests opus (dev), engine (release)
 
       - name: cargo clippy -p pumice-transcription --features engine
         run: cargo clippy -p pumice-transcription --features engine --all-targets --locked -- -D warnings
@@ -139,6 +144,8 @@ jobs:
           print("backend policy ok")
           PY
 
+      - uses: ./.github/actions/cargo-cache-save
+
   transcription-cpu-variants:
     name: Transcription runtime CPU variants (Linux)
     runs-on: ubuntu-latest
@@ -151,9 +158,10 @@ jobs:
         with:
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-cache
         with:
-          key: cpu-variants
+          name: transcription-cpu-variants
+          build: pumice-transcription clippy and tests cpu-variants (dev), cpu-variants stage (release)
 
       - name: cargo clippy -p pumice-transcription --features cpu-variants
         run: cargo clippy -p pumice-transcription --features cpu-variants --all-targets --locked -- -D warnings
@@ -230,6 +238,8 @@ jobs:
           python3 -c 'import json,sys; e=json.load(open(sys.argv[1]))["error"]; assert e["code"]=="gpu_unavailable", e; print("gpu refused ok")' "$out_file"
           chmod -R u+w target/cpu-variants/stage
 
+      - uses: ./.github/actions/cargo-cache-save
+
   transcription-windows-vulkan:
     # Experimental (P14.1): the Windows x64 Vulkan bundle — CPU variants plus
     # one loadable Vulkan module — built with a pinned Vulkan SDK, audited for
@@ -256,8 +266,8 @@ jobs:
         run: |
           # The test executables import transcribe.dll statically. The
           # engine's build script copies its DLLs next to cargo's artifacts
-          # only when it runs, and rust-cache drops them from the profile
-          # root, so on a cached native build they would not start
+          # only when it runs, and the cache prune drops them from the
+          # profile root, so on a cached native build they would not start
           # (0xC0000135). The staged core DLLs come from this same build.
           # (pumice-transcribe.exe itself delay-loads the engine and never
           # searches PATH; the CLI tests it runs load no engine DLL.)
@@ -519,6 +529,8 @@ jobs:
           path: target/windows-vulkan/stage
           retention-days: 7
           if-no-files-found: error
+
+      - uses: ./.github/actions/cargo-cache-save
 
   transcription-linux-vulkan:
     # Experimental (P14.5): the Linux x86-64 (glibc) Vulkan bundle — CPU
@@ -918,6 +930,8 @@ jobs:
           retention-days: 7
           compression-level: 0
           if-no-files-found: error
+
+      - uses: ./.github/actions/cargo-cache-save
 
   transcription-macos-metal:
     # Experimental (P14.4): the Apple Silicon bundle — one portable arm64
@@ -1639,3 +1653,5 @@ jobs:
           retention-days: 7
           compression-level: 0
           if-no-files-found: error
+
+      - uses: ./.github/actions/cargo-cache-save

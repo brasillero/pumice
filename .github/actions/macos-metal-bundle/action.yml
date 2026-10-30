@@ -38,9 +38,12 @@ runs:
         toolchain: ${{ inputs.rust-toolchain }}
         components: clippy
 
-    - uses: Swatinem/rust-cache@v2
+    # The calling job ends with ./.github/actions/cargo-cache-save.
+    - uses: ./.github/actions/cargo-cache
       with:
-        key: macos-metal
+        name: bundle-macos-metal
+        build: pumice-transcription metal, pumice (release; clippy and tests in the transcription workflow)
+        target-dir: target/macos-metal
 
     - name: Preflight build tools and the runner's GPU
       shell: bash

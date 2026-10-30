@@ -1,0 +1,24 @@
+name: Cargo build cache (save)
+description: >
+  Saves the target directory restored by ./.github/actions/cargo-cache,
+  pruned of what a later run never reuses (scripts/ci_cargo_cache.py prune).
+  Use as the job's last step: it removes the job's executables and staged
+  bundles. Saves only after a successful job and only when the key was not
+  an exact hit (cache entries are immutable).
+
+runs:
+  using: composite
+  steps:
+    - name: Prune the Cargo target directory
+      if: env.CARGO_CACHE_HIT != 'true'
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+        "$py" "$GITHUB_WORKSPACE/scripts/ci_cargo_cache.py" prune "$CARGO_CACHE_TARGET_DIR" | tee -a "$GITHUB_STEP_SUMMARY"
+
+    - name: Save the Cargo cache
+      if: env.CARGO_CACHE_HIT != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ env.CARGO_CACHE_TARGET_DIR }}
+        key: ${{ env.CARGO_CACHE_KEY }}
