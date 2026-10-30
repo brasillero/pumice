@@ -149,6 +149,19 @@ class KeyTests(unittest.TestCase):
                 manifest = f'[package]\nname = "pumice"\n{header}\ndebug = 1\n[[bin]]\nname = "x"\n'
                 self.assertEqual(sections(manifest), f"{header}\ndebug = 1")
 
+    def test_escaped_profile_headers_change_the_key_and_restore_prefix(self):
+        for header in (r'["pro\u0066ile".dev]', r'["\U00000070rofile".dev]'):
+            with self.subTest(header=header):
+                before = f'{header}\ndebug = 1\n[package]\nversion = "0.3.0"\n'
+                after = before.replace('debug = 1', 'debug = 2')
+                first = ci_cargo_cache.profile_sections(before)
+                second = ci_cargo_cache.profile_sections(after)
+                self.assertEqual(first, f'{header}\ndebug = 1')
+                key, prefix = ci_cargo_cache.cache_key('ci', first, 'deps', self.ENV)
+                other_key, other_prefix = ci_cargo_cache.cache_key('ci', second, 'deps', self.ENV)
+                self.assertNotEqual(key, other_key)
+                self.assertNotEqual(prefix, other_prefix)
+
     def test_identity_covers_the_repository_profiles(self):
         root = ci_cargo_cache.REPO_ROOT
         identity = ci_cargo_cache.cache_identity("ci", "debug", self.ENV, root)

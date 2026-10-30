@@ -135,8 +135,9 @@ def profile_sections(manifest: str) -> str:
     """The [profile.*] tables of a Cargo manifest, without comments or blank
     lines. They change every artifact, but no other part of the key sees
     them, and an exact hit is never saved again (cache entries are
-    immutable). Headers are matched by text, not parsed: a key spelled with
-    escapes (`["pro\\u0066ile".dev]`) is not recognised."""
+    immutable). Include any table with an escaped header conservatively:
+    TOML escapes can spell `profile` too, and an extra cache miss is safer
+    than restoring stale artifacts. No TOML parser is needed on the runners."""
     keep, lines = False, []
     for line in manifest.splitlines():
         stripped = line.strip()
@@ -145,7 +146,7 @@ def profile_sections(manifest: str) -> str:
         elif stripped.startswith("["):
             # TOML allows `[ profile.dev ]` and `["profile".dev]`.
             first = stripped[1:].split("]", 1)[0].split(".", 1)[0]
-            keep = first.strip().strip("\"'") == "profile"
+            keep = first.strip().strip("\"'") == "profile" or "\\" in stripped
         if keep and stripped and not stripped.startswith("#"):
             lines.append(stripped)
     return "\n".join(lines)
