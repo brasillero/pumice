@@ -1,0 +1,101 @@
+name: Bench Vulkan SDK cache (ci-speed#7, throwaway)
+
+# Measures the pinned Vulkan SDK install as the bundle actions do it today
+# (cached archive or installer, then extract or install) against restoring
+# the installed SDK from a cache. Throwaway: the PR is closed unmerged.
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/bench-vulkan-sdk.yml
+
+permissions:
+  contents: read
+
+env:
+  VULKAN_SDK_VERSION: 1.4.350.0
+  LINUX_SHA256: b65f068ab36263559da49d7cacd7e7b9df23824ca8b68ccc522a2b06f5725df2
+  WINDOWS_SHA256: 855b27ba05d2d8119c5114c5d4ff870ca38f2c632b11e1bb9923b9b7e6ecfe7b
+
+jobs:
+  linux-current:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Restore the archive (current cache entry)
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vulkan-sdk/vulkan_sdk.tar.xz
+          key: vulkan-sdk-linux-${{ env.VULKAN_SDK_VERSION }}-${{ env.LINUX_SHA256 }}
+      - name: Verify and unpack (current)
+        run: |
+          dir="$RUNNER_TEMP/vulkan-sdk"; archive="$dir/vulkan_sdk.tar.xz"
+          if [ ! -f "$archive" ]; then
+            curl -L --fail -o "$archive" "https://sdk.lunarg.com/sdk/download/$VULKAN_SDK_VERSION/linux/vulkansdk-linux-x86_64-$VULKAN_SDK_VERSION.tar.xz"
+          fi
+          start=$(date +%s.%N)
+          echo "$LINUX_SHA256  $archive" | sha256sum -c -
+          tar -xJf "$archive" -C "$dir"
+          echo "verify+unpack: $(echo "$(date +%s.%N) - $start" | bc) s"
+          du -sh "$dir/$VULKAN_SDK_VERSION/x86_64"
+          rm "$archive"
+      - name: Save the unpacked SDK (bench key)
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/vulkan-sdk/${{ env.VULKAN_SDK_VERSION }}/x86_64
+          key: bench-vulkan-sdk-linux-unpacked-${{ github.run_id }}
+
+  linux-cached:
+    needs: linux-current
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Restore the unpacked SDK
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/vulkan-sdk/${{ env.VULKAN_SDK_VERSION }}/x86_64
+          key: bench-vulkan-sdk-linux-unpacked-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - run: du -sh "$RUNNER_TEMP/vulkan-sdk/$VULKAN_SDK_VERSION/x86_64"; ls "$RUNNER_TEMP/vulkan-sdk/$VULKAN_SDK_VERSION/x86_64/bin/glslc"
+
+  windows-current:
+    runs-on: windows-2022
+    steps:
+      - name: Restore the installer (current cache entry)
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\vulkan-sdk\vulkan_sdk.exe
+          key: vulkan-sdk-windows-${{ env.VULKAN_SDK_VERSION }}-${{ env.WINDOWS_SHA256 }}
+      - name: Verify and install (current)
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'vulkan-sdk\vulkan_sdk.exe'
+          if (-not (Test-Path $installer)) {
+            New-Item -ItemType Directory -Force -Path (Split-Path $installer) | Out-Null
+            Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/$env:VULKAN_SDK_VERSION/windows/vulkan_sdk.exe?Human=true" -OutFile $installer
+          }
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          $hash = (Get-FileHash -Algorithm SHA256 -Path $installer).Hash.ToLowerInvariant()
+          if ($hash -ne $env:WINDOWS_SHA256) { throw "mismatch $hash" }
+          $root = "C:\VulkanSDK\$env:VULKAN_SDK_VERSION"
+          $p = Start-Process -FilePath $installer -Wait -PassThru -NoNewWindow -ArgumentList @('--root', $root, '--accept-licenses', '--default-answer', '--confirm-command', 'install')
+          if ($p.ExitCode -ne 0) { throw "installer exited $($p.ExitCode)" }
+          Write-Host "verify+install: $($sw.Elapsed.TotalSeconds) s"
+          $size = (Get-ChildItem $root -Recurse -File | Measure-Object -Sum Length).Sum
+          Write-Host "installed size: $([math]::Round($size / 1MB)) MiB"
+      - name: Save the installed SDK (bench key)
+        uses: actions/cache/save@v6
+        with:
+          path: C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}
+          key: bench-vulkan-sdk-windows-installed-${{ github.run_id }}
+
+  windows-cached:
+    needs: windows-current
+    runs-on: windows-2022
+    steps:
+      - name: Restore the installed SDK
+        uses: actions/cache/restore@v6
+        with:
+          path: C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}
+          key: bench-vulkan-sdk-windows-installed-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - shell: pwsh
+        run: Test-Path "C:\VulkanSDK\$env:VULKAN_SDK_VERSION\Lib\vulkan-1.lib"
