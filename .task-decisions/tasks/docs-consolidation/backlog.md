@@ -23,7 +23,7 @@
 - [x] `docs/install.md`: Handy on Windows with Pumice in WSL (`S0.5-wsl-localhost.md`), the Kiro limits, and the maintainers' release section (`S7.1-portable-releases.md`, `S7.4-npm-distribution.md`, `release-0.3.0#1`).
 - [x] `docs/transcription.md`: the CPU-variant mechanism and measurements (`P7-cpu-variants.md`).
 - [x] Repoint every live reference (code comments, tests, CI, README) and add an Unreleased CHANGELOG line.
-- [ ] Review.
+- [x] Review: Codex approved #131 and #132 on 2026-10-29; its one content finding (Kiro's `none` level) was added in #131.
 
 **Acceptance criteria.**
 - No maintained file links into `docs/research/` or the product docs, and every relative link in maintained docs resolves.
