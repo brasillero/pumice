@@ -9,8 +9,8 @@ Wall time is first job start to last job completion (includes later runner conte
 | Workflow | Historical baseline wall / runner min | PR A cold wall / runner min | PR A warm | PR B cold / warm | PR C |
 | --- | --- | --- | --- | --- | --- |
 | CI | 8m57 / 21.0 | 9m11 / 17.2, failed Mac; exclude as a successful comparison | attempt 3 of 40987501204 pending | cold 8m26 / 18.2; warm not required for unchanged Rust jobs | pending |
-| Release preview | 17m56 / 45.3 | 13m56 / 46.3 | attempt 2 of 40987501170 pending | 40989214048 / 40990338617 pending | 40989944137 pending |
-| Transcription engine | 19m13 / 68.6 | 14m37 / 57.9 | attempt 2 of 40987501189 pending | 40989214066 / 40990341042 pending | 40989944195 pending |
+| Release preview | 17m56 / 45.3 | 13m56 / 46.3 | attempt 2 of 40987501170 pending | 40989214048 superseded / 40990338617 pending | 40990662244 queued at final code push |
+| Transcription engine | 19m13 / 68.6 | 14m37 / 57.9 | attempt 2 of 40987501189 pending | 40989214066 / 40990341042 pending | 40990662406 queued at final code push |
 
 Historical baseline runs: CI 40980838739, Release 40980838699, Transcription 40980838776. Their initial queues were 2 seconds. PR A cold queues were about 2 seconds. PR B CI initial queue was 3 seconds. Other queue/critical-path measurements must be filled from completed attempts, without mixing jobs from retries. PR A's original macOS retry was canceled by the authorized fixture-fix push under PR-scoped concurrency; it does not establish whether the original timing failure repeats. The warm CI rerun is the next complete check.
 
@@ -57,6 +57,8 @@ Dependency map: `release.yml` still covers all Rust crates, root source/manifest
 ## Local checks and unresolved validation
 
 cargo fmt --check, cargo clippy --workspace --all-targets -- -D warnings, cargo test --workspace, Python helper tests and actionlint 1.7.12 passed. shellcheck was unavailable; changed Bash was reviewed and parsed with bash -n.
+
+Final B/C code and notes pushes superseded earlier PR runs. B Release 40989214048 was canceled after its Linux/Metal bundle jobs passed; it is not a full cold-workflow success. B CI 40989214272 completed successfully on all three OSes. Manual warm candidates 40990338617/40990341042 are independent runs at 30efeec and were not canceled by the later push; script/key changes at 7736ca0 mean their results must not be combined blindly with final-head cold measurements. Re-measure the final native-cache identity if necessary. Final code heads at this handover: B 7736ca071038d5540fbb41f3646bfdbe0d573d1f; C code descends from 65adb3bf7a4576c6c192a6ad58f4c4d3ddc4eb23. No manual cancellation was sent to main or the CPU-variants branch.
 
 Required follow-up: finish all A warm runs; confirm the macOS timing test and DNS-fixture improvement; finish B cold and warm (including restored Windows SDK compilation and native hit statistics); finish C and calculate net runner minutes including its coordinator; record final cache sizes and per-job queues/critical paths; only then close the corresponding backlog items. No task-state Done transition is made.
 
