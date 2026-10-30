@@ -142,6 +142,22 @@ def build_fake_packages(root: Path) -> None:
         )
 
 
+class RegistryBindTests(unittest.TestCase):
+    def test_numeric_loopback_never_uses_reverse_dns(self):
+        from unittest.mock import patch
+
+        with patch("socket.getfqdn", side_effect=AssertionError("DNS lookup")):
+            server = npm_registry_fixture.LoopbackHTTPServer(
+                ("127.0.0.1", 0), npm_registry_fixture.BaseHTTPRequestHandler
+            )
+            try:
+                self.assertEqual(server.server_name, "127.0.0.1")
+                self.assertEqual(server.server_port, server.server_address[1])
+                self.assertGreater(server.server_port, 0)
+            finally:
+                server.server_close()
+
+
 class InstallTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
