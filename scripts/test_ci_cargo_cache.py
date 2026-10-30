@@ -142,6 +142,13 @@ class KeyTests(unittest.TestCase):
         self.assertEqual(sections(base), sections(same))
         self.assertNotEqual(sections(base), sections(other))
 
+    def test_profile_sections_accept_spaced_and_quoted_headers(self):
+        sections = ci_cargo_cache.profile_sections
+        for header in ("[ profile.dev ]", '["profile".dev]', "['profile'.dev]"):
+            with self.subTest(header=header):
+                manifest = f'[package]\nname = "pumice"\n{header}\ndebug = 1\n[[bin]]\nname = "x"\n'
+                self.assertEqual(sections(manifest), f"{header}\ndebug = 1")
+
     def test_identity_covers_the_repository_profiles(self):
         root = ci_cargo_cache.REPO_ROOT
         identity = ci_cargo_cache.cache_identity("ci", "debug", self.ENV, root)

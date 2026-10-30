@@ -139,8 +139,12 @@ def profile_sections(manifest: str) -> str:
     keep, lines = False, []
     for line in manifest.splitlines():
         stripped = line.strip()
-        if stripped.startswith("["):
-            keep = stripped.startswith("[profile")
+        if stripped.startswith("[["):
+            keep = False
+        elif stripped.startswith("["):
+            # TOML allows `[ profile.dev ]` and `["profile".dev]`.
+            first = stripped[1:].split("]", 1)[0].split(".", 1)[0]
+            keep = first.strip().strip("\"'") == "profile"
         if keep and stripped and not stripped.startswith("#"):
             lines.append(stripped)
     return "\n".join(lines)
