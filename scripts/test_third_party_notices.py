@@ -277,7 +277,11 @@ class NoticesTests(unittest.TestCase):
         for ref, toolchain in installs:
             self.assertEqual((ref, toolchain.strip()), ("master", pinned))
         actions = re.findall(r"uses: \./\.github/actions/\S+\n\s+with:\n\s+rust-toolchain: (.+)", release)
-        self.assertEqual(len(actions), release.count("uses: ./.github/actions/"))
+        # The Cargo cache actions install nothing; every other local action
+        # builds with Rust.
+        cache_actions = len(re.findall(r"uses: \./\.github/actions/cargo-cache(?:-save)?\n", release))
+        self.assertEqual(len(actions), release.count("uses: ./.github/actions/") - cache_actions)
+        self.assertTrue(actions)
         self.assertEqual({a.strip() for a in actions}, {pinned})
 
     def add_mpl_crate(self, name, license="MPL-2.0", vcs=True, **fields):

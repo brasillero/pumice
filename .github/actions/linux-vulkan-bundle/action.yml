@@ -44,9 +44,12 @@ runs:
         toolchain: ${{ inputs.rust-toolchain }}
         components: clippy
 
-    - uses: Swatinem/rust-cache@v2
+    # The calling job ends with ./.github/actions/cargo-cache-save.
+    - uses: ./.github/actions/cargo-cache
       with:
-        key: linux-vulkan
+        name: bundle-linux-vulkan
+        build: pumice-transcription vulkan (release; clippy and tests in the transcription workflow)
+        target-dir: target/linux-vulkan
 
     - name: Cache Vulkan SDK archive
       id: cache-vulkan-sdk

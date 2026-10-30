@@ -9,6 +9,13 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels that PR's older run. Pushes to main
+# and manual runs get a group of their own (the run ID), so nothing cancels
+# them, and other PRs never share a group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     name: ${{ matrix.os }}
@@ -27,7 +34,10 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-cache
+        with:
+          name: ci
+          build: workspace clippy and tests (dev), pumice and pumice-relay (release)
 
       - name: cargo fmt --check
         if: matrix.os == 'ubuntu-latest'
@@ -88,3 +98,5 @@ jobs:
             target/release/pumice
             target/release/pumice.exe
           if-no-files-found: ignore
+
+      - uses: ./.github/actions/cargo-cache-save

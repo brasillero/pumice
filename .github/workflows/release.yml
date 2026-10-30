@@ -22,6 +22,8 @@ on:
       - scripts/third_party_notices.py
       - scripts/notices/**
       - scripts/npm_registry_fixture.py
+      - scripts/ci_cargo_cache.py
+      - scripts/test_ci_cargo_cache.py
       - scripts/test_package_release.py
       - scripts/test_package_npm.py
       - scripts/test_third_party_notices.py
@@ -40,6 +42,13 @@ on:
 
 permissions:
   contents: read
+
+# A new push to a pull request cancels that PR's older preview. Manual runs
+# (the owner's release builds) get a group of their own (the run ID), so
+# nothing cancels them, and other PRs never share a group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
   run:
@@ -124,6 +133,11 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
+      - uses: ./.github/actions/cargo-cache
+        with:
+          name: release-core-${{ matrix.target }}
+          build: pumice and pumice-relay (release, --target ${{ matrix.target }})
+
       # Only the product executable; the fake CLI is a test-only binary and
       # must never ship in a release archive.
       - name: cargo build --release --locked --bin pumice
@@ -151,15 +165,20 @@ jobs:
           test "$out" = "pumice-relay ${{ steps.meta.outputs.version }}"
 
       # Locate dumpbin through vswhere instead of ilammy/msvc-dev-cmd (which
-      # still pins an old Node runtime). A static CRT means no vcruntime /
-      # msvcp / ucrtbase / api-ms-win-crt dependencies.
+      # still pins an old Node runtime): the default MSVC tools version's
+      # x64 dumpbin, not a recursive search of the whole Visual Studio tree
+      # (about a minute). A static CRT means no vcruntime / msvcp / ucrtbase
+      # / api-ms-win-crt dependencies.
       - name: Verify exe has no CRT DLL dependencies
         if: matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
         run: |
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-          $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find '**\dumpbin.exe' | Select-Object -First 1
-          if (-not $dumpbin) { Write-Error 'FAIL: dumpbin.exe not found via vswhere'; exit 1 }
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1
+          if (-not $vs) { Write-Error 'FAIL: Visual Studio C++ x64 tools not found via vswhere'; exit 1 }
+          $tools = (Get-Content (Join-Path $vs 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt') -TotalCount 1).Trim()
+          $dumpbin = Join-Path $vs "VC\Tools\MSVC\$tools\bin\Hostx64\x64\dumpbin.exe"
+          if (-not (Test-Path $dumpbin -PathType Leaf)) { Write-Error "FAIL: dumpbin.exe not found at $dumpbin"; exit 1 }
           $output = & $dumpbin /dependents "target\${{ matrix.target }}\release\pumice.exe"
           if ($LASTEXITCODE -ne 0) { Write-Error "FAIL: dumpbin exited with $LASTEXITCODE"; exit 1 }
           $output | ForEach-Object { Write-Host $_ }
@@ -233,10 +252,12 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - uses: ./.github/actions/cargo-cache-save
+
   # The transcription bundles, built at this run's commit with the same
-  # actions (and job IDs, so the same Rust caches) as the transcription
-  # workflow's bundle jobs, which test them in depth. Each job checks the
-  # stage starts and uploads it for npm-pack.
+  # actions (and cache names, so the same Cargo caches when the toolchains
+  # match) as the transcription workflow's bundle jobs, which test them in
+  # depth. Each job checks the stage starts and uploads it for npm-pack.
   transcription-windows-vulkan:
     name: Transcription bundle (win32-x64, Vulkan)
     needs: package-tests
@@ -269,6 +290,8 @@ jobs:
           path: target/windows-vulkan/stage
           if-no-files-found: error
           retention-days: 7
+
+      - uses: ./.github/actions/cargo-cache-save
 
   transcription-linux-vulkan:
     name: Transcription bundle (linux-x64, Vulkan)
@@ -305,6 +328,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - uses: ./.github/actions/cargo-cache-save
+
   transcription-macos-metal:
     name: Transcription bundle (darwin-arm64, Metal)
     needs: package-tests
@@ -339,6 +364,8 @@ jobs:
           compression-level: 0
           if-no-files-found: error
           retention-days: 7
+
+      - uses: ./.github/actions/cargo-cache-save
 
   checksums:
     name: Aggregate checksums

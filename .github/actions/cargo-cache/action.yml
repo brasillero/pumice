@@ -1,0 +1,65 @@
+name: Cargo build cache (restore)
+description: >
+  Restores one job's Cargo target directory (ci-speed#1). Replaces
+  Swatinem/rust-cache, whose `cargo metadata --all-features` fails on
+  pumice-transcription's two names for transcribe-cpp-sys and then empties
+  every cache. The key (scripts/ci_cargo_cache.py) covers the job, the runner
+  image, rustc, the native compiler, what the job builds, the build scripts'
+  environment and the external packages of Cargo.lock. Run after the Rust
+  toolchain and every environment pin the build reads (CMake arguments, SDK
+  versions); end the job with ./.github/actions/cargo-cache-save. Registry
+  downloads are not cached: crates.io is about as fast as a cache restore.
+
+inputs:
+  name:
+    description: >
+      The cache's name. Jobs that run the same build may share one (the
+      release preview and the transcription workflow share the bundle caches;
+      the key still separates their toolchains).
+    required: true
+  build:
+    description: What the job builds (profiles, features, targets); part of the key.
+    required: true
+  target-dir:
+    description: The target directory to cache, relative to the workspace.
+    required: false
+    default: target
+
+runs:
+  using: composite
+  steps:
+    - name: Compute the Cargo cache key
+      id: key
+      shell: bash
+      env:
+        NAME: ${{ inputs.name }}
+        BUILD: ${{ inputs.build }}
+      run: |
+        if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+        "$py" "$GITHUB_WORKSPACE/scripts/ci_cargo_cache.py" key --name "$NAME" --build "$BUILD"
+
+    - name: Restore the Cargo cache
+      id: restore
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ inputs.target-dir }}
+        key: ${{ steps.key.outputs.key }}
+        restore-keys: ${{ steps.key.outputs.restore-key }}
+
+    # For cargo-cache-save. Incremental data is never reused by a fresh
+    # checkout (Swatinem/rust-cache set the same).
+    - name: Record the Cargo cache state
+      shell: bash
+      env:
+        KEY: ${{ steps.key.outputs.key }}
+        HIT: ${{ steps.restore.outputs.cache-hit }}
+        MATCHED: ${{ steps.restore.outputs.cache-matched-key }}
+        TARGET_DIR: ${{ inputs.target-dir }}
+      run: |
+        {
+          echo "CARGO_INCREMENTAL=0"
+          echo "CARGO_CACHE_KEY=$KEY"
+          echo "CARGO_CACHE_HIT=${HIT:-false}"
+          echo "CARGO_CACHE_TARGET_DIR=$TARGET_DIR"
+        } >> "$GITHUB_ENV"
+        echo "cargo cache: key $KEY, exact hit ${HIT:-false}, restored ${MATCHED:-nothing}" | tee -a "$GITHUB_STEP_SUMMARY"
