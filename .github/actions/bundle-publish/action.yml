@@ -13,9 +13,14 @@ runs:
         BACKEND: ${{ inputs.backend }}
       run: |
         shared="$RUNNER_TEMP/share-$BACKEND"
+        stage="$STAGE"
+        if [ "$RUNNER_OS" = Windows ]; then
+          shared="$(cygpath -u "$shared")"
+          stage="$(cygpath -u "$stage")"
+        fi
         mkdir -p "$shared"
         echo "$PUMICE_BUNDLE_IDENTITY" > "$shared/identity"
-        COPYFILE_DISABLE=1 tar -czf "$shared/bundle.tar.gz" -C "$STAGE" .
+        COPYFILE_DISABLE=1 tar -czf "$shared/bundle.tar.gz" -C "$stage" .
     - uses: actions/upload-artifact@v7
       with:
         name: shared-bundle-${{ inputs.backend }}

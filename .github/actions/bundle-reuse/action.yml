@@ -27,13 +27,18 @@ runs:
         echo 'hit=false' >> "$GITHUB_OUTPUT"
         if [ -z "$BUNDLE_PRODUCER_RUN" ]; then exit 0; fi
         shared="$RUNNER_TEMP/shared-$BACKEND"
+        stage="$STAGE"
+        if [ "$RUNNER_OS" = Windows ]; then
+          shared="$(cygpath -u "$shared")"
+          stage="$(cygpath -u "$stage")"
+        fi
         if ! gh run download "$BUNDLE_PRODUCER_RUN" --repo "$GITHUB_REPOSITORY" --name "shared-bundle-$BACKEND" --dir "$shared"; then exit 0; fi
         if [ "$(cat "$shared/identity")" != "$IDENTITY" ]; then
           echo 'Bundle identity differs (including pinned vs stable Rust); building locally.'
           exit 0
         fi
-        mkdir -p "$STAGE"
-        tar -xzf "$shared/bundle.tar.gz" -C "$STAGE"
+        mkdir -p "$stage"
+        tar -xzf "$shared/bundle.tar.gz" -C "$stage"
         # A reused stage contains no compiler output. Never publish an empty
         # Cargo cache that would win the immutable-key race with the producer.
         echo 'CARGO_CACHE_HIT=true' >> "$GITHUB_ENV"
