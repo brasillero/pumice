@@ -3,7 +3,7 @@ title: Close completed architecture and workspace task notes
 state: Done
 ticket: —
 branch: docs-close-completed-tasks
-mr: —
+mr: PR #139
 start: 2026-11-07
 end: 2026-11-07
 ---
