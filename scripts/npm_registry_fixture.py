@@ -48,9 +48,7 @@ MANIFEST_FIELDS = (
 
 
 def read_manifest(tarball: Path) -> dict:
-    # Streamed: stops at package.json instead of decompressing a whole
-    # transcription bundle to list its members (npm pack writes the deeper
-    # bin/ entries, the CPU and GPU modules, after package.json).
+    # Stream only as far as package.json, without reading the binary.
     with tarfile.open(tarball, "r|gz") as archive:
         for member in archive:
             if member.name == "package/package.json" and member.isreg():

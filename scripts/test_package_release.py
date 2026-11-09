@@ -20,7 +20,7 @@ EXPECTED_MEMBERS = (
     "pumice",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
-    "relay.example.yml",
+    "pumice.example.yml",
     "INSTALL.md",
 )
 
@@ -32,13 +32,15 @@ class PackageReleaseTests(unittest.TestCase):
         self.work = Path(self.tmp.name)
         self.binary = self.work / "pumice"
         self.binary.write_bytes(b"#!/bin/sh\necho fake binary\n")
+        self.notices = self.work / "notices.md"
+        self.notices.write_text("# Third-party notices — generated\n")
 
     def _expected_top(self, target):
         version = package_release.crate_version()
         return f"pumice-{version}-{target}"
 
     def test_tarball_membership_and_modes(self):
-        archive = package_release.package(LINUX_TARGET, self.binary, self.work / "dist")
+        archive = package_release.package(LINUX_TARGET, self.binary, self.work / "dist", notices=self.notices)
         top = self._expected_top(LINUX_TARGET)
         self.assertEqual(archive.name, f"{top}.tar.gz")
 
@@ -57,11 +59,10 @@ class PackageReleaseTests(unittest.TestCase):
         self.assertEqual(payload, self.binary.read_bytes())
         self.assertEqual(
             notices,
-            (REPO_ROOT / "crates" / "formatter" / "THIRD_PARTY_NOTICES.md").read_bytes(),
+            self.notices.read_bytes(),
         )
-        self.assertIn(b"Copyright (c) 2025 CJ Pais", notices)
 
-    def test_generated_notices_replace_the_default(self):
+    def test_generated_notices_are_packaged(self):
         notices = self.work / "linux-x64.md"
         notices.write_text("# Third-party notices — generated\n")
         archive = package_release.package(
@@ -75,7 +76,7 @@ class PackageReleaseTests(unittest.TestCase):
         self.assertEqual(members, sorted(f"{top}/{name}" for name in EXPECTED_MEMBERS))
 
     def test_zip_membership_and_executable_mode(self):
-        archive = package_release.package(WINDOWS_TARGET, self.binary, self.work / "dist")
+        archive = package_release.package(WINDOWS_TARGET, self.binary, self.work / "dist", notices=self.notices)
         top = self._expected_top(WINDOWS_TARGET)
         self.assertEqual(archive.name, f"{top}.zip")
 
@@ -130,13 +131,6 @@ class PackageReleaseTests(unittest.TestCase):
         manifest = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text())
         self.assertEqual(
             package_release.crate_version(), manifest["package"]["version"]
-        )
-
-    def test_root_package_version_matches_workspace_version(self):
-        manifest = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text())
-        self.assertEqual(
-            manifest["package"]["version"],
-            manifest["workspace"]["package"]["version"],
         )
 
 

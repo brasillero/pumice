@@ -127,7 +127,6 @@ def build_fake_packages(root: Path) -> None:
                             "license": "MIT",
                             "os": [npm_os],
                             "cpu": [npm_cpu],
-                            **({"libc": ["glibc"]} if key == "linux-x64" else {}),
                             "files": [f"bin/{executable}"],
                         }
                     ).encode(),
@@ -275,7 +274,7 @@ class InstallTests(unittest.TestCase):
         packument = npm_registry_fixture.build_packument(
             "@brasillero/pumice-linux-x64", tarballs, self.registry.base_url
         )
-        self.assertEqual(packument["versions"][FRONT_VERSION]["libc"], ["glibc"])
+        self.assertNotIn("libc", packument["versions"][FRONT_VERSION])
 
     @unittest.skipIf(NPM is None, "npm not found (set PUMICE_NPM)")
     def test_npm_local_install_bin_and_platform_skip(self):

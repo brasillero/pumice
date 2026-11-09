@@ -1,0 +1,123 @@
+# Pumice configuration example.
+#
+# Pumice is a small local tool: a dictation app (Handy, OpenWhispr, …) sends
+# its own prompt and the transcript to Pumice's OpenAI-compatible address,
+# and Pumice passes the request to the official CLI of a subscription you
+# are logged into. Each CLI keeps its own configuration (login, gateway,
+# routing); Pumice inherits it and adds none of its own.
+#
+# Pumice assumes nothing: every setting below must be written, and leaving
+# one out is a startup error that names the file and line. There are no
+# built-in defaults: the values in this file are the starting configuration.
+# Pumice writes this file to the per-user location on first start when it
+# is missing; edit it there, or pass your own file with --config. No provider is
+# enabled unless its entry says `enabled: true`; with none enabled every AI
+# request gets an error, and the app keeps its own transcript (the built-in
+# `passthrough` and `inspect` still work).
+#
+# The client picks the provider: the app sends the `model` the user chose
+# (a provider id such as `claude`), and Pumice runs exactly that provider. A
+# request without a model, an unknown or disabled model, or any failure is
+# answered with an HTTP error (the app pastes its own transcript), and every
+# request is logged with what happened and why.
+#
+# Pumice reads exactly one configuration file:
+#   1. the path passed with --config (pumice --config my.yaml), else
+#   2. the per-user file: ~/.config/pumice/pumice.yml on Linux and macOS
+#      ($XDG_CONFIG_HOME/pumice/pumice.yml when XDG_CONFIG_HOME is set), and
+#      %APPDATA%\pumice\pumice.yml on Windows,
+#   and the missing per-user file is created from this example. A missing
+#   explicit --config file is an error; doctor does not create settings.
+#
+# Validate a file with: pumice check-config --config <path>
+#
+# Point the app's custom OpenAI-compatible provider at:
+#   http://127.0.0.1:7567/v1
+
+# TCP port the service binds to on 127.0.0.1.
+port: 7567
+
+# Total seconds budget for one dictation.
+total_timeout_secs: 30
+
+# How many requests may run their provider at the same time (1–32).
+# Extra requests wait in line, first come first served; one still waiting
+# when its total_timeout_secs runs out gets HTTP 503.
+max_parallel: 4
+
+# The explicit provider list. ORDER MATTERS for the model list a client
+# shows: the enabled entries are listed in this order. There is NO fallback:
+# a request runs exactly one provider — the one its model names.
+#
+# Every entry writes `id`, `enabled` (true or false), `model` (`null` only on
+# a disabled entry), `binary`, `timeout_secs` and `effort`; the `claude`
+# entry also writes `thinking`. The removed keys `default`, `prompts`, `env`
+# and `options` are rejected with a message saying what replaced them.
+#
+# `effort` is the reasoning effort of every call the provider makes: `low`,
+# `medium` or `high`, mapped to the CLI's own setting (Claude and Kiro
+# `--effort`, Codex `model_reasoning_effort`). Higher effort can follow the
+# app's prompt more closely but takes longer and uses more of your quota.
+# A model known to have no effort (Claude `claude-haiku-4-5`,
+# `claude-sonnet-4`, Kiro `claude-haiku-4.5`, …) is refused at startup, in
+# every spelling the CLI reads as that model, since no level would be
+# honoured; an alias or an unknown model is accepted. Every other CLI
+# setting stays the cheapest the CLI offers, and fast/priority modes stay
+# off.
+providers:
+  # Claude Code, enabled.
+  - id: claude
+    enabled: true
+    # Any alias `claude --model` accepts; there is no built-in default.
+    model: haiku
+    # A bare command name (no slash) is looked up on PATH; a relative path
+    # with a slash resolves against this file's directory, an absolute path
+    # is used as-is.
+    binary: claude
+    # Per-call cap, also limited by the remaining total budget.
+    timeout_secs: 30
+    effort: low
+    # Claude only. `false` turns thinking off where the model allows it;
+    # `true` lets Claude Code think the way it does by default for the model
+    # (adaptive where the model supports it, otherwise up to its default
+    # thinking budget), which is slower and uses more of your quota.
+    # A model that cannot turn thinking off (Claude Haiku 5.5, Sonnet 5.5,
+    # Opus 5.5, Fable 5 and 5.1, Mythos 5.1) is refused with `false`.
+    # Aliases are resolved by Claude Code at run time and are accepted: on a
+    # first-party login, which includes a proxy set only through
+    # `ANTHROPIC_BASE_URL`, `haiku` means Haiku 5.5, which keeps thinking on
+    # whatever this says; on a cloud provider or in Claude Code's gateway
+    # mode (`CLAUDE_CODE_USE_GATEWAY`) it means Haiku 4.5, which drops
+    # `effort`.
+    thinking: false
+
+  # Codex CLI, off. A disabled entry is kept out of the model list and
+  # never runs; its `model` may be null.
+  - id: codex
+    enabled: false
+    model: null # e.g. gpt-6.1-sol
+    binary: codex
+    timeout_secs: 30
+    effort: low
+
+  # Kiro CLI, off. Pumice writes a one-off no-tools agent file into the
+  # call's empty temporary directory to carry the app's system prompt; your
+  # own ~/.kiro login and settings are used. `kiro-cli chat --list-models`
+  # shows the model ids.
+  - id: kiro
+    enabled: false
+    model: null # e.g. glm-5
+    binary: kiro-cli
+    timeout_secs: 30
+    effort: low
+
+  # The generic local-server adapter is archived for now, and Kimi,
+  # Antigravity and OpenCode support was removed: listing any of them is an
+  # error.
+
+# Dictated text is written to a log only when debug logging is enabled.
+debug_log:
+  enabled: false
+  # Written even while disabled. Relative paths resolve against this
+  # file's directory.
+  path: pumice-debug.jsonl

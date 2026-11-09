@@ -1,40 +1,11 @@
 #!/usr/bin/env python3
-"""Development-only generator for Pumice's combined third-party notices.
+"""Generate target-specific third-party notices for the Pumice executable.
 
-Writes one ``THIRD_PARTY_NOTICES.md`` per platform package covering what that
-package ships:
-
-- the Rust crates built into ``pumice`` for the package's core target, and
-  (unless ``--core-only``) into ``pumice-transcribe`` for its transcription
-  bundle target and features. The crate graph comes from ``cargo metadata
-  --locked --filter-platform <target>``: every package reachable from the
-  binary's package through normal (non-dev, non-build) dependencies, minus
-  the Pumice workspace members. Build-only tools never ship and are left out;
-  proc-macros are kept, which errs on the side of listing too much.
-- the native components compiled into those files that no crate's own
-  license file covers (transcribe.cpp, ggml and the code ggml embeds, libopus,
-  the Vulkan SDK headers, musl), in ``NATIVE``.
-- the Rust standard library of the build toolchain and the parts of it
-  licensed separately (its Unicode tables, compiler-builtins and libm, the
-  crates.io crates std links on each target), in ``rust_std_entries()``. The
-  texts are pinned for ``RUST_VERSION`` in ``scripts/notices/``; a different
-  ``rustc --version`` fails the run until they are refreshed.
-- for every crate whose license expression includes the MPL, where its
-  unmodified Source Code Form is available (MPL-2.0 section 3.2): the
-  crates.io download of that exact version and, when the crate records its
-  commit (``.cargo_vcs_info.json``), its repository at that commit.
-- the existing notices for the Handy-derived formatter prompt.
-
-License texts are read from each crate's downloaded source (root files named
-LICENSE*, LICENCE*, COPYING*, NOTICE*, COPYRIGHT*, UNLICENSE*, or the
-manifest's ``license-file``); identical texts are printed once. A crate that
-publishes no license file gets the standard text of its declared license from
-``scripts/notices/`` and its authors as the copyright holder, and is flagged
-as such. Unknown declared licenses without a file fail the run.
-
-Run ``cargo fetch --locked`` first so every crate source is on disk (``cargo
-metadata`` downloads them too). Used by .github/workflows/release.yml; tests
-in scripts/test_third_party_notices.py. Stdlib only.
+Walk normal Cargo dependencies, excluding dev/build dependencies and Pumice
+itself. Include the pinned Rust standard library and musl notices. License
+texts come from downloaded crate sources or their declared standard licenses;
+MPL dependencies include links to exact source versions. No tools or native
+libraries are bundled with the executable. Used by release.yml; stdlib only.
 """
 
 from __future__ import annotations
@@ -55,13 +26,9 @@ import package_release
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEXTS_DIR = Path(__file__).resolve().parent / "notices"
-FORMATTER_NOTICES = REPO_ROOT / "crates" / "formatter" / "THIRD_PARTY_NOTICES.md"
 
 CORE_PACKAGE = "pumice"
-TRANSCRIPTION_PACKAGE = "pumice-transcription"
-WORKSPACE_PACKAGES = frozenset(
-    {"pumice", "pumice-relay", "pumice-formatter", "pumice-settings", "pumice-transcription"}
-)
+WORKSPACE_PACKAGES = frozenset({"pumice"})
 
 LICENSE_FILE = re.compile(
     r"^(licen[cs]e|copying|notice|copyright|unlicense)([-_.].*)?$", re.IGNORECASE
@@ -71,21 +38,12 @@ LICENSE_FILE = re.compile(
 FALLBACK_TEXTS = {"MIT": "MIT.txt", "Apache-2.0": "Apache-2.0.txt"}
 
 
-def _crate_file(crate: str, path: str) -> dict:
-    return {"kind": "crate", "crate": crate, "path": path}
-
-
-def _crate_header(crate: str, path: str) -> dict:
-    """The leading ``//`` comment block of a source file in a crate."""
-    return {"kind": "header", "crate": crate, "path": path}
+def _mit(copyright_line: str) -> dict:
+    return {"kind": "mit", "copyright": copyright_line}
 
 
 def _repo_file(name: str) -> dict:
     return {"kind": "repo", "path": name}
-
-
-def _mit(copyright_line: str) -> dict:
-    return {"kind": "mit", "copyright": copyright_line}
 
 
 # The toolchain the std texts below are pinned for, and the single source of
@@ -95,14 +53,9 @@ def _mit(copyright_line: str) -> dict:
 RUST_VERSION = "1.99.1"
 RUST_TEXTS = f"rust-{RUST_VERSION}"
 
-# Every core and bundle target, and the subset where std links its
+# Every release target, and the subset where std links its
 # backtrace symbolizer and libc (all but windows-msvc; library/std/Cargo.toml).
-ALL_TARGETS = tuple(
-    sorted(
-        set(package_npm.TARGET_TO_NPM)
-        | {bundle["target"] for bundle in package_npm.BUNDLES.values()}
-    )
-)
+ALL_TARGETS = tuple(sorted(package_npm.TARGET_TO_NPM))
 NON_MSVC = tuple(target for target in ALL_TARGETS if not target.endswith("-msvc"))
 
 # The crates.io crates std links into executables for our targets, from
@@ -201,10 +154,7 @@ def check_rust_version(rustc: str) -> None:
         )
 
 
-# Native code no crate-level license file covers. `when` names what must be
-# shipped for the entry to apply: "core" (pumice), "transcription" (any
-# transcription bundle), a bundle feature ("vulkan", "metal"), a shipped
-# target triple, or a tuple of any of those.
+# Native code no crate-level license file covers.
 NATIVE = [
     {
         "name": "musl libc 1.2.5",
@@ -213,75 +163,7 @@ NATIVE = [
         "where": "statically linked into `pumice` (the Rust musl target's `libc.a`)",
         "texts": [_repo_file("musl-1.2.5-COPYRIGHT")],
     },
-    {
-        "name": "transcribe.cpp 0.3.1 (transcribe-cpp-sys)",
-        "license": "MIT",
-        "when": "transcription",
-        "where": "the transcribe core library",
-        "texts": [_crate_file("transcribe-cpp-sys", "LICENSE")],
-    },
-    {
-        "name": "ggml (vendored in transcribe-cpp-sys 0.3.1)",
-        "license": "MIT",
-        "when": "transcription",
-        "where": "the ggml core libraries, CPU modules and GPU module",
-        "texts": [_crate_file("transcribe-cpp-sys", "ggml/LICENSE")],
-    },
-    {
-        "name": "llamafile sgemm (in ggml's CPU backend)",
-        "license": "MIT",
-        "when": "transcription",
-        "where": "the ggml CPU modules",
-        "texts": [
-            _crate_header(
-                "transcribe-cpp-sys", "ggml/src/ggml-cpu/llamafile/sgemm.cpp"
-            )
-        ],
-    },
-    {
-        "name": "YaRN rotary embedding (in ggml's CPU and Metal backends)",
-        "license": "MIT",
-        "when": "transcription",
-        "where": "the ggml CPU modules and the Metal module",
-        "texts": [_mit("Copyright (c) 2023 Jeffrey Quesnelle and Bowen Peng")],
-    },
-    {
-        "name": "miniz (vendored in transcribe.cpp)",
-        "license": "MIT",
-        "when": "transcription",
-        "where": "the transcribe core library",
-        "texts": [_crate_file("transcribe-cpp-sys", "src/third_party/miniz/LICENSE")],
-    },
-    {
-        "name": "libopus 1.6.1 (bundled by opusic-sys 0.7.5)",
-        "license": "BSD-3-Clause",
-        "when": "transcription",
-        "where": "statically linked into `pumice-transcribe`",
-        "texts": [_crate_file("opusic-sys", "opus/COPYING")],
-    },
-    {
-        "name": "Vulkan-Headers and Vulkan-Hpp (Vulkan SDK 1.4.350.0)",
-        "license": "Apache-2.0 (vulkan_core.h; vulkan.hpp is Apache-2.0 OR MIT)",
-        "when": "vulkan",
-        "where": "compiled into the Vulkan GPU module",
-        "texts": [
-            {
-                "kind": "inline",
-                "text": "Copyright 2015-2026 The Khronos Group Inc.\n\n"
-                "SPDX-License-Identifier: Apache-2.0 (include/vulkan/vulkan_core.h)\n"
-                "SPDX-License-Identifier: Apache-2.0 OR MIT (include/vulkan/vulkan.hpp)\n",
-            },
-            _repo_file("Vulkan-Headers-1.4.350.0-LICENSE.md"),
-            _repo_file("Apache-2.0.txt"),
-        ],
-    },
-    {
-        "name": "SPIRV-Headers (Vulkan SDK 1.4.350.0)",
-        "license": "MIT (Khronos)",
-        "when": "vulkan",
-        "where": "compiled into the Vulkan GPU module",
-        "texts": [_repo_file("SPIRV-Headers-1.4.350.0-LICENSE")],
-    },
+
 ]
 
 TOOLCHAIN_NOTE = (
@@ -290,8 +172,8 @@ TOOLCHAIN_NOTE = (
     "and Clang runtime libraries) is distributed under terms that require no "
     "notice in binary form (the Microsoft Visual C++ redistribution terms, "
     "the LLVM exception, the GCC Runtime Library Exception). Operating system "
-    "libraries the files load at runtime (glibc, libstdc++, the Vulkan "
-    "loader, Apple's system frameworks) are not shipped."
+    "libraries the files load at runtime (Apple's system frameworks and "
+    "Windows system DLLs) are not shipped."
 )
 
 
@@ -392,34 +274,10 @@ def license_texts(package: dict) -> tuple[list[tuple[str, str]], bool]:
     )
 
 
-def native_text(source: dict, crates: dict[str, Path]) -> str:
-    kind = source["kind"]
-    if kind == "inline":
-        return source["text"]
-    if kind == "mit":
+def native_text(source: dict) -> str:
+    if source["kind"] == "mit":
         return f"{source['copyright']}\n\n{_read_text(TEXTS_DIR / 'MIT.txt')}"
-    if kind == "repo":
-        return _read_text(TEXTS_DIR / source["path"])
-    directory = crates.get(source["crate"])
-    if directory is None:
-        raise SystemExit(
-            f"error: crate {source['crate']} is not in the shipped graph; "
-            "update NATIVE in scripts/third_party_notices.py"
-        )
-    path = directory / source["path"]
-    if not path.is_file():
-        raise SystemExit(f"error: native license source missing: {path}")
-    text = _read_text(path)
-    if kind == "crate":
-        return text
-    lines = []
-    for line in text.splitlines():
-        if not line.startswith("//"):
-            break
-        lines.append(line[2:].removeprefix(" "))
-    if not any("copyright" in line.lower() for line in lines):
-        raise SystemExit(f"error: no license header at the top of {path}")
-    return "\n".join(lines).strip() + "\n"
+    return _read_text(TEXTS_DIR / source["path"])
 
 
 CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
@@ -469,15 +327,7 @@ def _fence(text: str) -> str:
     return f"{fence}text\n{text.rstrip()}\n{fence}"
 
 
-def _formatter_section() -> str:
-    lines = _read_text(FORMATTER_NOTICES).splitlines()
-    body = [line for line in lines if not line.startswith("# ")]
-    return "\n".join(
-        ("#" + line) if line.startswith("## ") else line for line in body
-    ).strip()
-
-
-def components(platform_key: str, core_only: bool) -> list[dict]:
+def components(platform_key: str) -> list[dict]:
     """What a package ships: [{binary, package, target, features}]."""
     core_target = {
         key: target for target, (key, _exe) in package_npm.TARGET_TO_NPM.items()
@@ -492,29 +342,18 @@ def components(platform_key: str, core_only: bool) -> list[dict]:
             "features": [],
         }
     ]
-    bundle = package_npm.BUNDLES.get(platform_key)
-    if bundle is not None and not core_only:
-        shipped.append(
-            {
-                "binary": "pumice-transcribe",
-                "package": TRANSCRIPTION_PACKAGE,
-                "target": bundle["target"],
-                "features": list(bundle["features"]),
-            }
-        )
     return shipped
 
 
 def generate(
     platform_key: str,
-    core_only: bool = False,
     cargo: str = "cargo",
     repo_root: Path = REPO_ROOT,
     rustc: str = "rustc",
 ) -> str:
     check_rust_version(rustc)
     version = package_release.crate_version(repo_root)
-    shipped = components(platform_key, core_only)
+    shipped = components(platform_key)
 
     crates: dict[tuple[str, str], dict] = {}
     used_in: dict[tuple[str, str], list[str]] = {}
@@ -525,14 +364,10 @@ def generate(
             key = (package["name"], package["version"])
             crates.setdefault(key, package)
             used_in.setdefault(key, []).append(f"`{item['binary']}`")
-    crate_dirs = {name: crate_dir(package) for (name, _), package in crates.items()}
 
     active = {"core"}
     for item in shipped:
         active.add(item["target"])
-        if item["binary"] != "pumice":
-            active.add("transcription")
-            active.update(item["features"])
 
     # Identical texts are printed once, numbered in first-use order.
     text_ids: dict[str, int] = {}
@@ -576,7 +411,7 @@ def generate(
         if not active.intersection((when,) if isinstance(when, str) else when):
             continue
         numbers = [
-            text_ref(native_text(source, crate_dirs), entry["name"])
+            text_ref(native_text(source), entry["name"])
             for source in entry["texts"]
         ]
         refs = ", ".join(f"[text {n}](#text-{n})" for n in numbers)
@@ -584,7 +419,7 @@ def generate(
             f"- **{entry['name']}** — {entry['license']}; {entry['where']}. "
             f"License: {refs}."
         )
-    out += ["", "## Adapted content", "", _formatter_section(), ""]
+    out.append("")
 
     out += [
         "## Rust crates",
@@ -664,11 +499,6 @@ def main(argv=None) -> int:
         help="npm platform key (repeatable; default: all four)",
     )
     parser.add_argument(
-        "--core-only",
-        action="store_true",
-        help="cover `pumice` only (the release archives), not the bundle",
-    )
-    parser.add_argument(
         "--output-dir",
         type=Path,
         help="writes <platform>.md for each platform here (required)",
@@ -698,7 +528,7 @@ def main(argv=None) -> int:
     for platform_key in platforms:
         path = args.output_dir / f"{platform_key}.md"
         path.write_text(
-            generate(platform_key, args.core_only, args.cargo, rustc=args.rustc)
+            generate(platform_key, args.cargo, rustc=args.rustc)
         )
         print(f"{path} ({path.stat().st_size} bytes)")
     return 0

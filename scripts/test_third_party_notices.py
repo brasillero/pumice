@@ -1,16 +1,4 @@
-"""Tests for scripts/third_party_notices.py (combined notices generator).
-
-A fake ``cargo`` answers ``cargo metadata`` with a small crate graph whose
-sources live in a temporary directory, so the tests never touch the real
-registry: the walk keeps normal dependencies only, workspace members and
-dev/build dependencies stay out, identical texts print once, a crate
-without a license file gets its declared license's standard text, and the
-native components follow the platform's bundle (Vulkan, Metal, musl, or
-none for the core-only Intel Mac package), every package carries the pinned
-Rust standard library notices for its targets (a fake ``rustc`` reports the
-pinned version; another version fails), and MPL crates get links to their
-exact source. The real run happens in CI.
-"""
+"""Test target-specific licenses with fake Cargo metadata and rustc."""
 
 import contextlib
 import io
@@ -57,28 +45,12 @@ class NoticesTests(unittest.TestCase):
         self.crates = self.root / "crates"
         self.packages = []
         self.nodes = []
-        self.add("pumice", deps=[("serde", None), ("tempfile", "dev"), ("cc", "build"), ("pumice-relay", None), ("pumice-settings", None)])
-        self.add("pumice-relay", deps=[("serde", None)])
-        self.add("pumice-settings")
-        self.add(
-            "pumice-transcription",
-            deps=[("transcribe-cpp-sys", None), ("opusic-sys", None), ("ebml", None), ("serde", None)],
-        )
+        self.add("pumice", deps=[("serde", None), ("ebml", None), ("tempfile", "dev"), ("cc", "build")])
         self.add("serde", files={"LICENSE-MIT": MIT_ALICE, "LICENSE-APACHE": "Apache text\n"}, deps=[("serde_derive", None)])
         self.add("serde_derive", files={"LICENSE-MIT": MIT_ALICE, "LICENSE-APACHE": "Apache text\n"})
         self.add("tempfile", files={"LICENSE": "dev only\n"})
         self.add("cc", files={"LICENSE": "build only\n"})
         self.add("ebml", files={}, license="MIT", authors=["Austin Blake"])
-        self.add(
-            "transcribe-cpp-sys",
-            files={
-                "LICENSE": "transcribe.cpp MIT\n",
-                "ggml/LICENSE": "ggml MIT ```fenced```\n",
-                "src/third_party/miniz/LICENSE": "miniz\n",
-                "ggml/src/ggml-cpu/llamafile/sgemm.cpp": "// Copyright 2024 Mozilla Foundation\n//\n// Permission granted.\n\nint x;\n",
-            },
-        )
-        self.add("opusic-sys", files={"LICENSE": "opusic\n", "opus/COPYING": "Opus BSD\n"})
         self.write_graph()
         self.cargo = self.root / "fake-cargo"
         self.cargo.write_text(FAKE_CARGO)
@@ -126,9 +98,9 @@ class NoticesTests(unittest.TestCase):
             json.dumps({"packages": self.packages, "resolve": {"nodes": self.nodes}})
         )
 
-    def generate(self, platform_key, core_only=False):
+    def generate(self, platform_key):
         return third_party_notices.generate(
-            platform_key, core_only, cargo=str(self.cargo), rustc=str(self.rustc)
+            platform_key, cargo=str(self.cargo), rustc=str(self.rustc)
         )
 
     def calls(self):
@@ -140,21 +112,19 @@ class NoticesTests(unittest.TestCase):
         self.assertIn("| serde_derive | 1.0.0 |", text)
         self.assertNotIn("| tempfile |", text)
         self.assertNotIn("| cc |", text)
-        self.assertNotIn("| pumice-relay |", text)
-        self.assertNotIn("| pumice-settings |", text)
+        self.assertNotIn("| pumice |", text)
         self.assertNotIn("dev only", text)
         self.assertNotIn("build only", text)
 
     def test_shipped_in_names_each_binary(self):
         text = self.generate("linux-x64")
-        self.assertIn("| serde | 1.0.0 | MIT OR Apache-2.0 | `pumice`, `pumice-transcribe` |", text)
-        self.assertIn("| opusic-sys | 1.0.0 | MIT OR Apache-2.0 | `pumice-transcribe` |", text)
+        self.assertIn("| serde | 1.0.0 | MIT OR Apache-2.0 | `pumice` |", text)
 
     def test_metadata_runs_per_target_and_feature(self):
         self.generate("linux-x64")
         self.assertEqual(
             self.calls(),
-            ["x86_64-unknown-linux-musl ", "x86_64-unknown-linux-gnu pumice-transcription/vulkan"],
+            ["x86_64-unknown-linux-musl "],
         )
 
     def test_identical_texts_print_once(self):
@@ -175,42 +145,22 @@ class NoticesTests(unittest.TestCase):
             self.generate("linux-x64")
         self.assertIn("ebml 1.0.0 ships no license file", str(caught.exception))
 
-    def test_native_components_follow_the_bundle(self):
-        linux = self.generate("linux-x64")
-        for name in ("musl libc", "transcribe.cpp", "ggml", "llamafile sgemm", "miniz", "libopus", "Vulkan-Headers", "SPIRV-Headers"):
-            self.assertIn(name, linux)
-        self.assertIn("Copyright 2024 Mozilla Foundation\n\nPermission granted.", linux)
-        self.assertIn("Opus BSD", linux)
+    def test_native_components_follow_the_target(self):
+        self.assertIn("**musl libc", self.generate("linux-x64"))
+        for key in ("darwin-arm64", "darwin-x64", "win32-x64"):
+            self.assertNotIn("**musl libc", self.generate(key))
 
-        mac = self.generate("darwin-arm64")
-        self.assertIn("transcribe.cpp", mac)
-        self.assertNotIn("Vulkan-Headers", mac)
-        self.assertNotIn("**musl libc", mac)
-
-        windows = self.generate("win32-x64")
-        self.assertIn("Vulkan-Headers", windows)
-        self.assertNotIn("**musl libc", windows)
-
-    def test_intel_mac_is_core_only(self):
+    def test_intel_mac_uses_its_target(self):
         text = self.generate("darwin-x64")
         self.assertIn("`pumice` (x86_64-apple-darwin)", text)
-        self.assertNotIn("pumice-transcribe", text)
-        self.assertNotIn("transcribe.cpp", text)
         self.assertIn("Rust standard library", text)
         self.assertEqual(self.calls(), ["x86_64-apple-darwin "])
 
-    def test_core_only_skips_the_bundle(self):
-        text = self.generate("linux-x64", core_only=True)
-        self.assertNotIn("libopus", text)
-        self.assertIn("musl libc", text)
-        self.assertEqual(self.calls(), ["x86_64-unknown-linux-musl "])
-
-    def test_formatter_notices_are_included(self):
-        self.assertIn("Copyright (c) 2025 CJ Pais", self.generate("darwin-x64"))
 
     def test_fences_outlast_backticks_in_texts(self):
+        (self.crates / "serde" / "LICENSE-MIT").write_text("MIT ```fenced```\n")
         text = self.generate("linux-x64")
-        self.assertIn("````text\nggml MIT ```fenced```\n````", text)
+        self.assertIn("````text\nMIT ```fenced```\n````", text)
 
     def test_output_is_a_generated_notices_file(self):
         out = self.root / "out"
@@ -221,8 +171,8 @@ class NoticesTests(unittest.TestCase):
 
     def test_every_package_carries_the_rust_std_notices(self):
         version = third_party_notices.RUST_VERSION
-        for key, core_only in (("darwin-x64", False), ("linux-x64", True), ("win32-x64", True)):
-            text = self.generate(key, core_only)
+        for key in ("darwin-x64", "darwin-arm64", "linux-x64", "win32-x64"):
+            text = self.generate(key)
             self.assertIn(f"**Rust standard library {version}", text)
             self.assertIn("Copyright © 1991-2024 Unicode, Inc.", text)
             self.assertIn("Copyright (c) 2019 The Crossbeam Project Developers", text)
@@ -232,7 +182,7 @@ class NoticesTests(unittest.TestCase):
 
     def test_rust_std_crates_follow_the_target(self):
         # std links gimli, libc and friends everywhere but windows-msvc.
-        linux = self.generate("linux-x64", core_only=True)
+        linux = self.generate("linux-x64")
         self.assertIn("**gimli 0.34.0 (a dependency of the Rust", linux)
         self.assertIn("**libc 0.2.189 (a dependency of the Rust", linux)
         windows = self.generate("win32-x64")
@@ -266,8 +216,7 @@ class NoticesTests(unittest.TestCase):
         self.assertEqual(out.getvalue(), f"{third_party_notices.RUST_VERSION}\n")
 
     def test_release_builds_install_the_pinned_toolchain(self):
-        # D4: every Rust install in the release preview, direct or through a
-        # bundle action, takes the version from --print-rust-version.
+        # Every release Rust install takes the version from --print-rust-version.
         release = (ROOT / ".github/workflows/release.yml").read_text()
         pinned = "${{ needs.package-tests.outputs.rust-version }}"
         self.assertIn("third_party_notices.py --print-rust-version", release)
@@ -281,8 +230,7 @@ class NoticesTests(unittest.TestCase):
         # builds with Rust.
         cache_actions = len(re.findall(r"uses: \./\.github/actions/cargo-cache(?:-save)?\n", release))
         self.assertEqual(len(actions), release.count("uses: ./.github/actions/") - cache_actions)
-        self.assertTrue(actions)
-        self.assertEqual({a.strip() for a in actions}, {pinned})
+        self.assertEqual(actions, [])
 
     def add_mpl_crate(self, name, license="MPL-2.0", vcs=True, **fields):
         files = {"LICENSE": "Mozilla Public License Version 2.0\n"}
@@ -291,8 +239,8 @@ class NoticesTests(unittest.TestCase):
                 {"git": {"sha1": "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"}, "path_in_vcs": name}
             )
         self.add(name, files=files, license=license, **fields)
-        transcription = self.nodes[[p["name"] for p in self.packages].index("pumice-transcription")]
-        transcription["deps"].append({"pkg": f"{name} 1.0.0", "dep_kinds": [{"kind": None, "target": None}]})
+        root = self.nodes[[p["name"] for p in self.packages].index("pumice")]
+        root["deps"].append({"pkg": f"{name} 1.0.0", "dep_kinds": [{"kind": None, "target": None}]})
         self.write_graph()
 
     def test_mpl_crates_link_to_their_exact_source(self):

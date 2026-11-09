@@ -1,0 +1,2308 @@
+//! Tests for the HTTP API (S1.1) and the loopback binding (S5.3): the
+//! recorded Handy request, error envelopes, body limits, SSE streaming and
+//! the model list, all over raw HTTP/1.1 through an in-process server.
+//! Requests never reach a real AI CLI — the Claude adapter points at the
+//! portable fake. Two tests spawn the real `pumice` binary to check startup
+//! behavior; they never invoke a provider.
+
+mod support;
+
+use std::fs;
+use std::io::Read;
+use std::net::{Ipv4Addr, SocketAddrV4};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
+use pumice::api::{self, RequestLog};
+use pumice::config;
+use pumice::logging::DebugLog;
+use pumice::pipeline::Pipeline;
+use pumice::process::ProcessRunner;
+use pumice::providers::{self, discovery};
+use serde_json::{Value, json};
+use support::FakeCli;
+use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+
+/// Minimal YAML configuring `claude` with its binary at the fake CLI and
+/// `codex` disabled, so the enabled model list is exactly `claude`.
+/// `{binary}` is replaced by the fake's path.
+const CLAUDE_AT_FAKE: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{binary}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n  - id: codex\n    enabled: false\n    model: null\n    binary: codex\n    timeout_secs: 30\n    effort: low\n";
+
+/// The recorded Handy transcript: what passthrough returns, and what logs
+/// and error bodies must never contain.
+const FIXTURE_TRANSCRIPT: &str = "Reunião com a equipe às nove horas, não esquecer de enviar o relatório para o João e revisar o orçamento.";
+
+/// Captured metadata lines, one per completion request.
+#[derive(Default)]
+struct LogCapture {
+    lines: Mutex<Vec<String>>,
+}
+
+impl RequestLog for LogCapture {
+    fn write_line(&self, line: &str) {
+        self.lines.lock().unwrap().push(line.to_owned());
+    }
+}
+
+impl LogCapture {
+    fn lines(&self) -> Vec<String> {
+        self.lines.lock().unwrap().clone()
+    }
+}
+
+/// A running in-process server with everything its pipeline needs kept
+/// alive: the fake CLI and the config directory.
+struct TestServer {
+    port: u16,
+    log: Arc<LogCapture>,
+    fake: FakeCli,
+    _config_dir: TempDir,
+}
+
+impl TestServer {
+    fn log_lines(&self) -> Vec<String> {
+        self.log.lines()
+    }
+}
+
+/// A running in-process server with a separate fake CLI per provider, so a
+/// test can prove which provider ran.
+struct DualServer {
+    port: u16,
+    log: Arc<LogCapture>,
+    claude: FakeCli,
+    codex: FakeCli,
+    _config_dir: TempDir,
+}
+
+impl DualServer {
+    fn log_lines(&self) -> Vec<String> {
+        self.log.lines()
+    }
+}
+
+/// YAML configuring `claude` and `codex`, each at its own fake CLI.
+/// `{claude}` and `{codex}` are replaced by the fakes' paths.
+const BOTH_AT_FAKES: &str = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{claude}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex}'\n    timeout_secs: 30\n    effort: low\n";
+
+/// Builds a pipeline from `yaml` with one fake per provider (`{claude}` and
+/// `{codex}` replaced by the fakes' paths), serves it on an ephemeral
+/// loopback port and returns the running server.
+async fn start_dual_server(
+    yaml: &str,
+    claude_scenario: Value,
+    codex_scenario: Value,
+) -> DualServer {
+    let claude = FakeCli::new(claude_scenario);
+    let codex = FakeCli::new(codex_scenario);
+    let yaml = yaml
+        .replace("{claude}", &claude.path().display().to_string())
+        .replace("{codex}", &codex.path().display().to_string());
+    let config_dir = TempDir::new().expect("temp dir");
+    let config_path = config_dir.path().join("pumice.yml");
+    fs::write(&config_path, support::relay_config(&yaml)).expect("write config");
+    let config = config::load_with_env(Some(&config_path), |_| None)
+        .expect("config loads")
+        .config;
+    let runner = Arc::new(ProcessRunner::new());
+    let built =
+        providers::build_from_config(&config, Arc::clone(&runner)).expect("providers build");
+    let pipeline = Arc::new(Pipeline::new(&config, built));
+
+    let listener = tokio::net::TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind ephemeral loopback port");
+    let port = listener.local_addr().unwrap().port();
+    let log = Arc::new(LogCapture::default());
+    let serve_log = Arc::clone(&log);
+    tokio::spawn(async move {
+        let _ = api::serve(
+            listener,
+            pipeline,
+            serve_log,
+            Arc::new(DebugLog::disabled()),
+        )
+        .await;
+    });
+    DualServer {
+        port,
+        log,
+        claude,
+        codex,
+        _config_dir: config_dir,
+    }
+}
+
+/// Builds a pipeline from `yaml` (`{binary}` replaced by the fake's path),
+/// serves it on an ephemeral loopback port and returns the running server.
+async fn start_server(yaml: &str, scenario: Value) -> TestServer {
+    let fake = FakeCli::new(scenario);
+    let yaml = yaml.replace("{binary}", &fake.path().display().to_string());
+    let config_dir = TempDir::new().expect("temp dir");
+    let config_path = config_dir.path().join("pumice.yml");
+    fs::write(&config_path, support::relay_config(&yaml)).expect("write config");
+    let config = config::load_with_env(Some(&config_path), |_| None)
+        .expect("config loads")
+        .config;
+    let runner = Arc::new(ProcessRunner::new());
+    let built = providers::build_from_config(&config, runner).expect("provider builds");
+    let pipeline = Arc::new(Pipeline::new(&config, built));
+
+    // Bind before spawning so a taken ephemeral port fails here, not in the
+    // background task.
+    let listener = tokio::net::TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind ephemeral loopback port");
+    let port = listener.local_addr().unwrap().port();
+    let log = Arc::new(LogCapture::default());
+    let serve_log = Arc::clone(&log);
+    tokio::spawn(async move {
+        let _ = api::serve(
+            listener,
+            pipeline,
+            serve_log,
+            Arc::new(DebugLog::disabled()),
+        )
+        .await;
+    });
+    TestServer {
+        port,
+        log,
+        fake,
+        _config_dir: config_dir,
+    }
+}
+
+/// Like [`start_server`], but with the opt-in debug log enabled and its path
+/// returned so tests can read the JSONL file.
+async fn start_server_with_debug_log(yaml: &str, scenario: Value) -> (TestServer, PathBuf) {
+    let fake = FakeCli::new(scenario);
+    let yaml = yaml.replace("{binary}", &fake.path().display().to_string());
+    let config_dir = TempDir::new().expect("temp dir");
+    let config_path = config_dir.path().join("pumice.yml");
+    let debug_path = config_dir.path().join("debug.log");
+    let yaml = format!(
+        "{}\ndebug_log:\n  enabled: true\n  path: {}\n",
+        yaml,
+        debug_path.display()
+    );
+    fs::write(&config_path, support::relay_config(&yaml)).expect("write config");
+    let config = config::load_with_env(Some(&config_path), |_| None)
+        .expect("config loads")
+        .config;
+    let runner = Arc::new(ProcessRunner::new());
+    let built = providers::build_from_config(&config, runner).expect("provider builds");
+    let pipeline = Arc::new(Pipeline::new(&config, built));
+
+    let listener = tokio::net::TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind ephemeral loopback port");
+    let port = listener.local_addr().unwrap().port();
+    let log = Arc::new(LogCapture::default());
+    let serve_log = Arc::clone(&log);
+    let debug_log = Arc::new(DebugLog::open(&config.debug_log).expect("open debug log"));
+    tokio::spawn(async move {
+        let _ = api::serve(listener, pipeline, serve_log, debug_log).await;
+    });
+    (
+        TestServer {
+            port,
+            log,
+            fake,
+            _config_dir: config_dir,
+        },
+        debug_path,
+    )
+}
+
+/// A parsed HTTP response (status, headers, body).
+struct RawResponse {
+    status: u16,
+    headers: String,
+    body: Vec<u8>,
+}
+
+impl RawResponse {
+    fn body_json(&self) -> Value {
+        serde_json::from_slice(&self.body).expect("response body is valid JSON")
+    }
+
+    fn body_text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+}
+
+/// True when `bytes` hold a whole HTTP/1.1 response: the head, then a body
+/// matching `Content-Length`, or a chunked body up to its last chunk.
+fn response_is_complete(bytes: &[u8]) -> bool {
+    let Some(head_end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return false;
+    };
+    let head = String::from_utf8_lossy(&bytes[..head_end]).to_ascii_lowercase();
+    let body = &bytes[head_end + 4..];
+    if let Some(length) = head
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length:"))
+        .and_then(|value| value.trim().parse::<usize>().ok())
+    {
+        return body.len() >= length;
+    }
+    if head.contains("transfer-encoding: chunked") {
+        return chunked_body_is_complete(body);
+    }
+    false
+}
+
+/// True when `body` is a whole chunked body: every chunk has the size its
+/// header announces, ending with the zero-size chunk and the final CRLF.
+fn chunked_body_is_complete(mut body: &[u8]) -> bool {
+    loop {
+        let Some(line_end) = body.windows(2).position(|w| w == b"\r\n") else {
+            return false;
+        };
+        let size_text = String::from_utf8_lossy(&body[..line_end]);
+        let size_text = size_text.split(';').next().unwrap_or_default().trim();
+        let Ok(size) = usize::from_str_radix(size_text, 16) else {
+            return false;
+        };
+        body = &body[line_end + 2..];
+        if size == 0 {
+            // No trailers are sent: the body ends with an empty line.
+            return body.starts_with(b"\r\n");
+        }
+        if body.len() < size + 2 || &body[size..size + 2] != b"\r\n" {
+            return false;
+        }
+        body = &body[size + 2..];
+    }
+}
+
+#[test]
+fn response_completeness_follows_its_framing() {
+    assert!(response_is_complete(
+        b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 2\r\n\r\n{}"
+    ));
+    assert!(!response_is_complete(
+        b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 50\r\n\r\n"
+    ));
+    assert!(response_is_complete(
+        b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n"
+    ));
+    assert!(!response_is_complete(b"HTTP/1.1 200 OK\r\ncontent-le"));
+    // A chunk announcing 16 bytes that holds two is truncated.
+    assert!(!response_is_complete(
+        b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n10\r\n\r\n"
+    ));
+    assert!(!response_is_complete(
+        b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\n{}\r\n"
+    ));
+}
+
+/// Sends `request` verbatim over raw HTTP/1.1 and reads the whole response.
+/// Writing and reading run concurrently: the server may answer an oversized
+/// body (413) and close before the client finishes sending, and the response
+/// must be read as it arrives, before the connection reset that follows.
+/// Write errors are ignored, and a read error (the reset that follows)
+/// ends the read only when the response received so far is complete. The
+/// write side stays open while the response is read — half-closing first makes hyper drop the
+/// connection without answering.
+async fn raw_http(port: u16, request: Vec<u8>) -> RawResponse {
+    // Connecting, writing and reading share one bound.
+    let exchange = async {
+        let stream = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+            .await
+            .expect("connect to server");
+        exchange(stream, request).await
+    };
+    let response = tokio::time::timeout(Duration::from_secs(30), exchange)
+        .await
+        .expect("request timed out");
+    parse_http(&response)
+}
+
+/// Writes `request` and reads the response on `stream`, concurrently (see
+/// [`raw_http`]).
+async fn exchange(stream: TcpStream, request: Vec<u8>) -> Vec<u8> {
+    let (mut reader, mut writer) = stream.into_split();
+    let write = async move {
+        let _ = writer.write_all(&request).await;
+        // Keep the write half open until the read finishes.
+        writer
+    };
+    let read = async {
+        let mut response = Vec::new();
+        let mut chunk = [0u8; 8 * 1024];
+        loop {
+            match reader.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&chunk[..n]),
+                // The reset after a complete answer: keep what arrived. A
+                // reset in the middle of the answer is still a failure.
+                Err(_) if response_is_complete(&response) => break,
+                Err(error) => panic!("read response: {error}"),
+            }
+        }
+        response
+    };
+    let (response, _writer) = tokio::join!(read, write);
+    response
+}
+
+/// Builds a request with fixed framing: HTTP/1.1, loopback host,
+/// `connection: close`, explicit `Content-Length`.
+fn http_request(method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
+    let mut request =
+        format!("{method} {path} HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\n");
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
+    request.push_str(&format!("content-length: {}\r\n\r\n", body.len()));
+    let mut request = request.into_bytes();
+    request.extend_from_slice(body);
+    request
+}
+
+/// Builds a chunked request (no `Content-Length`), one chunk per element.
+fn chunked_request(path: &str, chunks: &[&[u8]]) -> Vec<u8> {
+    let mut request = format!(
+        "POST {path} HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\ntransfer-encoding: chunked\r\n\r\n"
+    )
+    .into_bytes();
+    for chunk in chunks {
+        request.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+        request.extend_from_slice(chunk);
+        request.extend_from_slice(b"\r\n");
+    }
+    request.extend_from_slice(b"0\r\n\r\n");
+    request
+}
+
+fn parse_http(bytes: &[u8]) -> RawResponse {
+    let split = bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("header/body separator present");
+    let head = String::from_utf8_lossy(&bytes[..split]);
+    let status: u16 = head
+        .split_whitespace()
+        .nth(1)
+        .expect("status line has a code")
+        .parse()
+        .expect("status code is numeric");
+    RawResponse {
+        status,
+        headers: head.into_owned(),
+        body: bytes[split + 4..].to_vec(),
+    }
+}
+
+/// The stdout of a fake CLI replying with a Claude success envelope holding
+/// `result`.
+fn success_envelope(result: &str) -> String {
+    json!({
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": result,
+    })
+    .to_string()
+}
+
+/// A fake CLI replying successfully with `result`.
+fn success_scenario(result: &str) -> Value {
+    json!({"stdout": success_envelope(result), "exit_code": 0})
+}
+
+/// The stdout of a fake CLI replying with a Codex JSONL success stream whose
+/// agent message is `result`, mirroring `tests/fixtures/codex/success.jsonl`.
+fn codex_success_stdout(result: &str) -> String {
+    let text = serde_json::to_string(result).expect("result serializes");
+    format!(
+        "{{\"type\":\"thread.started\",\"thread_id\":\"00000000-0000-4000-8000-000000000003\"}}\n\
+         {{\"type\":\"turn.started\"}}\n\
+         {{\"type\":\"item.completed\",\"item\":{{\"id\":\"item_0\",\"type\":\"agent_message\",\"text\":{text}}}}}\n\
+         {{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":5310,\"cached_input_tokens\":0,\"output_tokens\":6}}}}\n"
+    )
+}
+
+/// A fake Codex CLI replying successfully with `result`.
+fn codex_success_scenario(result: &str) -> Value {
+    json!({"stdout": codex_success_stdout(result), "exit_code": 0})
+}
+
+/// The recorded Handy request with `model` set to `claude`, since the
+/// fixture's `pumice-echo` is intentionally not a configured provider.
+fn handy_fixture_with_model(model: &str) -> Vec<u8> {
+    let mut body: Value =
+        serde_json::from_str(&support::fixture("handy-request.json")).expect("fixture parses");
+    body["model"] = json!(model);
+    serde_json::to_vec(&body).expect("fixture re-serializes")
+}
+
+#[tokio::test]
+async fn handy_request_formats_and_returns_fake_output() {
+    let result = "Reunião com a equipe às 9:00, não esquecer de enviar o relatório para o João e revisar o orçamento.";
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario(result)).await;
+
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &handy_fixture_with_model("claude"),
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    assert!(
+        response.headers.contains("application/json"),
+        "headers: {}",
+        response.headers
+    );
+    let body = response.body_json();
+    assert_eq!(body["object"], "chat.completion");
+    assert!(
+        body["id"]
+            .as_str()
+            .expect("id is a string")
+            .starts_with("chatcmpl-pumice-")
+    );
+    assert_eq!(body["model"], "claude");
+    assert_eq!(body["choices"][0]["index"], 0);
+    assert_eq!(body["choices"][0]["finish_reason"], "stop");
+    assert_eq!(body["choices"][0]["message"]["role"], "assistant");
+    assert_eq!(body["choices"][0]["message"]["content"], result);
+    assert!(body.get("usage").is_none(), "usage must be omitted");
+    assert!(
+        server.fake.report_path().exists(),
+        "the fake ran and formatted"
+    );
+    let lines = server.log_lines();
+    assert_eq!(lines.len(), 1, "one log entry: {lines:?}");
+    assert!(lines[0].contains(" formatted "), "line: {}", lines[0]);
+    assert!(lines[0].contains(" claude ("), "line: {}", lines[0]);
+}
+
+#[tokio::test]
+async fn handy_fixture_with_an_unknown_model_is_an_http_404() {
+    // As recorded, the fixture's model is `pumice-echo`, which no
+    // configuration knows: the dictation must come back byte for byte and
+    // no CLI may run.
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            support::fixture("handy-request.json").as_bytes(),
+        ),
+    )
+    .await;
+
+    assert_failure(&response, 404, "no provider named \"pumice-echo\"");
+    assert!(
+        !server.fake.report_path().exists(),
+        "no provider may run for an unknown model"
+    );
+    let lines = server.log_lines();
+    assert!(lines[0].contains(" FAILED "), "line: {}", lines[0]);
+    assert!(lines[0].contains("no provider named"), "line: {}", lines[0]);
+}
+
+#[tokio::test]
+async fn failing_provider_returns_an_http_error_and_no_dictation() {
+    let server = start_server(
+        CLAUDE_AT_FAKE,
+        json!({
+            "stdout": support::fixture("claude/not-logged-in.json"),
+            "exit_code": 1,
+        }),
+    )
+    .await;
+    let raw = "  Olá, Mundo! Ação número três… fim.  ";
+    let request = json!({
+        "messages": [{
+            "role": "user",
+            "content": format!("<transcript>\n{raw}\n</transcript>"),
+        }],
+        "model": "claude",
+        "stream": false,
+    });
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &serde_json::to_vec(&request).unwrap(),
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 502, "body: {}", response.body_text());
+    assert!(response.body_text().contains("not logged in"));
+    assert!(
+        !response.body_text().contains(raw),
+        "no dictation in the error"
+    );
+    let lines = server.log_lines();
+    assert!(
+        lines[0].contains("FAILED") && lines[0].contains("HTTP 502: not logged in"),
+        "line: {}",
+        lines[0]
+    );
+    assert!(
+        lines[0].contains("✗ claude") && lines[0].contains("(exit "),
+        "the attempt line carries the CLI's exit code: {}",
+        lines[0]
+    );
+}
+
+#[tokio::test]
+async fn empty_envelope_returns_200_and_logs_without_running_a_provider() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let request = json!({
+        "messages": [{"role": "user", "content": "<transcript>\n</transcript>"}],
+        "model": "claude",
+        "stream": false,
+    });
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &serde_json::to_vec(&request).unwrap(),
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    assert_eq!(response.body_json()["choices"][0]["message"]["content"], "");
+    assert!(
+        !server.fake.report_path().exists(),
+        "an empty transcript runs no provider"
+    );
+    let lines = server.log_lines();
+    assert_eq!(lines.len(), 1, "one log entry: {lines:?}");
+    assert!(lines[0].contains(" empty "), "line: {}", lines[0]);
+}
+
+#[tokio::test]
+async fn malformed_extra_field_with_debug_log_enabled_does_not_panic() {
+    let (server, debug_path) =
+        start_server_with_debug_log(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    // A lone surrogate JSON escape parses as a typed request but cannot be
+    // re-parsed as serde_json::Value. The debug log must still record the
+    // exchange and the request must complete normally.
+    let raw_body =
+        br#"{"model":"passthrough","messages":[{"role":"user","content":"hello"}],"extra":"\uD800"}"#;
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            raw_body,
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    assert_eq!(
+        response.body_json()["choices"][0]["message"]["content"],
+        "hello"
+    );
+    assert!(
+        !server.fake.report_path().exists(),
+        "passthrough must not run a CLI"
+    );
+    let debug_contents = fs::read_to_string(&debug_path).expect("debug log written");
+    assert!(
+        !debug_contents.is_empty(),
+        "debug log must contain one record"
+    );
+    let record: Value =
+        serde_json::from_str(debug_contents.lines().next().unwrap()).expect("record is JSON");
+    assert_eq!(
+        record["request"], "request body could not be re-parsed",
+        "marker is recorded when the Value round trip fails: {record:?}"
+    );
+}
+
+#[tokio::test]
+async fn stream_true_answers_with_sse_frames() {
+    let result = "Reunião marcada.";
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario(result)).await;
+    let mut body: Value =
+        serde_json::from_str(&support::fixture("handy-request.json")).expect("fixture parses");
+    body["model"] = json!("claude");
+    body["stream"] = json!(true);
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &serde_json::to_vec(&body).unwrap(),
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200);
+    assert!(
+        response.headers.contains("text/event-stream"),
+        "headers: {}",
+        response.headers
+    );
+    let text = response.body_text();
+    let frames: Vec<&str> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .collect();
+    assert_eq!(frames.len(), 3, "two chunks then [DONE]: {text}");
+    assert_eq!(frames[2], "[DONE]");
+
+    let first: Value = serde_json::from_str(frames[0]).expect("chunk is JSON");
+    assert_eq!(first["object"], "chat.completion.chunk");
+    assert_eq!(first["choices"][0]["delta"]["role"], "assistant");
+    assert_eq!(first["choices"][0]["delta"]["content"], result);
+    assert_eq!(first["choices"][0]["finish_reason"], Value::Null);
+
+    let last: Value = serde_json::from_str(frames[1]).expect("chunk is JSON");
+    assert_eq!(last["choices"][0]["delta"], json!({}));
+    assert_eq!(last["choices"][0]["finish_reason"], "stop");
+    assert!(text.ends_with("data: [DONE]\n\n"), "SSE terminator: {text}");
+}
+
+#[tokio::test]
+async fn malformed_json_is_400_without_running_the_fake() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            b"{\"messages\": [",
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 400);
+    let body = response.body_json();
+    assert_eq!(body["error"]["type"], "invalid_request_error");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .expect("message is a string")
+            .contains("not valid JSON")
+    );
+    assert!(!server.fake.report_path().exists(), "the fake must not run");
+}
+
+#[tokio::test]
+async fn rejected_request_writes_one_rejected_log_entry() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            b"{\"messages\": [",
+        ),
+    )
+    .await;
+    assert_eq!(response.status, 400);
+    let lines = server.log_lines();
+    assert_eq!(lines.len(), 1, "one log entry: {lines:?}");
+    assert!(lines[0].contains("REJECTED"), "line: {}", lines[0]);
+    assert!(
+        lines[0].contains("HTTP 400: the request body is not valid JSON"),
+        "line: {}",
+        lines[0]
+    );
+}
+
+#[tokio::test]
+async fn client_disconnect_writes_one_dropped_log_entry() {
+    let server = start_server(
+        CLAUDE_AT_FAKE,
+        json!({"stdout": "unused", "exit_code": 0, "sleep_ms": 5_000}),
+    )
+    .await;
+    let request = json!({
+        "messages": [{"role": "user", "content": "<transcript>\nolá\n</transcript>"}],
+        "model": "claude",
+    });
+    let mut stream = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, server.port))
+        .await
+        .expect("connect to server");
+    stream
+        .write_all(&http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &serde_json::to_vec(&request).unwrap(),
+        ))
+        .await
+        .expect("send request");
+    // Wait until the CLI is running, then go away mid-request.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !server.fake.report_path().exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fake CLI never started"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    drop(stream);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while server.log_lines().is_empty() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let lines = server.log_lines();
+    assert_eq!(lines.len(), 1, "one log entry: {lines:?}");
+    assert!(lines[0].contains("DROPPED"), "line: {}", lines[0]);
+}
+
+#[tokio::test]
+async fn conversation_history_is_400_without_running_the_fake() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let request = json!({
+        "messages": [
+            {"role": "user", "content": "first"},
+            {"role": "user", "content": "second"},
+        ],
+        "stream": false,
+    });
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &serde_json::to_vec(&request).unwrap(),
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 400);
+    let body = response.body_json();
+    assert_eq!(body["error"]["type"], "invalid_request_error");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .expect("message is a string")
+            .contains("more than one user message")
+    );
+    assert!(!server.fake.report_path().exists(), "the fake must not run");
+}
+
+#[tokio::test]
+async fn oversized_body_is_413() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    // A little over the 10 MiB cap, inside one JSON string. The margin keeps
+    // the server's post-cap read within one chunk, so the client write
+    // completes instead of racing a connection reset.
+    let mut text = String::with_capacity(10 * 1024 * 1024 + 16 * 1024);
+    text.push_str("{\"messages\":[{\"role\":\"user\",\"content\":\"");
+    text.push('x');
+    text.push_str(&"x".repeat(10 * 1024 * 1024 + 8 * 1024));
+    text.push_str("\"}]}");
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            text.as_bytes(),
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 413, "body: {}", response.body_text());
+    assert_eq!(
+        response.body_json()["error"]["type"],
+        "invalid_request_error"
+    );
+    assert!(!server.fake.report_path().exists(), "the fake must not run");
+}
+
+#[tokio::test]
+async fn chunked_body_is_read_fully() {
+    let result = "Ditado recebido.";
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario(result)).await;
+    let body = handy_fixture_with_model("claude");
+    let (left, right) = body.split_at(body.len() / 2);
+    let response = raw_http(
+        server.port,
+        chunked_request("/v1/chat/completions", &[left, right]),
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    let parsed = response.body_json();
+    assert_eq!(parsed["choices"][0]["message"]["content"], result);
+    assert!(server.fake.report_path().exists(), "the fake ran");
+}
+
+#[tokio::test]
+async fn unknown_path_is_an_openai_404() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    for (method, path) in [
+        ("GET", "/v1/nope"),
+        ("POST", "/v1/audio/transcriptions"),
+        ("POST", "/pumice/v1/dictations"),
+        ("GET", "/pumice/v1/flows"),
+    ] {
+        let response = raw_http(server.port, http_request(method, path, &[], b"")).await;
+        assert_eq!(response.status, 404, "{method} {path}");
+        let body = response.body_json();
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert!(body["error"]["message"].as_str().is_some());
+    }
+    assert!(
+        !server.fake.report_path().exists(),
+        "unknown routes never invoke a CLI"
+    );
+}
+
+#[tokio::test]
+async fn health_reports_ok_and_the_version() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let response = raw_http(server.port, http_request("GET", "/health", &[], b"")).await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    let body = response.body_json();
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+    assert!(
+        !server.fake.report_path().exists(),
+        "health never invokes a CLI"
+    );
+}
+
+#[tokio::test]
+async fn landing_page_is_plain_html() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let response = raw_http(server.port, http_request("GET", "/", &[], b"")).await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    assert!(
+        response
+            .headers
+            .to_ascii_lowercase()
+            .contains("content-type: text/html"),
+        "headers: {}",
+        response.headers
+    );
+    let body = response.body_text();
+    assert!(body.contains("<h1>Pumice</h1>"), "body: {body}");
+    assert!(
+        body.contains("https://github.com/brasillero/pumice"),
+        "body: {body}"
+    );
+    assert!(
+        !server.fake.report_path().exists(),
+        "the landing page never invokes a CLI"
+    );
+}
+
+#[tokio::test]
+async fn landing_page_avoids_filter_trigger_words() {
+    // Corporate web filters scan page text for these words.
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let response = raw_http(server.port, http_request("GET", "/", &[], b"")).await;
+
+    assert_eq!(response.status, 200);
+    let body = response.body_text().to_ascii_lowercase();
+    let trigger_words = [
+        "proxy", "tunnel", "bypass", "vpn", "gateway", "relay", "forward", "api", "endpoint",
+        "unblock", "anonym",
+    ];
+    for word in &trigger_words {
+        assert!(!body.contains(word), "landing page contains '{word}'");
+    }
+}
+
+/// Waits (bounded) until the server's fake CLI wrote its report: the run
+/// has started and holds the pipeline's permit.
+async fn wait_for_fake_start(server: &TestServer) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !server.fake.report_path().exists() {
+        assert!(std::time::Instant::now() < deadline, "fake never started");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn health_answers_quickly_while_a_dictation_runs() {
+    let result = "Reunião com a equipe às 9:00.";
+    // The fake waits for a release file, so the dictation below is still
+    // running (holding the pipeline's single permit) when /health is
+    // checked, however slow the machine is.
+    let gate = TempDir::new().expect("temp dir");
+    let release = gate.path().join("release");
+    let server = start_server(
+        CLAUDE_AT_FAKE,
+        json!({"stdout": success_envelope(result), "exit_code": 0, "wait_for_path": release}),
+    )
+    .await;
+
+    let port = server.port;
+    let dictation = tokio::spawn(async move {
+        raw_http(
+            port,
+            http_request(
+                "POST",
+                "/v1/chat/completions",
+                &[("content-type", "application/json")],
+                &handy_fixture_with_model("claude"),
+            ),
+        )
+        .await
+    });
+    wait_for_fake_start(&server).await;
+
+    let started = std::time::Instant::now();
+    let response = raw_http(server.port, http_request("GET", "/health", &[], b"")).await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    assert_eq!(response.body_json()["status"], "ok");
+    // The gate is still closed: health answered while the dictation ran.
+    // The bound is generous; it only rules out waiting for the permit.
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "health took {elapsed:?} while a dictation was running"
+    );
+    assert!(
+        !dictation.is_finished(),
+        "the dictation must still be running when health answers"
+    );
+    fs::write(&release, "").expect("release the fake");
+
+    let dictation = dictation.await.expect("dictation task completes");
+    assert_eq!(dictation.status, 200);
+    assert_eq!(
+        dictation.body_json()["choices"][0]["message"]["content"],
+        result
+    );
+    assert!(server.fake.report_path().exists(), "the fake ran");
+}
+
+#[tokio::test]
+async fn models_lists_enabled_providers() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let response = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
+
+    assert_eq!(response.status, 200);
+    let body = response.body_json();
+    assert_eq!(body["object"], "list");
+    let ids: Vec<&str> = body["data"]
+        .as_array()
+        .expect("data is an array")
+        .iter()
+        .map(|entry| entry["id"].as_str().expect("id is a string"))
+        .collect();
+    assert_eq!(
+        ids,
+        ["claude", "passthrough", "inspect"],
+        "codex is disabled in the test config"
+    );
+    for entry in body["data"].as_array().unwrap() {
+        assert_eq!(entry["object"], "model");
+        assert_eq!(entry["created"], 0);
+        assert_eq!(entry["owned_by"], "pumice");
+    }
+    assert!(
+        !server.fake.report_path().exists(),
+        "listing never invokes a CLI"
+    );
+}
+
+/// The model IDs of a `/v1/models` body, in order.
+fn listed_model_ids(body: &Value) -> Vec<String> {
+    body["data"]
+        .as_array()
+        .expect("data is an array")
+        .iter()
+        .map(|entry| entry["id"].as_str().expect("id is a string").to_owned())
+        .collect()
+}
+
+/// Posts the recorded Handy request with `model` set, returning the response.
+async fn post_model(server_port: u16, model: &str) -> RawResponse {
+    raw_http(
+        server_port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &handy_fixture_with_model(model),
+        ),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn models_follow_the_list_order() {
+    // The model list follows the file: both orders of the same two entries.
+    let codex_first = "providers:\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex}'\n    timeout_secs: 30\n    effort: low\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{claude}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n";
+    for (yaml, expected) in [
+        (BOTH_AT_FAKES, ["claude", "codex", "passthrough", "inspect"]),
+        (codex_first, ["codex", "claude", "passthrough", "inspect"]),
+    ] {
+        let server = start_dual_server(
+            yaml,
+            success_scenario("unused"),
+            codex_success_scenario("unused"),
+        )
+        .await;
+        let response = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
+
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            listed_model_ids(&response.body_json()),
+            expected,
+            "enabled providers in list order, then the built-ins"
+        );
+        assert!(
+            !server.claude.report_path().exists() && !server.codex.report_path().exists(),
+            "listing never invokes a CLI"
+        );
+    }
+}
+
+#[tokio::test]
+async fn model_field_selects_the_named_provider() {
+    let server = start_dual_server(
+        BOTH_AT_FAKES,
+        success_scenario("Texto do Claude."),
+        codex_success_scenario("Texto do Codex."),
+    )
+    .await;
+
+    let codex = post_model(server.port, "codex").await;
+    assert_eq!(codex.status, 200, "body: {}", codex.body_text());
+    let codex_body = codex.body_json();
+    assert_eq!(codex_body["model"], "codex");
+    assert_eq!(
+        codex_body["choices"][0]["message"]["content"],
+        "Texto do Codex."
+    );
+    assert!(server.codex.report_path().exists(), "codex ran");
+    assert!(
+        !server.claude.report_path().exists(),
+        "selecting codex must not run claude"
+    );
+
+    let claude = post_model(server.port, "CLAUDE").await;
+    assert_eq!(claude.status, 200, "body: {}", claude.body_text());
+    let claude_body = claude.body_json();
+    assert_eq!(claude_body["model"], "claude");
+    assert_eq!(
+        claude_body["choices"][0]["message"]["content"],
+        "Texto do Claude."
+    );
+    assert!(server.claude.report_path().exists(), "claude ran");
+}
+
+#[tokio::test]
+async fn model_matching_is_case_insensitive_and_trims_whitespace() {
+    let server = start_dual_server(
+        BOTH_AT_FAKES,
+        success_scenario("Texto do Claude."),
+        codex_success_scenario("unused"),
+    )
+    .await;
+
+    // Handy users type the field by hand: "Claude " (trailing space,
+    // lowercase-rest mix) must still select claude.
+    let response = post_model(server.port, "Claude ").await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    assert_eq!(response.body_json()["model"], "claude");
+    assert!(server.claude.report_path().exists(), "claude ran");
+    assert!(
+        !server.codex.report_path().exists(),
+        "the codex fake must not run"
+    );
+}
+
+#[tokio::test]
+async fn missing_and_blank_model_are_an_http_400_and_run_no_provider() {
+    let server = start_dual_server(
+        BOTH_AT_FAKES,
+        success_scenario("unused"),
+        codex_success_scenario("unused"),
+    )
+    .await;
+
+    let empty = post_model(server.port, "").await;
+    assert_failure(&empty, 400, "the request named no provider");
+
+    // The same fixture without a `model` key at all.
+    let mut body: Value =
+        serde_json::from_str(&support::fixture("handy-request.json")).expect("fixture parses");
+    body.as_object_mut().expect("object").remove("model");
+    let missing = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &serde_json::to_vec(&body).unwrap(),
+        ),
+    )
+    .await;
+
+    assert_failure(&missing, 400, "the request named no provider");
+    assert!(
+        !server.claude.report_path().exists() && !server.codex.report_path().exists(),
+        "no provider runs for a model-less request"
+    );
+    let lines = server.log_lines();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains(" FAILED ") && line.contains("the request named no provider")),
+        "the raw outcome names the missing model: {:?}",
+        lines
+    );
+}
+
+#[tokio::test]
+async fn unknown_model_is_an_http_404_and_runs_no_provider() {
+    let server = start_dual_server(
+        BOTH_AT_FAKES,
+        success_scenario("unused"),
+        codex_success_scenario("unused"),
+    )
+    .await;
+
+    let response = post_model(server.port, "gpt-4").await;
+
+    assert_failure(&response, 404, "no provider named \"gpt-4\"");
+    assert!(
+        !server.claude.report_path().exists() && !server.codex.report_path().exists(),
+        "no provider may run for an unknown model"
+    );
+}
+
+#[tokio::test]
+async fn disabled_provider_is_not_listed_and_is_an_http_404() {
+    let yaml = "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{claude}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n  - id: codex\n    enabled: false\n    model: null\n    binary: codex\n    timeout_secs: 30\n    effort: low\n";
+    let server = start_dual_server(
+        yaml,
+        success_scenario("unused"),
+        codex_success_scenario("unused"),
+    )
+    .await;
+
+    let models = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
+    assert_eq!(models.status, 200);
+    assert_eq!(
+        listed_model_ids(&models.body_json()),
+        ["claude", "passthrough", "inspect"],
+        "a disabled provider is not listed"
+    );
+
+    let response = post_model(server.port, "codex").await;
+    // A disabled provider is an HTTP error; the app keeps its transcript.
+    assert_failure(&response, 404, "provider \"codex\" is disabled");
+    assert!(
+        !server.claude.report_path().exists() && !server.codex.report_path().exists(),
+        "no provider may run for a disabled selection"
+    );
+    let lines = server.log_lines();
+    assert!(
+        lines[0].contains("is disabled in the config"),
+        "line: {}",
+        lines[0]
+    );
+}
+
+/// A running in-process server with detection cached in the pipeline, where
+/// the selected provider (`claude`) has a missing binary and every other
+/// registered provider has its own fake.
+struct MissingSelectedServer {
+    port: u16,
+    log: Arc<LogCapture>,
+    codex: FakeCli,
+    _config_dir: TempDir,
+    _missing_dir: TempDir,
+}
+
+impl MissingSelectedServer {
+    fn log_lines(&self) -> Vec<String> {
+        self.log.lines()
+    }
+}
+
+/// Starts a detected pipeline where `claude`'s binary does not exist (inside
+/// a real temporary directory, so the path is absolute) and every other
+/// entry is disabled. `yaml_tail` is appended after those entries as further
+/// list items; `{codex}` is replaced by the codex fake's path.
+async fn start_missing_selected_server(
+    yaml_tail: &str,
+    codex_scenario: Value,
+) -> MissingSelectedServer {
+    let codex = FakeCli::new(codex_scenario);
+    let kiro = FakeCli::new(json!({}));
+    let missing_dir = TempDir::new().expect("temp dir");
+    let missing_binary = missing_dir.path().join("claude");
+    let yaml = format!(
+        "providers:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n  - id: kiro\n    enabled: false\n    binary: '{}'\n    model: null\n    timeout_secs: 30\n    effort: low\n{yaml_tail}",
+        missing_binary.display(),
+        kiro.path().display(),
+    )
+    .replace("{codex}", &codex.path().display().to_string());
+    let config_dir = TempDir::new().expect("temp dir");
+    let config_path = config_dir.path().join("pumice.yml");
+    fs::write(&config_path, support::relay_config(&yaml)).expect("write config");
+    let config = config::load_with_env(Some(&config_path), |_| None)
+        .expect("config loads")
+        .config;
+    let runner = Arc::new(ProcessRunner::new());
+    let built =
+        providers::build_from_config(&config, Arc::clone(&runner)).expect("providers build");
+    let detection = discovery::detect(&config, providers::PROVIDERS, &runner).await;
+    let pipeline = Arc::new(Pipeline::with_detection(&config, built, detection));
+
+    let listener = tokio::net::TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind ephemeral loopback port");
+    let port = listener.local_addr().unwrap().port();
+    let log = Arc::new(LogCapture::default());
+    let serve_log = Arc::clone(&log);
+    tokio::spawn(async move {
+        let _ = api::serve(
+            listener,
+            pipeline,
+            serve_log,
+            Arc::new(DebugLog::disabled()),
+        )
+        .await;
+    });
+    MissingSelectedServer {
+        port,
+        log,
+        codex,
+        _config_dir: config_dir,
+        _missing_dir: missing_dir,
+    }
+}
+
+#[tokio::test]
+async fn models_omit_an_enabled_provider_whose_binary_is_missing() {
+    let server = start_missing_selected_server(
+        "  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex}'\n    timeout_secs: 30\n    effort: low\n",
+        codex_success_scenario("unused"),
+    )
+    .await;
+
+    let response = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
+
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        listed_model_ids(&response.body_json()),
+        ["codex", "passthrough", "inspect"],
+        "claude is enabled but missing, so only codex is available"
+    );
+}
+
+#[tokio::test]
+async fn selecting_a_missing_provider_is_an_http_error_and_runs_no_other_provider() {
+    let server = start_missing_selected_server(
+        "  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex}'\n    timeout_secs: 30\n    effort: low\n",
+        codex_success_scenario("unused"),
+    )
+    .await;
+
+    let response = post_model(server.port, "claude").await;
+
+    // The selected provider is not installed: an HTTP error, and no other
+    // provider runs (there is no fallback chain).
+    assert_eq!(response.status, 502, "body: {}", response.body_text());
+    // The fake only ever answers a startup detection probe (`--version`);
+    // a formatting call would arrive as `codex exec ...`.
+    let report = server.codex.report();
+    assert_eq!(
+        report["argv"],
+        json!(["--version"]),
+        "codex must not run after claude failed as NotInstalled: {report}"
+    );
+    let lines = server.log_lines();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains(" FAILED ") && line.contains("not installed")),
+        "a raw outcome naming the failure: {:?}",
+        lines
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("✗ claude") && line.contains("not installed")),
+        "the single attempt line carries the failure: {:?}",
+        lines
+    );
+}
+
+/// A model-less request is refused as such before availability matters: the
+/// only enabled provider's binary is missing, yet the answer is the 400, not
+/// a "not installed" failure.
+#[tokio::test]
+async fn model_less_request_is_an_http_400_even_when_the_provider_is_missing() {
+    let server =
+        start_missing_selected_server("  - id: codex\n    enabled: false\n    model: null\n    binary: codex\n    timeout_secs: 30\n    effort: low\n", json!({})).await;
+
+    let mut body: Value =
+        serde_json::from_str(&support::fixture("handy-request.json")).expect("fixture parses");
+    body.as_object_mut().expect("object").remove("model");
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &serde_json::to_vec(&body).expect("re-serializes"),
+        ),
+    )
+    .await;
+
+    assert_failure(&response, 400, "the request named no provider");
+    assert!(
+        !server.codex.report_path().exists(),
+        "no provider may run for a model-less request"
+    );
+    let lines = server.log_lines();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains(" FAILED ") && line.contains("the request named no provider")),
+        "the raw outcome names the missing model: {:?}",
+        lines
+    );
+}
+
+#[tokio::test]
+async fn authorization_header_is_ignored_and_never_logged() {
+    let result = "Autorizado.";
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario(result)).await;
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[
+                ("content-type", "application/json"),
+                ("authorization", "Bearer secret"),
+            ],
+            &handy_fixture_with_model("claude"),
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.body_json()["choices"][0]["message"]["content"],
+        result
+    );
+    assert!(server.fake.report_path().exists(), "the fake ran");
+    let lines = server.log_lines();
+    assert!(!lines.is_empty(), "a metadata line was written");
+    for line in &lines {
+        assert!(
+            !line.contains("secret"),
+            "authorization value leaked into log: {line}"
+        );
+        assert!(
+            !line.contains(FIXTURE_TRANSCRIPT),
+            "dictated text leaked into log: {line}"
+        );
+    }
+}
+
+/// Builds `pumice serve` YAML whose every registered provider binary points
+/// at its own disposable fake, so startup detection never looks a real CLI
+/// up on PATH. Returns the fakes — they must outlive the served process —
+/// and the YAML.
+fn hermetic_serve_yaml(port: u16, claude_scenario: Value) -> (FakeCli, Vec<FakeCli>, String) {
+    let claude = FakeCli::new(claude_scenario);
+    let codex = FakeCli::new(json!({}));
+    let mut fakes: Vec<FakeCli> = vec![codex];
+    let codex_path = fakes[0].path().display().to_string();
+    let mut yaml = format!(
+        "port: {port}\nproviders:\n  - id: claude\n    enabled: true\n    model: haiku\n    binary: '{}'\n    timeout_secs: 30\n    effort: low\n    thinking: false\n  - id: codex\n    enabled: true\n    model: gpt-6.1-sol\n    binary: '{codex_path}'\n    timeout_secs: 30\n    effort: low\n",
+        claude.path().display(),
+    );
+    // Disabled providers, each at its own fake so detection never searches PATH.
+    let kiro = FakeCli::new(json!({}));
+    yaml.push_str(&format!(
+        "  - id: kiro\n    enabled: false\n    binary: '{}'\n    model: null\n    timeout_secs: 30\n    effort: low\n",
+        kiro.path().display()
+    ));
+    fakes.push(kiro);
+    (claude, fakes, yaml)
+}
+
+/// Writes `yaml` to a fresh config file and returns its directory (kept
+/// alive by the caller) and path.
+fn write_config(yaml: &str) -> (TempDir, std::path::PathBuf) {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("pumice.yml");
+    fs::write(&path, support::relay_config(yaml)).expect("write config");
+    (dir, path)
+}
+
+#[test]
+fn occupied_port_exits_1_naming_port() {
+    let blocker = std::net::TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+        .expect("bind a port to occupy");
+    let port = blocker.local_addr().unwrap().port();
+    let (_claude, _fakes, yaml) = hermetic_serve_yaml(port, json!({}));
+    let (_dir, config_path) = write_config(&yaml);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pumice"))
+        .arg("serve")
+        .arg("--config")
+        .arg(&config_path)
+        .output()
+        .expect("run pumice serve");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stderr: {stderr}\nstdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        stderr.contains(&format!("port {port}")),
+        "message must name the port: {stderr}"
+    );
+    assert!(
+        stderr.contains("already in use"),
+        "message must explain the conflict: {stderr}"
+    );
+    assert!(
+        stderr.contains("Change \"port\" in"),
+        "message must point at the setting: {stderr}"
+    );
+}
+
+/// A port that was free at observation time; binding it again can in theory
+/// race, so the caller retries.
+fn grab_free_port() -> u16 {
+    let listener = std::net::TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+        .expect("bind ephemeral port");
+    listener.local_addr().unwrap().port()
+}
+
+/// Spawns `pumice serve` and returns the child plus a receiver holding the
+/// first stdout line, read on a helper thread.
+fn spawn_serve(config_path: &std::path::Path) -> (Child, mpsc::Receiver<Option<String>>) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pumice"))
+        .arg("serve")
+        .arg("--config")
+        .arg(config_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn pumice serve");
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut line = String::new();
+        let mut byte = [0u8; 1];
+        loop {
+            match stdout.read(&mut byte) {
+                Ok(0) => break,
+                Ok(_) => {
+                    line.push(byte[0] as char);
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = tx.send(if line.is_empty() { None } else { Some(line) });
+    });
+    (child, rx)
+}
+
+#[test]
+fn serve_prints_the_loopback_address() {
+    for attempt in 1..=3 {
+        let port = grab_free_port();
+        let (_claude, _fakes, yaml) = hermetic_serve_yaml(port, json!({}));
+        let (_dir, config_path) = write_config(&yaml);
+        let (mut child, line_rx) = spawn_serve(&config_path);
+
+        let line = line_rx
+            .recv_timeout(Duration::from_secs(15))
+            .unwrap_or_else(|_| {
+                let _ = child.kill();
+                panic!("pumice did not print its startup line (attempt {attempt})")
+            });
+
+        let Some(line) = line else {
+            // The child exited before printing: only a lost port race is
+            // tolerable, and only a few times.
+            let status = child.wait().expect("child exits");
+            let stderr = child
+                .stderr
+                .take()
+                .map(|mut err| {
+                    let mut text = String::new();
+                    let _ = err.read_to_string(&mut text);
+                    text
+                })
+                .unwrap_or_default();
+            assert!(
+                status.code() == Some(1) && stderr.contains("already in use"),
+                "pumice exited unexpectedly (attempt {attempt}): {stderr}"
+            );
+            continue;
+        };
+
+        assert!(
+            line.contains(&format!("http://127.0.0.1:{port}/v1")),
+            "startup line must name the IPv4 loopback address: {line}"
+        );
+        assert!(
+            !line.contains("0.0.0.0"),
+            "never any other interface: {line}"
+        );
+
+        child.kill().expect("stop pumice");
+        child.wait().expect("pumice reaped");
+        return;
+    }
+    panic!("could not start pumice on a free port after 3 attempts");
+}
+
+/// Spawns `pumice serve` like [`spawn_serve`] and additionally forwards every
+/// stderr line, so a test can watch the startup provider status lines.
+fn spawn_serve_with_stderr(
+    config_path: &std::path::Path,
+) -> (
+    Child,
+    mpsc::Receiver<Option<String>>,
+    mpsc::Receiver<String>,
+) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pumice"))
+        .arg("serve")
+        .arg("--config")
+        .arg(config_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn pumice serve");
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let (stdout_tx, stdout_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut line = String::new();
+        let mut byte = [0u8; 1];
+        loop {
+            match stdout.read(&mut byte) {
+                Ok(0) => break,
+                Ok(_) => {
+                    line.push(byte[0] as char);
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = stdout_tx.send(if line.is_empty() { None } else { Some(line) });
+    });
+    let stderr = child.stderr.take().expect("piped stderr");
+    let (stderr_tx, stderr_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stderr);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match std::io::BufRead::read_line(&mut reader, &mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
+                    if stderr_tx.send(trimmed).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    (child, stdout_rx, stderr_rx)
+}
+
+#[test]
+fn serve_prints_one_status_line_per_enabled_provider() {
+    let port = grab_free_port();
+    let (_claude, _fakes, yaml) = hermetic_serve_yaml(
+        port,
+        json!({"stdout": "2.1.288 (Claude Code)", "exit_code": 0}),
+    );
+    let (_dir, config_path) = write_config(&yaml);
+    let (mut child, _stdout_rx, stderr_rx) = spawn_serve_with_stderr(&config_path);
+
+    // First line: allow generous startup time (process spawn plus probes on
+    // a loaded CI box). Then drain the rest with a short idle timeout as the
+    // end-of-output signal: after the status lines, serve prints nothing more
+    // to stderr.
+    let mut lines: Vec<String> = Vec::new();
+    match stderr_rx.recv_timeout(Duration::from_secs(15)) {
+        Ok(line) => lines.push(line),
+        Err(error) => panic!("pumice printed no startup status lines: {error}"),
+    }
+    while let Ok(line) = stderr_rx.recv_timeout(Duration::from_millis(500)) {
+        lines.push(line);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+
+    for wanted in [
+        "provider claude: found 2.1.288",
+        "provider codex: found (version unavailable)",
+    ] {
+        assert!(
+            lines.iter().any(|line| line.contains(wanted)),
+            "startup must print {wanted:?}; stderr: {lines:?}"
+        );
+    }
+    // A disabled provider is detected but gets no line.
+    assert!(
+        !lines.iter().any(|line| line.starts_with("provider kiro:")),
+        "disabled provider kiro must get no line: {lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn passthrough_returns_handy_transcript_without_running_any_cli() {
+    let server = start_dual_server(
+        BOTH_AT_FAKES,
+        success_scenario("unused"),
+        codex_success_scenario("unused"),
+    )
+    .await;
+    let response = post_model(server.port, " PassThrough ").await;
+    assert_eq!(response.status, 200);
+    let body = response.body_json();
+    assert_eq!(body["model"], "passthrough");
+    assert_eq!(body["choices"][0]["message"]["content"], FIXTURE_TRANSCRIPT);
+    assert!(!server.claude.report_path().exists());
+    assert!(!server.codex.report_path().exists());
+}
+
+#[tokio::test]
+async fn inspect_echoes_the_exact_request_body_bytes() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    // Deliberately irregular spacing, an unknown field and an escaped Unicode
+    // code point so a deserialize-reserialize round trip would change the text.
+    let raw_body =
+        br#"{ "model" : "inspect" , "custom_field" : [1,2] , "messages" : [{"role":"user","content":"  \u00e9  "}] , "stream" : false }"#;
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            raw_body,
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    let body = response.body_json();
+    assert_eq!(body["model"], "inspect");
+    let echoed = body["choices"][0]["message"]["content"]
+        .as_str()
+        .expect("content is a string");
+    assert_eq!(echoed.as_bytes(), raw_body, "body echoed byte for byte");
+    assert!(
+        !server.fake.report_path().exists(),
+        "inspect must not run a CLI"
+    );
+
+    let parsed: Value = serde_json::from_str(echoed).expect("echoed content parses as JSON");
+    assert_eq!(parsed["custom_field"], json!([1, 2]));
+    assert_eq!(parsed["messages"][0]["content"], "  \u{00e9}  ");
+
+    let lines = server.log_lines();
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].contains(" inspect "), "line: {}", lines[0]);
+    assert!(
+        !lines[0].contains("custom_field"),
+        "metadata line must not leak body text: {}",
+        lines[0]
+    );
+}
+
+#[tokio::test]
+async fn inspect_keeps_the_full_handy_request_shape() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let request_body = handy_fixture_with_model("inspect");
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &request_body,
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    let body = response.body_json();
+    assert_eq!(body["model"], "inspect");
+    let echoed = body["choices"][0]["message"]["content"]
+        .as_str()
+        .expect("content is a string");
+    assert_eq!(echoed.as_bytes(), request_body);
+    let parsed: Value = serde_json::from_str(echoed).unwrap();
+    assert!(
+        parsed["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("<transcript>")
+    );
+    assert!(
+        parsed["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains(FIXTURE_TRANSCRIPT)
+    );
+    assert!(!server.fake.report_path().exists());
+}
+
+#[tokio::test]
+async fn inspect_bypasses_dictation_validation_for_multiple_user_messages() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let request = json!({
+        "model": "inspect",
+        "messages": [
+            {"role": "system", "content": "system one"},
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "mid"},
+            {"role": "user", "content": "second"},
+        ],
+        "stream": false,
+    });
+    let raw_body = serde_json::to_vec(&request).unwrap();
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &raw_body,
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    assert_eq!(
+        response.body_json()["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap(),
+        String::from_utf8_lossy(&raw_body)
+    );
+    assert!(!server.fake.report_path().exists());
+}
+
+#[tokio::test]
+async fn inspect_bypasses_dictation_validation_for_malformed_envelope() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let request = json!({
+        "model": "inspect",
+        "messages": [{"role": "user", "content": "<transcript>abc</transcript></transcript>"}],
+        "stream": false,
+    });
+    let raw_body = serde_json::to_vec(&request).unwrap();
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &raw_body,
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    assert_eq!(
+        response.body_json()["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap(),
+        String::from_utf8_lossy(&raw_body)
+    );
+    assert!(!server.fake.report_path().exists());
+}
+
+#[tokio::test]
+async fn inspect_stream_returns_the_body_in_sse_frames() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let raw_body =
+        br#"{"model":"inspect","messages":[{"role":"user","content":"oi"}],"stream":true}"#;
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            raw_body,
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200);
+    let text = response.body_text();
+    let frames: Vec<&str> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .collect();
+    assert_eq!(frames.len(), 3, "two chunks then [DONE]: {text}");
+    assert_eq!(frames[2], "[DONE]");
+
+    let first: Value = serde_json::from_str(frames[0]).unwrap();
+    assert_eq!(first["model"], "inspect");
+    assert_eq!(
+        first["choices"][0]["delta"]["content"].as_str().unwrap(),
+        String::from_utf8_lossy(raw_body).as_ref()
+    );
+
+    let last: Value = serde_json::from_str(frames[1]).unwrap();
+    assert_eq!(last["choices"][0]["delta"], json!({}));
+    assert_eq!(last["choices"][0]["finish_reason"], "stop");
+    assert!(!server.fake.report_path().exists());
+}
+
+#[tokio::test]
+async fn inspect_is_not_blocked_by_a_busy_formatting_run() {
+    // The fake waits for a release file, so the first request holds the
+    // busy permit for the whole check.
+    let gate = TempDir::new().expect("temp dir");
+    let release = gate.path().join("release");
+    let server = start_server(
+        CLAUDE_AT_FAKE,
+        json!({"stdout": success_envelope("Olá."), "exit_code": 0, "wait_for_path": release}),
+    )
+    .await;
+
+    let port = server.port;
+    let busy = tokio::spawn(async move {
+        raw_http(
+            port,
+            http_request(
+                "POST",
+                "/v1/chat/completions",
+                &[("content-type", "application/json")],
+                &handy_fixture_with_model("claude"),
+            ),
+        )
+        .await
+    });
+
+    // Wait until the first request has started the fake and holds the busy permit.
+    wait_for_fake_start(&server).await;
+
+    let raw_body = br#"{"model":"inspect","messages":[{"role":"user","content":"busy test"}]}"#;
+    let started = std::time::Instant::now();
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            raw_body,
+        ),
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    // The gate is still closed: inspect answered past the busy permit. The
+    // bound is generous; it only rules out waiting for the permit.
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "inspect must bypass the busy guard, took {elapsed:?}"
+    );
+    assert!(
+        !busy.is_finished(),
+        "the formatting run still holds the permit"
+    );
+    fs::write(&release, "").expect("release the fake");
+    assert_eq!(
+        response.body_json()["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap(),
+        String::from_utf8_lossy(raw_body)
+    );
+}
+
+#[tokio::test]
+async fn inspect_selection_is_case_insensitive_and_trims_whitespace() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let request = json!({
+        "model": " Inspect ",
+        "messages": [{"role": "user", "content": "oi"}],
+        "stream": false,
+    });
+    let raw_body = serde_json::to_vec(&request).unwrap();
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            &raw_body,
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    let body = response.body_json();
+    assert_eq!(body["model"], "inspect");
+    assert!(!server.fake.report_path().exists());
+}
+
+#[tokio::test]
+async fn inspect_accepts_absent_messages_null_numeric_object_content_and_arbitrary_options() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let cases = [
+        (
+            br#"{"model":"inspect","arbitrary_option":{"nested":null}}"#.as_slice(),
+            "absent messages and arbitrary option",
+        ),
+        (
+            br#"{"model":"inspect","messages":[{"role":"user","content":null}]}"#.as_slice(),
+            "null content",
+        ),
+        (
+            br#"{"model":"inspect","messages":[{"role":"user","content":123}]}"#.as_slice(),
+            "numeric content",
+        ),
+        (
+            br#"{"model":"inspect","messages":[{"role":"assistant","content":{"not":"text"}}]}"#
+                .as_slice(),
+            "object content",
+        ),
+    ];
+    for (raw_body, label) in cases {
+        let response = raw_http(
+            server.port,
+            http_request(
+                "POST",
+                "/v1/chat/completions",
+                &[("content-type", "application/json")],
+                raw_body,
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status, 200, "{label}: {}", response.body_text());
+        let body = response.body_json();
+        assert_eq!(body["model"], "inspect", "{label}");
+        let echoed = body["choices"][0]["message"]["content"]
+            .as_str()
+            .expect("content is a string");
+        assert_eq!(
+            echoed.as_bytes(),
+            raw_body,
+            "{label}: body echoed byte for byte"
+        );
+    }
+    assert!(
+        !server.fake.report_path().exists(),
+        "inspect must not run a CLI"
+    );
+}
+
+#[tokio::test]
+async fn normal_model_rejects_absent_messages_and_unsupported_content_shapes() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let cases = [
+        (r#"{"model":"claude","stream":false}"#, "missing messages"),
+        (
+            r#"{"model":"claude","messages":[{"role":"user","content":null}],"stream":false}"#,
+            "null content",
+        ),
+        (
+            r#"{"model":"claude","messages":[{"role":"user","content":123}],"stream":false}"#,
+            "numeric content",
+        ),
+        (
+            r#"{"model":"claude","messages":[{"role":"user","content":{"not":"text"}}],"stream":false}"#,
+            "object content",
+        ),
+    ];
+    for (body, label) in cases {
+        let response = raw_http(
+            server.port,
+            http_request(
+                "POST",
+                "/v1/chat/completions",
+                &[("content-type", "application/json")],
+                body.as_bytes(),
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            response.status,
+            400,
+            "{label} should be rejected: {}",
+            response.body_text()
+        );
+        let response_body = response.body_json();
+        assert_eq!(response_body["error"]["type"], "invalid_request_error");
+        assert!(
+            response_body["error"]["message"]
+                .as_str()
+                .expect("message is a string")
+                .contains("not valid JSON"),
+            "{label}: {}",
+            response.body_text()
+        );
+    }
+    assert!(
+        !server.fake.report_path().exists(),
+        "the fake must not run for rejected requests"
+    );
+}
+
+#[tokio::test]
+async fn inspect_works_with_no_available_providers_and_no_fallback() {
+    let server =
+        start_missing_selected_server("  - id: codex\n    enabled: false\n    model: null\n    binary: codex\n    timeout_secs: 30\n    effort: low\n", json!({})).await;
+
+    let models = raw_http(server.port, http_request("GET", "/v1/models", &[], b"")).await;
+    assert_eq!(models.status, 200);
+    assert_eq!(
+        listed_model_ids(&models.body_json()),
+        ["passthrough", "inspect"],
+        "no enabled provider is available"
+    );
+
+    let raw_body = br#"{"model":"inspect","messages":[],"extra":true}"#;
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            raw_body,
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body_text());
+    let body = response.body_json();
+    assert_eq!(body["model"], "inspect");
+    assert_eq!(
+        body["choices"][0]["message"]["content"]
+            .as_str()
+            .expect("content is a string")
+            .as_bytes(),
+        raw_body
+    );
+    assert!(
+        !server.codex.report_path().exists(),
+        "codex must not run when disabled"
+    );
+}
+
+#[tokio::test]
+async fn inspect_rejects_malformed_json_encoding_and_stream_without_leaking_text() {
+    let server = start_server(CLAUDE_AT_FAKE, success_scenario("unused")).await;
+    let cases: &[&[u8]] = &[
+        b"{\"model\":\"inspect\",\"secret-marker\":\"\xff\"}",
+        br#"{"model":"inspect","secret-marker":"text"} trailing"#,
+        br#"{"model":"inspect","secret-marker":"text","stream":"yes"}"#,
+        br#"{"model":"inspect","secret-marker":"text","stream":1}"#,
+    ];
+    for bytes in cases {
+        let response = raw_http(
+            server.port,
+            http_request(
+                "POST",
+                "/v1/chat/completions",
+                &[("content-type", "application/json")],
+                bytes,
+            ),
+        )
+        .await;
+        assert_eq!(response.status, 400);
+        assert!(!response.body_text().contains("secret-marker"));
+        assert_eq!(
+            response.body_json()["error"]["message"],
+            "the request body is not valid JSON"
+        );
+    }
+    let bytes = br#"{"model":"inspect","stream":null}"#;
+    let response = raw_http(
+        server.port,
+        http_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-type", "application/json")],
+            bytes,
+        ),
+    )
+    .await;
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.body_json()["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap()
+            .as_bytes(),
+        bytes
+    );
+    assert!(!server.fake.report_path().exists());
+}
+
+/// Asserts an OpenAI-style error response with `status` whose message
+/// contains `reason` and never the dictation.
+fn assert_failure(response: &RawResponse, status: u16, reason: &str) {
+    assert_eq!(response.status, status, "body: {}", response.body_text());
+    let body = response.body_json();
+    let message = body["error"]["message"].as_str().expect("error message");
+    assert!(message.contains(reason), "message: {message}");
+    assert!(!response.body_text().contains(FIXTURE_TRANSCRIPT));
+}
+
+/// A Claude error envelope whose `result` is the CLI's failure message.
+fn claude_error_scenario(message: &str) -> Value {
+    json!({
+        "stdout": json!({"type": "result", "subtype": "success", "is_error": true, "result": message}).to_string(),
+        "exit_code": 1,
+    })
+}
+
+#[tokio::test]
+async fn every_failure_kind_is_one_http_error_without_dictation() {
+    let claude_timeout_1s = CLAUDE_AT_FAKE.replacen("timeout_secs: 30\n", "timeout_secs: 1\n", 1);
+    let cases: Vec<(&str, String, Value, u16, &str)> = vec![
+        (
+            "rate limit",
+            CLAUDE_AT_FAKE.to_owned(),
+            claude_error_scenario(
+                r#"API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}"#,
+            ),
+            429,
+            "rate_limit_error",
+        ),
+        (
+            "quota",
+            CLAUDE_AT_FAKE.to_owned(),
+            claude_error_scenario("You've hit your weekly limit · resets Monday"),
+            429,
+            "rate_limit_error",
+        ),
+        (
+            "not logged in",
+            CLAUDE_AT_FAKE.to_owned(),
+            claude_error_scenario("Not logged in · Please run /login"),
+            502,
+            "server_error",
+        ),
+        (
+            "cleanup rejection",
+            CLAUDE_AT_FAKE.to_owned(),
+            success_scenario("<think>only reasoning</think>"),
+            502,
+            "server_error",
+        ),
+        (
+            "timeout",
+            claude_timeout_1s,
+            json!({"stdout": success_envelope("late"), "exit_code": 0, "sleep_ms": 3_000}),
+            504,
+            "server_error",
+        ),
+    ];
+    for (name, yaml, scenario, status, error_type) in cases {
+        for stream in [false, true] {
+            let server = start_server(&yaml, scenario.clone()).await;
+            let mut body: Value =
+                serde_json::from_str(&support::fixture("handy-request.json")).unwrap();
+            body["model"] = json!("claude");
+            body["stream"] = json!(stream);
+            let response = raw_http(
+                server.port,
+                http_request(
+                    "POST",
+                    "/v1/chat/completions",
+                    &[("content-type", "application/json")],
+                    &serde_json::to_vec(&body).unwrap(),
+                ),
+            )
+            .await;
+            let case = format!("{name} (stream {stream})");
+            assert_eq!(response.status, status, "{case}: {}", response.body_text());
+            assert!(
+                response
+                    .headers
+                    .to_ascii_lowercase()
+                    .contains("content-type: application/json"),
+                "{case}: {}",
+                response.headers
+            );
+            assert_eq!(response.body_json()["error"]["type"], error_type, "{case}");
+            assert!(!response.body_text().contains(FIXTURE_TRANSCRIPT), "{case}");
+            let lines = server.log_lines();
+            assert_eq!(lines.len(), 1, "{case}: one log entry: {lines:?}");
+            assert!(
+                lines[0].contains(&format!("FAILED       HTTP {status}")),
+                "{case}: {}",
+                lines[0]
+            );
+            assert!(!lines[0].contains(FIXTURE_TRANSCRIPT), "{case}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_debug_log_records_a_failure_without_response_text() {
+    let (server, debug_path) = start_server_with_debug_log(
+        CLAUDE_AT_FAKE,
+        claude_error_scenario("Not logged in · Please run /login"),
+    )
+    .await;
+    let response = post_model(server.port, "claude").await;
+    assert_eq!(response.status, 502);
+    let record: Value = serde_json::from_str(
+        fs::read_to_string(&debug_path)
+            .unwrap()
+            .lines()
+            .next()
+            .expect("one record"),
+    )
+    .unwrap();
+    assert_eq!(record["outcome"]["kind"], "failed");
+    assert_eq!(record["response_text"], "", "no text was sent");
+}
