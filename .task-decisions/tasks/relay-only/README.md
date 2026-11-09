@@ -3,7 +3,7 @@ title: Restore Pumice as the relay only
 state: In progress
 ticket: —
 branch: relay-only
-mr: —
+mr: PR #140
 start: 2026-11-09
 end: —
 ---
