@@ -8,9 +8,9 @@ areas: architecture, api, pipeline, providers, transcription, config, cli, distr
 
 Pumice lets dictation apps (Handy, OpenWhispr) use the AI subscriptions the user already pays for. It is a small local tool on `127.0.0.1` with an OpenAI-compatible interface: it passes the app's request, unchanged, to the official CLI of a subscription the user is logged into (Claude Code, Codex, Kiro) and returns the answer in the OpenAI format the app expects.
 
-Each task is one branch and pull request; the task folder is named after the branch. Story IDs (`S4.8`) are kept in titles; there is no external tracker. Owner decisions recorded here take precedence over descriptive documentation; current behaviour is documented in the module guides in `docs/`.
+Each task is one branch and pull request; the task folder is named after the branch. Story IDs (`S4.8`) are kept in titles; there is no external tracker. Owner decisions recorded here take precedence over descriptive documentation; current behaviour is documented in `docs/api.md`, `docs/install.md` and `docs/providers.md`.
 
-Historical task notes may cite product and research documents removed during documentation consolidation. Those references describe the repository at the time; retrieve the cited files from Git history. Current behaviour is documented in the module guides and `docs/providers.md`.
+Historical task notes may cite product and research documents removed during documentation consolidation. Those references describe the repository at the time; retrieve the cited files from Git history. The relay-only scope is recorded in `relay-only/D1`; the current guides describe that scope.
 
 ## Vocabulary
 

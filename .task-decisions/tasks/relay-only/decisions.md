@@ -14,3 +14,16 @@
 **Rejected.** Keeping the modules as optional product features: the owner requested their complete removal.
 
 **Consequences.** This replaces the modular product direction in `arch-modules/D1`–`D4`, `D6`–`D14` and `D16`, and the transcription, formatter and orchestrator features built under it. Historical task notes and Git history describe past work; they do not authorize restoring removed features. Current delivery, docs and project rules must describe the relay alone. Provider, configuration validation and security decisions still apply to the relay.
+
+### D2 · Active · Align AGENTS.md with the relay-only product
+- date: 2026-11-09
+- decided by: brasillero
+- origin: conversation
+- area: docs
+- revisit if: the owner changes the product scope
+
+**Decision.** The owner authorizes updating AGENTS.md to describe Pumice as relay-only, removing obsolete module rules while preserving provider, security, testing and Git rules.
+
+**Why.** The reserved project rules must describe the product requested in D1.
+
+**Rejected.** Leaving the obsolete rules in place and proposing their replacement only in the PR.
