@@ -1,17 +1,30 @@
-[workspace]
-members = [".", "crates/formatter", "crates/relay", "crates/settings", "crates/transcription"]
-default-members = [".", "crates/formatter", "crates/relay", "crates/settings", "crates/transcription"]
-resolver = "3"
-
-[workspace.package]
+[package]
+name = "pumice"
 version = "0.3.0"
 edition = "2024"
 license = "MIT"
+description = "OpenAI-compatible relay for the AI subscriptions you already use"
+default-run = "pumice"
 
-[workspace.dependencies]
-clap = { version = "4.5", features = ["derive"] }
-hound = "3.5"
-rubato = { version = "5.0.1", default-features = false }
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "pumice"
+path = "src/main.rs"
+
+# Fake AI CLI for tests only; never shipped or installed.
+[[bin]]
+name = "pumice-test-cli"
+path = "tests/support/fake_cli.rs"
+required-features = ["test-helpers"]
+test = false
+bench = false
+
+[features]
+test-helpers = []
+
+[dependencies]
 axum = { version = "0.8.9", default-features = false, features = [
     "http1", "json", "tokio",
 ] }
@@ -28,12 +41,8 @@ serde = { version = "1", features = ["derive"] }
 serde-saphyr = { version = "1.3.0", default-features = false, features = [
     "deserialize",
 ] }
-# preserve_order + raw_value: the formatter re-emits the client request's
-# values as raw bytes (serde_json::RawValue), and neither it nor the relay may
-# reorder nested keys (OpenAI Structured Outputs follow schema key order).
-# Declared here because Cargo unifies the features across every crate built
-# together anyway.
-serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
+# Preserve the client's nested JSON key order.
+serde_json = { version = "1", features = ["preserve_order"] }
 tempfile = "3"
 tokio = { version = "1.53.2", features = [
     "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync",
@@ -42,89 +51,19 @@ tokio = { version = "1.53.2", features = [
 jiff = "0.2.38"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
 toml = { version = "1.1.6", default-features = false, features = ["parse", "std", "serde"] }
+
+[target.'cfg(unix)'.dependencies]
 libc = "0.2.190"
 
-[package]
-name = "pumice"
-version = "0.3.0"
-edition = "2024"
-description = "Connects dictation apps to the AI assistants you already use"
-license = "MIT"
-default-run = "pumice"
-
-[lib]
-name = "pumice"
-path = "src/lib.rs"
-
-[[bin]]
-name = "pumice"
-path = "src/main.rs"
-
-# Portable stand-in for `pumice-transcribe` used only by the dispatcher test
-# suite. It is never released.
-[[bin]]
-name = "pumice-test-transcribe"
-path = "tests/support/transcribe_stub.rs"
-required-features = ["test-helpers"]
-test = false
-bench = false
-
-# The relay's portable fake AI CLI (crates/relay/tests/support/fake_cli.rs),
-# built for the orchestrator's integration tests too: `pumice run` tests point
-# the relay configuration at it. Same source, never released; its own name
-# keeps its output apart from the relay package's `pumice-test-cli`.
-[[bin]]
-name = "pumice-root-test-cli"
-path = "crates/relay/tests/support/fake_cli.rs"
-required-features = ["test-helpers"]
-test = false
-bench = false
-
-[features]
-# Builds the test helper binaries above. Only the self dev-dependency below
-# turns it on, so `cargo test` and `clippy --all-targets` build them and
-# `cargo install` / `cargo build --bin pumice` leave them out.
-test-helpers = []
-
-[dependencies]
-pumice-formatter = { path = "crates/formatter" }
-pumice-relay = { path = "crates/relay" }
-pumice-settings = { path = "crates/settings" }
-# `pumice serve`'s loopback frontend and its client for the managed child's
-# `/ready`: the same hyper stack the relay already builds into this binary.
-bytes = { workspace = true }
-http-body-util = { workspace = true }
-hyper = { workspace = true, features = ["server"] }
-hyper-util = { workspace = true }
-# `pumice serve`'s dictation upload: the multipart parser the transcription
-# child already uses for the same fields and limits (same versions, already
-# in the lockfile), so both ends read a form the same way.
-futures-core = "0.3"
-multer = "3.1.0"
-serde = { workspace = true }
-serde-saphyr = { workspace = true }
-serde_json = { workspace = true }
-tokio = { workspace = true }
-
 [target.'cfg(windows)'.dependencies]
-# Console control handler for the transcription dispatch wait (D4).
 windows-sys = { version = "0.61", features = [
-    "Win32_Foundation",
-    "Win32_System_Console",
+    "Win32_Foundation", "Win32_System_Console",
 ] }
 
 [dev-dependencies]
 pumice = { path = ".", features = ["test-helpers"] }
-serde_json = { workspace = true }
-tempfile = { workspace = true }
+tokio = { version = "1.53.2", features = ["test-util"] }
 
-[target.'cfg(unix)'.dev-dependencies]
-# The dispatcher tests deliver a signal to the exec'd sibling by PID.
-libc = { workspace = true }
-
-# Debug and test builds keep file and line numbers for Pumice's own code, so
-# backtraces stay readable, and drop debug info from dependencies. Full debug
-# info made `target/` several times larger and linking slower.
 [profile.dev]
 debug = "line-tables-only"
 

@@ -1,73 +1,28 @@
 # Installing Pumice
 
-Pumice is a small local tool that connects your dictation app to the AI
-assistants you already use. It listens on `http://127.0.0.1:7567/v1`,
-receives the prompt and the text transcribed by
-[Handy](https://github.com/cjpais/Handy), passes them unchanged to an AI CLI
-you already have installed and logged into, and returns the answer to be
-pasted. The app's prompt decides what happens to the text.
+Pumice connects OpenAI-compatible clients to official Claude Code, Codex and Kiro CLIs. Install and log into a supported CLI yourself.
 
-> **Availability:** check
-> [GitHub Releases](https://github.com/brasillero/pumice/releases) for the
-> current published versions. For package-manager availability, see the
-> [npm registry](https://www.npmjs.com/package/@brasillero/pumice). Install the
-> `@brasillero/pumice` package with npm, pnpm, Bun or npx (Node.js >= 22 for the
-> launcher; the executable itself is standalone). The installed command is `pumice`.
+Extract the archive and run `./pumice` on Linux/macOS or `.\pumice.exe` in Windows PowerShell. Add the executable to your PATH to run `pumice` from anywhere. `pumice serve` is an alias; `--plain` uses one-line stderr logs. Stop with Ctrl-C.
 
-This archive has `pumice` only. Transcription (`pumice transcribe`) ships
-in the npm platform packages for Windows x64, Linux x64 and Apple Silicon;
-install `@brasillero/pumice` with npm for it.
+The service listens on `http://127.0.0.1:7567/v1`. In Handy, choose the Custom post-processing provider, that base URL, an empty API key, and an enabled model (`claude`, `codex` or `kiro`). The client owns the prompt.
 
-## Run the service
+## Settings
 
-Extract this archive anywhere and start the service from the extracted
-folder:
+First start creates `pumice.yml` automatically:
 
-```
-./pumice relay serve
-```
+- Windows: `%APPDATA%\pumice\pumice.yml`
+- Linux/macOS: `~/.config/pumice/pumice.yml`, or `$XDG_CONFIG_HOME/pumice/pumice.yml`
 
-On Windows PowerShell, run `.\pumice.exe relay serve` from the extracted folder.
-To use `pumice` from any directory, put the executable in a directory on your
-user PATH. (`pumice relay` with no further arguments is the same command, and
-`pumice relay --config <path>` starts it with an explicit config file.)
+Edit it to select providers and models. Every setting is required. Existing files are never overwritten. `pumice check-config` validates the file and reports errors with the file and line. `pumice --config PATH` reads an existing file elsewhere. `pumice doctor` reports installed CLIs without spending quota or creating settings.
 
-No installation step and no runtime are needed: the executable is
-self-contained. It binds to `127.0.0.1` only and makes no outbound
-external connections of its own. Stop it with Ctrl-C.
-
-## Configuration
-
-The service needs a config file in which every setting is written (there
-are no built-in defaults; a missing setting is reported with its file and
-line). The first command that needs settings creates missing per-user
-files from the supplied examples, including `relay.yml`. Edit it at:
-
-- Windows: `%APPDATA%\pumice\relay.yml`
-- Linux and macOS: `~/.config/pumice/relay.yml`
-  (or `$XDG_CONFIG_HOME/pumice/relay.yml`)
-
-Run `./pumice relay check-config` (or `.\pumice.exe relay check-config` on Windows) to validate the file. Keep your config outside
-this archive so upgrading is a simple folder replace.
-
-Upgrading from 0.2: `pumice` alone no longer starts the service (use
-`pumice relay serve`), `pumice.yaml` is no longer read (rename it to
-`relay.yml`), and every setting must now be written; `check-config` names
-each missing one. Details are in the release notes and in
-https://github.com/brasillero/pumice/blob/main/docs/install.md#upgrading-from-02
-
-## Point Handy at it
-
-In Handy, set the post-processing endpoint to `http://127.0.0.1:7567/v1`
-(Custom provider, API key empty, model `claude`, `codex`, `kiro` or
-`passthrough`).
+Before upgrading, rename an existing `relay.yml` or `pumice.yaml` to `pumice.yml`, and change service commands to `pumice --plain`. Keep settings outside the extracted archive.
 
 ## Contents
 
-- `pumice` (or `pumice.exe`) — the service executable
-- `LICENSE` — MIT license
-- `THIRD_PARTY_NOTICES.md` — license notices for the third-party code and
-  content in the executable (its Rust dependencies, the C runtime it links
-  and the Handy-derived built-in formatter prompt)
-- `relay.example.yml` — commented reference configuration with every
-  setting; the executable creates initial per-user files automatically
+- `pumice` or `pumice.exe`: self-contained service executable
+- `LICENSE`: Pumice's MIT license
+- `THIRD_PARTY_NOTICES.md`: dependency, Rust standard library and runtime notices for this target
+- `pumice.example.yml`: complete reference configuration
+- `INSTALL.md`: this guide
+
+Full documentation: https://github.com/brasillero/pumice/blob/main/docs/install.md

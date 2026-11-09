@@ -14,7 +14,7 @@ LOCKFILE = """\
 version = 4
 
 [[package]]
-name = "opus"
+name = "serde"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "abc"
@@ -23,11 +23,11 @@ checksum = "abc"
 name = "pumice"
 version = "{version}"
 dependencies = [
- "opus",
+ "serde",
 ]
 """
 
-WORKSPACE = {"pumice", "pumice-transcription"}
+WORKSPACE = {"pumice"}
 WS_HASH = "0123456789abcdef"
 WS_TEST_HASH = "1111111111111111"
 WS_BUILD_HASH = "2222222222222222"
@@ -43,28 +43,26 @@ def touch(path: Path) -> Path:
 
 def make_profile(profile: Path) -> None:
     """A profile directory with workspace units, an external crate whose
-    name is also a workspace test target (`opus`) and a CMake-built -sys
+    name is also a workspace test target (`serde`) and a build-script
     dependency."""
     for name in (
-        f".fingerprint/pumice-transcription-{WS_HASH}/lib-pumice_transcription",
-        f".fingerprint/pumice-transcription-{WS_TEST_HASH}/test-integration-test-opus",
-        f".fingerprint/opus-{DEP_HASH}/lib-opus",
-        f".fingerprint/transcribe-cpp-sys-{SYS_HASH}/run-build-script",
-        f"build/pumice-transcription-{WS_BUILD_HASH}/build-script-build",
-        f"build/transcribe-cpp-sys-{SYS_HASH}/output",
-        f"build/transcribe-cpp-sys-{SYS_HASH}/out/lib/libtranscribe.so",
-        f"build/transcribe-cpp-sys-{SYS_HASH}/out/build/CMakeCache.txt",
-        f"build/transcribe-cpp-sys-{SYS_HASH}/out/build/ggml/ggml.c.o",
-        f"deps/libpumice_transcription-{WS_HASH}.rlib",
-        f"deps/pumice_transcription-{WS_HASH}.d",
-        f"deps/opus-{WS_TEST_HASH}",
-        f"deps/opus-{WS_TEST_HASH}.d",
-        f"deps/libopus-{DEP_HASH}.rlib",
-        f"deps/opus-{DEP_HASH}.d",
-        "deps/transcribe.dll",
+        f".fingerprint/pumice-{WS_HASH}/lib-pumice",
+        f".fingerprint/pumice-{WS_TEST_HASH}/test-integration-test-serde",
+        f".fingerprint/serde-{DEP_HASH}/lib-serde",
+        f".fingerprint/some-sys-{SYS_HASH}/run-build-script",
+        f"build/pumice-{WS_BUILD_HASH}/build-script-build",
+        f"build/some-sys-{SYS_HASH}/output",
+        f"build/some-sys-{SYS_HASH}/out/lib/libsome.a",
+        f"deps/libpumice-{WS_HASH}.rlib",
+        f"deps/pumice-{WS_HASH}.d",
+        f"deps/serde-{WS_TEST_HASH}",
+        f"deps/serde-{WS_TEST_HASH}.d",
+        f"deps/libserde-{DEP_HASH}.rlib",
+        f"deps/serde-{DEP_HASH}.d",
+        "deps/some.dll",
         "incremental/pumice-abc/s-1/query-cache.bin",
-        "pumice-transcribe",
-        "pumice-transcribe.d",
+        "pumice",
+        "pumice.d",
         ".cargo-lock",
     ):
         touch(profile / name)
@@ -86,7 +84,7 @@ class LockfileTests(unittest.TestCase):
             first = ci_cargo_cache.lockfile_dependencies(lock)
             lock.write_text(LOCKFILE.format(version="0.4.0"))
             self.assertEqual(ci_cargo_cache.lockfile_dependencies(lock), first)
-            self.assertIn('name = "opus"', first)
+            self.assertIn('name = "serde"', first)
             self.assertNotIn('name = "pumice"', first)
 
     def test_crlf_checkout_reads_the_same(self):
@@ -182,10 +180,10 @@ class PruneTests(unittest.TestCase):
         make_profile(self.target / "debug")
         make_profile(self.target / "x86_64-unknown-linux-musl" / "release")
         touch(self.target / "x86_64-unknown-linux-musl" / "CACHEDIR.TAG.not-a-profile")
-        nested = self.target / "cpu-variants"
+        nested = self.target / "nested"
         touch(nested / "CACHEDIR.TAG")
         make_profile(nested / "release")
-        touch(nested / "stage" / "pumice-transcribe")
+        touch(nested / "stage" / "pumice")
         touch(nested / "cargo-build.json")
         touch(self.target / "tmp" / "test-scratch")
 
@@ -198,18 +196,17 @@ class PruneTests(unittest.TestCase):
 
     def test_profiles_keep_only_dependencies(self):
         ci_cargo_cache.prune_target(self.target, WORKSPACE)
-        for profile in ("debug", "x86_64-unknown-linux-musl/release", "cpu-variants/release"):
+        for profile in ("debug", "x86_64-unknown-linux-musl/release", "nested/release"):
             self.assertEqual(
                 self.kept(profile),
                 {
-                    f"{profile}/.fingerprint/opus-{DEP_HASH}/lib-opus",
-                    f"{profile}/.fingerprint/transcribe-cpp-sys-{SYS_HASH}/run-build-script",
-                    f"{profile}/build/transcribe-cpp-sys-{SYS_HASH}/output",
-                    f"{profile}/build/transcribe-cpp-sys-{SYS_HASH}/out/lib/libtranscribe.so",
-                    f"{profile}/build/transcribe-cpp-sys-{SYS_HASH}/out/build/CMakeCache.txt",
-                    f"{profile}/deps/libopus-{DEP_HASH}.rlib",
-                    f"{profile}/deps/opus-{DEP_HASH}.d",
-                    f"{profile}/deps/transcribe.dll",
+                    f"{profile}/.fingerprint/serde-{DEP_HASH}/lib-serde",
+                    f"{profile}/.fingerprint/some-sys-{SYS_HASH}/run-build-script",
+                    f"{profile}/build/some-sys-{SYS_HASH}/output",
+                    f"{profile}/build/some-sys-{SYS_HASH}/out/lib/libsome.a",
+                    f"{profile}/deps/libserde-{DEP_HASH}.rlib",
+                    f"{profile}/deps/serde-{DEP_HASH}.d",
+                    f"{profile}/deps/some.dll",
                 },
                 profile,
             )
@@ -219,11 +216,11 @@ class PruneTests(unittest.TestCase):
         top = {
             name
             for name in listing(self.target)
-            if "/" not in name or name.startswith("cpu-variants/") and name.count("/") == 1
+            if "/" not in name or name.startswith("nested/") and name.count("/") == 1
         }
         self.assertEqual(
             top,
-            {"CACHEDIR.TAG", ".rustc_info.json", "cpu-variants/CACHEDIR.TAG"},
+            {"CACHEDIR.TAG", ".rustc_info.json", "nested/CACHEDIR.TAG"},
         )
         self.assertFalse((self.target / "tmp").exists())
         self.assertFalse((self.target / "x86_64-unknown-linux-musl" / "CACHEDIR.TAG.not-a-profile").exists())

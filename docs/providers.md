@@ -48,7 +48,7 @@ straight through the provider. Real calls and timings below include that hop.
 
 ### Effort and thinking
 
-`relay.yml` writes `effort: low | medium | high` on every provider entry
+`pumice.yml` writes `effort: low | medium | high` on every provider entry
 and `thinking: true | false` on the `claude` entry only
 (`p16-provider-effort/D2`, `D4`, `D5`). Checked on 2026-10-23 (Claude Code
 re-checked on 2026-10-26), read from the installed CLIs; no AI call was made:
@@ -79,8 +79,8 @@ run time.
 - `thinking` is required on `claude` (also when disabled) and must be
   `true` or `false`. On any other entry the key fails at its line: those
   CLIs reason through effort alone (`p16-provider-effort/D5`).
-- The shipped [`relay.example.yml`](../relay.example.yml), also the
-  first-start `relay.yml`, writes `effort: low` on every entry and
+- The shipped [`pumice.example.yml`](../pumice.example.yml), also the
+  first-start `pumice.yml`, writes `effort: low` on every entry and
   `thinking: false` on `claude`.
 
 ### Models that cannot honour effort
@@ -93,7 +93,7 @@ of them and refuses the entry's `effort` at its line (on a disabled entry
 too), with the model, the level and the evidence in the message:
 
 ```text
-relay.yml:10:13: providers entry "kiro".effort: model "claude-haiku-4.5" has no reasoning effort (kiro-cli 2.29.0 ignores --effort for it: "model does not support additional fields"), so "high" cannot be honoured, nor can any other level; choose a model with reasoning effort
+pumice.yml:10:13: providers entry "kiro".effort: model "claude-haiku-4.5" has no reasoning effort (kiro-cli 2.29.0 ignores --effort for it: "model does not support additional fields"), so "high" cannot be honoured, nor can any other level; choose a model with reasoning effort
 ```
 
 Since `effort` is required, such a model cannot be configured for that
@@ -102,7 +102,7 @@ provider at all.
 | Provider | Models refused | Evidence |
 | --- | --- | --- |
 | Claude | Every spelling Claude Code canonicalizes to `claude-haiku-4-5`, `claude-sonnet-4-5`, `claude-sonnet-4-0`, `claude-opus-4-1`, `claude-opus-4-0` or a `claude-3-…` name: `claude-sonnet-4`, `claude-sonnet-4-20250514`, `claude-opus-4`, `claude-opus-4@20250514`, `claude-haiku-4-5-20251001`, `us.anthropic.claude-haiku-4-5-20251001-v1:0`, `Claude-Sonnet-4-5[1m]`, … ([Claude Code's model names](#claude-codes-model-names)), except the four legacy Opus spellings Claude Code remaps at run time | Read from the Claude Code 2.1.306 binary: the effort check (`JS`) canonicalizes the model (`r=qe(e)`) and returns false for exactly these names (`r.includes("claude-3-")\|\|r==="claude-opus-4-0"\|\|r==="claude-opus-4-1"\|\|r==="claude-sonnet-4-0"\|\|r==="claude-sonnet-4-5"\|\|r==="claude-haiku-4-5"`), after overrides that only apply to custom setups; the request builder then deletes `effort` (`if(!JS(h)){delete n.effort;return}`) without a warning. Its bundled model catalog agrees: none of these entries has the `effort` capability. `claude-opus-4-5` lacks that capability too but is not in this list, so it is accepted: its effort depends on the API provider (below). Same in 2.1.310 |
-| Kiro | `claude-haiku-4.5` (verbatim, as `--list-models` prints it) | Verified on 2026-10-10 with kiro-cli 2.29.0 ([Kiro](#kiro), live calls 1 and 3): `[warn] failed to set effort 'low': model does not support additional fields`; the recorded run (`crates/relay/tests/fixtures/kiro/success.jsonl`, live call 1) says `"reasoning":{"support":"unavailable","effortLevels":[]}` in every `metadata` event |
+| Kiro | `claude-haiku-4.5` (verbatim, as `--list-models` prints it) | Verified on 2026-10-10 with kiro-cli 2.29.0 ([Kiro](#kiro), live calls 1 and 3): `[warn] failed to set effort 'low': model does not support additional fields`; the recorded run (`tests/fixtures/kiro/success.jsonl`, live call 1) says `"reasoning":{"support":"unavailable","effortLevels":[]}` in every `metadata` event |
 | Codex | none | Read: `codex debug models --bundled` (0.163.0, no network) lists `low`, `medium` and `high` in `supported_reasoning_levels` for every model in the bundled catalog (`gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5` and the hidden ones) |
 
 **Every other model is accepted**, because nothing recorded says it cannot
@@ -164,7 +164,7 @@ cheapest settings and never a fast or priority mode:
 
 ## Claude Code
 
-Plugin: `crates/relay/src/providers/claude.rs`. First verified with Claude
+Plugin: `src/providers/claude.rs`. First verified with Claude
 Code 2.1.288 on 2026-10-03; effort, thinking and model names read from 2.1.306
 (2026-10-23/24) and re-checked against 2.1.310 (2026-10-26).
 
@@ -263,7 +263,7 @@ Pumice does not set that variable. None of this was run.
 Claude Code compares a model with its tables only after canonicalizing its
 name, so `claude-opus-4` and `claude-opus-4-20250514` both count as
 `claude-opus-4-0`. Pumice reproduces that step
-(`crates/relay/src/providers/claude/models.rs`).
+(`src/providers/claude/models.rs`).
 
 **Where it comes from.** The 2.1.306 binary (`sha256 520bc6c1…71cfe`) is a
 Bun executable whose JavaScript is stored as code-split chunks, each
@@ -451,7 +451,7 @@ Pumice refuses `thinking: false` for every spelling that canonicalizes to
 one of them, on a disabled entry too, at the `thinking` key:
 
 ```text
-relay.yml:90:15: providers entry "claude".thinking: model "claude-haiku-5-5" cannot turn thinking off (Claude Code 2.1.310 sends adaptive thinking for it even with thinking off), so "false" cannot be honoured; write "thinking: true" or choose a model that can turn thinking off
+pumice.yml:90:15: providers entry "claude".thinking: model "claude-haiku-5-5" cannot turn thinking off (Claude Code 2.1.310 sends adaptive thinking for it even with thinking off), so "false" cannot be honoured; write "thinking: true" or choose a model that can turn thinking off
 ```
 
 An effort refusal is reported first when both apply (no model is in both
@@ -470,7 +470,7 @@ otherwise:
 
 So the shipped example's `model: haiku` with `thinking: false` keeps
 thinking on through a first-party setup (the owner's live entry reaches
-Haiku 5.5, 2026-10-29); `relay.example.yml` says so in a comment. The
+Haiku 5.5, 2026-10-29); `pumice.example.yml` says so in a comment. The
 owner kept the example as it is (`p16-provider-effort/D3`).
 
 ### Re-check on Claude Code 2.1.310
@@ -499,7 +499,7 @@ tests name 2.1.310; the excerpts keep 2.1.306's names, where they were read.
 
 ## Codex
 
-Plugin: `crates/relay/src/providers/codex.rs`. First verified with
+Plugin: `src/providers/codex.rs`. First verified with
 `codex-cli 0.160.0` on 2026-10-03; user-config inheritance verified on
 2026-10-06; effort and catalog read from 0.163.0 on 2026-10-23.
 
@@ -586,13 +586,13 @@ with the user message on stdin (`-`).
 
 ## Kiro
 
-Plugin: `crates/relay/src/providers/kiro.rs`, provider id `kiro`, written
+Plugin: `src/providers/kiro.rs`, provider id `kiro`, written
 from scratch on owner request (2026-10-10). Checked against
 `kiro-cli 2.29.0` (WSL, Linux x86-64, logged in with IAM Identity Center) on
 2026-10-10, with `--help`, the official docs ([headless mode][headless],
 [agent configuration reference][agent-ref], [exit codes][exit-codes],
 [reasoning effort][effort]) and the [live checks](#kiro-live-checks); effort
-from `relay.yml` since 2026-10-23.
+from `pumice.yml` since 2026-10-23.
 
 ```text
 kiro-cli chat --agent-engine v2 --no-interactive --output-format stream-json \
@@ -610,8 +610,8 @@ workspace file, `.kiro/agents/pumice.json` (below). The child also gets
 | `--output-format stream-json` | The run's ACP events as JSON Lines on stdout; logs and warnings go to stderr. Works only on V2/V3 |
 | `--trust-tools=` | "trust no tools" (`chat --help`). In non-interactive mode an untrusted tool call is denied, not asked |
 | `--agent pumice` | The one-off agent file Pumice writes into the workspace |
-| `--model <model>` | From `relay.yml`; V2 overrides the agent's and the saved model with it. `kiro-cli chat --list-models --format json` (no chat call) lists `auto` and the model ids with a credit multiplier; Pumice ships no default |
-| `--effort <level>` | From `relay.yml` ([effort and thinking](#effort-and-thinking)). Levels depend on the model ([effort]); a model without reasoning prints `[warn] failed to set effort '<level>': model does not support additional fields` on stderr and runs (verified for `low` with `claude-haiku-4.5`; expected but not run for `medium` and `high`), so such a model is refused at startup. The S2.14 check (kiro-cli 2.29.0, 2026-10-10) found GPT-5.6 Terra/Sol/Luna also offer `none`, cheaper than `low`; Pumice's common scale has no `none`, so `low` is the cheapest Kiro level it sends |
+| `--model <model>` | From `pumice.yml`; V2 overrides the agent's and the saved model with it. `kiro-cli chat --list-models --format json` (no chat call) lists `auto` and the model ids with a credit multiplier; Pumice ships no default |
+| `--effort <level>` | From `pumice.yml` ([effort and thinking](#effort-and-thinking)). Levels depend on the model ([effort]); a model without reasoning prints `[warn] failed to set effort '<level>': model does not support additional fields` on stderr and runs (verified for `low` with `claude-haiku-4.5`; expected but not run for `medium` and `high`), so such a model is refused at startup. The S2.14 check (kiro-cli 2.29.0, 2026-10-10) found GPT-5.6 Terra/Sol/Luna also offer `none`, cheaper than `low`; Pumice's common scale has no `none`, so `low` is the cheapest Kiro level it sends |
 | stdin | "When stdin is piped and there is no positional argument, Kiro reads the full stream as the instruction" ([headless]) |
 | `KIRO_DISABLE_TELEMETRY=1` | Present in the 2.29.0 binary next to the legacy `Q_DISABLE_TELEMETRY` (AGENTS.md: no telemetry). Its effect was not measured |
 | `KIRO_NO_AUTO_UPDATE=1` | Present in the binary; no update checks from runs Pumice starts. Its effect was not measured |

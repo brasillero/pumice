@@ -1,79 +1,57 @@
 # Pumice
 
-Polish your dictation with the AI subscriptions you already have.
+Use the AI subscriptions you already have from any OpenAI-compatible client.
 
-Pumice is a small open-source tool that runs on your computer and connects your dictation app to the AI assistants you already pay for (Claude, Codex or Kiro), using their official command-line apps. The dictation app sends its own prompt and the text transcribed by Whisper; Pumice passes them, unchanged, to the assistant you chose and returns the answer ready to paste. Formatting, translating or anything else is decided by the app's prompt. No separately billed API keys required.
+Pumice is a small local relay for Claude Code, Codex and Kiro. Your app sends its prompt and text to Pumice; Pumice passes them to the selected official CLI and returns the answer in OpenAI format. The app decides what to do with the text. No separately billed API key is needed.
 
+```text
+Client → http://127.0.0.1:7567/v1 → Pumice → official AI CLI
+Client ← OpenAI chat completion ← Pumice ← final answer
 ```
-Handy (Whisper, on your machine) ──raw text──▶ Pumice ──▶ Claude / Codex / Kiro CLI
-                                  ◀──polished text──
-```
 
-- **Works with [Handy](https://github.com/cjpais/Handy)** through its Custom post-processing provider, and with any app that talks to an OpenAI-compatible endpoint.
-- **Uses the official CLIs** of your subscriptions: Claude, Codex and Kiro.
-- **Never loses a dictation:** if the selected provider fails or times out, Pumice answers with an error and the app pastes its own transcript.
-- **Local and private:** listens on localhost only, no telemetry.
-- **Single executable** for Windows, Linux and macOS, with no runtime to install (you only need the provider CLIs you already use).
+- Works with [Handy](https://github.com/cjpais/Handy) and other OpenAI-compatible clients.
+- One executable for Windows, Linux and macOS; npm provides an optional Node.js launcher.
+- Listens on IPv4 loopback only, with no telemetry.
+- Runs the selected provider with restricted tools in a fresh temporary directory.
+- Returns an HTTP error on failure; there is no provider fallback.
+- Offers a live request view, plain logs, configuration validation and provider diagnostics.
 
-## Status
+## Install and run
 
-Pumice works end to end through Claude, Codex and Kiro. The local OpenAI-compatible adapter is archived for now, and Kimi and Antigravity support was removed. You choose the providers in an explicit list in the YAML config — only entries marked `enabled: true` run, and there is no fallback: a failure is answered with an HTTP error and the app pastes its own transcript. Each provider entry sets its reasoning effort (`low`, `medium` or `high`), and the Claude entry also says whether Claude may think. Every setting is written in the module's YAML file: there are no built-in defaults, and a missing setting stops the module with an error naming the file and line (the `*.example.yml` files write every setting and are the starting configuration). The first command that needs settings creates missing per-user files automatically and preserves existing files. The starting relay file enables Claude; edit it to choose your providers. Run `pumice relay doctor` to see which CLIs it found.
-
-Pumice supports standalone downloads and the npm package `@brasillero/pumice` (installable with npm, pnpm, Bun or npx; the installed command is `pumice`). Check [GitHub Releases](https://github.com/brasillero/pumice/releases) and the [npm registry](https://www.npmjs.com/package/@brasillero/pumice) for published versions. See the [installation guide](docs/install.md) for installation, startup and Handy setup; building from source is also supported below.
-
-The [latest standalone release](https://github.com/brasillero/pumice/releases/latest) is available, and the npm package installs with `pnpm add -g @brasillero/pumice` (or `npm install -g @brasillero/pumice`). The package is scoped because the registry rejected the unscoped name `pumice` as too similar to an existing package.
-
-### Run from source (preview)
-
-With [Rust](https://rustup.rs/) installed:
+Install a supported official AI CLI and log in to it yourself, then install Pumice from a [release archive](https://github.com/brasillero/pumice/releases) or with Node.js 22+:
 
 ```sh
+npm install -g @brasillero/pumice
+pumice doctor
+pumice
+```
+
+`pumice` starts the relay; `pumice serve` is an alias. Use `pumice --plain` for one-line stderr logs. Stop with Ctrl-C.
+
+The first start creates **one** settings file, `pumice.yml`, from [pumice.example.yml](pumice.example.yml): `%APPDATA%\pumice\pumice.yml` on Windows, or `~/.config/pumice/pumice.yml` on Linux/macOS (`$XDG_CONFIG_HOME` is respected). Existing files are preserved. Edit the file to select providers and models; every setting must be written explicitly. `pumice check-config` validates it. Use `--config PATH` for an existing file at another location.
+
+For Handy's Custom post-processing provider, use base URL `http://127.0.0.1:7567/v1`, leave the API key empty, and select `claude`, `codex` or `kiro`. `passthrough` returns the transcript without an AI call; `inspect` echoes the request JSON for diagnostics.
+
+**Upgrading:** rename your previous `relay.yml` (or `pumice.yaml`) to `pumice.yml` before starting, and change service commands to `pumice --plain`. See [the migration steps](docs/install.md#upgrading).
+
+## Build from source
+
+With stable Rust on Linux:
+
+```sh
+cargo test --locked
 cargo build --release --locked --bin pumice
-mkdir -p ~/.config/pumice
-cp relay.example.yml ~/.config/pumice/relay.yml   # every setting; edit the providers
-./target/release/pumice relay check-config   # validates the per-user config (or --config <path>)
-./target/release/pumice relay doctor         # checks which CLIs are installed
-./target/release/pumice relay serve          # starts the service (live view; use --plain for one-line stderr logs)
+./target/release/pumice doctor
+./target/release/pumice
 ```
 
-With the [transcription module](docs/transcription.md) installed next to `pumice`, one audio file can go through the whole stack — transcribe, format, relay — in a single command driven by a flow from `orchestrator.yml`:
+## Documentation
 
-```sh
-./target/release/pumice run meeting.wav --flow clean          # plain text on stdout
-./target/release/pumice run meeting.wav --flow clean --json   # one JSON document: raw transcript and result apart
-```
-
-See [`docs/orchestrator.md`](docs/orchestrator.md) and [`orchestrator.example.yml`](orchestrator.example.yml) for flows, budgets, the result schema and exit codes. `pumice serve` keeps the transcription model loaded and takes the same flows over HTTP (`POST /pumice/v1/dictations`, and OpenAI's `POST /v1/audio/transcriptions` with the real transcription model id for raw text or `model:provider:preset` for AI processing); every HTTP API Pumice serves is summarized in [`docs/api.md`](docs/api.md).
-
-In Handy: **Settings → Advanced → Experimental Features → Post Processing**, set the provider to **Custom**, base URL `http://127.0.0.1:7567/v1`, API key empty, model `claude`, `codex` or `kiro`. Choose `passthrough` to return the original transcript exactly, including whitespace and line breaks, without calling an AI. With Handy, only the text inside its `<transcript>` envelope is returned; its formatting prompt is omitted. Choose `inspect` to echo the full JSON request body that Pumice received, including Handy's attached prompt and every message and option; the result is pasted as JSON, which is useful for diagnostics, and it never calls an AI. See [`relay.example.yml`](relay.example.yml) for every configuration setting. On WSL, use `127.0.0.1`, not `localhost` (see [Handy on Windows, Pumice in WSL](docs/install.md#handy-on-windows-pumice-in-wsl)).
-
-**Upgrading from 0.2:** the old `pumice` / `pumice --plain` commands no longer start the service and the old `pumice.yaml` config is no longer read. Run `pumice relay serve` instead of `pumice`. For a systemd user service (server-1): `mv ~/.config/pumice/pumice.yaml ~/.config/pumice/relay.yml`, change the unit's `ExecStart=` to `<installed binary path> relay serve --plain`, then `systemctl --user daemon-reload && systemctl --user restart pumice`. Handy's URL and port 7567 are unchanged. Full steps: [Upgrading from 0.2](docs/install.md#upgrading-from-02) in the installation guide.
-
-- AI provider plugins (how each CLI is called, limits and evidence): [`docs/providers.md`](docs/providers.md)
-- Transcription module guide: [`docs/transcription.md`](docs/transcription.md)
-- Formatter module guide: [`docs/formatter.md`](docs/formatter.md)
-- Orchestrator guide (`pumice run`, `pumice serve`): [`docs/orchestrator.md`](docs/orchestrator.md)
-- HTTP APIs (relay, transcription, `pumice serve`): [`docs/api.md`](docs/api.md)
-- Plans, decisions and open work: [`.task-decisions/`](.task-decisions/README.md)
-- Rules for contributors and AI agents: [`AGENTS.md`](AGENTS.md)
-
-## Roadmap
-
-| Stage | Status |
-| --- | --- |
-| Local pass-through service (Claude, Codex, explicit provider list) | Implemented |
-| Auto-detection | Implemented |
-| Kiro plugin | Implemented |
-| Configurable effort per provider, Claude thinking switch | Implemented (0.3.0) |
-| Generic loopback adapter | Archived; Kimi, Antigravity and OpenCode support removed |
-| Distribution: GitHub release archives + npm package | Released (v0.3.0) |
-| Module dispatcher: `pumice relay`, `pumice format`, `pumice transcribe` | Implemented (0.3.0) |
-| Transcription module `pumice-transcribe`: local files, HTTP, model downloads, runtime CPU variants | Implemented (0.3.0; in the npm packages for Windows x64, Linux x64 and Apple Silicon) |
-| Formatter module (`pumice format`) | Implemented (0.3.0) |
-| Whole stack: `pumice run`, `pumice serve` | Implemented (0.3.0) |
-| GPU transcription: Vulkan (Windows, Linux), Metal (Apple Silicon) | Experimental (0.3.0, `backend: gpu` or `auto`) |
-| `pumice setup` configuration wizard | Paused |
-| Tauri installer, auto-update, start-with-the-system | Deferred |
+- [Installation, configuration, live view and releases](docs/install.md)
+- [HTTP API and captured Handy contract](docs/api.md)
+- [Provider behavior, limits and evidence](docs/providers.md)
+- [Task decisions](.task-decisions/README.md)
+- [Contributor and agent rules](AGENTS.md)
 
 ## License
 

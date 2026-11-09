@@ -1,6 +1,17 @@
-//! The `pumice` orchestrator's library. The binary in `src/main.rs` is a thin
-//! entry point on top of it, so the flow execution seam can be driven
-//! directly by integration tests (with the fake AI CLI they get built).
+//! Pumice library modules. The binary in `src/main.rs` is a thin CLI on top of
+//! these modules so the logic can be tested directly.
 
-pub mod dispatch;
-pub mod orchestrator;
+pub mod api;
+pub mod cleanup;
+pub mod cli;
+pub mod config;
+pub mod doctor;
+pub mod logging;
+pub mod monitor;
+pub mod pipeline;
+pub mod process;
+pub mod prompts;
+pub mod providers;
+pub mod request;
+pub mod time;
+pub mod tui;

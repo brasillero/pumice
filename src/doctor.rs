@@ -1,0 +1,436 @@
+//! `pumice doctor` (S2.8 part 2): what is installed, what is missing and how
+//! to install it — plus the only quota-bearing diagnostic, `--login-check`.
+//!
+//! The default report renders from [`ProviderStatus`] plus the loaded config
+//! as a pure function, so the presentation is unit-testable without spawning
+//! anything. Detection runs fresh on every invocation (never the startup
+//! cache) and never spends quota: only bounded version probes run.
+//!
+//! `--login-check` spends quota: it composes one fixed tiny dictation through
+//! the selected provider's normal adapter — same restrictions, fresh temporary
+//! workspace and configured timeout — and it never
+//! prints the response: only `ok (<ms> ms)` or a text-free error category.
+
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::time::Instant;
+
+use crate::config::{Config, ConfigError};
+use crate::process::ProcessRunner;
+use crate::prompts::compose_prompts;
+use crate::providers::discovery::{self, Found, ProviderStatus, Version};
+use crate::providers::{self, Provider, ProviderError, ProviderErrorCode};
+use crate::request::{ChatCompletionRequest, Content, Message, extract_request};
+
+/// The fixed tiny dictation the login check formats.
+pub const LOGIN_CHECK_SAMPLE: &str = "pumice login check";
+
+/// Renders the full doctor report: the config file, one line per registered
+/// provider and the readiness summary. Pure over the config and the detection
+/// statuses; never prints dictated text or probe output. Every enabled
+/// provider is shown the same way: no provider-specific warnings. Without a
+/// configuration file (`config_path` is `None`) every provider is disabled
+/// and probed by its standard command name.
+pub fn render(config_path: Option<&Path>, statuses: &[ProviderStatus]) -> String {
+    let mut out = String::new();
+    match config_path {
+        Some(path) => out.push_str(&format!("config: {}\n", path.display())),
+        None => out.push_str(
+            "config: none found (pass --config <path> or create the per-user pumice.yml); \
+             providers are probed by their standard command names\n",
+        ),
+    }
+    for status in statuses {
+        out.push_str(&provider_line(status));
+        out.push('\n');
+    }
+    let (ready, total) = enabled_ready(statuses);
+    if total == 0 {
+        out.push_str(
+            "no providers enabled: every request gets an error and the app keeps its own text\n",
+        );
+    }
+    out.push_str(&format!("{ready} of {total} enabled providers ready\n"));
+    out
+}
+
+/// One doctor line for `status`: id, enabled state, found state (with the
+/// install hint when the provider is missing). A provider with no
+/// executable (`Found::NotApplicable`, the archived generic adapter) names
+/// the local endpoint and defers availability to call time.
+fn provider_line(status: &ProviderStatus) -> String {
+    let install_hint = providers::descriptor(status.id).map_or("", |d| d.install_hint);
+    let state = match (&status.found, &status.version) {
+        (Found::Found(_), Version::Parsed(version)) => format!("found {version}"),
+        (Found::Found(_), Version::Unavailable) => "found (version unavailable)".to_owned(),
+        (Found::Found(_), Version::Skipped) => "found".to_owned(),
+        (Found::Missing, _) => format!("missing (install: {install_hint})"),
+        (Found::UnsupportedShim, _) => format!("unsupported launcher (install: {install_hint})"),
+        (Found::NotApplicable, _) => "local endpoint (checked at call time)".to_owned(),
+    };
+    let enabled = if status.enabled {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    format!("{}: {enabled}, {state}", status.id)
+}
+
+/// Counts `(ready, total)` over the enabled providers: an enabled provider
+/// is ready when detection found its executable; a provider with no
+/// executable (`Found::NotApplicable`, the archived generic adapter) is ready
+/// by definition, since its endpoint is checked at call time.
+pub fn enabled_ready(statuses: &[ProviderStatus]) -> (usize, usize) {
+    let mut ready = 0;
+    let mut total = 0;
+    for status in statuses {
+        if !status.enabled {
+            continue;
+        }
+        total += 1;
+        if matches!(status.found, Found::Found(_) | Found::NotApplicable) {
+            ready += 1;
+        }
+    }
+    (ready, total)
+}
+
+/// Why a login check could not start; every variant carries a fixed,
+/// text-free message.
+pub enum LoginCheckError {
+    /// The ID names no registered provider.
+    UnknownProvider,
+    /// The provider is registered but has no entry in the configuration's
+    /// providers list.
+    NotConfigured,
+    /// The provider is registered and listed but disabled in the
+    /// configuration.
+    Disabled,
+    /// Detection did not find the provider's executable.
+    NotInstalled,
+    /// The adapter refused to build (defense in depth: full-settings
+    /// validation already ran at config load).
+    BuildFailed(ConfigError),
+}
+
+impl LoginCheckError {
+    /// The fixed output line and process exit code for this failure: 2 for
+    /// usage-style problems, 1 for a provider that is not ready.
+    pub fn line_and_code(&self, id: &str) -> (String, u8) {
+        match self {
+            LoginCheckError::UnknownProvider => {
+                (format!("error: provider \"{id}\" is not registered"), 2)
+            }
+            LoginCheckError::NotConfigured => (
+                format!("error: cannot check provider \"{id}\": it is not in the providers list"),
+                1,
+            ),
+            LoginCheckError::Disabled => (
+                format!("error: cannot check provider \"{id}\": it is disabled"),
+                1,
+            ),
+            LoginCheckError::NotInstalled => (
+                format!("error: cannot check provider \"{id}\": it is not installed"),
+                1,
+            ),
+            LoginCheckError::BuildFailed(error) => (error.to_string(), 2),
+        }
+    }
+}
+
+/// The outcome of the single real formatting call.
+pub enum LoginCheck {
+    /// The call returned text (discarded); elapsed time of the call.
+    Ok(Duration),
+    /// The call failed with a safe, text-free error.
+    Failed(ProviderError),
+}
+
+/// The quota warning printed before the call runs.
+pub fn quota_notice(id: &str) -> String {
+    format!("this runs one real formatting call and spends {id} quota")
+}
+
+/// Validates the login-check preconditions and builds the selected provider:
+/// refused, unknown, disabled and not-installed IDs stop here, before
+/// anything is spawned.
+pub async fn prepare_login_check(
+    config: &Config,
+    id: &str,
+    runner: &ProcessRunner,
+) -> Result<Arc<dyn Provider>, LoginCheckError> {
+    let descriptor = providers::descriptor(id).ok_or(LoginCheckError::UnknownProvider)?;
+    let settings = config.provider(id).ok_or(LoginCheckError::NotConfigured)?;
+    if !settings.enabled {
+        return Err(LoginCheckError::Disabled);
+    }
+    // Fresh detection for exactly this provider, through the same resolution
+    // path a formatting call uses; the bounded version probe spends no quota.
+    // NotApplicable providers (generic) have no executable to find: their
+    // endpoint availability is what the login-check call itself establishes.
+    let statuses = discovery::detect(config, &[*descriptor], runner).await;
+    if !matches!(statuses[0].found, Found::Found(_) | Found::NotApplicable) {
+        return Err(LoginCheckError::NotInstalled);
+    }
+    (descriptor.build)(settings, Arc::new(runner.clone())).map_err(LoginCheckError::BuildFailed)
+}
+
+/// Runs exactly one formatting call through `provider`: the normal adapter
+/// with its configured restrictions and timeout inside a fresh temporary
+/// workspace. The returned text is discarded, so
+/// cleanup does not run and the response never reaches the output.
+pub async fn run_login_call(config: &Config, provider: &Arc<dyn Provider>) -> LoginCheck {
+    let request = extract_request(ChatCompletionRequest {
+        model: None,
+        messages: vec![Message {
+            role: "user".to_owned(),
+            content: Content::Text(LOGIN_CHECK_SAMPLE.to_owned()),
+        }],
+        stream: None,
+    })
+    .expect("the fixed login-check sample always extracts");
+    let prompts = compose_prompts(&request);
+    let now = Instant::now();
+    // The provider still applies its own (configured) timeout inside this
+    // deadline. An overflowing total timeout cannot happen in practice; any
+    // finite deadline keeps the provider cap meaningful.
+    let deadline = now
+        .checked_add(config.total_timeout)
+        .unwrap_or_else(|| now + Duration::from_secs(86_400));
+    let started = std::time::Instant::now();
+    match provider.format(prompts.format_input(), deadline).await {
+        Ok(_) => LoginCheck::Ok(started.elapsed()),
+        Err(error) => LoginCheck::Failed(error),
+    }
+}
+
+/// Text-free category for a failed login check; never carries captured
+/// output, diagnostics or dictated text. Returns an owned string because the
+/// `HTTP status n` category embeds the status code.
+pub fn error_category(error: ProviderError) -> String {
+    match error {
+        ProviderError::NotInstalled => "not installed".to_owned(),
+        ProviderError::NotLoggedIn => "not logged in".to_owned(),
+        ProviderError::Timeout => "timeout".to_owned(),
+        ProviderError::QuotaExceeded { .. } => "quota exhausted".to_owned(),
+        ProviderError::RateLimited { .. } => "rate limited".to_owned(),
+        ProviderError::Other { code } => match code {
+            ProviderErrorCode::Spawn => "could not start the CLI".to_owned(),
+            ProviderErrorCode::Io => "I/O error while running the CLI".to_owned(),
+            ProviderErrorCode::InvalidConfiguration => "invalid provider configuration".to_owned(),
+            ProviderErrorCode::AuthenticationRejected => {
+                "the CLI rejected its credentials".to_owned()
+            }
+            ProviderErrorCode::UnsupportedShim => "the CLI is an unsupported launcher".to_owned(),
+            ProviderErrorCode::InvalidOutput => "the CLI returned unparseable output".to_owned(),
+            ProviderErrorCode::OutputTooLarge => "the CLI returned too much output".to_owned(),
+            ProviderErrorCode::InputTooLarge => "input too large".to_owned(),
+            ProviderErrorCode::UnsupportedSystemPrompt => "unsupported system prompt".to_owned(),
+            ProviderErrorCode::UnexpectedToolActivity => "the CLI tried to use a tool".to_owned(),
+            ProviderErrorCode::NonzeroExit => "the CLI reported a failure".to_owned(),
+            ProviderErrorCode::EndpointUnavailable => "endpoint unavailable".to_owned(),
+            ProviderErrorCode::HttpStatus(status) => format!("HTTP status {status}"),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn status(id: &'static str, enabled: bool, found: Found, version: Version) -> ProviderStatus {
+        ProviderStatus {
+            id,
+            enabled,
+            found,
+            version,
+        }
+    }
+
+    fn found() -> Found {
+        Found::Found(PathBuf::from("/nonexistent/example"))
+    }
+
+    /// Every registered provider, like a full [`discovery::detect`] run.
+    fn full_scan() -> Vec<ProviderStatus> {
+        vec![
+            status(
+                "claude",
+                true,
+                found(),
+                Version::Parsed("2.1.288".to_owned()),
+            ),
+            status(
+                "codex",
+                true,
+                found(),
+                Version::Parsed("0.160.0".to_owned()),
+            ),
+            status("kiro", false, Found::Missing, Version::Unavailable),
+        ]
+    }
+
+    #[test]
+    fn render_lists_every_provider_and_the_summary() {
+        let report = render(None, &full_scan());
+
+        assert!(report.contains("config: none found"), "{report}");
+        assert!(
+            report.contains("claude: enabled, found 2.1.288\n"),
+            "{report}"
+        );
+        assert!(
+            report.contains("codex: enabled, found 0.160.0\n"),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "kiro: disabled, missing (install: curl -fsSL https://cli.kiro.dev/install | bash)\n"
+            ),
+            "{report}"
+        );
+        assert!(
+            report.contains("2 of 2 enabled providers ready\n"),
+            "{report}"
+        );
+        // Probe output and versions of other providers never mix into lines.
+        assert!(!report.contains("provider claude:"), "{report}");
+    }
+
+    #[test]
+    fn render_marks_missing_enabled_providers_and_counts_them_unready() {
+        let mut statuses = full_scan();
+        statuses[1] = status("codex", true, Found::Missing, Version::Unavailable);
+        let report = render(Some(Path::new("pumice.yml")), &statuses);
+
+        assert!(
+            report.contains("codex: enabled, missing (install: npm install -g @openai/codex)\n"),
+            "{report}"
+        );
+        assert!(
+            report.contains("1 of 2 enabled providers ready\n"),
+            "{report}"
+        );
+        assert!(report.contains("config: pumice.yml\n"), "{report}");
+    }
+
+    #[test]
+    fn render_reports_unavailable_versions_and_unsupported_launchers() {
+        let mut statuses = full_scan();
+        statuses[0] = status("claude", true, found(), Version::Unavailable);
+        statuses[1] = status("codex", true, Found::UnsupportedShim, Version::Unavailable);
+        let report = render(None, &statuses);
+
+        assert!(
+            report.contains("claude: enabled, found (version unavailable)\n"),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "codex: enabled, unsupported launcher (install: npm install -g @openai/codex)\n"
+            ),
+            "{report}"
+        );
+        // Claude is found (version unknown); Codex's launcher is unsupported,
+        // so only one enabled provider is ready.
+        assert!(
+            report.contains("1 of 2 enabled providers ready\n"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn render_shows_an_enabled_provider_without_warnings() {
+        let mut statuses = full_scan();
+        statuses[2] = status("kiro", true, found(), Version::Unavailable);
+        let report = render(None, &statuses);
+
+        assert!(
+            report.contains("kiro: enabled, found (version unavailable)\n"),
+            "{report}"
+        );
+        assert!(!report.contains("warning"), "{report}");
+        assert_eq!(enabled_ready(&statuses), (3, 3));
+    }
+
+    #[test]
+    fn render_reports_an_enabled_generic_as_a_local_endpoint() {
+        let mut statuses = full_scan();
+        // Generic is archived and not in the registry, so no configuration
+        // can enable it; this synthetic status only keeps the rendering rule
+        // for endpoint providers covered.
+        statuses.push(status(
+            "generic",
+            true,
+            Found::NotApplicable,
+            Version::Skipped,
+        ));
+        let report = render(None, &statuses);
+
+        assert!(
+            report.contains("generic: enabled, local endpoint (checked at call time)\n"),
+            "{report}"
+        );
+        assert!(!report.contains("warning"), "{report}");
+        // An enabled generic has no executable to miss, so it is ready.
+        assert_eq!(enabled_ready(&statuses), (3, 3));
+    }
+
+    #[test]
+    fn enabled_ready_counts_enabled_providers_only() {
+        assert_eq!(enabled_ready(&full_scan()), (2, 2));
+        assert_eq!(enabled_ready(&[]), (0, 0));
+    }
+
+    #[test]
+    fn error_categories_are_text_free() {
+        assert_eq!(error_category(ProviderError::NotLoggedIn), "not logged in");
+        assert_eq!(
+            error_category(ProviderError::RateLimited { retry_after: None }),
+            "rate limited"
+        );
+        assert_eq!(error_category(ProviderError::Timeout), "timeout");
+        assert_eq!(
+            error_category(ProviderError::other(ProviderErrorCode::NonzeroExit)),
+            "the CLI reported a failure"
+        );
+        assert_eq!(
+            error_category(ProviderError::other(ProviderErrorCode::InputTooLarge)),
+            "input too large"
+        );
+        assert_eq!(
+            error_category(ProviderError::other(ProviderErrorCode::EndpointUnavailable)),
+            "endpoint unavailable"
+        );
+        assert_eq!(
+            error_category(ProviderError::other(ProviderErrorCode::HttpStatus(500))),
+            "HTTP status 500"
+        );
+        assert_eq!(
+            error_category(ProviderError::other(ProviderErrorCode::HttpStatus(404))),
+            "HTTP status 404"
+        );
+    }
+
+    #[test]
+    fn precondition_failures_map_to_fixed_lines_and_codes() {
+        let (line, code) = LoginCheckError::UnknownProvider.line_and_code("nope");
+        assert_eq!(line, "error: provider \"nope\" is not registered");
+        assert_eq!(code, 2);
+
+        let (line, code) = LoginCheckError::NotConfigured.line_and_code("codex");
+        assert!(line.contains("not in the providers list"));
+        assert_eq!(code, 1);
+
+        let (line, code) = LoginCheckError::Disabled.line_and_code("claude");
+        assert!(line.contains("disabled"));
+        assert_eq!(code, 1);
+
+        let (line, code) = LoginCheckError::NotInstalled.line_and_code("claude");
+        assert!(line.contains("not installed"));
+        assert_eq!(code, 1);
+    }
+}

@@ -8,8 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- Documentation: how each provider CLI is called, its limits, the effort and Claude model-name rules and the subscription-terms findings are now in `docs/providers.md`; the captured Handy request and the `inspect` model are in `docs/api.md`; the WSL notes and the maintainers' release procedure are in `docs/install.md`; the CPU-variant evidence is in `docs/transcription.md`.
-- Documentation: the product spec (`docs/spec.md`, `docs/product.pt-BR.md`) and the research notes in `docs/research/` were removed after their still-needed content moved; Git history keeps them. `AGENTS.md` now points at the module guides and `.task-decisions/` instead.
+- **Breaking: Pumice is the relay again.** Bare `pumice` starts the OpenAI-compatible service; `pumice serve` is an alias. Diagnostics are `pumice doctor` and `pumice check-config`. The relay code and tests live in the single root package.
+- **Breaking: the settings file is `pumice.yml`.** Rename an existing `relay.yml` or `pumice.yaml` before starting. Every setting remains explicit. First start creates only this file and preserves existing settings.
+- Release archives and all four npm platform packages ship only the relay executable, with generated target-specific license notices. The Linux npm package works on glibc and musl systems.
+- Current documentation and project rules describe the relay-only product; historical task notes retain the evidence of previous work.
+
+### Removed
+
+- Transcription, formatter, orchestration, audio HTTP routes, combined flows, model catalogs/downloads, native engines, CPU/GPU libraries, module commands and their build, packaging and CI machinery.
+- The separate `pumice-relay` executable and module-specific example settings.
 
 ## [0.3.0] — 2026-10-29
 
