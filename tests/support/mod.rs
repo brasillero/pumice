@@ -12,7 +12,6 @@ use tempfile::TempDir;
 
 pub mod adapter_contract;
 pub mod bounded;
-pub mod fake_http;
 pub mod install;
 pub mod test_provider;
 

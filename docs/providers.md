@@ -23,7 +23,8 @@ straight through the provider. Real calls and timings below include that hop.
 
 - **Spawning.** The CLI is started directly with an argument array, never
   through a shell. On Windows, a recognised npm `.cmd` shim is translated
-  into a direct `node <package entrypoint>` launch; any other shim is
+  into a direct native executable launch (Claude) or
+  `node <package entrypoint>` launch (Codex); any other shim is
   refused (`UnsupportedShim`).
 - **Working directory.** Each call gets a private temporary root (0700 on
   Unix), removed afterwards. The CLI runs in its empty `workspace/`; control
@@ -856,3 +857,13 @@ measured.
 [agent-ref]: https://kiro.dev/docs/custom-agents/configuration-reference/
 [exit-codes]: https://kiro.dev/docs/reference/exit-codes/
 [effort]: https://kiro.dev/docs/models/effort/
+
+### Windows npm shim compatibility (2026-11-11)
+
+Claude Code 2.1.322's npm entrypoint is `bin/claude.exe`, replacing the old
+`cli.js` layout. Pumice starts the quoted, provider-declared executable inside
+`node_modules` directly, without a shell or Node runtime. Codex keeps its
+JavaScript entrypoint. The resolver tests exercise both paths on Linux and
+in CI on all three operating systems; a real Windows installation remains
+unverified. The [official installation guide](https://code.claude.com/docs/en/setup)
+recommends the native installer. No model calls were made for this check.

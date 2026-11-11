@@ -160,7 +160,7 @@ pub struct ProgramSpec {
     pub binary: PathBuf,
     /// Package entrypoint inside the npm global `node_modules`, declared by
     /// the adapter so a standard Windows `.cmd` shim can be translated into
-    /// a direct launch of its runtime. `None` refuses such shims.
+    /// a direct executable or runtime launch. `None` refuses such shims.
     pub npm_entrypoint: Option<&'static str>,
 }
 

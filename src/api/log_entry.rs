@@ -334,7 +334,6 @@ mod tests {
             attempts: trail.len() as u8,
             trail,
             elapsed: Duration::from_millis(9_100),
-            caller_deadline_bound: false,
         }
     }
 

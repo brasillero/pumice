@@ -306,32 +306,26 @@ impl App {
         }
     }
 
-    /// Returns the startup/info block.
     pub fn info(&self) -> &Info {
         &self.info
     }
 
-    /// Whether the details pane is open.
     pub fn details_open(&self) -> bool {
         self.details
     }
 
-    /// Whether the help screen is open.
     pub fn help_open(&self) -> bool {
         self.help
     }
 
-    /// Current tab in the details view.
     pub fn tab(&self) -> Tab {
         self.tab
     }
 
-    /// Current scroll offset of the details view.
     pub fn details_scroll(&self) -> usize {
         self.details_scroll
     }
 
-    /// Current scroll offset of the help screen.
     pub fn help_scroll(&self) -> usize {
         self.help_scroll
     }
@@ -341,7 +335,6 @@ impl App {
         self.search_mode
     }
 
-    /// Current search query.
     pub fn search(&self) -> &str {
         &self.search
     }

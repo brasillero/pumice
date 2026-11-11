@@ -4,13 +4,16 @@
 
 ## Deferred
 
-### #1 · Deferred · Panic handling for `pumice run --json`
+## Closed
+
+### #1 · Discarded · Panic handling for `pumice run --json`
 - type: Tech debt
 - area: cli
 - origin: conversation
 - ticket: —
 - created: 2026-10-15
-- reason: no input is known to trigger a panic on the reporting path; revisit when a UI starts calling `pumice run`
+- closed: 2026-11-11
+- outcome: the feature this item belongs to was removed (`relay-only/D1`); the owner asked on 2026-11-11 to clear stale material
 
 **Context.** Codex review round 4: an unexpected panic under `--json` still prints Rust's default panic text on stderr (not JSONL) and gives no envelope; with a full, unread stderr the panic message can block the exit. Every panic found on the reporting path was removed in this task, but no panic hook exists.
 
@@ -24,13 +27,14 @@
 **Where in the code.**
 - `src/orchestrator/cli.rs` (`report`, `write_envelope`), `src/orchestrator/events.rs`
 
-### #2 · Deferred · Run `pumice run` cancellation on Windows and macOS
+### #2 · Discarded · Run `pumice run` cancellation on Windows and macOS
 - type: Task
 - area: cli
 - origin: D1
 - ticket: —
 - created: 2026-10-15
-- reason: needs the owner's manual Windows check; CI runs the rest of the suite there
+- closed: 2026-11-11
+- outcome: the feature this item belongs to was removed (`relay-only/D1`); the owner asked on 2026-11-11 to clear stale material
 
 **Context.** The Ctrl-C/SIGTERM integration tests (no orphan transcription or provider processes, temp dirs removed, exit 130/143) are Unix-only. Windows relies on the relay's Job Object teardown through the new cleanup scope, and the scoped temp-dir retry path is only exercised on Unix.
 
@@ -40,8 +44,6 @@
 
 **Where in the code.**
 - `src/orchestrator/cancel.rs`, `crates/relay/src/process/tree.rs` (`CleanupScope`)
-
-## Closed
 
 ### #3 · Discarded · Kimi receives the transcript on its command line
 - type: Tech debt

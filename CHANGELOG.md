@@ -6,17 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows resolution of Claude Code npm shims targeting `bin/claude.exe`.
+
 ### Changed
+
+- CI runs platform tests without duplicate release builds; release preview retains packaging and linkage checks.
 
 - **Breaking: Pumice is the relay again.** Bare `pumice` starts the OpenAI-compatible service; `pumice serve` is an alias. Diagnostics are `pumice doctor` and `pumice check-config`. The relay code and tests live in the single root package.
 - **Breaking: the settings file is `pumice.yml`.** Rename an existing `relay.yml` or `pumice.yaml` before starting. Every setting remains explicit. First start creates only this file and preserves existing settings.
-- Release archives and all four npm platform packages ship only the relay executable, with generated target-specific license notices. The Linux npm package works on glibc and musl systems.
+- Release archives and all three npm platform packages ship only the relay executable, with generated target-specific license notices. The Linux npm package works on glibc and musl systems.
 - Current documentation and project rules describe the relay-only product; historical task notes retain the evidence of previous work.
 
 ### Removed
 
+- The archived generic HTTP adapter, its tests and direct HTTP-client dependencies.
+
 - Transcription, formatter, orchestration, audio HTTP routes, combined flows, model catalogs/downloads, native engines, CPU/GPU libraries, module commands and their build, packaging and CI machinery.
 - The separate `pumice-relay` executable and module-specific example settings.
+- The Intel Mac release build and its npm platform package (`darwin-x64`). Pumice ships for Windows x64, Linux x64 and macOS Apple Silicon.
 
 ## [0.3.0] — 2026-10-29
 

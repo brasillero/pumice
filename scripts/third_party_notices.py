@@ -496,7 +496,7 @@ def main(argv=None) -> int:
         "--platform",
         action="append",
         choices=sorted(key for key, _exe in package_npm.TARGET_TO_NPM.values()),
-        help="npm platform key (repeatable; default: all four)",
+        help="npm platform key (repeatable; default: all three)",
     )
     parser.add_argument(
         "--output-dir",

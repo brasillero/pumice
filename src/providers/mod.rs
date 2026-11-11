@@ -2,7 +2,7 @@
 //!
 //! A provider is a module exporting a [`ProviderDescriptor`] named
 //! `DESCRIPTOR`. Adding one is a new module plus one entry in
-//! `register_providers!` below.
+//! `PROVIDERS` below.
 
 pub mod cli;
 pub mod diagnostic;
@@ -127,12 +127,6 @@ pub struct ProviderDescriptor {
 pub enum ProbeSpec {
     /// Resolve and run the given version arguments.
     Version(&'static [&'static str]),
-    /// No CLI exists to detect (the generic loopback adapter): detection
-    /// neither resolves nor spawns anything. The provider is reported
-    /// available for listing purposes when enabled; its endpoint is a
-    /// network target whose availability is only checked at call time
-    /// (`EndpointUnavailable` then fails the request).
-    NotApplicable,
 }
 
 /// Validates one provider's settings; see
@@ -143,23 +137,13 @@ pub type ValidateSettingsFn = fn(&ProviderSettings, &ProviderLocations) -> Resul
 pub type BuildFn =
     fn(&ProviderSettings, Arc<ProcessRunner>) -> Result<Arc<dyn Provider>, ConfigError>;
 
-/// Declares provider modules and lists their descriptors in [`PROVIDERS`].
-macro_rules! register_providers {
-    ($($module:ident),+ $(,)?) => {
-        $(pub mod $module;)+
+pub mod claude;
+pub mod codex;
+pub mod kiro;
 
-        /// Every known provider, in registration order.
-        pub static PROVIDERS: &[ProviderDescriptor] = &[$($module::DESCRIPTOR),+];
-    };
-}
-
-register_providers!(claude, codex, kiro);
-
-// Archived provider (owner decision 2026-10-08): its code and tests stay,
-// but it is not registered, so configuration, detection, `doctor` and
-// `/v1/models` never see it. It comes back once the plugin architecture
-// settles.
-pub mod generic;
+/// Every known provider, in registration order.
+pub static PROVIDERS: &[ProviderDescriptor] =
+    &[claude::DESCRIPTOR, codex::DESCRIPTOR, kiro::DESCRIPTOR];
 
 /// Provider IDs that are archived or removed, with what the configuration
 /// loader says when a file still lists one.
@@ -168,10 +152,7 @@ pub const RETIRED: &[(&str, &str)] = &[
         "antigravity",
         "provider was removed (p16-provider-effort/D6); delete this entry",
     ),
-    (
-        "generic",
-        "is archived for now and cannot be used; delete this entry",
-    ),
+    ("generic", "provider was removed; delete this entry"),
     (
         "kimi",
         "provider was removed (p16-provider-effort/D6); delete this entry",

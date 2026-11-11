@@ -57,18 +57,14 @@ pub fn render(config_path: Option<&Path>, statuses: &[ProviderStatus]) -> String
 }
 
 /// One doctor line for `status`: id, enabled state, found state (with the
-/// install hint when the provider is missing). A provider with no
-/// executable (`Found::NotApplicable`, the archived generic adapter) names
-/// the local endpoint and defers availability to call time.
+/// install hint when the provider is missing).
 fn provider_line(status: &ProviderStatus) -> String {
     let install_hint = providers::descriptor(status.id).map_or("", |d| d.install_hint);
     let state = match (&status.found, &status.version) {
         (Found::Found(_), Version::Parsed(version)) => format!("found {version}"),
         (Found::Found(_), Version::Unavailable) => "found (version unavailable)".to_owned(),
-        (Found::Found(_), Version::Skipped) => "found".to_owned(),
         (Found::Missing, _) => format!("missing (install: {install_hint})"),
         (Found::UnsupportedShim, _) => format!("unsupported launcher (install: {install_hint})"),
-        (Found::NotApplicable, _) => "local endpoint (checked at call time)".to_owned(),
     };
     let enabled = if status.enabled {
         "enabled"
@@ -79,9 +75,7 @@ fn provider_line(status: &ProviderStatus) -> String {
 }
 
 /// Counts `(ready, total)` over the enabled providers: an enabled provider
-/// is ready when detection found its executable; a provider with no
-/// executable (`Found::NotApplicable`, the archived generic adapter) is ready
-/// by definition, since its endpoint is checked at call time.
+/// is ready when detection found its executable.
 pub fn enabled_ready(statuses: &[ProviderStatus]) -> (usize, usize) {
     let mut ready = 0;
     let mut total = 0;
@@ -90,7 +84,7 @@ pub fn enabled_ready(statuses: &[ProviderStatus]) -> (usize, usize) {
             continue;
         }
         total += 1;
-        if matches!(status.found, Found::Found(_) | Found::NotApplicable) {
+        if matches!(status.found, Found::Found(_)) {
             ready += 1;
         }
     }
@@ -168,10 +162,8 @@ pub async fn prepare_login_check(
     }
     // Fresh detection for exactly this provider, through the same resolution
     // path a formatting call uses; the bounded version probe spends no quota.
-    // NotApplicable providers (generic) have no executable to find: their
-    // endpoint availability is what the login-check call itself establishes.
     let statuses = discovery::detect(config, &[*descriptor], runner).await;
-    if !matches!(statuses[0].found, Found::Found(_) | Found::NotApplicable) {
+    if !matches!(statuses[0].found, Found::Found(_)) {
         return Err(LoginCheckError::NotInstalled);
     }
     (descriptor.build)(settings, Arc::new(runner.clone())).map_err(LoginCheckError::BuildFailed)
@@ -230,8 +222,6 @@ pub fn error_category(error: ProviderError) -> String {
             ProviderErrorCode::UnsupportedSystemPrompt => "unsupported system prompt".to_owned(),
             ProviderErrorCode::UnexpectedToolActivity => "the CLI tried to use a tool".to_owned(),
             ProviderErrorCode::NonzeroExit => "the CLI reported a failure".to_owned(),
-            ProviderErrorCode::EndpointUnavailable => "endpoint unavailable".to_owned(),
-            ProviderErrorCode::HttpStatus(status) => format!("HTTP status {status}"),
         },
     }
 }
@@ -357,29 +347,6 @@ mod tests {
     }
 
     #[test]
-    fn render_reports_an_enabled_generic_as_a_local_endpoint() {
-        let mut statuses = full_scan();
-        // Generic is archived and not in the registry, so no configuration
-        // can enable it; this synthetic status only keeps the rendering rule
-        // for endpoint providers covered.
-        statuses.push(status(
-            "generic",
-            true,
-            Found::NotApplicable,
-            Version::Skipped,
-        ));
-        let report = render(None, &statuses);
-
-        assert!(
-            report.contains("generic: enabled, local endpoint (checked at call time)\n"),
-            "{report}"
-        );
-        assert!(!report.contains("warning"), "{report}");
-        // An enabled generic has no executable to miss, so it is ready.
-        assert_eq!(enabled_ready(&statuses), (3, 3));
-    }
-
-    #[test]
     fn enabled_ready_counts_enabled_providers_only() {
         assert_eq!(enabled_ready(&full_scan()), (2, 2));
         assert_eq!(enabled_ready(&[]), (0, 0));
@@ -400,18 +367,6 @@ mod tests {
         assert_eq!(
             error_category(ProviderError::other(ProviderErrorCode::InputTooLarge)),
             "input too large"
-        );
-        assert_eq!(
-            error_category(ProviderError::other(ProviderErrorCode::EndpointUnavailable)),
-            "endpoint unavailable"
-        );
-        assert_eq!(
-            error_category(ProviderError::other(ProviderErrorCode::HttpStatus(500))),
-            "HTTP status 500"
-        );
-        assert_eq!(
-            error_category(ProviderError::other(ProviderErrorCode::HttpStatus(404))),
-            "HTTP status 404"
         );
     }
 

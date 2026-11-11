@@ -2,9 +2,7 @@
 //! which versions they report.
 //!
 //! [`detect`] resolves every registered provider through the same
-//! [`resolve_program`] path a formatting call uses, then — except for
-//! [`ProbeSpec::NotApplicable`] providers, which have no CLI and are never
-//! even resolved (the archived generic adapter) — runs a
+//! [`resolve_program`] path a formatting call uses, then runs a
 //! bounded `--version`-style probe through the shared
 //! [`ProcessRunner`], so a probe gets a fresh empty workspace, no shell,
 //! closed stdin and process-tree kill on timeout. The service runs detection
@@ -55,10 +53,6 @@ pub enum Found {
     /// Found, but it is a script wrapper Pumice refuses to translate
     /// (on Windows, anything but a supported npm `.cmd` shim).
     UnsupportedShim,
-    /// No executable exists to find ([`ProbeSpec::NotApplicable`], the
-    /// generic loopback adapter): detection neither resolves nor spawns
-    /// anything, and availability is checked at call time instead.
-    NotApplicable,
 }
 
 /// What a version probe established.
@@ -69,15 +63,12 @@ pub enum Version {
     /// The probe failed, timed out or printed nothing version-shaped. This
     /// never changes [`Found`]: the provider is still installed.
     Unavailable,
-    /// Deliberately not probed ([`ProbeSpec::NotApplicable`]).
-    Skipped,
 }
 
 /// Detects every provider in `descriptors` — enabled or not, so a later
 /// `pumice doctor` can show the whole registry — and returns the statuses in
 /// descriptor order. Probes run concurrently; each gets its own deadline of
-/// [`PROBE_TIMEOUT`]. Never spends quota and never spawns a
-/// [`ProbeSpec::NotApplicable`] provider.
+/// [`PROBE_TIMEOUT`]. Never spends quota.
 pub async fn detect(
     config: &Config,
     descriptors: &[ProviderDescriptor],
@@ -117,12 +108,6 @@ async fn detect_entries(
     let mut found: Vec<Found> = Vec::with_capacity(descriptors.len());
     let mut probes: Vec<(usize, CliInvocation)> = Vec::new();
     for (index, descriptor) in descriptors.iter().enumerate() {
-        // NotApplicable providers have no CLI: never resolve, never probe.
-        // Their endpoint is a network target checked at call time.
-        if descriptor.probe == ProbeSpec::NotApplicable {
-            found.push(Found::NotApplicable);
-            continue;
-        }
         let program = probe_program(
             descriptor,
             config.and_then(|config| config.provider(descriptor.id)),
@@ -134,7 +119,8 @@ async fn detect_entries(
             }) => Found::UnsupportedShim,
             Err(_) => Found::Missing,
         };
-        if let (Found::Found(_), ProbeSpec::Version(args)) = (&resolved, descriptor.probe) {
+        let ProbeSpec::Version(args) = descriptor.probe;
+        if let Found::Found(_) = &resolved {
             probes.push((index, probe_invocation(&program, args)));
         }
         found.push(resolved);
@@ -170,10 +156,6 @@ async fn detect_entries(
                 (Found::Found(_), ProbeSpec::Version(_)) => {
                     probed.get(&index).cloned().unwrap_or(Version::Unavailable)
                 }
-                // Unreachable in practice: NotApplicable descriptors never
-                // resolve, so they never report Found. Nothing was probed.
-                (Found::Found(_), ProbeSpec::NotApplicable) => Version::Skipped,
-                (Found::NotApplicable, _) => Version::Skipped,
                 (Found::Missing, _) | (Found::UnsupportedShim, _) => Version::Unavailable,
             };
             ProviderStatus {
@@ -284,11 +266,9 @@ pub fn status_line(status: &ProviderStatus, install_hint: &str) -> String {
         Found::Found(_) => match &status.version {
             Version::Parsed(version) => format!("found {version}"),
             Version::Unavailable => "found (version unavailable)".to_owned(),
-            Version::Skipped => "found".to_owned(),
         },
         Found::Missing => format!("missing (install: {install_hint})"),
         Found::UnsupportedShim => format!("unsupported launcher (install: {install_hint})"),
-        Found::NotApplicable => "local endpoint (checked at call time)".to_owned(),
     };
     format!("provider {}: {state}", status.id)
 }

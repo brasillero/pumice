@@ -10,7 +10,6 @@ Download the archive for your platform from [GitHub Releases](https://github.com
 | --- | --- | --- |
 | Windows x64 | `x86_64-pc-windows-msvc` | Static C runtime; no separate CRT install |
 | Linux x64 | `x86_64-unknown-linux-musl` | Static executable, for glibc and musl systems |
-| macOS Intel | `x86_64-apple-darwin` | OS libraries only |
 | macOS Apple Silicon | `aarch64-apple-darwin` | OS libraries only |
 
 Alternatively, with Node.js 22 or newer:
@@ -80,7 +79,7 @@ archive — run it from its folder with an explicit path:
 
 ```sh
 ./pumice        # Linux and macOS
-.\pumice.exe relay serve    # Windows PowerShell
+.\pumice.exe                # Windows PowerShell
 ```
 
 ## Check that it works
@@ -201,8 +200,6 @@ the same time. Extra requests wait in line, first come first served; a
 request still waiting when its `total_timeout_secs` budget runs out gets
 HTTP 503.
 
-Which providers are available today:
-
 Nothing is on until you list it with `enabled: true` and a `model` (the
 example config shows how). Then set the model in Handy to the provider's
 id to pick it.
@@ -241,19 +238,19 @@ Pumice listens on `127.0.0.1` only and sends no telemetry. Request text stays ou
 The [Release preview workflow](../.github/workflows/release.yml) runs on relevant pull requests and manual dispatch. It never publishes. It:
 
 - Tests the packaging helpers and launcher with fake binaries and a loopback npm registry.
-- Builds `pumice` for all four targets using the Rust version pinned by `scripts/third_party_notices.py --print-rust-version`.
+- Builds `pumice` for all three targets using the Rust version pinned by `scripts/third_party_notices.py --print-rust-version`.
 - Checks Linux static linkage and Windows static CRT linkage, then tests `--version` from each archive.
 - Generates target-specific notices for Cargo dependencies, the Rust standard library and musl. See [the license source notes](../scripts/notices/README.md) when changing the release toolchain.
-- Packs four archives, each containing the executable, `LICENSE`, `THIRD_PARTY_NOTICES.md`, `pumice.example.yml` and `INSTALL.md`, plus checksums.
-- Packs the front npm launcher and four native packages. Each native package holds just `bin/pumice` (or `.exe`), its manifest, license and generated notices. Archive hashes and tarball contents, modes and hashes are checked before upload. `PACKAGES.md` records sizes; the limits are 50 MB packed and 150 MB unpacked per package.
-- Installs the tarballs through a loopback registry on all four platforms and tests npm/npx plus pnpm/Bun on Linux. No real AI calls run.
+- Packs three archives, each containing the executable, `LICENSE`, `THIRD_PARTY_NOTICES.md`, `pumice.example.yml` and `INSTALL.md`, plus checksums.
+- Packs the front npm launcher and three native packages. Each native package holds just `bin/pumice` (or `.exe`), its manifest, license and generated notices. Archive hashes and tarball contents, modes and hashes are checked before upload. `PACKAGES.md` records sizes; the limits are 50 MB packed and 150 MB unpacked per package.
+- Installs the tarballs through a loopback registry on all three platforms and tests npm/npx plus pnpm/Bun on Linux. No real AI calls run.
 
 To publish:
 
 1. Prepare the version and hand-written changelog in a release PR, merge it, then run `gh workflow run release.yml --ref main`. Wait for that manual run to pass.
 2. Download its `release-preview` and `npm-preview` artifacts. Verify `SHA256SUMS` in both directories.
-3. Create a draft GitHub release `v<version>` targeting the merge commit, attach the four archives and archive checksums, and use the changelog as release notes. Review and publish it.
-4. With the owner's npm login/2FA, publish the four native tarballs first, then the front tarball: `pnpm publish <tarball> --access public`.
+3. Create a draft GitHub release `v<version>` targeting the merge commit, attach the three archives and archive checksums, and use the changelog as release notes. Review and publish it.
+4. With the owner's npm login/2FA, publish the three native tarballs first, then the front tarball: `pnpm publish <tarball> --access public`.
 5. Verify `pnpm dlx @brasillero/pumice@<version> --version` prints `pumice <version>`.
 
 Publishing needs the owner. The npm web approval flow can expire after a few minutes, and registry metadata may lag a successful publish. Check upload output before retrying; a version cannot be overwritten.

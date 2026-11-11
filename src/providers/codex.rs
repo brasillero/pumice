@@ -29,8 +29,8 @@ use serde_json::Value;
 
 use super::cli::{CliAdapter, CliProvider};
 use super::{
-    Effort, FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError,
-    ProviderErrorCode, ProviderSettings, validate_settings_noop,
+    Effort, FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode,
+    ProviderSettings, validate_settings_noop,
 };
 use crate::config::ConfigError;
 use crate::process::{
@@ -115,9 +115,9 @@ impl CodexAdapter {
         };
         match std::fs::read_to_string(home.join("config.toml")) {
             Ok(text) => inherit_plan(&text),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                UserConfig::Inherit { mcp_servers: Vec::new() }
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => UserConfig::Inherit {
+                mcp_servers: Vec::new(),
+            },
             Err(_) => UserConfig::Ignore,
         }
     }
@@ -173,7 +173,9 @@ impl CliAdapter for CodexAdapter {
     fn invocation(&self, input: FormatInput<'_>) -> Result<CliInvocation, ProviderError> {
         // A model that looks like a flag would change the command's meaning.
         if self.model.is_empty() || self.model.starts_with('-') {
-            return Err(ProviderError::other(ProviderErrorCode::InvalidConfiguration));
+            return Err(ProviderError::other(
+                ProviderErrorCode::InvalidConfiguration,
+            ));
         }
 
         let user_config = self.user_config();
@@ -186,17 +188,17 @@ impl CliAdapter for CodexAdapter {
         }
         args.extend(
             [
-            "--ignore-rules",
-            "--ephemeral",
-            "--skip-git-repo-check",
-            "--sandbox",
-            "read-only",
-            "--color",
-            "never",
-            "--json",
-        ]
-        .into_iter()
-        .map(Argument::literal),
+                "--ignore-rules",
+                "--ephemeral",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "read-only",
+                "--color",
+                "never",
+                "--json",
+            ]
+            .into_iter()
+            .map(Argument::literal),
         );
 
         args.push(Argument::literal("-m"));
@@ -232,7 +234,9 @@ impl CliAdapter for CodexAdapter {
         if let UserConfig::Inherit { mcp_servers } = &user_config {
             for name in mcp_servers {
                 args.push(Argument::literal("-c"));
-                args.push(Argument::literal(format!("mcp_servers.{name}.enabled=false")));
+                args.push(Argument::literal(format!(
+                    "mcp_servers.{name}.enabled=false"
+                )));
             }
         }
         // The system prompt is a control file outside the workspace; the path
@@ -425,8 +429,12 @@ mod tests {
         if let Some(config) = config {
             std::fs::write(home.path().join("config.toml"), config).expect("config written");
         }
-        let adapter = CodexAdapter::new(PathBuf::from("codex"), "gpt-6.1-sol".to_owned(), Effort::Low)
-            .with_codex_home(home.path().to_path_buf());
+        let adapter = CodexAdapter::new(
+            PathBuf::from("codex"),
+            "gpt-6.1-sol".to_owned(),
+            Effort::Low,
+        )
+        .with_codex_home(home.path().to_path_buf());
         (home, adapter)
     }
 
@@ -438,7 +446,10 @@ mod tests {
              [mcp_servers.web-search]\ncommand = \"x\"\n",
         ));
         let args = literal_args(&adapter);
-        assert!(!args.contains(&"--ignore-user-config".to_owned()), "{args:?}");
+        assert!(
+            !args.contains(&"--ignore-user-config".to_owned()),
+            "{args:?}"
+        );
         for wanted in [
             "mcp_servers.files.enabled=false",
             "mcp_servers.web-search.enabled=false",
@@ -449,10 +460,15 @@ mod tests {
             "features.fast_mode=false",
             r#"model_reasoning_summary="none""#,
         ] {
-            assert!(args.contains(&wanted.to_owned()), "missing {wanted}: {args:?}");
+            assert!(
+                args.contains(&wanted.to_owned()),
+                "missing {wanted}: {args:?}"
+            );
         }
         assert!(
-            !args.iter().any(|arg| arg.contains("secret-cmd") || arg.contains("gateway")),
+            !args
+                .iter()
+                .any(|arg| arg.contains("secret-cmd") || arg.contains("gateway")),
             "config values are never copied: {args:?}"
         );
     }
@@ -461,8 +477,14 @@ mod tests {
     fn missing_config_inherits_nothing_to_disable() {
         let (_home, adapter) = adapter_with_config(None);
         let args = literal_args(&adapter);
-        assert!(!args.contains(&"--ignore-user-config".to_owned()), "{args:?}");
-        assert!(!args.iter().any(|arg| arg.starts_with("mcp_servers.")), "{args:?}");
+        assert!(
+            !args.contains(&"--ignore-user-config".to_owned()),
+            "{args:?}"
+        );
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("mcp_servers.")),
+            "{args:?}"
+        );
     }
 
     #[test]
@@ -483,17 +505,20 @@ mod tests {
 
     #[test]
     fn without_a_codex_home_the_user_config_is_ignored() {
-        let adapter = CodexAdapter::new(PathBuf::from("codex"), "gpt-6.1-sol".to_owned(), Effort::Low);
+        let adapter = CodexAdapter::new(
+            PathBuf::from("codex"),
+            "gpt-6.1-sol".to_owned(),
+            Effort::Low,
+        );
         assert!(literal_args(&adapter).contains(&"--ignore-user-config".to_owned()));
     }
-
-
-
 
     #[test]
     fn classifies_failure_messages() {
         assert_eq!(
-            classify_failure(&["unexpected status 401 Unauthorized: Missing bearer or basic authentication in header"]),
+            classify_failure(&[
+                "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header"
+            ]),
             ProviderError::NotLoggedIn
         );
         assert_eq!(

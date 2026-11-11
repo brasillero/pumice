@@ -212,6 +212,27 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("unsupported platform", result.stderr)
         self.assertIn("linux-x64", result.stderr)
 
+    def test_intel_mac_is_unsupported(self):
+        # Simulate the host without changing the shipped launcher.
+        import package_npm
+
+        manifest = json.loads((self.front / "package.json").read_text())
+        manifest["optionalDependencies"] = {
+            package_npm.native_package_name(key): FRONT_VERSION
+            for key, _ in package_npm.TARGET_TO_NPM.values()
+        }
+        (self.front / "package.json").write_text(json.dumps(manifest))
+        platform, arch = "darwin", "x64"
+        host = self.root / "intel-mac.cjs"
+        host.write_text(
+            f"Object.defineProperty(process, 'platform', {{value: {json.dumps(platform)}}});"
+            f"Object.defineProperty(process, 'arch', {{value: {json.dumps(arch)}}});"
+        )
+        result = self.run_launcher([], node_args=("--require", str(host)))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"unsupported platform {platform}-{arch}", result.stderr)
+        self.assertNotIn("missing native package", result.stderr)
+
     def test_missing_binary_fails_clearly(self):
         (self.native / "bin" / "pumice").unlink()
         result = self.run_launcher([])

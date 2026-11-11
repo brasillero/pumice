@@ -52,7 +52,7 @@ print(filename)
 
 
 def make_release_dir(root: Path) -> Path:
-    """Creates the four fake release archives plus SHA256SUMS in root/dist."""
+    """Creates the three fake release archives plus SHA256SUMS in root/dist."""
     dist = root / "dist"
     dist.mkdir()
     binary = root / "pumice"
@@ -121,14 +121,14 @@ class PackageNpmTests(unittest.TestCase):
             "nothing may be packed after a validation failure",
         )
 
-    def test_packs_five_tarballs_and_checksums(self):
+    def test_packs_four_tarballs_and_checksums(self):
         tarballs = self.pack()
         self.assertEqual(
             sorted(path.name for path in tarballs),
             sorted([FRONT_TARBALL, *NATIVE_TARBALLS]),
         )
         checksums = (self.output / "SHA256SUMS").read_text().splitlines()
-        self.assertEqual(len(checksums), 5)
+        self.assertEqual(len(checksums), 4)
         for line in checksums:
             digest, name = line.split()
             self.assertEqual(
@@ -238,7 +238,7 @@ class PackageNpmTests(unittest.TestCase):
         self.assertIn("unexpected: bin/extra", str(caught.exception))
 
     def test_notices_must_cover_every_native_package(self):
-        (self.notices / "darwin-x64.md").unlink()
+        (self.notices / "win32-x64.md").unlink()
         self.assert_pack_fails("must contain exactly darwin-arm64.md")
 
     def test_notices_must_be_generated(self):
@@ -269,7 +269,7 @@ class PackageNpmTests(unittest.TestCase):
             self.pack()
         self.assertIn("SHA-256 mismatch", str(caught.exception))
 
-    def test_checksums_must_cover_exactly_the_four_archives(self):
+    def test_checksums_must_cover_exactly_the_three_archives(self):
         lines = (self.dist / "SHA256SUMS").read_text().splitlines()
         (self.dist / "SHA256SUMS").write_text("\n".join(lines[1:]) + "\n")
         with self.assertRaises(SystemExit) as caught:

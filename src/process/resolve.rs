@@ -28,7 +28,7 @@ pub struct ResolvedProgram {
 ///
 /// On Windows, `.cmd`, `.bat` and `.ps1` results would run through a shell
 /// interpreter, so they are never spawned: a supported npm `.cmd` shim is
-/// translated into a direct launch of its runtime (see
+/// translated into a direct executable or runtime launch (see
 /// [`translate_npm_shim`]); anything else is
 /// [`ProviderErrorCode::UnsupportedShim`].
 pub fn resolve_program(program: &ProgramSpec) -> Result<ResolvedProgram, ProviderError> {
@@ -95,7 +95,7 @@ fn read_shim(path: &Path) -> Result<String, ProviderError> {
 }
 
 /// Translates a recognized npm `.cmd` shim into a direct launch of its
-/// JavaScript runtime: `node <entrypoint> <adapter args…>`. Pure string
+/// executable, or JavaScript runtime: `node <entrypoint> <adapter args…>`. Pure string
 /// parsing plus an injectable runtime lookup, so it is unit-testable on every
 /// OS. Anything outside the recognized format is refused with
 /// [`ProviderErrorCode::UnsupportedShim`]; errors never include shim text.
@@ -117,6 +117,12 @@ fn translate_npm_shim(
         .fold(shim_dir.join("node_modules"), |path, part| path.join(part));
     if !entrypoint_path.is_file() {
         return Err(unsupported_shim());
+    }
+    if entrypoint.ends_with(".exe") {
+        return Ok(ResolvedProgram {
+            path: entrypoint_path,
+            prefix_args: Vec::new(),
+        });
     }
     let Some(node) = lookup_node(shim_dir) else {
         // The shim is a known wrapper but its runtime is missing.
@@ -352,7 +358,7 @@ mod tests {
     }
 
     const CODEX_SHIM: &str = include_str!("../../tests/fixtures/windows-shims/codex.cmd");
-    const CLAUDE_SHIM: &str = include_str!("../../tests/fixtures/windows-shims/claude.cmd");
+    const CLAUDE_SHIM: &str = include_str!("../../tests/fixtures/windows-shims/claude-legacy.cmd");
     const HOSTILE_SHIM: &str = include_str!("../../tests/fixtures/windows-shims/hostile.cmd");
     const CODEX_ENTRYPOINT: &str = "@openai/codex/bin/codex.js";
     const CLAUDE_ENTRYPOINT: &str = "@anthropic-ai/claude-code/cli.js";
@@ -393,6 +399,44 @@ mod tests {
                     .into_os_string()]
             );
         }
+    }
+
+    #[test]
+    fn translates_claude_native_npm_shim_without_node() {
+        let entrypoint = crate::providers::claude::DESCRIPTOR.npm_entrypoint.unwrap();
+        let (_dir, shim) = shim_with_entrypoint("claude.cmd", entrypoint);
+        let contents = include_str!("../../tests/fixtures/windows-shims/claude.cmd");
+        let resolved = translate_npm_shim(&shim, contents, entrypoint, &|_| None)
+            .expect("native npm entrypoint needs no Node runtime");
+        assert_eq!(
+            resolved.path,
+            shim.parent()
+                .unwrap()
+                .join("node_modules")
+                .join("@anthropic-ai")
+                .join("claude-code")
+                .join("bin")
+                .join("claude.exe")
+        );
+        assert!(resolved.prefix_args.is_empty());
+        for bad in [
+            contents.replace("claude.exe", "other.exe"),
+            contents.repeat(2),
+        ] {
+            assert!(matches!(
+                translate_npm_shim(&shim, &bad, entrypoint, &|_| None),
+                Err(ProviderError::Other {
+                    code: ProviderErrorCode::UnsupportedShim
+                })
+            ));
+        }
+        std::fs::remove_file(&resolved.path).unwrap();
+        assert!(matches!(
+            translate_npm_shim(&shim, contents, entrypoint, &|_| None),
+            Err(ProviderError::Other {
+                code: ProviderErrorCode::UnsupportedShim
+            })
+        ));
     }
 
     #[test]

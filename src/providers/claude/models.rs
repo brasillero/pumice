@@ -389,8 +389,14 @@ mod tests {
         ("claude-sonnet-4-20250514", "claude-sonnet-4-0"),
         ("claude-sonnet-4@20250514", "claude-sonnet-4-0"),
         ("claude-sonnet-4-latest", "claude-sonnet-4-0"),
-        ("us.anthropic.claude-sonnet-4-20250514-v1:0", "claude-sonnet-4-0"),
-        ("eu.anthropic.claude-sonnet-4-20250514-v1:0", "claude-sonnet-4-0"),
+        (
+            "us.anthropic.claude-sonnet-4-20250514-v1:0",
+            "claude-sonnet-4-0",
+        ),
+        (
+            "eu.anthropic.claude-sonnet-4-20250514-v1:0",
+            "claude-sonnet-4-0",
+        ),
         ("claude-opus-4", "claude-opus-4-0"),
         ("claude-opus-4-20250514", "claude-opus-4-0"),
         ("claude-opus-4@20250514", "claude-opus-4-0"),
@@ -448,7 +454,11 @@ mod tests {
             assert!(!has_no_effort(model), "{model}");
             assert!(!keeps_thinking_on(model), "{model}");
         }
-        for model in ["claude-opus-4", "claude-opus-4-0@20250514", "claude-opus-4-1-fast"] {
+        for model in [
+            "claude-opus-4",
+            "claude-opus-4-0@20250514",
+            "claude-opus-4-1-fast",
+        ] {
             assert!(has_no_effort(model), "{model}");
         }
     }

@@ -90,9 +90,6 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             npm: win32-x64
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            npm: darwin-x64
           - os: macos-15
             target: aarch64-apple-darwin
             npm: darwin-arm64
@@ -291,7 +288,7 @@ jobs:
           cargo fetch --locked
           python3 scripts/third_party_notices.py --output-dir notices
 
-      # Validate archive hashes, stage the five packages and audit each tarball.
+      # Validate archive hashes, stage the four packages and audit each tarball.
       - name: Stage and pack npm tarballs
         run: >
           python3 scripts/package_npm.py
@@ -328,8 +325,6 @@ jobs:
             npm: linux-x64
           - os: windows-latest
             npm: win32-x64
-          - os: macos-15-intel
-            npm: darwin-x64
           - os: macos-15
             npm: darwin-arm64
     steps:

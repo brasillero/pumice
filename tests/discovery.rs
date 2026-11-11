@@ -1,6 +1,5 @@
 //! Tests for startup provider detection (S2.8 part 1): version parsing over
-//! realistic outputs, missing binaries, probe deadlines, the never-spawn
-//! guarantee for the CLI-less generic adapter, and
+//! realistic outputs, missing binaries, probe deadlines, and
 //! full-registry detection. Every CLI below is the portable fake; no test
 //! looks a real CLI up on PATH (each test passes descriptors whose binaries
 //! it controls).
@@ -159,58 +158,8 @@ fn registry_probe_metadata_is_consistent() {
     for descriptor in providers::PROVIDERS {
         match descriptor.probe {
             ProbeSpec::Version(args) => assert_eq!(args, ["--version"], "{}", descriptor.id),
-            ProbeSpec::NotApplicable => {}
         }
-        if descriptor.probe == ProbeSpec::NotApplicable {
-            // No CLI exists: the empty default binary is never resolved.
-            assert!(descriptor.default_binary.is_empty(), "{}", descriptor.id);
-        } else {
-            assert!(!descriptor.default_binary.is_empty(), "{}", descriptor.id);
-        }
+        assert!(!descriptor.default_binary.is_empty(), "{}", descriptor.id);
         assert!(!descriptor.install_hint.is_empty(), "{}", descriptor.id);
     }
-}
-
-/// Validates `yaml` against `descriptors` alone, so archived (unregistered)
-/// providers keep their detection guarantees tested.
-fn load_with(yaml: &str, descriptors: &[ProviderDescriptor]) -> Config {
-    config::validate_text_with_descriptors(
-        &support::relay_config(yaml),
-        Path::new("pumice.yml"),
-        descriptors,
-    )
-    .expect("config validates")
-}
-
-#[tokio::test]
-async fn archived_generic_is_never_resolved_or_spawned() {
-    // The generic adapter has no CLI: even with a `binary` that exists on
-    // disk, detection neither resolves nor spawns it.
-    let fake = FakeCli::new(json!({}));
-    let descriptors = [providers::generic::DESCRIPTOR];
-    let config = load_with(
-        &format!(
-            "providers:\n  - id: generic\n    enabled: false\n    binary: '{}'\n    model: null\n    timeout_secs: 30\n    effort: low\n",
-            fake.path().display()
-        ),
-        &descriptors,
-    );
-    let statuses = discovery::detect(&config, &descriptors, &ProcessRunner::new()).await;
-
-    assert_eq!(statuses.len(), 1);
-    assert_eq!(statuses[0].found, Found::NotApplicable);
-    assert_eq!(statuses[0].version, Version::Skipped);
-    assert!(
-        !fake.report_path().exists(),
-        "the generic adapter has no CLI: nothing may ever be spawned for it"
-    );
-}
-
-#[test]
-fn archived_probe_metadata_keeps_its_guarantees() {
-    assert_eq!(
-        providers::generic::DESCRIPTOR.probe,
-        ProbeSpec::NotApplicable,
-        "generic spawns no CLI, so detection must not touch PATH or the runner"
-    );
 }

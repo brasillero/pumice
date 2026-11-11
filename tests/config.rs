@@ -128,7 +128,7 @@ mod capability_probe {
         build: probe_build,
         thinking_switch: false,
         validate_settings: validate_settings_noop,
-        probe: ProbeSpec::NotApplicable,
+        probe: ProbeSpec::Version(&["--version"]),
         default_binary: "probe-cli",
         npm_entrypoint: None,
         install_hint: "the probe is not installable",

@@ -19,7 +19,6 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -32,7 +31,7 @@ pub use invocation::{
 };
 pub use resolve::{ResolvedProgram, resolve_program};
 pub use std_handles::make_std_handles_non_inheritable;
-pub use tree::{CleanupScope, ProcessTree};
+pub use tree::ProcessTree;
 
 use crate::providers::{ProviderError, ProviderErrorCode};
 
@@ -54,28 +53,13 @@ const REMOVE_RETRY_DELAY: Duration = Duration::from_millis(50);
 const WORKSPACE_DIR: &str = "workspace";
 const CONTROL_DIR: &str = "control";
 
-/// Runs CLI invocations. Stateless apart from an optional cleanup scope;
-/// share one instance.
+/// Runs CLI invocations in private temporary directories.
 #[derive(Debug, Default, Clone)]
-pub struct ProcessRunner {
-    cleanup_scope: Option<Arc<CleanupScope>>,
-}
+pub struct ProcessRunner;
 
 impl ProcessRunner {
     pub fn new() -> ProcessRunner {
-        ProcessRunner::default()
-    }
-
-    /// Returns a runner that reports abandoned process trees to `scope`
-    /// (p12-pumice-run): when a call's future is dropped mid-run — the
-    /// caller cancelled — the tree is killed synchronously and registered for
-    /// the scope owner to reap with [`CleanupScope::drain`]. Without a scope
-    /// the behavior is unchanged: a dropped tree is killed and nobody awaits
-    /// the reap.
-    pub fn with_cleanup_scope(self, scope: Arc<CleanupScope>) -> ProcessRunner {
-        ProcessRunner {
-            cleanup_scope: Some(scope),
-        }
+        ProcessRunner
     }
 
     /// Runs `invocation` to completion before `deadline`.
@@ -92,50 +76,10 @@ impl ProcessRunner {
             return Err(ProviderError::Timeout);
         }
         let program = resolve_program(&invocation.program)?;
-        // Dropping the guard removes the root, on success, failure and
-        // cancellation alike. With a cleanup scope a deferred removal is
-        // registered, so the scope owner's bounded drain awaits it.
         let root = RootGuard {
             root: Some(private_temp::tempdir().map_err(io_error)?),
-            scope: self.cleanup_scope.clone(),
         };
-        run_in(
-            root.path(),
-            &program,
-            invocation,
-            deadline,
-            self.cleanup_scope.clone(),
-        )
-        .await
-    }
-}
-
-/// Guards a spawned tree for the length of a run: every explicit exit path
-/// calls [`ProcessTree::finish`] (kill and reap), and a drop before that —
-/// the run's future was cancelled — kills the tree. With a cleanup scope the
-/// killed tree is registered so its owner can await the reap; without one
-/// the tree's own drop kills it, as before.
-struct TreeGuard {
-    tree: Option<ProcessTree>,
-    scope: Option<Arc<CleanupScope>>,
-}
-
-impl TreeGuard {
-    fn tree_mut(&mut self) -> &mut ProcessTree {
-        self.tree.as_mut().expect("tree present until dropped")
-    }
-}
-
-impl Drop for TreeGuard {
-    fn drop(&mut self) {
-        let Some(tree) = self.tree.take() else { return };
-        if tree.is_reaped() {
-            return;
-        }
-        if let Some(scope) = &self.scope {
-            scope.kill_and_register(tree);
-        }
-        // No scope: dropping `tree` here runs ProcessTree's own kill-on-drop.
+        run_in(root.path(), &program, invocation, deadline).await
     }
 }
 
@@ -144,7 +88,6 @@ async fn run_in(
     program: &ResolvedProgram,
     invocation: CliInvocation,
     deadline: Instant,
-    cleanup_scope: Option<Arc<CleanupScope>>,
 ) -> Result<ProcessOutput, ProviderError> {
     let workspace = root.join(WORKSPACE_DIR);
     let control = root.join(CONTROL_DIR);
@@ -194,19 +137,14 @@ async fn run_in(
     if Instant::now() >= deadline {
         return Err(ProviderError::Timeout);
     }
-    let tree = ProcessTree::spawn(command).map_err(|e| match e.kind() {
+    let mut tree = ProcessTree::spawn(command).map_err(|e| match e.kind() {
         io::ErrorKind::NotFound => ProviderError::NotInstalled,
         _ => ProviderError::other(ProviderErrorCode::Spawn),
     })?;
-    let mut guard = TreeGuard {
-        tree: Some(tree),
-        scope: cleanup_scope,
-    };
-    let captured = drive(guard.tree_mut(), invocation.stdin, deadline).await;
-    // Kill whatever is left (descendants included) on every path, then reap.
-    // If this future is dropped before here, the guard kills the tree instead
-    // (registering it with the cleanup scope when one is set).
-    let status = guard.tree_mut().finish(REAP_LIMIT).await;
+    let captured = drive(&mut tree, invocation.stdin, deadline).await;
+    // Kill descendants on every exit path, then reap. ProcessTree's drop
+    // kills the tree if the request is cancelled before this point.
+    let status = tree.finish(REAP_LIMIT).await;
     let (stdout, stderr_tail, stdin_complete) = captured?;
     let status = status.ok_or(ProviderError::other(ProviderErrorCode::Io))?;
     // A CLI that exits cleanly without taking all of its stdin answered a
@@ -227,15 +165,8 @@ async fn run_in(
 /// hold the workspace for a moment after termination) a plain thread keeps
 /// retrying, so the retries depend neither on the request nor on the async
 /// runtime still running.
-///
-/// With a cleanup scope the thread reports back and the scope's
-/// [`CleanupScope::drain`] awaits the removal within the caller's bounded
-/// teardown, counting it as a failure when the root survives. Without a
-/// scope the behavior is unchanged: the thread is detached and a final
-/// failure is only warned about on stderr.
 struct RootGuard {
     root: Option<tempfile::TempDir>,
-    scope: Option<Arc<CleanupScope>>,
 }
 
 impl RootGuard {
@@ -253,37 +184,19 @@ impl Drop for RootGuard {
         if try_remove(root.path()) {
             return;
         }
-        match &self.scope {
-            Some(scope) => {
-                let (sender, done) = tokio::sync::oneshot::channel();
-                let spawned = std::thread::Builder::new()
-                    .name("pumice-temp-cleanup".to_owned())
-                    .spawn(move || {
-                        let gone = remove_root_with_retries(&root);
-                        let _ = sender.send(gone);
-                    });
-                // Could not start a thread: `TempDir`'s drop (inside the
-                // failed closure) tries once more and drops the sender, so
-                // the drain counts the removal as unfinished.
-                drop(spawned);
-                scope.register_temp_cleanup(done);
-            }
-            None => {
-                let spawned = std::thread::Builder::new()
-                    .name("pumice-temp-cleanup".to_owned())
-                    .spawn(move || {
-                        if !remove_root_with_retries(&root) {
-                            eprintln!(
-                                "warning: could not remove the temporary directory {}",
-                                root.path().display()
-                            );
-                        }
-                    });
-                // Could not start a thread: `TempDir`'s drop (inside the
-                // failed closure) tries once more.
-                drop(spawned);
-            }
-        }
+        let spawned = std::thread::Builder::new()
+            .name("pumice-temp-cleanup".to_owned())
+            .spawn(move || {
+                if !remove_root_with_retries(&root) {
+                    eprintln!(
+                        "warning: could not remove the temporary directory {}",
+                        root.path().display()
+                    );
+                }
+            });
+        // Could not start a thread: TempDir's drop inside the failed
+        // closure tries once more.
+        drop(spawned);
     }
 }
 
@@ -480,39 +393,4 @@ async fn read_tail(
 
 fn io_error(_: io::Error) -> ProviderError {
     ProviderError::other(ProviderErrorCode::Io)
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
-    /// When the inline removal fails, a scoped guard registers the deferred
-    /// cleanup instead of detaching it: the scope's drain awaits the retry
-    /// thread and observes the removal (p12-pumice-run).
-    #[tokio::test]
-    async fn scoped_root_guard_registers_and_awaits_deferred_cleanup() {
-        let scope = Arc::new(CleanupScope::new());
-        let root = private_temp::tempdir().expect("temp root");
-        private_temp::create_dir(&root.path().join(WORKSPACE_DIR)).expect("workspace");
-        let path = root.path().to_path_buf();
-
-        // The first removal fails while the root is not writable.
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o555)).unwrap();
-        {
-            let guard = RootGuard {
-                root: Some(root),
-                scope: Some(Arc::clone(&scope)),
-            };
-            drop(guard);
-        }
-        assert!(!scope.is_empty(), "the deferred cleanup is registered");
-
-        // The retry succeeds once the root is writable again, and the drain
-        // awaits it.
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert_eq!(scope.drain(Duration::from_secs(5)).await, 0);
-        assert!(scope.is_empty());
-        assert!(!path.exists(), "the root is gone");
-    }
 }
