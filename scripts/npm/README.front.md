@@ -4,7 +4,7 @@ Use your AI subscriptions from an OpenAI-compatible client. Pumice passes the cl
 
 ## Install
 
-Requires Node.js 22+ and Windows x64, Linux x64 (glibc or musl), macOS Intel or Apple Silicon.
+Requires Node.js 22+ and Windows x64, Linux x64 (glibc or musl), macOS Apple Silicon.
 
 ```sh
 npm install -g @brasillero/pumice

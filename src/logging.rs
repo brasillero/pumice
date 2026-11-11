@@ -315,7 +315,6 @@ mod tests {
             attempts: 1,
             trail: Vec::new(),
             elapsed: std::time::Duration::from_millis(7),
-            caller_deadline_bound: false,
         };
         let headers = HeaderMap::new();
         let body = serde_json::json!({"messages": [{"role": "user", "content": "oi"}]});
@@ -351,7 +350,6 @@ mod tests {
             attempts: 1,
             trail: Vec::new(),
             elapsed: std::time::Duration::from_millis(3),
-            caller_deadline_bound: false,
         };
         log.record(&DebugRecord::new(
             "chatcmpl-pumice-2",

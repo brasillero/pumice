@@ -10,7 +10,7 @@ Client ← OpenAI chat completion ← Pumice ← final answer
 ```
 
 - Works with [Handy](https://github.com/cjpais/Handy) and other OpenAI-compatible clients.
-- One executable for Windows, Linux and macOS; npm provides an optional Node.js launcher.
+- One executable for Windows x64, Linux x64 and macOS Apple Silicon; npm provides an optional Node.js launcher.
 - Listens on IPv4 loopback only, with no telemetry.
 - Runs the selected provider with restricted tools in a fresh temporary directory.
 - Returns an HTTP error on failure; there is no provider fallback.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pack the Pumice launcher and four platform binaries for npm.
+"""Pack the Pumice launcher and three platform binaries for npm.
 
 Release archives and SHA256SUMS are validated before staging. Only the exact
 regular executable is extracted; links and traversal paths are rejected.
@@ -46,7 +46,6 @@ NATIVE_SCOPE = "@brasillero"
 TARGET_TO_NPM = {
     "x86_64-unknown-linux-musl": ("linux-x64", "pumice"),
     "x86_64-pc-windows-msvc": ("win32-x64", "pumice.exe"),
-    "x86_64-apple-darwin": ("darwin-x64", "pumice"),
     "aarch64-apple-darwin": ("darwin-arm64", "pumice"),
 }
 
@@ -130,10 +129,10 @@ def native_manifest(
 
 
 def verify_archives(archives_dir: Path, version: str) -> dict[str, Path]:
-    """Checks the four archives and their SHA256SUMS; returns target -> path.
+    """Checks the three archives and their SHA256SUMS; returns target -> path.
 
     Fails on a missing archive, an unexpected archive file, a checksum file
-    that does not cover exactly the four archives, or any hash mismatch.
+    that does not cover exactly the three archives, or any hash mismatch.
     """
     expected = {
         package_release.archive_name(version, target): target
@@ -180,12 +179,12 @@ def verify_archives(archives_dir: Path, version: str) -> dict[str, Path]:
         if extra:
             details.append("unexpected: " + ", ".join(extra))
         raise SystemExit(
-            f"error: {archives_dir} must contain exactly the four release "
+            f"error: {archives_dir} must contain exactly the three release "
             "archives (" + ", ".join(sorted(expected)) + "); " + "; ".join(details)
         )
     if set(recorded) != set(expected):
         raise SystemExit(
-            "error: SHA256SUMS must list exactly the four release archives; "
+            "error: SHA256SUMS must list exactly the three release archives; "
             f"found: {sorted(recorded)}"
         )
 
@@ -257,7 +256,7 @@ def extract_binary(archive: Path, target: str, version: str) -> bytes:
 
 
 def load_notices(notices_dir: Path) -> dict[str, str]:
-    """``notices_dir/<platform>.md`` for exactly the four native packages."""
+    """``notices_dir/<platform>.md`` for exactly the three native packages."""
     expected = {f"{key}.md": key for key, _exe in TARGET_TO_NPM.values()}
     present = (
         {path.name for path in notices_dir.iterdir()} if notices_dir.is_dir() else set()
@@ -306,7 +305,7 @@ def stage_packages(
     stage: Path,
     notices: dict[str, str],
 ) -> list[StagedPackage]:
-    """Writes the five staged package folders; returns them front first."""
+    """Writes the four staged package folders; returns them front first."""
     front = StagedPackage("front", stage / "front")
     front.write("bin/pumice.js", LAUNCHER_SOURCE.read_bytes(), EXECUTABLE_MODE)
     front.write(
@@ -447,7 +446,7 @@ def pack(
     npm_bin: str = "npm",
     repo_root: Path = REPO_ROOT,
 ) -> list[Path]:
-    """Stages and packs the five npm packages; returns the tarball paths."""
+    """Stages and packs the four npm packages; returns the tarball paths."""
     version = package_release.crate_version(repo_root)
     archives = verify_archives(archives_dir, version)
     binaries = {
@@ -482,13 +481,13 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--archives-dir",
         type=Path,
-        help="directory with the four release archives and SHA256SUMS "
+        help="directory with the three release archives and SHA256SUMS "
         "(required unless --print-version)",
     )
     parser.add_argument(
         "--notices-dir",
         type=Path,
-        help="directory with <platform>.md notices for the four native "
+        help="directory with <platform>.md notices for the three native "
         "packages (scripts/third_party_notices.py); required unless --print-version",
     )
     parser.add_argument(

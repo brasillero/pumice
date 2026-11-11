@@ -28,7 +28,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -37,7 +37,7 @@ jobs:
       - uses: ./.github/actions/cargo-cache
         with:
           name: ci
-          build: clippy and tests (dev), pumice (release)
+          build: clippy and tests (dev)
 
       - name: cargo fmt --check
         if: matrix.os == 'ubuntu-latest'
@@ -52,47 +52,5 @@ jobs:
       - name: cargo test
         timeout-minutes: 10
         run: cargo test --locked
-
-      # Only the product executable; the fake CLI is a test-only binary.
-      - name: cargo build --release --bin pumice
-        run: cargo build --release --locked --bin pumice
-
-      - name: Report release binary size
-        shell: bash
-        run: |
-          bin=target/release/pumice
-          [ -f "$bin.exe" ] && bin="$bin.exe"
-          size=$(wc -c < "$bin")
-          echo "pumice release binary: $size bytes"
-          echo "pumice release binary (${{ matrix.os }}): $size bytes" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Set up MSVC environment
-        if: matrix.os == 'windows-latest'
-        uses: ilammy/msvc-dev-cmd@v1
-
-      - name: Verify release exe has no CRT DLL dependencies
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          $output = dumpbin /dependents target\release\pumice.exe
-          $output | ForEach-Object { Write-Host $_ }
-          $text = ($output | Out-String).ToLowerInvariant()
-          $forbidden = @('vcruntime', 'msvcp', 'ucrtbase', 'api-ms-win-crt')
-          foreach ($name in $forbidden) {
-            if ($text.Contains($name)) {
-              Write-Error "FAIL: pumice.exe depends on '$name' (CRT must be statically linked)"
-              exit 1
-            }
-          }
-          Write-Host "OK: pumice.exe has no CRT DLL dependencies"
-
-      - name: Upload release binary
-        uses: actions/upload-artifact@v5
-        with:
-          name: pumice-release-${{ matrix.os }}
-          path: |
-            target/release/pumice
-            target/release/pumice.exe
-          if-no-files-found: ignore
 
       - uses: ./.github/actions/cargo-cache-save

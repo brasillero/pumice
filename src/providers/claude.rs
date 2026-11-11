@@ -26,11 +26,13 @@ use serde_saphyr::Location;
 
 use super::cli::{CliAdapter, CliProvider};
 use super::{
-    Effort, FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError,
-    ProviderErrorCode, ProviderLocations, ProviderSettings, effort_unsupported,
+    Effort, FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode,
+    ProviderLocations, ProviderSettings, effort_unsupported,
 };
 use crate::config::ConfigError;
-use crate::process::{Argument, CliInvocation, ControlFile, ProcessOutput, ProcessRunner, ProgramSpec};
+use crate::process::{
+    Argument, CliInvocation, ControlFile, ProcessOutput, ProcessRunner, ProgramSpec,
+};
 
 mod models;
 
@@ -43,7 +45,7 @@ const NOT_LOGGED_IN_PREFIX: &str = "Not logged in";
 
 /// npm package entrypoint the Windows `.cmd` shim translates to (layout from
 /// npm; verify on a real Windows install (owner check)).
-const NPM_ENTRYPOINT: &str = "@anthropic-ai/claude-code/cli.js";
+const NPM_ENTRYPOINT: &str = "@anthropic-ai/claude-code/bin/claude.exe";
 
 pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: ID,
@@ -53,7 +55,7 @@ pub const DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     probe: ProbeSpec::Version(&["--version"]),
     default_binary: DEFAULT_BINARY,
     npm_entrypoint: Some(NPM_ENTRYPOINT),
-    install_hint: "npm install -g @anthropic-ai/claude-code",
+    install_hint: "native installer: https://code.claude.com/docs/en/setup",
 };
 
 fn validate_settings(
@@ -177,7 +179,9 @@ impl CliAdapter for ClaudeAdapter {
     fn invocation(&self, input: FormatInput<'_>) -> Result<CliInvocation, ProviderError> {
         // A model that looks like a flag would change the command's meaning.
         if self.model.is_empty() || self.model.starts_with('-') {
-            return Err(ProviderError::other(ProviderErrorCode::InvalidConfiguration));
+            return Err(ProviderError::other(
+                ProviderErrorCode::InvalidConfiguration,
+            ));
         }
 
         // No `--restricted`: it also ignores the user's settings files,

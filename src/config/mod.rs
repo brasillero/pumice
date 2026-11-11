@@ -514,9 +514,7 @@ fn provider_settings(
         thinking,
     };
 
-    // The descriptor runs first: its refusal (the archived generic adapter)
-    // and its own requirements keep their established messages and
-    // positions.
+    // Provider requirements keep their own error messages and positions.
     (descriptor.validate_settings)(&settings, &locations)?;
     // Loader backstop for descriptors without requirements of their own:
     // an enabled entry always needs a usable model.

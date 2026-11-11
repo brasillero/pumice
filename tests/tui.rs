@@ -303,7 +303,6 @@ fn selection_auto_follows_newest_then_stays() {
     app.apply(arrived(2, base, 10, None));
     assert_eq!(app.selected().map(|r| r.number), Some(2));
 
-    // Move selection to the older request.
     app.key(key(KeyCode::Down));
     assert_eq!(app.selected().map(|r| r.number), Some(1));
 

@@ -1,6 +1,6 @@
 """Install tests for the pumice npm packages against a loopback registry.
 
-Builds five fake tarballs (a front package with the real launcher plus four
+Builds four fake tarballs (a front package with the real launcher plus three
 native packages with a fake shell binary), serves them through the
 loopback test registry in scripts/npm_registry_fixture.py, and installs the
 front package with npm, pnpm and Bun pointed at that registry. Asserts that
@@ -43,7 +43,7 @@ LAUNCHER_SOURCE = REPO_ROOT / "scripts" / "npm" / "bin" / "pumice.js"
 
 FRONT_VERSION = "9.9.9"
 FRONT_NAME = "@brasillero/pumice"
-PLATFORMS = ("linux-x64", "win32-x64", "darwin-x64", "darwin-arm64")
+PLATFORMS = ("linux-x64", "win32-x64", "darwin-arm64")
 
 # Echoes its arguments so tests can prove the .bin entry reached the native
 # binary through the launcher. chmod 0755 when packaged.
@@ -86,7 +86,7 @@ def make_tarball(root: Path, files: dict[str, tuple[bytes, int]]) -> Path:
 
 
 def build_fake_packages(root: Path) -> None:
-    """Creates the five fake .tgz files in root."""
+    """Creates the four fake .tgz files in root."""
     launcher = LAUNCHER_SOURCE.read_bytes()
     license_bytes = (REPO_ROOT / "LICENSE").read_bytes()
     optional = {

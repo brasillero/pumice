@@ -147,14 +147,14 @@ class NoticesTests(unittest.TestCase):
 
     def test_native_components_follow_the_target(self):
         self.assertIn("**musl libc", self.generate("linux-x64"))
-        for key in ("darwin-arm64", "darwin-x64", "win32-x64"):
+        for key in ("darwin-arm64", "win32-x64"):
             self.assertNotIn("**musl libc", self.generate(key))
 
-    def test_intel_mac_uses_its_target(self):
-        text = self.generate("darwin-x64")
-        self.assertIn("`pumice` (x86_64-apple-darwin)", text)
+    def test_apple_silicon_mac_uses_its_target(self):
+        text = self.generate("darwin-arm64")
+        self.assertIn("`pumice` (aarch64-apple-darwin)", text)
         self.assertIn("Rust standard library", text)
-        self.assertEqual(self.calls(), ["x86_64-apple-darwin "])
+        self.assertEqual(self.calls(), ["aarch64-apple-darwin "])
 
 
     def test_fences_outlast_backticks_in_texts(self):
@@ -165,13 +165,13 @@ class NoticesTests(unittest.TestCase):
     def test_output_is_a_generated_notices_file(self):
         out = self.root / "out"
         third_party_notices.main(
-            ["--platform", "darwin-x64", "--output-dir", str(out), "--cargo", str(self.cargo), "--rustc", str(self.rustc)]
+            ["--platform", "darwin-arm64", "--output-dir", str(out), "--cargo", str(self.cargo), "--rustc", str(self.rustc)]
         )
-        self.assertTrue((out / "darwin-x64.md").read_text().startswith("# Third-party notices"))
+        self.assertTrue((out / "darwin-arm64.md").read_text().startswith("# Third-party notices"))
 
     def test_every_package_carries_the_rust_std_notices(self):
         version = third_party_notices.RUST_VERSION
-        for key in ("darwin-x64", "darwin-arm64", "linux-x64", "win32-x64"):
+        for key in ("darwin-arm64", "linux-x64", "win32-x64"):
             text = self.generate(key)
             self.assertIn(f"**Rust standard library {version}", text)
             self.assertIn("Copyright © 1991-2024 Unicode, Inc.", text)

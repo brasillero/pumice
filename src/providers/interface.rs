@@ -108,12 +108,6 @@ pub enum ProviderErrorCode {
     UnsupportedSystemPrompt,
     UnexpectedToolActivity,
     NonzeroExit,
-    /// An HTTP endpoint refused the connection or is unreachable (the generic
-    /// loopback adapter).
-    EndpointUnavailable,
-    /// The endpoint answered with an unexpected HTTP status (never a captured
-    /// body; the status code is safe to show).
-    HttpStatus(u16),
 }
 
 impl ProviderError {
@@ -158,13 +152,6 @@ impl fmt::Display for ProviderErrorCode {
             }
             ProviderErrorCode::UnexpectedToolActivity => "the provider tried to use a tool",
             ProviderErrorCode::NonzeroExit => "the provider reported a failure",
-            ProviderErrorCode::EndpointUnavailable => "the endpoint is unavailable",
-            ProviderErrorCode::HttpStatus(status) => {
-                return write!(
-                    f,
-                    "the endpoint returned an unexpected HTTP status ({status})"
-                );
-            }
         })
     }
 }

@@ -42,8 +42,8 @@ use serde_json::{Value, json};
 
 use super::cli::{CliAdapter, CliProvider};
 use super::{
-    Effort, FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError,
-    ProviderErrorCode, ProviderLocations, ProviderSettings, effort_unsupported,
+    Effort, FormatInput, ProbeSpec, Provider, ProviderDescriptor, ProviderError, ProviderErrorCode,
+    ProviderLocations, ProviderSettings, effort_unsupported,
 };
 use crate::config::ConfigError;
 use crate::process::{
@@ -147,7 +147,9 @@ impl CliAdapter for KiroAdapter {
     fn invocation(&self, input: FormatInput<'_>) -> Result<CliInvocation, ProviderError> {
         // A model that looks like a flag would change the command's meaning.
         if self.model.is_empty() || self.model.starts_with('-') {
-            return Err(ProviderError::other(ProviderErrorCode::InvalidConfiguration));
+            return Err(ProviderError::other(
+                ProviderErrorCode::InvalidConfiguration,
+            ));
         }
         // Kiro reads a `file://` agent prompt from disk; passing one through
         // would make the CLI load a local file chosen by the request.
@@ -293,10 +295,7 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
             return Err(invalid());
         };
         let data = event.get("data");
-        let field = |name: &str| {
-            data.and_then(|data| data.get(name))
-                .and_then(Value::as_str)
-        };
+        let field = |name: &str| data.and_then(|data| data.get(name)).and_then(Value::as_str);
         match (event.get("type").and_then(Value::as_str), state) {
             // A failure can be reported at any point of the run.
             (Some("runError"), _) => run_error = true,
@@ -307,7 +306,9 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
                 state = RunState::Running;
             }
             (Some("sessionUpdate"), RunState::Running) => {
-                let update = data.and_then(|data| data.get("update")).ok_or_else(invalid)?;
+                let update = data
+                    .and_then(|data| data.get("update"))
+                    .ok_or_else(invalid)?;
                 if update.get("sessionUpdate").and_then(Value::as_str)
                     == Some("agent_message_chunk")
                 {
@@ -315,7 +316,10 @@ pub fn parse_output(output: &ProcessOutput) -> Result<String, ProviderError> {
                     if content.get("type").and_then(Value::as_str) != Some("text") {
                         return Err(invalid());
                     }
-                    let text = content.get("text").and_then(Value::as_str).ok_or_else(invalid)?;
+                    let text = content
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .ok_or_else(invalid)?;
                     texts.push(text.to_owned());
                 }
             }
@@ -353,7 +357,13 @@ mod tests {
         ] {
             assert!(is_file_uri(uri), "{uri:?}");
         }
-        for text in ["", "file", "You format speech. file:///x", "files: none", "é"] {
+        for text in [
+            "",
+            "file",
+            "You format speech. file:///x",
+            "files: none",
+            "é",
+        ] {
             assert!(!is_file_uri(text), "{text:?}");
         }
     }

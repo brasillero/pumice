@@ -31,7 +31,7 @@ The dictated text can be in any language. Whether the answer stays in that langu
 - **Rust (stable)**, one root package with a library and a thin `pumice` binary.
 - **One self-contained executable:** static musl on Linux, static C runtime on Windows (`+crt-static`), only OS libraries on macOS. Delivered by npm or a release archive.
 - **No developer runtimes for end users.** Users need no Rust, Python or compilers. The npm package is only a launcher and needs Node.js 22 or newer.
-- **Targets:** Windows, Linux and macOS. Windows is the main day-to-day target.
+- **Targets:** Windows x64, Linux x64 (musl) and macOS Apple Silicon (arm64). Windows is the main day-to-day target.
 - **Configuration:** one YAML file, `pumice.yml`, validated at startup, with the exact line reported on errors. Providers and models are explicitly enabled. Settings must be explicit in YAML; omitted settings are startup errors with file and line. Defaults exist only in the initial configuration, created automatically on first start without replacing existing files. Each AI CLI keeps its own user configuration (gateway, routing, login); Pumice inherits it and does not duplicate it in YAML.
 - **Backward compatibility** is not required yet: nobody but the owner uses the configuration, so command and config changes need no compatibility window. The live instance (port 7567, the Handy URL used by the owner's friends) is updated by hand when a new version is deployed.
 - **Network:** listen on `127.0.0.1` only. No telemetry. The only outbound traffic allowed is the calls the AI CLIs make themselves.

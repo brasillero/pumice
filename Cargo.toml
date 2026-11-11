@@ -29,14 +29,8 @@ axum = { version = "0.8.9", default-features = false, features = [
     "http1", "json", "tokio",
 ] }
 process-wrap = { version = "10.0.1", default-features = false, features = [
-    "tokio1", "kill-on-drop", "process-group", "job-object", "creation-flags",
+    "tokio1", "kill-on-drop", "process-group", "job-object",
 ] }
-hyper = { version = "1.11.1", default-features = false, features = [
-    "client", "http1",
-] }
-hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
-http-body-util = { version = "0.1.5", default-features = false }
-bytes = "1.12.1"
 serde = { version = "1", features = ["derive"] }
 serde-saphyr = { version = "1.3.0", default-features = false, features = [
     "deserialize",
