@@ -35,7 +35,7 @@ Minimum maintained matrix: three native release builds and npm/npx install check
 - `cargo fmt --check` and `cargo clippy --locked --all-targets -- -D warnings`: pass.
 - `python3 -m unittest discover -s scripts -p 'test_*.py'`: 76 tests, one skipped, pass.
 - Task-note shape check and `git diff --check`: pass.
-- Cross-platform native builds, archive checks and npm/npx installs await the PR's CI; they are not claimed from local Linux testing.
+- PR #141 at `81a6f5b`: all 14 checks passed, including Rust tests on Windows/Linux/macOS, three native builds, archive/linkage checks and npm/npx installs on all three platforms. Linux pnpm/Bun checks also passed. This verifies packaged fake-CLI/smoke behavior, not a real Windows provider installation.
 
 ## Questions for the owner
 
