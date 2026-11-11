@@ -4,20 +4,6 @@
 
 ## Deferred
 
-### #2 · Deferred · Windows Ctrl-C handling for `pumice transcribe`
-- type: Tech debt
-- area: cli
-- origin: D4
-- ticket: —
-- created: 2026-10-15
-- reason: review round 2 nits; needs a real Windows console to test
-
-**Context.** On Windows `pumice` registers a console control handler while it waits for `pumice-transcribe`. Review round 2 suggested removing the handler explicitly before exit and on error returns, and adding an isolated Windows test where the child delays its cleanup after Ctrl-C.
-
-**To do.**
-- [ ] Remove the handler explicitly on every return path.
-- [ ] Add a Windows Ctrl-C test with a slow-cleanup stub.
-
 ## Closed
 
 ### #1 · Done · Migrate the live server-1 service to the new command
@@ -35,6 +21,21 @@
 - [x] `mv ~/.config/pumice/pumice.yaml ~/.config/pumice/relay.yml`.
 - [x] Change `ExecStart=` in `~/.config/systemd/user/pumice.service` to `… relay serve --plain`, then `systemctl --user daemon-reload` and reinstall/restart.
 - [x] Check `/health` and a request through the public URL.
+
+### #2 · Discarded · Windows Ctrl-C handling for `pumice transcribe`
+- type: Tech debt
+- area: cli
+- origin: D4
+- ticket: —
+- created: 2026-10-15
+- closed: 2026-11-11
+- outcome: the feature this item belongs to was removed (`relay-only/D1`); the owner asked on 2026-11-11 to clear stale material
+
+**Context.** On Windows `pumice` registers a console control handler while it waits for `pumice-transcribe`. Review round 2 suggested removing the handler explicitly before exit and on error returns, and adding an isolated Windows test where the child delays its cleanup after Ctrl-C.
+
+**To do.**
+- [ ] Remove the handler explicitly on every return path.
+- [ ] Add a Windows Ctrl-C test with a slow-cleanup stub.
 
 ### #3 · Done · The documented update command installs the test helper binaries
 - type: Bug

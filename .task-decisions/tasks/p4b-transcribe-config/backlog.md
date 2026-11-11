@@ -4,21 +4,6 @@
 
 ## Deferred
 
-### #2 · Deferred · Release archive and Windows/macOS engine builds for `pumice-transcribe`
-- type: Task
-- area: distribution
-- origin: #1
-- ticket: —
-- created: 2026-10-14
-- reason: next PR, after PR #96 merges
-
-**Context.** The rest of #1: `pumice-transcribe` has no release archive yet, and its engine is only built and smoke-tested on Linux in CI (`.github/workflows/transcription.yml`).
-
-**To do.**
-- [ ] Release archive for `pumice-transcribe`, including Symphonia's MPL-2.0 notice and source pointer.
-- [ ] Windows engine builds with `-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`; macOS engine builds.
-- [ ] Installation guide section for the transcription archive.
-
 ## Closed
 
 ### #1 · Done · Config file, model registry, release archive and user docs
@@ -37,3 +22,19 @@
 - [ ] Release archive for `pumice-transcribe`, including Symphonia's MPL-2.0 notice and source pointer.
 - [ ] Windows engine builds with `-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`; macOS engine builds.
 - [x] User documentation in `docs/`.
+
+### #2 · Discarded · Release archive and Windows/macOS engine builds for `pumice-transcribe`
+- type: Task
+- area: distribution
+- origin: #1
+- ticket: —
+- created: 2026-10-14
+- closed: 2026-11-11
+- outcome: the feature this item belongs to was removed (`relay-only/D1`); the owner asked on 2026-11-11 to clear stale material
+
+**Context.** The rest of #1: `pumice-transcribe` has no release archive yet, and its engine is only built and smoke-tested on Linux in CI (`.github/workflows/transcription.yml`).
+
+**To do.**
+- [ ] Release archive for `pumice-transcribe`, including Symphonia's MPL-2.0 notice and source pointer.
+- [ ] Windows engine builds with `-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`; macOS engine builds.
+- [ ] Installation guide section for the transcription archive.

@@ -4,19 +4,6 @@
 
 ## Deferred
 
-### #2 · Deferred · Sign and notarize the macOS bundle with a Developer ID
-- type: Improvement
-- area: distribution
-- origin: conversation
-- ticket: —
-- created: 2026-10-16
-- reason: needs a paid Apple Developer account, the owner's call
-
-**Context.** The bundle is ad-hoc signed. A copy downloaded with a browser gets the quarantine attribute, and Gatekeeper may refuse it until the user runs `xattr -dr com.apple.quarantine` on the folder (documented in `docs/transcription.md`). Signing every Mach-O with a Developer ID after the loader-path edits, then notarizing, removes that step; `bundle.json` hashes must be generated after signing.
-
-**To do.**
-- [ ] Decide whether to get a Developer ID, then sign and notarize in the release job.
-
 ## Closed
 
 ### #1 · Discarded · Real-Metal check on an Apple Silicon Mac
@@ -33,3 +20,17 @@
 **To do.**
 - [ ] Run the Apple Silicon checklist in `docs/transcription.md` on a real Mac (ideally also one on macOS 11, the deployment floor) and record the results here.
 - [ ] If Metal gives correct text and is faster, revisit D1 and D2.
+
+### #2 · Discarded · Sign and notarize the macOS bundle with a Developer ID
+- type: Improvement
+- area: distribution
+- origin: conversation
+- ticket: —
+- created: 2026-10-16
+- closed: 2026-11-11
+- outcome: the feature this item belongs to was removed (`relay-only/D1`); the owner asked on 2026-11-11 to clear stale material
+
+**Context.** The bundle is ad-hoc signed. A copy downloaded with a browser gets the quarantine attribute, and Gatekeeper may refuse it until the user runs `xattr -dr com.apple.quarantine` on the folder (documented in `docs/transcription.md`). Signing every Mach-O with a Developer ID after the loader-path edits, then notarizing, removes that step; `bundle.json` hashes must be generated after signing.
+
+**To do.**
+- [ ] Decide whether to get a Developer ID, then sign and notarize in the release job.

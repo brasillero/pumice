@@ -2,12 +2,18 @@
 
 ## Active
 
-### #1 · To do · Owner publishes 0.3.0 to GitHub and npm
+## Deferred
+
+## Closed
+
+### #1 · Discarded · Owner publishes 0.3.0 to GitHub and npm
 - type: Task
 - area: distribution
 - origin: conversation
 - ticket: —
 - created: 2026-10-29
+- closed: 2026-11-11
+- outcome: Obsolete modular-product publishing instructions cancelled at owner request; relay release version and draft disposition remain unresolved.
 
 **Context.** Nothing publishes automatically: `.github/workflows/release.yml` only builds previews, and npm logins and 2FA are the owner's. The GitHub release carries the four core-only archives and `SHA256SUMS`, as for 0.2.0; transcription ships only in the npm platform packages (`p14.3-npm-bundles/D5`). Publish both from one release-preview run on the merge commit.
 
@@ -21,7 +27,3 @@
 
 **Acceptance criteria.**
 - GitHub `v0.3.0` and all five npm packages at 0.3.0 (`latest`).
-
-## Deferred
-
-## Closed

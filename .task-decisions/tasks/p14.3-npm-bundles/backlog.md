@@ -4,19 +4,6 @@
 
 ## Deferred
 
-### #2 · Deferred · CPU-only transcription for Intel Macs
-- type: Improvement
-- area: distribution
-- origin: D2
-- ticket: —
-- created: 2026-10-16
-- reason: no CPU bundle build exists for macOS x86-64 yet
-
-**Context.** `pumice-darwin-x64` keeps today's core-only payload: `pumice` works, `pumice transcribe` reports no engine.
-
-**To do.**
-- [ ] Add a macOS x86-64 CPU bundle build and ship it in `pumice-darwin-x64`.
-
 ## Closed
 
 ### #1 · Done · Third-party notices for everything the transcription bundle ships
@@ -32,6 +19,20 @@
 
 **To do.**
 - [x] Inventory the shipped dependency graph per platform and generate the combined notices file.
+
+### #2 · Discarded · CPU-only transcription for Intel Macs
+- type: Improvement
+- area: distribution
+- origin: D2
+- ticket: —
+- created: 2026-10-16
+- closed: 2026-11-11
+- outcome: the feature this item belongs to was removed (`relay-only/D1`); the owner asked on 2026-11-11 to clear stale material
+
+**Context.** `pumice-darwin-x64` keeps today's core-only payload: `pumice` works, `pumice transcribe` reports no engine.
+
+**To do.**
+- [ ] Add a macOS x86-64 CPU bundle build and ship it in `pumice-darwin-x64`.
 
 ### #3 · Moved · Check why the Rust caches of the bundle jobs are almost empty
 - type: Tech debt
