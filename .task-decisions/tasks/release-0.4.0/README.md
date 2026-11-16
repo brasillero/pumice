@@ -3,7 +3,7 @@ title: Prepare relay-only release 0.4.0
 state: Done
 ticket: —
 branch: release-0.4.0
-mr: —
+mr: PR #142
 start: 2026-11-16
 end: 2026-11-16
 ---
