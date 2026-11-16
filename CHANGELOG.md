@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-11-16
+
+Pumice returns to a single relay executable, distributed through npm/npx and portable release archives. Version 0.3.0 was an unpublished modular-product draft and is retired.
+
+### Upgrading from 0.2.0
+
+- Keep the `pumice` command and port 7567. If using an unpublished modular build, replace `pumice relay serve` with `pumice` (or `pumice --plain` for a service).
+- Rename the existing `pumice.yaml` or `relay.yml` to `pumice.yml`, preserving provider settings. Every setting must be explicit; compare with `pumice.example.yml` and run `pumice check-config`.
+- Supported release targets are Windows x64, Linux x64 (static musl), and macOS Apple Silicon. Intel Mac support has been removed.
+
 ### Fixed
 
 - Windows resolution of Claude Code npm shims targeting `bin/claude.exe`.
@@ -27,7 +37,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The separate `pumice-relay` executable and module-specific example settings.
 - The Intel Mac release build and its npm platform package (`darwin-x64`). Pumice ships for Windows x64, Linux x64 and macOS Apple Silicon.
 
-## [0.3.0] — 2026-10-29
+## [0.3.0] — Retired unpublished draft
+
+The following notes describe the cancelled 2026-10-29 modular-product draft. It was never published to npm or as a public GitHub release. Use 0.4.0 and its migration instructions above.
 
 Pumice is now a set of modules behind one `pumice` command: the relay (what Handy uses, still on port 7567), local transcription, a formatter, and `pumice run` / `pumice serve`, which combine them. The relay now starts with `pumice relay serve`, and every setting must be written in YAML. Read "Upgrading from 0.2.0" before updating.
 
